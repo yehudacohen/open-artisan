@@ -76,8 +76,13 @@ export type ArtifactKey =
  * All absolute file paths in fileAllowlist must start with "/".
  * approvalCount, iterationCount, retryCount must be >= 0.
  * schemaVersion must equal SCHEMA_VERSION at load time, else state is discarded.
+ *
+ * Schema changelog:
+ *   v1: initial schema (all fields through lastCheckpointTag/approvalCount)
+ *   v2: added orchestratorSessionId, intentBaseline, escapePending, pendingRevisionSteps;
+ *       added OrchestratorPlanResult.classification field
  */
-export const SCHEMA_VERSION = 1
+export const SCHEMA_VERSION = 2
 
 export interface WorkflowState {
   /** Schema version for forward-compatibility. Must equal SCHEMA_VERSION. */
@@ -322,6 +327,12 @@ export function validateWorkflowState(state: WorkflowState): string | null {
       }
     }
   }
+  if (typeof state.escapePending !== "boolean") {
+    return `escapePending must be a boolean, got ${typeof state.escapePending}`
+  }
+  if (state.pendingRevisionSteps !== null && !Array.isArray(state.pendingRevisionSteps)) {
+    return `pendingRevisionSteps must be null or an array, got ${typeof state.pendingRevisionSteps}`
+  }
   return null
 }
 
@@ -381,6 +392,13 @@ export interface RevisionStep {
 export interface OrchestratorPlanResult {
   /** Ordered revision steps, earliest upstream artifact first */
   revisionSteps: RevisionStep[]
+  /**
+   * Whether the orchestrator classified this change as tactical or strategic.
+   * tactical → agent proceeds autonomously to REVISE.
+   * strategic → escape hatch is presented to the user before proceeding.
+   * Callers MUST use this field rather than re-deriving from revisionSteps.length.
+   */
+  classification: "tactical" | "strategic"
 }
 
 /**

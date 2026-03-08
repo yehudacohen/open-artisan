@@ -74,6 +74,18 @@ describe("Orchestrator — tactical routing", () => {
     expect(result.revisionSteps).toHaveLength(1)
     expect(result.revisionSteps[0]?.phase).toBe("INTERFACES")
   })
+
+  it("tactical: returns classification='tactical' in plan result", async () => {
+    const orchestrator = createOrchestrator({ assess: mockAssess, diverge: mockDiverge, graph })
+    const result = await orchestrator.route({
+      feedback: "Small fix",
+      currentPhase: "TESTS",
+      currentPhaseState: "USER_GATE",
+      mode: "GREENFIELD",
+      approvedArtifacts: {},
+    })
+    expect(result.classification).toBe("tactical")
+  })
 })
 
 describe("Orchestrator — strategic routing", () => {
@@ -105,6 +117,29 @@ describe("Orchestrator — strategic routing", () => {
     expect(phases).toContain("PLANNING")
     expect(phases).toContain("INTERFACES")
     expect(phases).toContain("TESTS")
+  })
+
+  it("strategic: returns classification='strategic' in plan result", async () => {
+    mockAssess.mockImplementation(async () => ({
+      success: true,
+      affectedArtifacts: ["plan", "interfaces"],
+      rootCauseArtifact: "plan" as ArtifactKey,
+      reasoning: "Plan changed",
+    }))
+    mockDiverge.mockImplementation(async () => ({
+      success: true,
+      classification: "strategic" as const,
+      reasoning: "Large change",
+    }))
+    const orchestrator = createOrchestrator({ assess: mockAssess, diverge: mockDiverge, graph })
+    const result = await orchestrator.route({
+      feedback: "Rethink everything",
+      currentPhase: "INTERFACES",
+      currentPhaseState: "USER_GATE",
+      mode: "GREENFIELD",
+      approvedArtifacts: {},
+    })
+    expect(result.classification).toBe("strategic")
   })
 
   it("strategic: steps are in dependency order (planning before interfaces)", async () => {
@@ -155,6 +190,8 @@ describe("Orchestrator — fallback on assess error", () => {
 
     expect(result.revisionSteps[0]?.phase).toBe("INTERFACES")
     expect(result.revisionSteps[0]?.phaseState).toBe("REVISE")
+    // Fallback must always be tactical
+    expect(result.classification).toBe("tactical")
   })
 })
 

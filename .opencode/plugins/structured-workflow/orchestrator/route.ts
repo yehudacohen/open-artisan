@@ -106,6 +106,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
               instructions: "Revise based on user feedback (assess failed, falling back to current artifact).",
             },
           ],
+          classification: "tactical",
         }
       }
 
@@ -122,6 +123,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
               instructions: `Revise ${fallback} based on user feedback (assess error: ${assessResult.error}).`,
             },
           ],
+          classification: "tactical",
         }
       }
 
@@ -142,7 +144,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
       // ---- Step 3: Build revision plan --------------------------------------
       const revisionSteps = buildRevisionSteps(rootCause, classification, deps, input.mode)
 
-      return { revisionSteps }
+      return { revisionSteps, classification }
     },
   }
 }

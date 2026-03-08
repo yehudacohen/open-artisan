@@ -10,12 +10,20 @@ import type { OrchestratorAssessResult } from "#plugin/types"
 // Mock client factory
 // ---------------------------------------------------------------------------
 
+/**
+ * The llm-calls module now uses ephemeralPrompt() which calls:
+ *   client.session.create({ body: { ... } }) → { id: "mock-session-id" }
+ *   client.session.prompt({ path: { id }, body: { ... } }) → { parts: [...] }
+ *   client.session.delete({ path: { id } })  [best-effort, errors ignored]
+ */
 function makeClient(responseText: string) {
   return {
     session: {
+      create: mock(async () => ({ id: "mock-session-id" })),
       prompt: mock(async () => ({
         parts: [{ type: "text", text: responseText }],
       })),
+      delete: mock(async () => undefined),
     },
   }
 }
@@ -23,9 +31,11 @@ function makeClient(responseText: string) {
 function makeClientThrows() {
   return {
     session: {
+      create: mock(async () => ({ id: "mock-session-id" })),
       prompt: mock(async () => {
         throw new Error("Network error")
       }),
+      delete: mock(async () => undefined),
     },
   }
 }
@@ -63,6 +73,31 @@ describe("createAssessFn — happy path", () => {
     const assess = createAssessFn(client)
     await assess("The plan is missing a requirement", "plan")
     expect((client.session.prompt as ReturnType<typeof mock>).mock.calls).toHaveLength(1)
+  })
+
+  it("uses ephemeral session: create() and delete() are called once per assess call", async () => {
+    const client = makeClient(JSON.stringify({
+      affected_artifacts: ["tests"],
+      root_cause_artifact: "tests",
+      reasoning: "Tests issue",
+    }))
+    const assess = createAssessFn(client)
+    await assess("Tests are missing edge cases", "tests")
+    expect((client.session.create as ReturnType<typeof mock>).mock.calls).toHaveLength(1)
+    expect((client.session.delete as ReturnType<typeof mock>).mock.calls).toHaveLength(1)
+  })
+
+  it("passes session id from create() into prompt() path param", async () => {
+    const client = makeClient(JSON.stringify({
+      affected_artifacts: ["impl_plan"],
+      root_cause_artifact: "impl_plan",
+      reasoning: "impl plan issue",
+    }))
+    const assess = createAssessFn(client)
+    await assess("Impl plan is wrong", "impl_plan")
+    const promptCall = (client.session.prompt as ReturnType<typeof mock>).mock.calls[0]
+    // First arg to prompt() must have path: { id: "mock-session-id" }
+    expect((promptCall?.[0] as any)?.path?.id).toBe("mock-session-id")
   })
 
   it("filters out invalid artifact keys from affected_artifacts", async () => {
@@ -154,6 +189,23 @@ describe("createDivergeFn — happy path", () => {
     expect(result.success).toBe(true)
     if (!result.success) return
     expect(result.classification).toBe("strategic")
+  })
+
+  it("uses ephemeral session: create() and delete() are called once per diverge call", async () => {
+    const client = makeClient(JSON.stringify({
+      classification: "tactical",
+      reasoning: "Small change",
+    }))
+    const diverge = createDivergeFn(client)
+    const assessResult: OrchestratorAssessResult = {
+      success: true,
+      affectedArtifacts: ["tests"],
+      rootCauseArtifact: "tests",
+      reasoning: "test",
+    }
+    await diverge(assessResult, {})
+    expect((client.session.create as ReturnType<typeof mock>).mock.calls).toHaveLength(1)
+    expect((client.session.delete as ReturnType<typeof mock>).mock.calls).toHaveLength(1)
   })
 
   it("auto-classifies as strategic when 3+ artifacts affected (cascade_depth), regardless of LLM response", async () => {

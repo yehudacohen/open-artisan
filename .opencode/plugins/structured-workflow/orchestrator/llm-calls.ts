@@ -13,10 +13,15 @@
  * - Both always return a typed result — never throw — failures return error shapes.
  * - The orchestrator factory handles fallbacks when these return error shapes.
  *
- * LLM call pattern: create a dedicated short-lived session for each classification
- * call (prefixed "orch-"). This isolates the classification context from the main
- * session conversation and prevents the workflow state block from biasing the
+ * LLM call pattern: create a dedicated ephemeral session per call (prefixed "orch-"),
+ * prompt into it, then delete it. This isolates the classification context from the
+ * main session conversation and prevents the workflow state block from biasing the
  * classification LLM.
+ *
+ * Session lifecycle per call:
+ *   1. client.session.create({ body: { ... } }) → { id }
+ *   2. client.session.prompt({ path: { id }, body: { ... } }) → result
+ *   3. client.session.delete({ path: { id } })  [best-effort, errors ignored]
  */
 
 import type {
@@ -104,14 +109,12 @@ export function createAssessFn(client: Client): (
         `Classify which artifact is the root cause of this feedback and which artifacts are affected.`,
       ].join("\n")
 
-      const result = await client.session.prompt({
-        body: {
-          parts: [{ type: "text", text: prompt }],
-          system: ASSESS_SYSTEM_PROMPT,
-          format: {
-            type: "json_schema",
-            schema: ASSESS_JSON_SCHEMA,
-          },
+      const result = await ephemeralPrompt(client, {
+        parts: [{ type: "text", text: prompt }],
+        system: ASSESS_SYSTEM_PROMPT,
+        format: {
+          type: "json_schema",
+          schema: ASSESS_JSON_SCHEMA,
         },
       })
 
@@ -217,14 +220,12 @@ export function createDivergeFn(client: Client): (
         `Note: cascade_depth trigger fires automatically when ${affectedCount} >= 3 artifacts are affected.`,
       ].join("\n")
 
-      const result = await client.session.prompt({
-        body: {
-          parts: [{ type: "text", text: prompt }],
-          system: DIVERGE_SYSTEM_PROMPT,
-          format: {
-            type: "json_schema",
-            schema: DIVERGE_JSON_SCHEMA,
-          },
+      const result = await ephemeralPrompt(client, {
+        parts: [{ type: "text", text: prompt }],
+        system: DIVERGE_SYSTEM_PROMPT,
+        format: {
+          type: "json_schema",
+          schema: DIVERGE_JSON_SCHEMA,
         },
       })
 
@@ -240,9 +241,10 @@ export function createDivergeFn(client: Client): (
         ? "strategic"
         : "tactical"
 
-      const criterion = affectedCount >= 3
+      const VALID_CRITERIA = new Set(["scope_expansion", "architectural_shift", "cascade_depth", "accumulated_drift"])
+      const criterion: string | undefined = affectedCount >= 3
         ? "cascade_depth"
-        : (parsed.trigger_criterion as OrchestratorDivergeResult extends { success: true } ? OrchestratorDivergeResult["triggerCriterion"] : never) ?? parsed.trigger_criterion
+        : (VALID_CRITERIA.has(parsed.trigger_criterion ?? "") ? parsed.trigger_criterion : undefined)
 
       return {
         success: true,
@@ -265,6 +267,48 @@ export function createDivergeFn(client: Client): (
 // ---------------------------------------------------------------------------
 // Private helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * Creates an ephemeral session, calls prompt() into it, then deletes the session.
+ * Returns the raw prompt result. Throws on hard failure.
+ *
+ * Using ephemeral sessions isolates classification context from the main
+ * conversation. The "orch-" prefix makes them identifiable in logs.
+ */
+async function ephemeralPrompt(
+  client: Client,
+  body: Record<string, unknown>,
+): Promise<unknown> {
+  // Create short-lived session
+  const sessionResult = await client.session.create({
+    body: { title: "orch-classify" },
+  }) as Record<string, unknown>
+
+  // Extract session ID — probe common SDK response shapes
+  const sessionId =
+    (sessionResult["id"] as string | undefined) ??
+    (sessionResult["sessionId"] as string | undefined) ??
+    (sessionResult["session_id"] as string | undefined)
+
+  if (!sessionId) {
+    throw new Error("ephemeralPrompt: could not extract session ID from create() response")
+  }
+
+  try {
+    const result = await client.session.prompt({
+      path: { id: sessionId },
+      body,
+    })
+    return result
+  } finally {
+    // Best-effort cleanup — never throw from delete()
+    try {
+      await client.session.delete({ path: { id: sessionId } })
+    } catch {
+      // Ignore cleanup errors
+    }
+  }
+}
 
 /**
  * Extracts text content from a client.session.prompt() result.

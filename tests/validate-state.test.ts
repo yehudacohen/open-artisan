@@ -23,6 +23,8 @@ function makeValidState(overrides: Partial<WorkflowState> = {}): WorkflowState {
     approvalCount: 0,
     orchestratorSessionId: null,
     intentBaseline: null,
+    escapePending: false,
+    pendingRevisionSteps: null,
     ...overrides,
   }
 }
@@ -173,6 +175,41 @@ describe("validateWorkflowState — fileAllowlist in INCREMENTAL mode", () => {
       fileAllowlist: ["relative/path.ts"], // would fail in INCREMENTAL, but not GREENFIELD
     })
     expect(validateWorkflowState(state)).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// validateWorkflowState — escapePending / pendingRevisionSteps (schema v2)
+// ---------------------------------------------------------------------------
+
+describe("validateWorkflowState — escapePending and pendingRevisionSteps", () => {
+  it("accepts escapePending=false with pendingRevisionSteps=null", () => {
+    const state = makeValidState({ escapePending: false, pendingRevisionSteps: null })
+    expect(validateWorkflowState(state)).toBeNull()
+  })
+
+  it("accepts escapePending=true with non-null pendingRevisionSteps", () => {
+    const state = makeValidState({
+      escapePending: true,
+      pendingRevisionSteps: [
+        { artifact: "interfaces", phase: "INTERFACES", phaseState: "REVISE", instructions: "fix it" },
+      ],
+    })
+    expect(validateWorkflowState(state)).toBeNull()
+  })
+
+  it("rejects escapePending as non-boolean", () => {
+    const state = makeValidState({ escapePending: "yes" as any })
+    const err = validateWorkflowState(state)
+    expect(err).not.toBeNull()
+    expect(err).toContain("escapePending")
+  })
+
+  it("rejects pendingRevisionSteps as a non-null non-array", () => {
+    const state = makeValidState({ pendingRevisionSteps: "invalid" as any })
+    const err = validateWorkflowState(state)
+    expect(err).not.toBeNull()
+    expect(err).toContain("pendingRevisionSteps")
   })
 })
 

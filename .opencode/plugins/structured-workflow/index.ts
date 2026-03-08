@@ -734,17 +734,74 @@ export const StructuredWorkflowPlugin: Plugin = async ({ client }: { client: any
                 )
               }
 
-              // User accepts or provides alternative direction.
-              // If alternative direction: update intentBaseline with user's direction.
+              // Detect whether user provided a substantive alternative direction
+              // (not just a bare "accept" / "proceed").
               const isAccept = feedbackLower === "accept" || feedbackLower === "proceed"
-              if (!isAccept && args.feedback_text.trim().length > 10) {
-                // O_INTENT_UPDATE: record the user's alternative direction as the new baseline
+              const hasAlternativeDirection = !isAccept && args.feedback_text.trim().length > 10
+
+              if (hasAlternativeDirection) {
+                // O_INTENT_UPDATE: record the user's alternative direction as the new baseline.
                 await store.update(sessionId, (draft) => {
                   draft.intentBaseline = args.feedback_text.slice(0, 2000)
                 })
+
+                // Design doc §12: "Provide alternative direction → intent updated →
+                // Orchestrator rebuilds change plan." Re-run the orchestrator with the
+                // updated intent so the plan reflects the user's new direction.
+                let altPlan: { revisionSteps: RevisionStep[]; classification: "tactical" | "strategic" }
+                try {
+                  const freshState = store.get(sessionId)!
+                  altPlan = await orchestrator.route({
+                    feedback: args.feedback_text,
+                    currentPhase: freshState.phase,
+                    currentPhaseState: freshState.phaseState,
+                    mode: state.mode,
+                    approvedArtifacts: freshState.approvedArtifacts,
+                  })
+                } catch {
+                  // Orchestrator hard failure — fall back to original pending plan
+                  altPlan = { revisionSteps: state.pendingRevisionSteps ?? [], classification: "strategic" }
+                }
+
+                // If the rebuilt plan is itself strategic, re-present the escape hatch.
+                if (altPlan.classification === "strategic") {
+                  const freshState2 = store.get(sessionId)!
+                  const summary = buildEscapeHatchPresentation({
+                    feedback: args.feedback_text,
+                    intentBaseline: freshState2.intentBaseline,
+                    assessResult: { success: true, affectedArtifacts: altPlan.revisionSteps.map((s) => s.artifact), rootCauseArtifact: altPlan.revisionSteps[0]!.artifact, reasoning: "orchestrator re-assessment" },
+                    divergeResult: { success: true, classification: "strategic", reasoning: "alternative direction re-assessed as strategic" },
+                    revisionSteps: altPlan.revisionSteps,
+                    currentPhase: state.phase,
+                  })
+                  await store.update(sessionId, (draft) => {
+                    draft.pendingRevisionSteps = altPlan.revisionSteps
+                    draft.escapePending = true
+                    draft.retryCount = 0
+                  })
+                  return summary.presentation
+                }
+
+                // Rebuilt plan is tactical — proceed directly.
+                const altFirst = altPlan.revisionSteps[0]!
+                const altOutcome = sm.transition(state.phase, state.phaseState, "user_feedback", state.mode)
+                if (!altOutcome.success) return `Error: ${altOutcome.message}`
+                await store.update(sessionId, (draft) => {
+                  draft.phase = altFirst.phase
+                  draft.phaseState = "REVISE"
+                  draft.escapePending = false
+                  draft.pendingRevisionSteps = altPlan.revisionSteps.slice(1)
+                  draft.retryCount = 0
+                })
+                return (
+                  `Alternative direction accepted — rebuilding revision plan.\n\n` +
+                  `**Step 1 of ${altPlan.revisionSteps.length}:** Revise the **${altFirst.artifact}** artifact.\n` +
+                  `${altFirst.instructions}\n\n` +
+                  `Begin revision work now. Call \`request_review\` when the revision is complete.`
+                )
               }
 
-              // Execute the pending revision plan
+              // Plain "accept" / "proceed" — execute the stored pending plan.
               const steps = state.pendingRevisionSteps ?? []
               const firstStep = steps[0]
               if (!firstStep) {
@@ -763,7 +820,7 @@ export const StructuredWorkflowPlugin: Plugin = async ({ client }: { client: any
                 draft.phase = firstStep.phase
                 draft.phaseState = "REVISE"
                 draft.escapePending = false
-                draft.pendingRevisionSteps = steps.slice(1) // remaining steps
+                draft.pendingRevisionSteps = steps.slice(1) // remaining steps for cascade continuation
                 draft.retryCount = 0
               })
 
@@ -780,9 +837,40 @@ export const StructuredWorkflowPlugin: Plugin = async ({ client }: { client: any
             }
 
             // ----------------------------------------------------------------
+            // Layer 2: Cascade continuation path
+            // If pendingRevisionSteps is non-empty (set by a prior escape hatch accept),
+            // this submit_feedback at the next USER_GATE continues the cascade —
+            // no need to re-run the orchestrator.
+            // ----------------------------------------------------------------
+            if (state.pendingRevisionSteps && state.pendingRevisionSteps.length > 0) {
+              const nextStep = state.pendingRevisionSteps[0]!
+              const remaining = state.pendingRevisionSteps.slice(1)
+              const outcome = sm.transition(state.phase, state.phaseState, "user_feedback", state.mode)
+              if (!outcome.success) return `Error: ${outcome.message}`
+
+              await store.update(sessionId, (draft) => {
+                draft.phase = nextStep.phase
+                draft.phaseState = "REVISE"
+                draft.pendingRevisionSteps = remaining
+                draft.retryCount = 0
+              })
+
+              const remainingMsg = remaining.length > 0
+                ? `\n\n**Cascade continues:** ${remaining.length} more artifact(s) after this: ${remaining.map((s) => s.artifact).join(" → ")}.`
+                : "\n\n**Final revision step.** Once complete, call `request_review`."
+
+              return (
+                `**Revision cascade — continuing to next artifact.**\n\n` +
+                `Revise the **${nextStep.artifact}** artifact.\n` +
+                `${nextStep.instructions}${remainingMsg}\n\n` +
+                `Begin revision work now. Call \`request_review\` when the revision is complete.`
+              )
+            }
+
+            // ----------------------------------------------------------------
             // Layer 2: Normal revise path — run orchestrator
             // ----------------------------------------------------------------
-            let orchestratorPlan: { revisionSteps: RevisionStep[] }
+            let orchestratorPlan: { revisionSteps: RevisionStep[]; classification: "tactical" | "strategic" }
             try {
               orchestratorPlan = await orchestrator.route({
                 feedback: args.feedback_text,
@@ -803,22 +891,11 @@ export const StructuredWorkflowPlugin: Plugin = async ({ client }: { client: any
               return result.responseMessage + "\n\n*(Orchestrator unavailable — proceeding with direct revision.)*"
             }
 
-            const { revisionSteps } = orchestratorPlan
-
-            // Check if this is a strategic change requiring escape hatch
-            // The orchestrator's diverge() sets classification — we detect it by checking
-            // if the revision plan has 3+ steps (cascade_depth) or if diverge said strategic.
-            // Since the orchestrator is a black box here, we use the cascade rule as a proxy:
-            // strategic means the diverge() returned strategic — which we can detect by
-            // re-running diverge's cascade check: if steps.length >= 3.
-            // For a cleaner signal, we also check if the first step's phase is UPSTREAM of state.phase.
-
-            const PHASE_ORDER_FOR_ORCH = [
-              "DISCOVERY", "PLANNING", "INTERFACES", "TESTS", "IMPL_PLAN", "IMPLEMENTATION",
-            ]
-            const currentIdx = PHASE_ORDER_FOR_ORCH.indexOf(state.phase)
-            const firstStepIdx = PHASE_ORDER_FOR_ORCH.indexOf(revisionSteps[0]?.phase ?? state.phase)
-            const isStrategic = revisionSteps.length >= 3 || firstStepIdx < currentIdx
+            const { revisionSteps, classification } = orchestratorPlan
+            // Use the orchestrator's authoritative classification rather than re-deriving it.
+            // The orchestrator's diverge() already applied all strategic criteria
+            // (cascade_depth, scope_expansion, architectural_shift, accumulated_drift).
+            const isStrategic = classification === "strategic"
 
             if (isStrategic) {
               // Strategic — fire escape hatch. Stay at USER_GATE, store pending plan.

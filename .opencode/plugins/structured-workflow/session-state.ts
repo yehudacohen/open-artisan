@@ -48,10 +48,16 @@ function cloneState(s: WorkflowState): WorkflowState {
   return JSON.parse(JSON.stringify(s)) as WorkflowState
 }
 
+/**
+ * Accepts states at the current schema version OR at any previous version
+ * that the migration block below can bring up to date.
+ * A state with an unknown future schemaVersion is rejected.
+ */
 function isValidState(s: unknown): s is WorkflowState {
   if (!s || typeof s !== "object") return false
   const obj = s as Record<string, unknown>
-  return obj["schemaVersion"] === SCHEMA_VERSION && typeof obj["sessionId"] === "string"
+  const v = obj["schemaVersion"] as number | undefined
+  return (v === 1 || v === SCHEMA_VERSION) && typeof obj["sessionId"] === "string"
 }
 
 async function writeAll(stateFile: string, map: Map<string, WorkflowState>): Promise<void> {
@@ -148,8 +154,13 @@ export function createSessionStateStore(dir: string): SessionStateStore {
           // Migration: fill in fields added in later schema versions with safe defaults.
           // This allows states written before these fields existed to load correctly.
           const migrated = value as Record<string, unknown>
+          // v1 → v2: add orchestratorSessionId, intentBaseline, escapePending, pendingRevisionSteps
+          migrated["orchestratorSessionId"] ??= null
+          migrated["intentBaseline"] ??= null
           migrated["escapePending"] ??= false
           migrated["pendingRevisionSteps"] ??= null
+          // Always stamp with current schema version after migration
+          migrated["schemaVersion"] = SCHEMA_VERSION
           // Second gate: full invariant validation (phase/phaseState combos, counts, etc.)
           const validationError = validateWorkflowState(value)
           if (validationError) continue // silently discard states that fail invariants

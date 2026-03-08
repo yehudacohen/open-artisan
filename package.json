@@ -1,0 +1,16 @@
+{
+  "name": "opencode-structured-workflow",
+  "version": "0.1.0",
+  "type": "module",
+  "imports": {
+    "#plugin/*": "./.opencode/plugins/structured-workflow/*"
+  },
+  "scripts": {
+    "test": "bun test",
+    "test:watch": "bun test --watch"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.4.0"
+  }
+}

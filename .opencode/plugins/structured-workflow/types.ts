@@ -315,6 +315,43 @@ export interface OrchestratorPlanResult {
   revisionSteps: RevisionStep[]
 }
 
+/**
+ * Input to the orchestrator's route() method.
+ * approvedArtifacts is passed through to the diverge call so it can detect
+ * accumulated drift across multiple approved artifacts.
+ */
+export interface OrchestratorRouteInput {
+  feedback: string
+  currentPhase: Phase
+  currentPhaseState: PhaseState
+  mode: WorkflowMode
+  /** Hashes of last-approved artifact content, for drift detection */
+  approvedArtifacts: Partial<Record<ArtifactKey, string>>
+}
+
+/**
+ * Dependencies injected into the orchestrator factory.
+ * assess and diverge are async functions (LLM-backed) with explicit signatures
+ * so they can be mocked cleanly in tests.
+ */
+export interface OrchestratorDeps {
+  assess: (
+    feedback: string,
+    currentArtifact: ArtifactKey,
+  ) => Promise<OrchestratorAssessResult>
+
+  /**
+   * approvedArtifacts is passed as second arg so the diverge implementation
+   * can compute accumulated drift without needing the full WorkflowState.
+   */
+  diverge: (
+    assessResult: OrchestratorAssessResult,
+    approvedArtifacts: Partial<Record<ArtifactKey, string>>,
+  ) => Promise<OrchestratorDivergeResult>
+
+  graph: ArtifactGraph
+}
+
 export interface EscapeHatchPresentation {
   originalIntent: string
   detectedDivergence: string

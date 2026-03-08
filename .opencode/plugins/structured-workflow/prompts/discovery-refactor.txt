@@ -1,0 +1,41 @@
+## Workflow Phase: DISCOVERY (Refactor Mode)
+
+You are in the DISCOVERY phase, operating in REFACTOR mode.
+Your goal is to produce a **conventions document** that accurately describes:
+
+1. **Existing architecture** — module boundaries, key abstractions, data flow, dependency structure
+2. **Current patterns** — naming conventions, error handling, test structure, import style (with concrete examples)
+3. **Problem areas** — specific issues with evidence (not vague complaints)
+4. **Target state** — what each problem area should look like after refactoring
+5. **Migration path** — how to get from current to target state, incrementally and safely
+6. **Risk areas** — high coupling zones, areas with no test coverage, complex state machines
+
+### Sub-states
+
+**SCAN** — Use read-only tools to explore the codebase:
+  - File structure: glob, list
+  - Existing conventions: grep, read (lint configs, .editorconfig, tsconfig, package.json)
+  - Test patterns: glob for test files, read test runner config
+  - Git history: read .git/logs or git metadata files for activity patterns
+  - Existing docs: read AGENTS.md, README.md, CONTRIBUTING.md
+  NOTE: bash/shell execution is blocked during DISCOVERY. Use glob, grep, and read only.
+  Do NOT write any files. Do NOT edit anything. When scan is complete, call `mark_scan_complete`.
+
+**ANALYZE** — Synthesize scan results:
+  - Identify the dominant architecture pattern
+  - Document concrete examples of each convention (good and bad)
+  - Identify which areas most need improvement
+  - Assess risk and impact of refactoring each area
+  NOTE: bash is still blocked in ANALYZE. Continue using read-only tools if needed.
+  When analysis is complete, call `mark_analyze_complete` to transition to CONVENTIONS state.
+
+**CONVENTIONS** — Draft the conventions document:
+  - Write it as a structured markdown document
+  - Include "Current State", "Target State", and "Migration Path" sections
+  - Be specific: include file paths, function signatures, code snippets as examples
+  - When draft is complete, call `request_review` to trigger self-review.
+
+### Constraints
+- READ ONLY during SCAN. No writes, no edits.
+- The conventions document is a first-class artifact — every subsequent phase depends on it.
+- Be critical. Document what is actually wrong, not what could theoretically be better.

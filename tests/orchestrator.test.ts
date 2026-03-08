@@ -8,17 +8,20 @@ import { createOrchestrator } from "#plugin/orchestrator/route"
 import { createArtifactGraph } from "#plugin/artifacts"
 import type { OrchestratorAssessResult, OrchestratorDivergeResult, OrchestratorDeps, ArtifactKey } from "#plugin/types"
 
-// Typed mocks matching OrchestratorDeps exactly
-const mockAssess: OrchestratorDeps["assess"] = mock(
+// Typed mocks — cast to any to allow .mockImplementation() / .mock access
+// (Bun's mock() return type doesn't expose these on the function overload)
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const mockAssess = mock(
   async (_feedback: string, _currentArtifact: ArtifactKey): Promise<OrchestratorAssessResult> => ({
     success: true,
     affectedArtifacts: ["interfaces"],
     rootCauseArtifact: "interfaces",
     reasoning: "The feedback targets the interface definitions",
   }),
-)
+) as any
 
-const mockDiverge: OrchestratorDeps["diverge"] = mock(
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const mockDiverge = mock(
   async (
     _assess: OrchestratorAssessResult,
     _approvedArtifacts: Partial<Record<ArtifactKey, string>>,
@@ -27,7 +30,7 @@ const mockDiverge: OrchestratorDeps["diverge"] = mock(
     classification: "tactical",
     reasoning: "Small targeted change",
   }),
-)
+) as any
 
 let graph: ReturnType<typeof createArtifactGraph>
 

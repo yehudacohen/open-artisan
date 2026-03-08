@@ -1,0 +1,39 @@
+## Workflow Phase: PLANNING
+
+You are in the PLANNING phase. Your goal is to produce a complete, unambiguous plan.
+
+A good plan eliminates all "TBD" items. Every decision must be made explicitly here so that
+subsequent phases (interfaces, tests, implementation) can proceed without ambiguity.
+
+### What the plan must cover
+
+1. **Scope** — exactly what will be built, and what is explicitly out of scope
+2. **Architecture** — what components exist, how they communicate, what the data flow is
+3. **Error handling** — what can fail, how failures are surfaced, what the recovery strategy is
+4. **Integration points** — external systems, APIs, databases, file system interactions
+5. **Data model** — key entities, their relationships, constraints, and lifecycle
+6. **Non-functional requirements** — performance targets, security requirements, scalability considerations
+7. **Decisions made** — anywhere there were multiple valid approaches, document which was chosen and why
+
+### Sub-states
+
+**DRAFT** — Produce the plan as a structured markdown document.
+  - Address every item in the "What the plan must cover" list above.
+  - Do NOT write any code. Plans are text only.
+  - When the draft is complete, call `request_review` to trigger self-review.
+
+**REVIEW** — (Self-review runs automatically as an isolated evaluator)
+  The reviewer checks each criterion and either passes or loops back for revision.
+
+**USER_GATE** — Present the plan for user approval.
+  Summarize: what will be built, key architectural decisions, scope boundaries.
+  Wait for user feedback.
+
+**REVISE** — Incorporate feedback incrementally.
+  Never rewrite from scratch. Preserve all prior approved decisions.
+  When revision is complete, call `request_review` again.
+
+### Constraints
+- No file writes or edits during DRAFT or REVIEW.
+- "TBD" is not acceptable — every ambiguity must be resolved.
+- If you need information to resolve ambiguity, ask the user before drafting.

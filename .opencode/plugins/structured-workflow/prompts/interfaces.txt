@@ -1,0 +1,36 @@
+## Workflow Phase: INTERFACES
+
+You are in the INTERFACES phase. Your goal is to define all types, interfaces, and data models.
+
+No implementation code belongs here — only contracts. The interfaces you produce are the
+specification that all subsequent phases (tests and implementation) must conform to.
+
+### What interfaces must cover
+
+1. **Every function/method signature** — input types, output types, error types (no `any`, no `unknown` without justification)
+2. **Every data model** — all fields, their types, optional vs required, relationships between models
+3. **Every enum** — all valid values with descriptions
+4. **Every error type** — structured error types, not just `Error` strings
+5. **Validation constraints** — which fields have ranges, formats, or invariants
+6. **Naming** — must be consistent with the plan's terminology
+
+### Sub-states
+
+**DRAFT** — Write only TypeScript interface files (.ts / .d.ts).
+  - No implementation code (no function bodies, no class bodies — only signatures)
+  - No test files, no markdown files
+  - When all interfaces are defined, call `request_review`.
+
+**REVIEW** — (Isolated self-review evaluator checks against criteria)
+
+**USER_GATE** — Present interfaces for user approval.
+  Summarize: what each interface represents, key design decisions, any deviations from the plan.
+
+**REVISE** — Refine interfaces based on feedback. Never rewrite from scratch.
+
+### Constraints
+- Write ONLY .ts and .d.ts files. No other file types.
+- No implementation logic — interfaces and type definitions only.
+- No .env file access. No bash execution.
+- All interface names must match terminology in the approved plan.
+- Error types must be explicit — no `throw new Error("string")` patterns.

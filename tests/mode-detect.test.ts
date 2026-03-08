@@ -38,7 +38,9 @@ describe("detectMode — git repo with no commits", () => {
 })
 
 describe("detectMode — existing codebase", () => {
-  it("suggests REFACTOR when many source files present with git history", async () => {
+  it("suggests INCREMENTAL (not REFACTOR) for large existing codebases", async () => {
+    // REFACTOR is never auto-suggested — it requires explicit user intent.
+    // Any existing project with source files → INCREMENTAL.
     const { $ } = await import("bun")
     await $`git init`.cwd(tmpDir).quiet()
     await $`git config user.email test@test.com`.cwd(tmpDir).quiet()
@@ -54,12 +56,14 @@ describe("detectMode — existing codebase", () => {
     await $`git commit -m "initial"`.cwd(tmpDir).quiet()
 
     const result = await detectMode(tmpDir)
-    expect(result.suggestedMode).toBe("REFACTOR")
+    expect(result.suggestedMode).toBe("INCREMENTAL")
     expect(result.hasGitHistory).toBe(true)
     expect(result.sourceFileCount).toBeGreaterThanOrEqual(15)
+    // REFACTOR is never auto-suggested
+    expect(result.suggestedMode).not.toBe("REFACTOR")
   })
 
-  it("suggests INCREMENTAL when few files changed relative to base", async () => {
+  it("suggests INCREMENTAL for small existing codebase with git history", async () => {
     const { $ } = await import("bun")
     await $`git init`.cwd(tmpDir).quiet()
     await $`git config user.email test@test.com`.cwd(tmpDir).quiet()
@@ -75,8 +79,25 @@ describe("detectMode — existing codebase", () => {
     await $`git commit -m "initial"`.cwd(tmpDir).quiet()
 
     const result = await detectMode(tmpDir)
-    // Small existing project — could be INCREMENTAL or REFACTOR; must not be GREENFIELD
-    expect(result.suggestedMode).not.toBe("GREENFIELD")
+    expect(result.suggestedMode).toBe("INCREMENTAL")
     expect(result.hasGitHistory).toBe(true)
+    expect(result.suggestedMode).not.toBe("GREENFIELD")
+  })
+
+  it("suggests GREENFIELD when git history present but no source files", async () => {
+    const { $ } = await import("bun")
+    await $`git init`.cwd(tmpDir).quiet()
+    await $`git config user.email test@test.com`.cwd(tmpDir).quiet()
+    await $`git config user.name Test`.cwd(tmpDir).quiet()
+
+    // Only a README, no source files
+    await writeFile(join(tmpDir, "README.md"), "# Project")
+    await $`git add -A`.cwd(tmpDir).quiet()
+    await $`git commit -m "initial"`.cwd(tmpDir).quiet()
+
+    const result = await detectMode(tmpDir)
+    expect(result.suggestedMode).toBe("GREENFIELD")
+    expect(result.hasGitHistory).toBe(true)
+    expect(result.sourceFileCount).toBe(0)
   })
 })

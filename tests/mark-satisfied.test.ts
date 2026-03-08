@@ -1,0 +1,157 @@
+/**
+ * Tests for evaluateMarkSatisfied — self-review evaluation logic.
+ * Covers G9: suggestion-severity criteria don't block advancement.
+ */
+import { describe, expect, it } from "bun:test"
+import { evaluateMarkSatisfied } from "#plugin/tools/mark-satisfied"
+
+// ---------------------------------------------------------------------------
+// All criteria blocking (default behavior)
+// ---------------------------------------------------------------------------
+
+describe("evaluateMarkSatisfied — all criteria met", () => {
+  it("passes when all criteria are met", () => {
+    const result = evaluateMarkSatisfied({
+      criteria_met: [
+        { criterion: "Has unit tests", met: true, evidence: "15 tests written" },
+        { criterion: "No any types", met: true, evidence: "Checked with tsc" },
+      ],
+    })
+    expect(result.passed).toBe(true)
+    expect(result.unmetCriteria).toHaveLength(0)
+  })
+
+  it("response message mentions criteria count", () => {
+    const result = evaluateMarkSatisfied({
+      criteria_met: [
+        { criterion: "A", met: true, evidence: "e1" },
+        { criterion: "B", met: true, evidence: "e2" },
+        { criterion: "C", met: true, evidence: "e3" },
+      ],
+    })
+    expect(result.passed).toBe(true)
+    expect(result.responseMessage).toContain("3")
+  })
+})
+
+describe("evaluateMarkSatisfied — blocking criteria unmet", () => {
+  it("fails when one blocking criterion is not met", () => {
+    const result = evaluateMarkSatisfied({
+      criteria_met: [
+        { criterion: "Has tests", met: false, evidence: "No test file found" },
+        { criterion: "No any types", met: true, evidence: "tsc clean" },
+      ],
+    })
+    expect(result.passed).toBe(false)
+    expect(result.unmetCriteria).toHaveLength(1)
+    expect(result.unmetCriteria[0]?.criterion).toBe("Has tests")
+  })
+
+  it("includes all unmet blocking criteria in responseMessage", () => {
+    const result = evaluateMarkSatisfied({
+      criteria_met: [
+        { criterion: "A", met: false, evidence: "missing A" },
+        { criterion: "B", met: false, evidence: "missing B" },
+        { criterion: "C", met: true, evidence: "C is fine" },
+      ],
+    })
+    expect(result.passed).toBe(false)
+    expect(result.responseMessage).toContain("A")
+    expect(result.responseMessage).toContain("B")
+    expect(result.responseMessage).not.toContain("C is fine") // C passed, shouldn't be in fail list
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Severity: suggestion (G9)
+// ---------------------------------------------------------------------------
+
+describe("evaluateMarkSatisfied — suggestion severity (G9)", () => {
+  it("passes when all blocking are met but a suggestion is unmet", () => {
+    const result = evaluateMarkSatisfied({
+      criteria_met: [
+        { criterion: "Core logic works", met: true, evidence: "Tests pass" },
+        { criterion: "Could add more docs", met: false, evidence: "Docs minimal", severity: "suggestion" },
+      ],
+    })
+    expect(result.passed).toBe(true)
+  })
+
+  it("reports unmet suggestions in unmetCriteria (non-blocking)", () => {
+    const result = evaluateMarkSatisfied({
+      criteria_met: [
+        { criterion: "Core logic", met: true, evidence: "ok" },
+        { criterion: "Nice-to-have docs", met: false, evidence: "sparse", severity: "suggestion" },
+      ],
+    })
+    expect(result.passed).toBe(true)
+    expect(result.unmetCriteria).toHaveLength(1)
+    expect(result.unmetCriteria[0]?.criterion).toBe("Nice-to-have docs")
+    expect(result.unmetCriteria[0]?.severity).toBe("suggestion")
+  })
+
+  it("mentions unmet suggestions in the pass message", () => {
+    const result = evaluateMarkSatisfied({
+      criteria_met: [
+        { criterion: "Core", met: true, evidence: "ok" },
+        { criterion: "Nice", met: false, evidence: "missing", severity: "suggestion" },
+      ],
+    })
+    expect(result.passed).toBe(true)
+    // Pass message should note the advisory suggestion
+    expect(result.responseMessage).toContain("suggestion")
+  })
+
+  it("fails when a blocking criterion is unmet, even if all suggestions are met", () => {
+    const result = evaluateMarkSatisfied({
+      criteria_met: [
+        { criterion: "Core", met: false, evidence: "broken", severity: "blocking" },
+        { criterion: "Nice", met: true, evidence: "great", severity: "suggestion" },
+      ],
+    })
+    expect(result.passed).toBe(false)
+  })
+
+  it("defaults to blocking when severity is not provided", () => {
+    const result = evaluateMarkSatisfied({
+      criteria_met: [
+        { criterion: "No severity field", met: false, evidence: "missing" },
+        // no severity field — should default to blocking
+      ],
+    })
+    expect(result.passed).toBe(false)
+    expect(result.unmetCriteria[0]?.severity).toBe("blocking")
+  })
+
+  it("explicit blocking severity behaves same as default", () => {
+    const withExplicit = evaluateMarkSatisfied({
+      criteria_met: [{ criterion: "A", met: false, evidence: "e", severity: "blocking" }],
+    })
+    const withDefault = evaluateMarkSatisfied({
+      criteria_met: [{ criterion: "A", met: false, evidence: "e" }],
+    })
+    expect(withExplicit.passed).toBe(withDefault.passed)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Edge cases
+// ---------------------------------------------------------------------------
+
+describe("evaluateMarkSatisfied — edge cases", () => {
+  it("handles empty criteria list — passes (nothing to fail)", () => {
+    const result = evaluateMarkSatisfied({ criteria_met: [] })
+    expect(result.passed).toBe(true)
+  })
+
+  it("severity of met criteria doesn't affect pass/fail", () => {
+    const result = evaluateMarkSatisfied({
+      criteria_met: [
+        { criterion: "A", met: true, evidence: "ok", severity: "blocking" },
+        { criterion: "B", met: true, evidence: "ok", severity: "suggestion" },
+      ],
+    })
+    expect(result.passed).toBe(true)
+    expect(result.unmetCriteria).toHaveLength(0)
+  })
+})

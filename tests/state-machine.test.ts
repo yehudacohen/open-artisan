@@ -18,8 +18,8 @@ beforeEach(() => {
 // Happy path: full greenfield flow
 // ---------------------------------------------------------------------------
 describe("StateMachine — greenfield happy path", () => {
-  it("MODE_SELECT/DRAFT + mode_selected → DISCOVERY/SCAN", () => {
-    const result = sm.transition("MODE_SELECT", "DRAFT", "mode_selected", null)
+  it("MODE_SELECT/DRAFT + mode_selected (REFACTOR) → DISCOVERY/SCAN", () => {
+    const result = sm.transition("MODE_SELECT", "DRAFT", "mode_selected", "REFACTOR")
     expect(result.success).toBe(true)
     if (!result.success) return
     expect(result.nextPhase).toBe("DISCOVERY")
@@ -116,15 +116,31 @@ describe("StateMachine — greenfield happy path", () => {
 })
 
 // ---------------------------------------------------------------------------
-// INCREMENTAL: skips DISCOVERY entirely
+// GREENFIELD: skips DISCOVERY entirely
 // ---------------------------------------------------------------------------
-describe("StateMachine — incremental mode skips discovery", () => {
-  it("MODE_SELECT/DRAFT + mode_selected → PLANNING/DRAFT when mode=INCREMENTAL", () => {
-    const result = sm.transition("MODE_SELECT", "DRAFT", "mode_selected", "INCREMENTAL")
+describe("StateMachine — greenfield mode skips discovery", () => {
+  it("MODE_SELECT/DRAFT + mode_selected → PLANNING/DRAFT when mode=GREENFIELD", () => {
+    const result = sm.transition("MODE_SELECT", "DRAFT", "mode_selected", "GREENFIELD")
     expect(result.success).toBe(true)
     if (!result.success) return
     expect(result.nextPhase).toBe("PLANNING")
     expect(result.nextPhaseState).toBe("DRAFT")
+  })
+
+  it("MODE_SELECT/DRAFT + mode_selected → DISCOVERY/SCAN when mode=INCREMENTAL", () => {
+    const result = sm.transition("MODE_SELECT", "DRAFT", "mode_selected", "INCREMENTAL")
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    expect(result.nextPhase).toBe("DISCOVERY")
+    expect(result.nextPhaseState).toBe("SCAN")
+  })
+
+  it("MODE_SELECT/DRAFT + mode_selected → DISCOVERY/SCAN when mode=REFACTOR", () => {
+    const result = sm.transition("MODE_SELECT", "DRAFT", "mode_selected", "REFACTOR")
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    expect(result.nextPhase).toBe("DISCOVERY")
+    expect(result.nextPhaseState).toBe("SCAN")
   })
 })
 
@@ -230,6 +246,42 @@ describe("StateMachine — invalid transitions", () => {
     expect(result.success).toBe(false)
     if (result.success) return
     expect(result.code).toBe("INVALID_PHASE_STATE")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// DISCOVERY revision loop (N4 gap)
+// ---------------------------------------------------------------------------
+describe("StateMachine — DISCOVERY revision loop", () => {
+  it("DISCOVERY/USER_GATE + user_feedback → DISCOVERY/REVISE", () => {
+    const result = sm.transition("DISCOVERY", "USER_GATE", "user_feedback", "REFACTOR")
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    expect(result.nextPhase).toBe("DISCOVERY")
+    expect(result.nextPhaseState).toBe("REVISE")
+  })
+
+  it("DISCOVERY/REVISE + revision_complete → DISCOVERY/REVIEW", () => {
+    const result = sm.transition("DISCOVERY", "REVISE", "revision_complete", "REFACTOR")
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    expect(result.nextPhase).toBe("DISCOVERY")
+    expect(result.nextPhaseState).toBe("REVIEW")
+  })
+
+  it("DISCOVERY/REVIEW + self_review_fail loops back to DISCOVERY/REVIEW", () => {
+    const result = sm.transition("DISCOVERY", "REVIEW", "self_review_fail", "INCREMENTAL")
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    expect(result.nextPhase).toBe("DISCOVERY")
+    expect(result.nextPhaseState).toBe("REVIEW")
+  })
+
+  it("DISCOVERY revision feedback never produces nextPhaseState=DRAFT", () => {
+    const result = sm.transition("DISCOVERY", "USER_GATE", "user_feedback", "REFACTOR")
+    if (result.success) {
+      expect(result.nextPhaseState).not.toBe("DRAFT")
+    }
   })
 })
 

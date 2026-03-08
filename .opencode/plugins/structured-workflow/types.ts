@@ -40,7 +40,7 @@ export type PhaseState =
  */
 export const VALID_PHASE_STATES: Record<Phase, PhaseState[]> = {
   MODE_SELECT: ["DRAFT"],
-  DISCOVERY: ["SCAN", "ANALYZE", "CONVENTIONS", "USER_GATE", "REVISE"],
+  DISCOVERY: ["SCAN", "ANALYZE", "CONVENTIONS", "REVIEW", "USER_GATE", "REVISE"],
   PLANNING: ["DRAFT", "REVIEW", "USER_GATE", "REVISE"],
   INTERFACES: ["DRAFT", "REVIEW", "USER_GATE", "REVISE"],
   TESTS: ["DRAFT", "REVIEW", "USER_GATE", "REVISE"],
@@ -266,8 +266,63 @@ export interface SessionStateStore {
 }
 
 // ---------------------------------------------------------------------------
+// State validation
+// ---------------------------------------------------------------------------
+
+/**
+ * Validates that a WorkflowState object is internally consistent.
+ * Returns null if valid, or an error message describing the first violation found.
+ *
+ * Rules:
+ * - schemaVersion must equal SCHEMA_VERSION
+ * - sessionId must be a non-empty string
+ * - phase must be a valid Phase value
+ * - phaseState must be valid for the current phase (per VALID_PHASE_STATES)
+ * - iterationCount, retryCount, approvalCount must all be >= 0
+ * - fileAllowlist paths must start with "/" in INCREMENTAL mode
+ */
+export function validateWorkflowState(state: WorkflowState): string | null {
+  if (state.schemaVersion !== SCHEMA_VERSION) {
+    return `Invalid schemaVersion: expected ${SCHEMA_VERSION}, got ${state.schemaVersion}`
+  }
+  if (!state.sessionId || typeof state.sessionId !== "string") {
+    return "Invalid sessionId: must be a non-empty string"
+  }
+  const validPhases: Phase[] = [
+    "MODE_SELECT", "DISCOVERY", "PLANNING", "INTERFACES",
+    "TESTS", "IMPL_PLAN", "IMPLEMENTATION", "DONE",
+  ]
+  if (!validPhases.includes(state.phase)) {
+    return `Invalid phase: "${state.phase}"`
+  }
+  const validStates = VALID_PHASE_STATES[state.phase]
+  if (!validStates.includes(state.phaseState)) {
+    return `Invalid phaseState "${state.phaseState}" for phase "${state.phase}". Valid: ${validStates.join(", ")}`
+  }
+  if (state.iterationCount < 0) return "iterationCount must be >= 0"
+  if (state.retryCount < 0) return "retryCount must be >= 0"
+  if (state.approvalCount < 0) return "approvalCount must be >= 0"
+  if (state.mode === "INCREMENTAL") {
+    for (const path of state.fileAllowlist) {
+      if (!path.startsWith("/")) {
+        return `fileAllowlist path "${path}" must be an absolute path (start with "/")`
+      }
+    }
+  }
+  return null
+}
+
+// ---------------------------------------------------------------------------
 // Orchestrator
 // ---------------------------------------------------------------------------
+
+/**
+ * The Orchestrator routes user feedback through the artifact dependency graph
+ * to determine which artifacts need revision and in what order.
+ */
+export interface Orchestrator {
+  route(input: OrchestratorRouteInput): Promise<OrchestratorPlanResult>
+}
 
 export interface OrchestratorAssessSuccess {
   success: true
@@ -402,6 +457,11 @@ export interface MarkSatisfiedArgs {
     criterion: string
     met: boolean
     evidence: string
+    /**
+     * Optional severity override. Defaults to "blocking" if not provided.
+     * "suggestion" criteria do not block advancement; they are advisory only.
+     */
+    severity?: "blocking" | "suggestion"
   }>
 }
 
@@ -412,11 +472,31 @@ export interface RequestReviewArgs {
   artifact_description: string
 }
 
+export interface MarkScanCompleteArgs {
+  /** Brief summary of what was scanned and key observations */
+  scan_summary: string
+}
+
+export interface MarkAnalyzeCompleteArgs {
+  /** Brief summary of what was analyzed and key architectural/convention findings */
+  analysis_summary: string
+}
+
 export interface SubmitFeedbackArgs {
   /** The user's raw feedback text */
   feedback_text: string
   /** Whether the user approved or is requesting a revision */
   feedback_type: "approve" | "revise"
+  /**
+   * Optional: full artifact content to store as conventions (for DISCOVERY/USER_GATE approval).
+   * When approving the DISCOVERY phase, pass the complete conventions document text here.
+   */
+  artifact_content?: string
+  /**
+   * Optional: list of absolute file paths to allow writes to (for PLANNING/USER_GATE approval in INCREMENTAL mode).
+   * When approving the PLANNING phase in INCREMENTAL mode, pass the approved file allowlist here.
+   */
+  approved_files?: string[]
 }
 
 // ---------------------------------------------------------------------------
@@ -446,6 +526,11 @@ export interface GitCheckpointSuccess {
   success: true
   tag: string
   commitHash: string
+  /**
+   * Non-fatal warnings, e.g. unexpected files staged in INCREMENTAL mode.
+   * Present only when there is something to warn about.
+   */
+  warnings?: string[]
 }
 
 export interface GitCheckpointError {

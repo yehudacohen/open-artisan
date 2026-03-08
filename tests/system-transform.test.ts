@@ -23,6 +23,11 @@ function makeState(overrides: Partial<WorkflowState> = {}): WorkflowState {
     approvalCount: 0,
     orchestratorSessionId: null,
     intentBaseline: null,
+    modeDetectionNote: null,
+    discoveryReport: null,
+    implDag: null,
+    escapePending: false,
+    pendingRevisionSteps: null,
     ...overrides,
   }
 }
@@ -204,25 +209,26 @@ describe("buildWorkflowSystemPrompt — MODE_SELECT phase", () => {
     expect(prompt).not.toContain("request_review")
   })
 
-  it("shows auto-detection note when intentBaseline starts with [Auto-detected", () => {
+  it("shows auto-detection note when modeDetectionNote is set", () => {
     const prompt = buildWorkflowSystemPrompt(
       makeState({
         phase: "MODE_SELECT",
         phaseState: "DRAFT",
         mode: null,
-        intentBaseline: "[Auto-detected workflow mode suggestion: INCREMENTAL]\nReasoning: x",
+        modeDetectionNote: "[Auto-detected workflow mode suggestion: INCREMENTAL]\nReasoning: x",
       }),
     )
     expect(prompt).toContain("Auto-Detection Result")
     expect(prompt).toContain("INCREMENTAL")
   })
 
-  it("does NOT show auto-detection section for non-placeholder intentBaseline", () => {
+  it("does NOT show auto-detection section when modeDetectionNote is null", () => {
     const prompt = buildWorkflowSystemPrompt(
       makeState({
         phase: "MODE_SELECT",
         phaseState: "DRAFT",
         mode: null,
+        modeDetectionNote: null,
         intentBaseline: "Add user authentication to the API",
       }),
     )

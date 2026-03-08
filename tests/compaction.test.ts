@@ -23,6 +23,11 @@ function makeState(overrides: Partial<WorkflowState> = {}): WorkflowState {
     approvalCount: 0,
     orchestratorSessionId: null,
     intentBaseline: null,
+    modeDetectionNote: null,
+    discoveryReport: null,
+    implDag: null,
+    escapePending: false,
+    pendingRevisionSteps: null,
     ...overrides,
   }
 }
@@ -175,15 +180,28 @@ describe("buildCompactionContext — intent baseline", () => {
     expect(ctx).not.toContain("Original Intent")
   })
 
-  it("omits auto-detection placeholder from intentBaseline (N6 fix)", () => {
+  it("modeDetectionNote shown only at MODE_SELECT phase (not in other phases)", () => {
     const ctx = buildCompactionContext(
       makeState({
-        intentBaseline: "[Auto-detected workflow mode suggestion: INCREMENTAL]\nReasoning: existing repo",
+        phase: "PLANNING",
+        phaseState: "DRAFT",
+        modeDetectionNote: "[Auto-detected workflow mode suggestion: INCREMENTAL]\nReasoning: existing repo",
+        intentBaseline: null,
       }),
     )
-    // Should NOT show this as "Original Intent (User's Request)"
-    expect(ctx).not.toContain("Original Intent")
+    // modeDetectionNote only surfaces at MODE_SELECT, not at PLANNING
+    expect(ctx).not.toContain("Mode Detection Suggestion")
     expect(ctx).not.toContain("Auto-detected")
+  })
+
+  it("intentBaseline shown as Original Intent when set (no placeholder interference)", () => {
+    const ctx = buildCompactionContext(
+      makeState({
+        intentBaseline: "Add user authentication to the API",
+      }),
+    )
+    expect(ctx).toContain("Original Intent")
+    expect(ctx).toContain("Add user authentication")
   })
 })
 

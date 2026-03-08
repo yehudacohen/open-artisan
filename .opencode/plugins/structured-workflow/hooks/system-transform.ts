@@ -14,6 +14,8 @@
 import { readFileSync } from "node:fs"
 import { join } from "node:path"
 import type { WorkflowState, Phase, PhaseState, WorkflowMode } from "../types"
+import { createImplDAG } from "../dag"
+import { nextSchedulerDecision } from "../scheduler"
 
 // ---------------------------------------------------------------------------
 // Prompt file loader (cached)
@@ -76,10 +78,10 @@ function buildStateHeader(state: WorkflowState): string {
   }
   lines.push("")
 
-  // At MODE_SELECT, show the auto-detection result so the agent can use it to inform the user
-  if (state.phase === "MODE_SELECT" && state.intentBaseline?.startsWith("[Auto-detected")) {
+  // At MODE_SELECT, show the mode-detection suggestion (stored in dedicated field)
+  if (state.phase === "MODE_SELECT" && state.modeDetectionNote) {
     lines.push("### Auto-Detection Result")
-    lines.push(state.intentBaseline)
+    lines.push(state.modeDetectionNote)
     lines.push("")
   }
 
@@ -152,7 +154,7 @@ function buildStateHeader(state: WorkflowState): string {
  * Format: each criterion is a string. The agent maps each to a CriterionResult.
  * Criteria marked [S] are suggestions (non-blocking); all others are blocking.
  */
-function getAcceptanceCriteria(phase: Phase, phaseState: PhaseState, mode: WorkflowMode | null): string | null {
+export function getAcceptanceCriteria(phase: Phase, phaseState: PhaseState, mode: WorkflowMode | null): string | null {
   if (phaseState !== "REVIEW") return null
 
   switch (phase) {
@@ -359,10 +361,45 @@ function buildSubStateContext(state: WorkflowState): string {
     case "CONVENTIONS":
       lines.push("You are drafting the conventions document.")
       lines.push("When the draft is complete, call `request_review`.")
+      // Inject discovery fleet report if available
+      if ((state as { discoveryReport?: string | null }).discoveryReport) {
+        lines.push("")
+        lines.push("### Discovery Fleet Report")
+        lines.push("The following was gathered by parallel scanner subagents. Use it as your primary source for the conventions draft.")
+        lines.push("")
+        const MAX_REPORT_CHARS = 16_000 // ~4000 tokens
+        const report = (state as { discoveryReport: string }).discoveryReport
+        lines.push(
+          report.length > MAX_REPORT_CHARS
+            ? report.slice(0, MAX_REPORT_CHARS) + `\n\n[... discovery report truncated at ${MAX_REPORT_CHARS} chars ...]`
+            : report,
+        )
+      }
       break
     case "DRAFT":
       lines.push(`You are drafting the ${state.phase} artifact.`)
       lines.push("When the draft is complete, call `request_review`.")
+      // Layer 4: Inject next task from DAG when in IMPLEMENTATION/DRAFT
+      if (state.phase === "IMPLEMENTATION" && (state as { implDag?: unknown }).implDag) {
+        try {
+          const dag = createImplDAG(Array.from((state as { implDag: ReturnType<typeof Array.from> }).implDag as Parameters<typeof createImplDAG>[0]))
+          const decision = nextSchedulerDecision(dag)
+          if (decision.action === "dispatch") {
+            lines.push("")
+            lines.push("### Next Implementation Task (from approved DAG)")
+            lines.push(decision.prompt)
+          } else if (decision.action === "complete") {
+            lines.push("")
+            lines.push(`**DAG status:** ${decision.message}`)
+          } else if (decision.action === "blocked") {
+            lines.push("")
+            lines.push("**DAG BLOCKED:** All remaining tasks have incomplete dependencies.")
+            lines.push("Call `submit_feedback` to alert the user of the scheduling conflict.")
+          }
+        } catch {
+          // Non-fatal — scheduler failure should not block the DRAFT phase
+        }
+      }
       break
     case "REVIEW":
       lines.push("Self-review is in progress.")

@@ -120,12 +120,18 @@ export function buildEscapeHatchPresentation(opts: {
   lines.push("### Your Options")
   lines.push("")
   lines.push("**A. Accept and proceed** — The orchestrator will execute the proposed change plan.")
-  lines.push("   Respond: `accept` or describe any adjustments you want to the plan.")
+  lines.push("   Respond: `accept` or `proceed`.")
   lines.push("")
   lines.push("**B. Provide alternative direction** — Describe a different approach.")
-  lines.push("   Respond with your preferred direction and the orchestrator will rebuild the plan.")
+  lines.push("   The intent baseline is updated with your direction and the orchestrator rebuilds the plan.")
+  lines.push("   Respond with your preferred direction (any message longer than a few words that isn't one of the other options).")
   lines.push("")
-  lines.push("**C. Abort change** — Return to the current state without making any changes.")
+  lines.push("**C. Start fresh with entirely new direction** — Neither original nor detected drift is right.")
+  lines.push("   The intent baseline is cleared and replaced with your new requirements.")
+  lines.push("   The orchestrator does a full re-assessment from the current phase.")
+  lines.push("   Respond: `new direction: <your new requirements>`")
+  lines.push("")
+  lines.push("**D. Abort change** — Return to the current state without making any changes.")
   lines.push("   The last approved checkpoint tag can be used to roll back if needed.")
   lines.push("   Respond: `abort`")
   lines.push("")
@@ -154,6 +160,17 @@ export function isEscapeHatchAbort(text: string): boolean {
 export function isEscapeHatchAccept(text: string): boolean {
   const t = text.trim().toLowerCase()
   return t === "accept" || t === "proceed" || t === "yes" || t === "ok" || t === "okay"
+}
+
+/**
+ * Detects whether the user's response is "entirely new direction" (option C).
+ * Format: "new direction: <requirements>" — clears intentBaseline and does full re-assessment.
+ * Returns the new direction text (after the prefix) if matched, null otherwise.
+ */
+export function parseEscapeHatchNewDirection(text: string): string | null {
+  const t = text.trim()
+  const match = /^new direction:\s*(.+)/is.exec(t)
+  return match ? (match[1]!.trim() || null) : null
 }
 
 // ---------------------------------------------------------------------------

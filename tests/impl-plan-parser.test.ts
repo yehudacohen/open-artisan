@@ -1,0 +1,295 @@
+/**
+ * Tests for impl-plan-parser.ts — parses free-text IMPL_PLAN into an ImplDAG.
+ *
+ * Covers:
+ * - Happy path: well-formed plan with multiple tasks
+ * - Dependency parsing: none, single, multiple, comma/space-separated
+ * - Expected tests parsing: none, single, multiple paths
+ * - Complexity parsing: small/medium/large; default to medium for unknown
+ * - Empty input → ParseError
+ * - No task headers found → ParseError
+ * - DAG-level errors surface as ParseError (cycles, missing deps)
+ * - Partial tasks (missing optional fields) still parse
+ */
+import { describe, expect, it } from "bun:test"
+import { parseImplPlan } from "#plugin/impl-plan-parser"
+
+// ---------------------------------------------------------------------------
+// Fixtures
+// ---------------------------------------------------------------------------
+
+const SIMPLE_PLAN = `
+## Task T1: Set up database schema
+**Dependencies:** none
+**Expected tests:** tests/db.test.ts
+**Complexity:** small
+
+Create the initial database schema with users and sessions tables.
+
+## Task T2: Implement repository layer
+**Dependencies:** T1
+**Expected tests:** tests/repository.test.ts, tests/user-repo.test.ts
+**Complexity:** medium
+
+Implement the repository abstraction on top of the schema from T1.
+
+## Task T3: Add HTTP handlers
+**Dependencies:** T2
+**Expected tests:** tests/handlers.test.ts
+**Complexity:** medium
+
+Wire up the HTTP handlers using the repository from T2.
+`
+
+// ---------------------------------------------------------------------------
+// Happy path
+// ---------------------------------------------------------------------------
+
+describe("parseImplPlan — happy path", () => {
+  it("returns success=true for a well-formed plan", () => {
+    const result = parseImplPlan(SIMPLE_PLAN)
+    expect(result.success).toBe(true)
+  })
+
+  it("extracts all 3 tasks", () => {
+    const result = parseImplPlan(SIMPLE_PLAN)
+    if (!result.success) throw new Error(result.errors.join("; "))
+    expect(result.dag.tasks).toHaveLength(3)
+  })
+
+  it("extracts correct task IDs", () => {
+    const result = parseImplPlan(SIMPLE_PLAN)
+    if (!result.success) throw new Error(result.errors.join("; "))
+    const ids = Array.from(result.dag.tasks).map((t) => t.id)
+    expect(ids).toContain("T1")
+    expect(ids).toContain("T2")
+    expect(ids).toContain("T3")
+  })
+
+  it("parses T1 with no dependencies", () => {
+    const result = parseImplPlan(SIMPLE_PLAN)
+    if (!result.success) throw new Error(result.errors.join("; "))
+    const t1 = Array.from(result.dag.tasks).find((t) => t.id === "T1")!
+    expect(t1.dependencies).toHaveLength(0)
+  })
+
+  it("parses T2 with dependency on T1", () => {
+    const result = parseImplPlan(SIMPLE_PLAN)
+    if (!result.success) throw new Error(result.errors.join("; "))
+    const t2 = Array.from(result.dag.tasks).find((t) => t.id === "T2")!
+    expect(t2.dependencies).toEqual(["T1"])
+  })
+
+  it("parses expected tests correctly", () => {
+    const result = parseImplPlan(SIMPLE_PLAN)
+    if (!result.success) throw new Error(result.errors.join("; "))
+    const t2 = Array.from(result.dag.tasks).find((t) => t.id === "T2")!
+    expect(t2.expectedTests).toContain("tests/repository.test.ts")
+    expect(t2.expectedTests).toContain("tests/user-repo.test.ts")
+  })
+
+  it("parses complexity correctly", () => {
+    const result = parseImplPlan(SIMPLE_PLAN)
+    if (!result.success) throw new Error(result.errors.join("; "))
+    const t1 = Array.from(result.dag.tasks).find((t) => t.id === "T1")!
+    expect(t1.estimatedComplexity).toBe("small")
+  })
+
+  it("all parsed tasks start with status=pending", () => {
+    const result = parseImplPlan(SIMPLE_PLAN)
+    if (!result.success) throw new Error(result.errors.join("; "))
+    for (const t of result.dag.tasks) {
+      expect(t.status).toBe("pending")
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Dependency parsing variants
+// ---------------------------------------------------------------------------
+
+describe("parseImplPlan — dependency parsing", () => {
+  it("handles multiple comma-separated dependencies", () => {
+    const plan = `
+## Task T1: First task
+**Dependencies:** none
+
+## Task T2: Second task
+**Dependencies:** none
+
+## Task T3: Third task
+**Dependencies:** T1, T2
+`
+    const result = parseImplPlan(plan)
+    if (!result.success) throw new Error(result.errors.join("; "))
+    const t3 = Array.from(result.dag.tasks).find((t) => t.id === "T3")!
+    expect(t3.dependencies).toContain("T1")
+    expect(t3.dependencies).toContain("T2")
+    expect(t3.dependencies).toHaveLength(2)
+  })
+
+  it("handles 'none' as empty dependencies", () => {
+    const plan = `## Task T1: A task\n**Dependencies:** none\n`
+    const result = parseImplPlan(plan)
+    if (!result.success) throw new Error(result.errors.join("; "))
+    const t1 = Array.from(result.dag.tasks).find((t) => t.id === "T1")!
+    expect(t1.dependencies).toHaveLength(0)
+  })
+
+  it("handles missing Dependencies field (defaults to empty)", () => {
+    const plan = `## Task T1: A task\n**Complexity:** small\n`
+    const result = parseImplPlan(plan)
+    if (!result.success) throw new Error(result.errors.join("; "))
+    expect(Array.from(result.dag.tasks)[0]!.dependencies).toHaveLength(0)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Complexity parsing
+// ---------------------------------------------------------------------------
+
+describe("parseImplPlan — complexity parsing", () => {
+  it("parses 'small' complexity", () => {
+    const plan = `## Task T1: task\n**Dependencies:** none\n**Complexity:** small\n`
+    const result = parseImplPlan(plan)
+    if (!result.success) throw new Error(result.errors.join("; "))
+    expect(Array.from(result.dag.tasks)[0]!.estimatedComplexity).toBe("small")
+  })
+
+  it("parses 'large' complexity", () => {
+    const plan = `## Task T1: task\n**Dependencies:** none\n**Complexity:** large\n`
+    const result = parseImplPlan(plan)
+    if (!result.success) throw new Error(result.errors.join("; "))
+    expect(Array.from(result.dag.tasks)[0]!.estimatedComplexity).toBe("large")
+  })
+
+  it("defaults unknown complexity to 'medium'", () => {
+    const plan = `## Task T1: task\n**Dependencies:** none\n**Complexity:** unknown-value\n`
+    const result = parseImplPlan(plan)
+    if (!result.success) throw new Error(result.errors.join("; "))
+    expect(Array.from(result.dag.tasks)[0]!.estimatedComplexity).toBe("medium")
+  })
+
+  it("defaults missing complexity to 'medium'", () => {
+    const plan = `## Task T1: task\n**Dependencies:** none\n`
+    const result = parseImplPlan(plan)
+    if (!result.success) throw new Error(result.errors.join("; "))
+    expect(Array.from(result.dag.tasks)[0]!.estimatedComplexity).toBe("medium")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Error cases
+// ---------------------------------------------------------------------------
+
+describe("parseImplPlan — error cases", () => {
+  it("returns ParseError for empty input", () => {
+    const result = parseImplPlan("")
+    expect(result.success).toBe(false)
+    if (result.success) return
+    expect(result.errors.length).toBeGreaterThan(0)
+  })
+
+  it("returns ParseError for whitespace-only input", () => {
+    const result = parseImplPlan("   \n\n  ")
+    expect(result.success).toBe(false)
+  })
+
+  it("returns ParseError when no task headers are found", () => {
+    const result = parseImplPlan("This is just some text without any task headers.\n\n- Bullet\n- Another bullet")
+    expect(result.success).toBe(false)
+    if (result.success) return
+    expect(result.errors.some((e) => e.toLowerCase().includes("no task"))).toBe(true)
+  })
+
+  it("returns ParseError when a dependency references a nonexistent task", () => {
+    const plan = `
+## Task T1: first task
+**Dependencies:** T99
+`
+    const result = parseImplPlan(plan)
+    expect(result.success).toBe(false)
+    if (result.success) return
+    expect(result.errors.some((e) => e.includes("T99"))).toBe(true)
+  })
+
+  it("returns ParseError for a cyclic dependency", () => {
+    const plan = `
+## Task T1: first
+**Dependencies:** T2
+
+## Task T2: second
+**Dependencies:** T1
+`
+    const result = parseImplPlan(plan)
+    expect(result.success).toBe(false)
+    if (result.success) return
+    expect(result.errors.some((e) => e.toLowerCase().includes("circular"))).toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Alternative header formats
+// ---------------------------------------------------------------------------
+
+describe("parseImplPlan — alternative header formats", () => {
+  it("parses '### Task T1: description' (level 3 header)", () => {
+    const plan = `### Task T1: My task\n**Dependencies:** none\n`
+    const result = parseImplPlan(plan)
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    expect(Array.from(result.dag.tasks)[0]!.id).toBe("T1")
+  })
+
+  it("parses '## T1: description' (no 'Task' keyword)", () => {
+    const plan = `## T1: My task\n**Dependencies:** none\n`
+    const result = parseImplPlan(plan)
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    expect(Array.from(result.dag.tasks)[0]!.id).toBe("T1")
+  })
+
+  it("parses 'Depends on' as an alias for Dependencies", () => {
+    const plan = `
+## Task T1: base
+**Dependencies:** none
+
+## Task T2: derived
+**Depends on:** T1
+`
+    const result = parseImplPlan(plan)
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    const t2 = Array.from(result.dag.tasks).find((t) => t.id === "T2")!
+    expect(t2.dependencies).toContain("T1")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Expected tests field
+// ---------------------------------------------------------------------------
+
+describe("parseImplPlan — expected tests field", () => {
+  it("handles 'none' as empty test list", () => {
+    const plan = `## Task T1: task\n**Dependencies:** none\n**Expected tests:** none\n`
+    const result = parseImplPlan(plan)
+    if (!result.success) throw new Error(result.errors.join("; "))
+    expect(Array.from(result.dag.tasks)[0]!.expectedTests).toHaveLength(0)
+  })
+
+  it("handles missing Expected tests field as empty array", () => {
+    const plan = `## Task T1: task\n**Dependencies:** none\n`
+    const result = parseImplPlan(plan)
+    if (!result.success) throw new Error(result.errors.join("; "))
+    expect(Array.from(result.dag.tasks)[0]!.expectedTests).toHaveLength(0)
+  })
+
+  it("parses multiple test paths", () => {
+    const plan = `## Task T1: task\n**Dependencies:** none\n**Expected tests:** tests/a.test.ts, tests/b.test.ts\n`
+    const result = parseImplPlan(plan)
+    if (!result.success) throw new Error(result.errors.join("; "))
+    const tests = Array.from(result.dag.tasks)[0]!.expectedTests
+    expect(tests).toContain("tests/a.test.ts")
+    expect(tests).toContain("tests/b.test.ts")
+  })
+})

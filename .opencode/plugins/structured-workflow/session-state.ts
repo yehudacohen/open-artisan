@@ -39,6 +39,9 @@ function freshState(sessionId: string): WorkflowState {
     approvalCount: 0,
     orchestratorSessionId: null,
     intentBaseline: null,
+    modeDetectionNote: null,
+    discoveryReport: null,
+    implDag: null,
     escapePending: false,
     pendingRevisionSteps: null,
   }
@@ -57,7 +60,7 @@ function isValidState(s: unknown): s is WorkflowState {
   if (!s || typeof s !== "object") return false
   const obj = s as Record<string, unknown>
   const v = obj["schemaVersion"] as number | undefined
-  return (v === 1 || v === SCHEMA_VERSION) && typeof obj["sessionId"] === "string"
+  return (v === 1 || v === 2 || v === 3 || v === 4 || v === SCHEMA_VERSION) && typeof obj["sessionId"] === "string"
 }
 
 async function writeAll(stateFile: string, map: Map<string, WorkflowState>): Promise<void> {
@@ -157,8 +160,14 @@ export function createSessionStateStore(dir: string): SessionStateStore {
           // v1 → v2: add orchestratorSessionId, intentBaseline, escapePending, pendingRevisionSteps
           migrated["orchestratorSessionId"] ??= null
           migrated["intentBaseline"] ??= null
+          // v2 → v3: add modeDetectionNote
+          migrated["modeDetectionNote"] ??= null
           migrated["escapePending"] ??= false
           migrated["pendingRevisionSteps"] ??= null
+          // v3 → v4: add discoveryReport
+          migrated["discoveryReport"] ??= null
+          // v4 → v5: add implDag
+          migrated["implDag"] ??= null
           // Always stamp with current schema version after migration
           migrated["schemaVersion"] = SCHEMA_VERSION
           // Second gate: full invariant validation (phase/phaseState combos, counts, etc.)

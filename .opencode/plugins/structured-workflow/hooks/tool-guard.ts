@@ -62,11 +62,12 @@ function isTestFile(path: string): boolean {
   const filename = parts.at(-1) ?? ""
   const dirs = parts.slice(0, -1)
 
-  // Filename patterns: contains "test" or "spec" as a boundary word
+  // Filename patterns: contains "test" or "spec" as a word boundary
   // e.g.: foo.test.ts, foo_test.go, test_foo.py, foo.spec.ts, foo_spec.rb
   if (/(?:^|[._-])(?:test|spec)(?:[._-]|$)/.test(filename)) return true
-  // Also match files like "FooTest.java", "FooSpec.scala"
-  if (/(?:test|spec)(?:\.[a-z]+)?$/.test(filename)) return true
+  // "FooTest.java", "FooSpec.scala" — capital letter prefix ensures word boundary
+  // (avoids false-positives like "forest.py" which ends in "est" but is not a test file)
+  if (/(?<=[A-Z])(?:Test|Spec)(?:\.[a-z]+)?$/.test(filename)) return true
 
   // Directory patterns: test lives in test/, tests/, __tests__/, spec/, specs/
   const TEST_DIRS = new Set(["test", "tests", "__tests__", "spec", "specs"])

@@ -81,8 +81,11 @@ export type ArtifactKey =
  *   v1: initial schema (all fields through lastCheckpointTag/approvalCount)
  *   v2: added orchestratorSessionId, intentBaseline, escapePending, pendingRevisionSteps;
  *       added OrchestratorPlanResult.classification field
+ *   v3: added modeDetectionNote (separate from intentBaseline to avoid field overloading)
+ *   v4: added discoveryReport (assembled output from parallel scanner fleet)
+ *   v5: added implDag (serialized DAG from approved IMPL_PLAN artifact)
  */
-export const SCHEMA_VERSION = 2
+export const SCHEMA_VERSION = 5
 
 export interface WorkflowState {
   /** Schema version for forward-compatibility. Must equal SCHEMA_VERSION. */
@@ -142,8 +145,32 @@ export interface WorkflowState {
   /**
    * The user's original intent statement.
    * Captured from first user message, updated by O_INTENT_UPDATE.
+   * Never used for mode-detection output — use modeDetectionNote for that.
    */
   intentBaseline: string | null
+
+  /**
+   * Advisory mode-detection suggestion produced at session.created.
+   * Shown in MODE_SELECT system prompt only. Never overwritten by user messages.
+   * Separate from intentBaseline to avoid field overloading.
+   */
+  modeDetectionNote: string | null
+
+  /**
+   * Combined Markdown output from the parallel discovery scanner fleet.
+   * Populated at the DISCOVERY/ANALYZE → DISCOVERY/CONVENTIONS transition.
+   * null in GREENFIELD mode or before the fleet runs.
+   * Injected into the CONVENTIONS drafting system prompt.
+   */
+  discoveryReport: string | null
+
+  /**
+   * Serialized ImplDAG — the parsed task graph from the approved IMPL_PLAN artifact.
+   * Populated at IMPL_PLAN/USER_GATE approval. null before that gate.
+   * The sequential scheduler reads this to find the next ready task.
+   * Stored as a plain object (TaskNode[]) for JSON serializability.
+   */
+  implDag: import("./dag").TaskNode[] | null
 
   /**
    * When the orchestrator detects a strategic change, this is set to true

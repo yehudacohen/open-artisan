@@ -48,7 +48,11 @@ import { processSubmitFeedback } from "./tools/submit-feedback"
 import { createOrchestrator } from "./orchestrator/route"
 import { createArtifactGraph } from "./artifacts"
 import { createAssessFn, createDivergeFn } from "./orchestrator/llm-calls"
-import { buildEscapeHatchPresentation, isEscapeHatchAbort } from "./orchestrator/escape-hatch"
+import { buildEscapeHatchPresentation, isEscapeHatchAbort, parseEscapeHatchNewDirection } from "./orchestrator/escape-hatch"
+import { dispatchSelfReview } from "./self-review"
+import { getAcceptanceCriteria } from "./hooks/system-transform"
+import { runDiscoveryFleet } from "./discovery/index"
+import { parseImplPlan } from "./impl-plan-parser"
 
 import { createHash } from "node:crypto"
 import type { WorkflowMode, ArtifactKey, RevisionStep } from "./types"
@@ -73,6 +77,21 @@ function artifactHash(text: string): string {
 
 // Re-export for consumers who import from index.ts (G19)
 export { resolveSessionId }
+
+/**
+ * Names of all custom workflow control tools.
+ * The tool guard must never block these regardless of phase — they are the
+ * mechanism by which the agent signals state transitions.
+ * Defined as a module constant so adding a new tool cannot be silently missed.
+ */
+export const WORKFLOW_TOOL_NAMES = new Set([
+  "select_mode",
+  "mark_scan_complete",
+  "mark_analyze_complete",
+  "mark_satisfied",
+  "request_review",
+  "submit_feedback",
+])
 
 /**
  * Maximum number of self_review_fail loops before escalating to USER_GATE.
@@ -125,20 +144,14 @@ export const StructuredWorkflowPlugin: Plugin = async ({ client }: { client: any
           // Already exists from a previous load — no-op
         }
 
-        // G7: Run mode detection and store the suggestion as a separate field in the
-        // system prompt via buildModeDetectionNote. We do NOT write this to intentBaseline
-        // because that field is reserved for the user's actual task description (captured
-        // from the first chat.message). Instead, store the detection result in the system
-        // prompt via a transient annotation in the mode_select prompt text.
-        // We write the detection note to intentBaseline only if intentBaseline is still null
-        // AND no user message has arrived yet — it will be overwritten by the first message.
+        // G7: Run mode detection and store in the dedicated modeDetectionNote field.
+        // This is separate from intentBaseline (which holds the user's actual task).
+        // modeDetectionNote is shown in the MODE_SELECT system prompt only.
         try {
           const cwd = (info as any)?.path?.cwd ?? (info as any)?.path ?? process.cwd()
           const detectionResult = await detectMode(typeof cwd === "string" ? cwd : process.cwd())
-          // Store temporarily as intentBaseline placeholder — the chat.message hook will
-          // overwrite it with the actual first user message once that arrives.
           await store.update(sessionId, (draft) => {
-            draft.intentBaseline = buildModeDetectionNote(detectionResult)
+            draft.modeDetectionNote = buildModeDetectionNote(detectionResult)
           })
         } catch {
           // Non-fatal — mode detection is advisory only
@@ -208,21 +221,25 @@ export const StructuredWorkflowPlugin: Plugin = async ({ client }: { client: any
     // -------------------------------------------------------------------------
 
     "chat.message": async (
-      input: { sessionID?: string; [key: string]: unknown },
-      output: { message: { sessionID?: string }; parts: Array<{ type: string; text?: string }> },
+      input: { sessionID?: string; sessionId?: string; session_id?: string; [key: string]: unknown },
+      output: { message: { sessionID?: string; sessionId?: string }; parts: Array<{ type: string; text?: string }> },
     ) => {
-      // Resolve sessionID from input (core passes it as extra field) or message
-      const sessionId = (input.sessionID as string | undefined) ?? (output.message?.sessionID as string | undefined)
+      // Resolve sessionID — probe all casing variants the SDK may use
+      const sessionId = (
+        (input.sessionID as string | undefined) ??
+        (input.sessionId as string | undefined) ??
+        (input.session_id as string | undefined) ??
+        (output.message?.sessionID as string | undefined) ??
+        (output.message?.sessionId as string | undefined)
+      )
       if (!sessionId) return
       const state = store.get(sessionId)
       if (!state) return
 
-      // Capture first real user message as intent baseline (before any routing hint injection).
-      // The mode-detection placeholder (starts with "[Auto-detected") is replaced by the
-      // actual user task as soon as the first user message arrives.
-      // After that, intentBaseline is only updated by O_INTENT_UPDATE in Layer 2.
-      const isModeDetectionPlaceholder = state.intentBaseline?.startsWith("[Auto-detected") ?? false
-      if (!state.intentBaseline || isModeDetectionPlaceholder) {
+      // Capture first real user message as intent baseline (for O_DIVERGE later).
+      // intentBaseline is null until the first real user message arrives.
+      // After capture, only O_INTENT_UPDATE (in the escape hatch path) may update it.
+      if (!state.intentBaseline) {
         const textContent = (output.parts as Array<{ type: string; text?: string }>)
           .filter((p) => p.type === "text" && p.text)
           .map((p) => p.text!)
@@ -230,10 +247,8 @@ export const StructuredWorkflowPlugin: Plugin = async ({ client }: { client: any
           .trim()
         if (textContent) {
           await store.update(sessionId, (draft) => {
-            // Only overwrite placeholder or null; don't clobber a real intent
-            const isPlaceholder = draft.intentBaseline?.startsWith("[Auto-detected") ?? false
-            if (!draft.intentBaseline || isPlaceholder) {
-              draft.intentBaseline = textContent.slice(0, 2000) // cap at 2000 chars
+            if (!draft.intentBaseline) {
+              draft.intentBaseline = textContent.slice(0, 2000)
             }
           })
         }
@@ -284,13 +299,8 @@ export const StructuredWorkflowPlugin: Plugin = async ({ client }: { client: any
       const state = store.get(input.sessionID)
       if (!state) return
 
-      // M4 fix: Never block our own workflow tools regardless of phase.
-      // These tool names contain substrings like "write" (submit_feedback → no, but be safe)
-      // that could match the blocked-list substring check.
-      const WORKFLOW_TOOL_NAMES = new Set([
-        "select_mode", "mark_scan_complete", "mark_analyze_complete",
-        "mark_satisfied", "request_review", "submit_feedback",
-      ])
+      // Never block our own workflow tools regardless of phase — they are the
+      // only way the agent can signal state transitions.
       if (WORKFLOW_TOOL_NAMES.has(input.tool)) return
 
       const policy = getPhaseToolPolicy(
@@ -462,6 +472,26 @@ export const StructuredWorkflowPlugin: Plugin = async ({ client }: { client: any
           const outcome = sm.transition(state.phase, state.phaseState, "analyze_complete", state.mode)
           if (!outcome.success) return `Error: ${outcome.message}`
 
+          // Layer 3 — Discovery fleet: dispatch 6 parallel scanner subagents.
+          // This runs BEFORE the state transition so the report is available
+          // immediately in the CONVENTIONS phase system prompt.
+          // Fleet runs only in REFACTOR/INCREMENTAL modes (GREENFIELD skips discovery).
+          let fleetMsg = ""
+          if (state.mode === "REFACTOR" || state.mode === "INCREMENTAL") {
+            try {
+              const cwd = context.directory || process.cwd()
+              const report = await runDiscoveryFleet(client, cwd, state.mode)
+              await store.update(sessionId, (draft) => {
+                draft.discoveryReport = report.combinedReport
+              })
+              const successCount = report.scanners.filter((s) => s.success).length
+              fleetMsg = `\n\n**Discovery fleet:** ${successCount}/${report.scanners.length} scanners completed.`
+            } catch {
+              // Non-fatal — fleet failure does not block conventions drafting
+              fleetMsg = "\n\n**Discovery fleet:** Failed to run (non-fatal). Conventions draft will proceed without fleet input."
+            }
+          }
+
           await store.update(sessionId, (draft) => {
             draft.phase = outcome.nextPhase
             draft.phaseState = outcome.nextPhaseState
@@ -469,7 +499,7 @@ export const StructuredWorkflowPlugin: Plugin = async ({ client }: { client: any
           })
 
           const result = processMarkAnalyzeComplete(args)
-          return result.responseMessage
+          return result.responseMessage + fleetMsg
         },
       }),
 
@@ -511,7 +541,37 @@ export const StructuredWorkflowPlugin: Plugin = async ({ client }: { client: any
             return `Error: mark_satisfied can only be called in REVIEW state (current: ${state.phaseState}).`
           }
 
-          const result = evaluateMarkSatisfied(args)
+          // Layer 3: Dispatch isolated reviewer subagent.
+          // The reviewer runs in a fresh ephemeral session that sees ONLY the
+          // artifact files and acceptance criteria — never the authoring conversation.
+          // This eliminates anchoring bias. If the reviewer call fails, fall back
+          // to the agent's self-reported criteria (graceful degradation).
+          const criteriaText = getAcceptanceCriteria(state.phase, state.phaseState, state.mode)
+          let result = evaluateMarkSatisfied(args) // fallback baseline (agent self-report)
+
+          if (criteriaText) {
+            const reviewResult = await dispatchSelfReview(client, {
+              phase: state.phase,
+              mode: state.mode,
+              artifactPaths: [], // TODO: populate from artifact registry once available
+              criteriaText,
+              upstreamSummary: state.conventions ?? undefined,
+            })
+
+            if (reviewResult.success) {
+              // Isolated reviewer succeeded — use its verdict as authoritative truth.
+              // Re-evaluate using the reviewer's criteria_results (same logic as agent path).
+              result = evaluateMarkSatisfied({
+                criteria_met: reviewResult.criteriaResults.map((c) => ({
+                  criterion: c.criterion,
+                  met: c.met,
+                  evidence: c.evidence,
+                  severity: c.severity,
+                })),
+              })
+            }
+            // If reviewResult.success === false, result keeps the agent's self-report (fallback)
+          }
 
           // Iteration cap: if self-review has failed MAX_REVIEW_ITERATIONS times
           // already, escalate to USER_GATE instead of looping again. The user can
@@ -683,6 +743,17 @@ export const StructuredWorkflowPlugin: Plugin = async ({ client }: { client: any
                   ? artifactHash(args.artifact_content)
                   : `approved-at-${Date.now()}`
               }
+              // S4: Layer 4 — Parse IMPL_PLAN into DAG at IMPL_PLAN approval.
+              // The sequential scheduler uses this DAG to find the next ready task
+              // during the IMPLEMENTATION phase. Non-fatal: if parsing fails, implDag
+              // stays null and the agent falls back to sequential task execution without
+              // DAG tracking.
+              if (state.phase === "IMPL_PLAN" && args.artifact_content) {
+                const parseResult = parseImplPlan(args.artifact_content)
+                draft.implDag = parseResult.success
+                  ? Array.from(parseResult.dag.tasks).map((t) => ({ ...t }))
+                  : null
+              }
             })
 
             let checkpointMsg: string
@@ -734,8 +805,51 @@ export const StructuredWorkflowPlugin: Plugin = async ({ client }: { client: any
                 )
               }
 
+              // Option C — "new direction: <requirements>" clears intentBaseline entirely
+              // and re-runs orchestrator from scratch (full re-assessment).
+              const newDirectionText = parseEscapeHatchNewDirection(args.feedback_text)
+              if (newDirectionText) {
+                await store.update(sessionId, (draft) => {
+                  draft.intentBaseline = newDirectionText.slice(0, 2000) // replace baseline wholesale
+                  draft.escapePending = false
+                  draft.pendingRevisionSteps = null
+                })
+                // Re-run orchestrator from scratch with the new requirements
+                let ndPlan: { revisionSteps: RevisionStep[]; classification: "tactical" | "strategic" }
+                try {
+                  const ndState = store.get(sessionId)!
+                  ndPlan = await orchestrator.route({
+                    feedback: newDirectionText,
+                    currentPhase: ndState.phase,
+                    currentPhaseState: ndState.phaseState,
+                    mode: state.mode!,
+                    approvedArtifacts: ndState.approvedArtifacts,
+                  })
+                } catch {
+                  ndPlan = { revisionSteps: [], classification: "tactical" }
+                }
+                if (!ndPlan.revisionSteps.length) {
+                  return `New direction recorded. Re-present the artifact with this new focus: "${newDirectionText}"`
+                }
+                const ndFirst = ndPlan.revisionSteps[0]!
+                const ndOutcome = sm.transition(state.phase, state.phaseState, "user_feedback", state.mode)
+                if (!ndOutcome.success) return `Error: ${ndOutcome.message}`
+                await store.update(sessionId, (draft) => {
+                  draft.phase = ndFirst.phase
+                  draft.phaseState = "REVISE"
+                  draft.pendingRevisionSteps = ndPlan.revisionSteps.slice(1)
+                  draft.retryCount = 0
+                })
+                return (
+                  `Entirely new direction accepted. Intent baseline replaced.\n\n` +
+                  `**Step 1 of ${ndPlan.revisionSteps.length}:** Revise the **${ndFirst.artifact}** artifact.\n` +
+                  `${ndFirst.instructions}\n\n` +
+                  `Begin revision work now. Call \`request_review\` when complete.`
+                )
+              }
+
               // Detect whether user provided a substantive alternative direction
-              // (not just a bare "accept" / "proceed").
+              // (not just a bare "accept" / "proceed", and not "new direction:").
               const isAccept = feedbackLower === "accept" || feedbackLower === "proceed"
               const hasAlternativeDirection = !isAccept && args.feedback_text.trim().length > 10
 

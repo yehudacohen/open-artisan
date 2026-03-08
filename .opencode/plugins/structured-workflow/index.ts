@@ -638,7 +638,14 @@ export const StructuredWorkflowPlugin: Plugin = async ({ client }: { client: any
               checkpointMsg = ` (Git checkpoint failed: ${checkpointResult.error})`
             }
 
-            return result.responseMessage + checkpointMsg
+            // Warn if DISCOVERY approved without providing the conventions document —
+            // all downstream phases rely on conventions for consistent guidance.
+            const discoveryWarning =
+              state.phase === "DISCOVERY" && !args.artifact_content
+                ? "\n\n**Warning:** No `artifact_content` provided. The conventions document will be null — downstream phases will receive no conventions context. Re-call `submit_feedback` with the conventions summary, or proceed knowing convention injection is disabled."
+                : ""
+
+            return result.responseMessage + checkpointMsg + discoveryWarning
 
           } else {
             // N3 fix: mode must be set before revision routing

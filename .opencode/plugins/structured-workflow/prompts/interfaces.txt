@@ -16,7 +16,10 @@ specification that all subsequent phases (tests and implementation) must conform
 
 ### Sub-states
 
-**DRAFT** — Write only TypeScript interface files (.ts / .d.ts).
+**DRAFT** — Write only interface/type/schema definition files.
+  Accepted file types depend on your project's language: `.ts`/`.d.ts` (TypeScript),
+  `.py`/`.pyi` (Python), `.go` (Go), `.rs` (Rust), `.java`/`.kt` (JVM), `.proto` (Protobuf),
+  `.graphql`/`.gql` (GraphQL), `.json` (JSON Schema), `.yaml`/`.yml` (OpenAPI), etc.
   - No implementation code (no function bodies, no class bodies — only signatures)
   - No test files, no markdown files
   - When all interfaces are defined, call `request_review`.
@@ -29,8 +32,9 @@ specification that all subsequent phases (tests and implementation) must conform
 **REVISE** — Refine interfaces based on feedback. Never rewrite from scratch.
 
 ### Constraints
-- Write ONLY .ts and .d.ts files. No other file types.
-- No implementation logic — interfaces and type definitions only.
-- No .env file access. No bash execution.
+- Write ONLY interface/type/schema definition files appropriate to your project's language.
+  No implementation files, no test files, no markdown files.
+- No implementation logic — interfaces, type definitions, and schemas only.
+- No .env file access. No bash execution (bash is blocked in this phase).
 - All interface names must match terminology in the approved plan.
-- Error types must be explicit — no `throw new Error("string")` patterns.
+- Error types must be explicit — no loosely-typed error strings.

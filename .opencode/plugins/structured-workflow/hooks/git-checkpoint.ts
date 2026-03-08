@@ -6,6 +6,7 @@
  * (they still get committed — this is a warning, not a hard block, since the
  * user may have made manual edits). The warning surfaces in the tool response.
  */
+import { realpath } from "node:fs/promises"
 import type { GitCheckpointResult, Phase } from "../types"
 
 // BunShell type: use 'any' to avoid dependency on bun's internal type export,
@@ -35,12 +36,19 @@ function phaseLabel(phase: Phase): string {
 /**
  * Parses `git status --porcelain` output into a list of modified file paths.
  * Each line is "XY filename" where XY is a 2-char status code.
+ * For rename/copy lines ("R  old -> new" or "C  old -> new"), returns the
+ * destination path only (after " -> ").
  */
 function parseStagedFiles(porcelain: string): string[] {
   return porcelain
     .split("\n")
     .filter(Boolean)
-    .map((line) => line.slice(3).trim()) // strip "XY " prefix
+    .map((line) => {
+      const raw = line.slice(3).trim() // strip "XY " prefix
+      // Rename/copy: "old -> new" — take the destination
+      const arrowIdx = raw.indexOf(" -> ")
+      return arrowIdx >= 0 ? raw.slice(arrowIdx + 4) : raw
+    })
 }
 
 export async function createGitCheckpoint(
@@ -51,11 +59,15 @@ export async function createGitCheckpoint(
   const tag = `workflow/${phaseLabel(opts.phase)}-v${opts.approvalCount}`
 
   try {
-    // Verify this is a git repo
-    const revParse = await $`git rev-parse --git-dir`.cwd(cwd).quiet()
-    if (revParse.exitCode !== 0) {
+    // Verify this is a git repo and get the canonical repo root.
+    // `git status --porcelain` returns repo-root-relative paths, not cwd-relative,
+    // so we must resolve staged paths against the repo root to compare with the
+    // allowlist (which uses absolute paths).
+    const rootResult = await $`git rev-parse --show-toplevel`.cwd(cwd).quiet()
+    if (rootResult.exitCode !== 0) {
       return { success: false, error: "Not a git repository" }
     }
+    const repoRoot = rootResult.stdout.toString().trim()
 
     // Stage all changes (if any)
     await $`git add -A`.cwd(cwd).quiet()
@@ -68,9 +80,15 @@ export async function createGitCheckpoint(
     // INCREMENTAL mode: warn if files outside the allowlist were staged
     const warnings: string[] = []
     if (opts.fileAllowlist && opts.fileAllowlist.length > 0 && hasChanges) {
-      const allowSet = new Set(opts.fileAllowlist)
+      // Resolve all allowlist paths to their real (symlink-resolved) paths so comparison
+      // works correctly on macOS where /tmp → /private/var/... and git resolves the latter.
+      const resolvedAllowlist = await Promise.all(
+        opts.fileAllowlist.map((p) => realpath(p).catch(() => p)),
+      )
+      const allowSet = new Set(resolvedAllowlist)
       const staged = parseStagedFiles(porcelain)
-      const unexpected = staged.filter((f) => !allowSet.has(f) && !allowSet.has(`${cwd}/${f}`))
+      // Resolve each staged path (repo-root-relative) to an absolute path for comparison
+      const unexpected = staged.filter((f) => !allowSet.has(`${repoRoot}/${f}`))
       if (unexpected.length > 0) {
         warnings.push(
           `INCREMENTAL mode: ${unexpected.length} file(s) outside the approved allowlist were staged: ` +

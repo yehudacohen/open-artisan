@@ -16,10 +16,12 @@ If any test passes at the end of this phase, that means implementation has leake
 
 ### Sub-states
 
-**DRAFT** — Write only test files (.test.ts / .spec.ts).
+**DRAFT** — Write only test files appropriate to your project's language and test framework.
+  Accepted patterns: `foo.test.ts`, `foo_test.go`, `test_foo.py`, `FooSpec.java`, files in
+  `test/`, `tests/`, `__tests__/`, `spec/`, `specs/` directories, etc.
   - Import from the interfaces you defined — do not import implementation
-  - Use `describe` blocks organized by interface/feature
-  - Every test must have a clear `expect` that will fail when run against a stub
+  - Organize tests by interface or feature
+  - Every test must assert behavior that will fail against a stub or unimplemented code
   - When the test suite is complete, call `request_review`.
 
 **REVIEW** — (Isolated self-review checks test coverage against the interfaces)
@@ -30,8 +32,8 @@ If any test passes at the end of this phase, that means implementation has leake
 **REVISE** — Add/modify tests based on feedback. Never remove passing tests.
 
 ### Constraints
-- Write ONLY .test.ts and .spec.ts files.
-- No implementation code. No code that makes tests pass.
-- No .env file access.
+- Write ONLY test files. No implementation files, no interface files, no markdown.
+- No implementation code. No code that makes tests pass — tests must fail until IMPLEMENTATION.
+- No .env file access. No bash execution (bash is blocked in this phase).
 - Tests must import from the interfaces module, not from implementations.
 - Do not mock the interfaces themselves — mock only external dependencies (network, filesystem).

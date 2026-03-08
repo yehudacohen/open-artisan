@@ -49,6 +49,11 @@ describe("Tool policy — INTERFACES allows .ts/.tsx/.d.ts writes only (G1)", ()
     expect(policy.writePathPredicate).toBeDefined()
   })
 
+  it("bash is blocked in INTERFACES", () => {
+    const policy = getPhaseToolPolicy("INTERFACES", "DRAFT", "GREENFIELD", [])
+    expect(policy.blocked).toContain("bash")
+  })
+
   it("predicate allows .ts files", () => {
     const policy = getPhaseToolPolicy("INTERFACES", "DRAFT", "GREENFIELD", [])
     expect(policy.writePathPredicate?.("/project/src/types.ts")).toBe(true)
@@ -73,6 +78,11 @@ describe("Tool policy — INTERFACES allows .ts/.tsx/.d.ts writes only (G1)", ()
 })
 
 describe("Tool policy — TESTS allows .test.ts/.test.tsx writes only (G1)", () => {
+  it("bash is blocked in TESTS", () => {
+    const policy = getPhaseToolPolicy("TESTS", "DRAFT", "GREENFIELD", [])
+    expect(policy.blocked).toContain("bash")
+  })
+
   it("predicate allows .test.ts files", () => {
     const policy = getPhaseToolPolicy("TESTS", "DRAFT", "GREENFIELD", [])
     expect(policy.writePathPredicate?.("/project/tests/foo.test.ts")).toBe(true)

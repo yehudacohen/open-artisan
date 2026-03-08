@@ -66,13 +66,40 @@ describe("ArtifactGraph — transitive dependents", () => {
     expect(dependents).toHaveLength(0)
   })
 
-  it("dependents are in topological order: interfaces before tests before impl_plan", () => {
+  it("dependents are in topological order: interfaces before tests before impl_plan before implementation", () => {
     const dependents = graph.getDependents("plan", "GREENFIELD")
     const idxInterfaces = dependents.indexOf("interfaces")
     const idxTests = dependents.indexOf("tests")
     const idxImplPlan = dependents.indexOf("impl_plan")
+    const idxImpl = dependents.indexOf("implementation")
     expect(idxInterfaces).toBeLessThan(idxTests)
     expect(idxTests).toBeLessThan(idxImplPlan)
+    expect(idxImplPlan).toBeLessThan(idxImpl)
+  })
+
+  it("tests dependents are in topological order: impl_plan before implementation", () => {
+    const dependents = graph.getDependents("tests", "GREENFIELD")
+    expect(dependents).toContain("impl_plan")
+    expect(dependents).toContain("implementation")
+    const idxImplPlan = dependents.indexOf("impl_plan")
+    const idxImpl = dependents.indexOf("implementation")
+    expect(idxImplPlan).toBeLessThan(idxImpl)
+  })
+
+  it("conventions change cascades to all 5 downstream artifacts in REFACTOR mode", () => {
+    const dependents = graph.getDependents("conventions", "REFACTOR")
+    expect(dependents).toContain("plan")
+    expect(dependents).toContain("interfaces")
+    expect(dependents).toContain("tests")
+    expect(dependents).toContain("impl_plan")
+    expect(dependents).toContain("implementation")
+    expect(dependents).toHaveLength(5)
+  })
+
+  it("conventions is excluded from getDependents results in GREENFIELD mode", () => {
+    // In GREENFIELD, conventions is not used — getDependents of any artifact should not include it
+    const dependents = graph.getDependents("plan", "GREENFIELD")
+    expect(dependents).not.toContain("conventions")
   })
 })
 

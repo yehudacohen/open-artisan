@@ -122,25 +122,29 @@ export function getPhaseToolPolicy(
     // -----------------------------------------------------------------------
     case "INTERFACES":
       return {
-        blocked: [],
+        // bash is blocked: INTERFACES is a definition-only phase.
+        // (Future M2: allow type-checking commands via bashCommandPredicate.)
+        blocked: ["bash"],
         writePathPredicate: (filePath: string) => {
           if (isEnvFile(filePath)) return false
           return isInterfaceFile(filePath)
         },
         allowedDescription:
-          "Only interface/type/schema files may be written (.ts, .d.ts, .py, .go, .rs, .java, .proto, .graphql, .json, .yaml, etc.). .env writes are always blocked.",
+          "Only interface/type/schema files may be written (.ts, .d.ts, .py, .go, .rs, .java, .proto, .graphql, .json, .yaml, etc.). bash is blocked. .env writes are always blocked.",
       }
 
     // -----------------------------------------------------------------------
     case "TESTS":
       return {
-        blocked: [],
+        // bash is blocked: TESTS is a test-writing phase, not a test-running phase.
+        // (Future M2: allow test-runner commands via bashCommandPredicate.)
+        blocked: ["bash"],
         writePathPredicate: (filePath: string) => {
           if (isEnvFile(filePath)) return false
           return isTestFile(filePath)
         },
         allowedDescription:
-          "Only test files may be written (files containing 'test' or 'spec' in name, or in test/tests/__tests__/spec directories). .env writes are always blocked.",
+          "Only test files may be written (files containing 'test' or 'spec' in name, or in test/tests/__tests__/spec directories). bash is blocked. .env writes are always blocked.",
       }
 
     // -----------------------------------------------------------------------

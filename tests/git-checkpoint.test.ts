@@ -92,3 +92,47 @@ describe("createGitCheckpoint — failure cases", () => {
     }
   })
 })
+
+describe("createGitCheckpoint — INCREMENTAL mode allowlist warnings", () => {
+  it("no warning when all staged files are in the allowlist", async () => {
+    const { $ } = await import("bun")
+    const allowedFile = join(tmpDir, "allowed.ts")
+    await writeFile(allowedFile, "export const x = 1")
+    const result = await createGitCheckpoint(
+      { cwd: tmpDir, $ },
+      { phase: "IMPLEMENTATION", approvalCount: 1, fileAllowlist: [allowedFile] },
+    )
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    expect(result.warnings).toBeUndefined()
+  })
+
+  it("warns when a staged file is outside the allowlist", async () => {
+    const { $ } = await import("bun")
+    const allowedFile = join(tmpDir, "allowed.ts")
+    const unexpectedFile = join(tmpDir, "unexpected.ts")
+    await writeFile(allowedFile, "export const x = 1")
+    await writeFile(unexpectedFile, "export const y = 2")
+    const result = await createGitCheckpoint(
+      { cwd: tmpDir, $ },
+      { phase: "IMPLEMENTATION", approvalCount: 1, fileAllowlist: [allowedFile] },
+    )
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    expect(result.warnings).toBeDefined()
+    expect(result.warnings!.length).toBeGreaterThan(0)
+    expect(result.warnings![0]).toContain("unexpected.ts")
+  })
+
+  it("no warning when fileAllowlist is empty (allowlist not configured)", async () => {
+    const { $ } = await import("bun")
+    await writeFile(join(tmpDir, "any-file.ts"), "export const z = 3")
+    const result = await createGitCheckpoint(
+      { cwd: tmpDir, $ },
+      { phase: "IMPLEMENTATION", approvalCount: 1, fileAllowlist: [] },
+    )
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    expect(result.warnings).toBeUndefined()
+  })
+})

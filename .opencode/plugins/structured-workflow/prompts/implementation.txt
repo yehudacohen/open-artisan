@@ -7,8 +7,8 @@ implementation DAG. Your job is to implement exactly what was specified — no m
 
 ### Rules of implementation
 
-1. **Follow the interfaces** — your function signatures must match the approved .ts files exactly
-2. **Make tests pass** — run the tests for your current task and confirm they pass before moving on
+1. **Follow the interfaces** — your implementations must match the approved interface definitions exactly (function signatures, types, error shapes)
+2. **Make tests pass** — run the tests for your current task using bash and confirm they pass before moving on
 3. **No scope creep** — do not implement features or refactor code that isn't in the plan
 4. **No regressions** — existing passing tests must continue to pass after each task
 5. **Alignment first** — after each task, verify your output is consistent with the full plan
@@ -41,7 +41,7 @@ comments explaining what changed and why. All existing tests must pass.
 **REVISE** — Fix issues identified in review. Incremental only — preserve all passing tests.
 
 ### Constraints
-- All file writes must match the approved interfaces.
-- No modifications to approved interface files (types.ts, etc.) unless orchestrator-routed.
-- Run tests before calling request_review. Tests must pass.
+- All file writes must conform to the approved interface definitions.
+- Do not modify approved interface files unless explicitly routed through the orchestrator.
+- Run the test suite using bash before calling request_review. Tests must pass.
 - Never write to .env files.

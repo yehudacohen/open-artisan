@@ -67,6 +67,14 @@ function artifactHash(text: string): string {
 // Re-export for consumers who import from index.ts (G19)
 export { resolveSessionId }
 
+/**
+ * Maximum number of self_review_fail loops before escalating to USER_GATE.
+ * Prevents the agent from spinning indefinitely in REVIEW when it cannot
+ * resolve a blocking criterion on its own. After this many failures, the
+ * user gate is forced so the user can provide direction.
+ */
+export const MAX_REVIEW_ITERATIONS = 5
+
 // ---------------------------------------------------------------------------
 // Plugin export — correct OpenCode plugin API shape
 // ---------------------------------------------------------------------------
@@ -287,9 +295,19 @@ export const StructuredWorkflowPlugin: Plugin = async ({ client }: { client: any
       }
 
       // Check write path predicate for write/edit tools.
-      // Use .includes() so namespaced tool names (file_write, write_file, etc.) are all caught.
-      if (policy.writePathPredicate && (toolName.includes("write") || toolName.includes("edit"))) {
-        const filePath = (input.args?.["filePath"] ?? input.args?.["path"]) as string | undefined
+      // Catches: write, edit, patch, create, overwrite, and any namespaced variants
+      // (file_write, write_file, str_replace_editor, apply_patch, etc.)
+      const WRITE_LIKE_TOKENS = ["write", "edit", "patch", "create", "overwrite"]
+      if (policy.writePathPredicate && WRITE_LIKE_TOKENS.some((t) => toolName.includes(t))) {
+        // Probe all common argument names used by different tool implementations
+        const filePath = (
+          input.args?.["filePath"] ??
+          input.args?.["path"] ??
+          input.args?.["file"] ??
+          input.args?.["filename"] ??
+          input.args?.["target"] ??
+          input.args?.["destination"]
+        ) as string | undefined
         if (filePath && !policy.writePathPredicate(filePath)) {
           throw new Error(
             `[Workflow] Writing to "${filePath}" is blocked in ${state.phase}/${state.phaseState}. ` +
@@ -478,16 +496,33 @@ export const StructuredWorkflowPlugin: Plugin = async ({ client }: { client: any
           }
 
           const result = evaluateMarkSatisfied(args)
-          const event = result.passed ? "self_review_pass" : "self_review_fail"
+
+          // Iteration cap: if self-review has failed MAX_REVIEW_ITERATIONS times
+          // already, escalate to USER_GATE instead of looping again. The user can
+          // provide direction that the agent cannot resolve autonomously.
+          const nextIterationCount = result.passed ? 0 : state.iterationCount + 1
+          const hitIterationCap = !result.passed && nextIterationCount >= MAX_REVIEW_ITERATIONS
+
+          // Force escalation to USER_GATE if cap reached
+          const event = (result.passed || hitIterationCap) ? "self_review_pass" : "self_review_fail"
           const outcome = sm.transition(state.phase, state.phaseState, event, state.mode)
           if (!outcome.success) return `Error: ${outcome.message}`
 
           await store.update(sessionId, (draft) => {
             draft.phase = outcome.nextPhase
             draft.phaseState = outcome.nextPhaseState
-            draft.iterationCount = result.passed ? 0 : draft.iterationCount + 1
+            draft.iterationCount = nextIterationCount
             draft.retryCount = 0
           })
+
+          if (hitIterationCap) {
+            const unmetList = result.unmetCriteria.map((c) => `  - ${c.criterion}: ${c.evidence}`).join("\n")
+            return (
+              `Self-review reached the maximum of ${MAX_REVIEW_ITERATIONS} iterations without resolving all blocking criteria.\n\n` +
+              `**Unresolved blocking criteria:**\n${unmetList}\n\n` +
+              `Escalating to user gate. Present the artifact and the unresolved issues to the user for direction.`
+            )
+          }
 
           return result.responseMessage
         },

@@ -176,6 +176,126 @@ describe("buildWorkflowSystemPrompt — conventions injection", () => {
 })
 
 // ---------------------------------------------------------------------------
+// MODE_SELECT — must tell agent to call select_mode, not draft
+// ---------------------------------------------------------------------------
+
+describe("buildWorkflowSystemPrompt — MODE_SELECT phase", () => {
+  it("mentions select_mode at MODE_SELECT", () => {
+    const prompt = buildWorkflowSystemPrompt(makeState({ phase: "MODE_SELECT", phaseState: "DRAFT", mode: null }))
+    expect(prompt).toContain("select_mode")
+  })
+
+  it("does NOT tell agent to call request_review at MODE_SELECT", () => {
+    const prompt = buildWorkflowSystemPrompt(makeState({ phase: "MODE_SELECT", phaseState: "DRAFT", mode: null }))
+    // request_review is wrong at MODE_SELECT — should only be select_mode
+    expect(prompt).not.toContain("request_review")
+  })
+
+  it("shows auto-detection note when intentBaseline starts with [Auto-detected", () => {
+    const prompt = buildWorkflowSystemPrompt(
+      makeState({
+        phase: "MODE_SELECT",
+        phaseState: "DRAFT",
+        mode: null,
+        intentBaseline: "[Auto-detected workflow mode suggestion: INCREMENTAL]\nReasoning: x",
+      }),
+    )
+    expect(prompt).toContain("Auto-Detection Result")
+    expect(prompt).toContain("INCREMENTAL")
+  })
+
+  it("does NOT show auto-detection section for non-placeholder intentBaseline", () => {
+    const prompt = buildWorkflowSystemPrompt(
+      makeState({
+        phase: "MODE_SELECT",
+        phaseState: "DRAFT",
+        mode: null,
+        intentBaseline: "Add user authentication to the API",
+      }),
+    )
+    expect(prompt).not.toContain("Auto-Detection Result")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// DONE phase — must say workflow is complete, not draft
+// ---------------------------------------------------------------------------
+
+describe("buildWorkflowSystemPrompt — DONE phase", () => {
+  it("does NOT tell agent to call request_review at DONE", () => {
+    const prompt = buildWorkflowSystemPrompt(makeState({ phase: "DONE", phaseState: "DRAFT" }))
+    expect(prompt).not.toContain("request_review")
+  })
+
+  it("says workflow is complete at DONE", () => {
+    const prompt = buildWorkflowSystemPrompt(makeState({ phase: "DONE", phaseState: "DRAFT" }))
+    expect(prompt.toLowerCase()).toContain("complete")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Acceptance criteria injection at REVIEW state
+// ---------------------------------------------------------------------------
+
+describe("buildWorkflowSystemPrompt — acceptance criteria at REVIEW", () => {
+  it("injects Planning acceptance criteria at PLANNING/REVIEW", () => {
+    const prompt = buildWorkflowSystemPrompt(makeState({ phase: "PLANNING", phaseState: "REVIEW" }))
+    expect(prompt).toContain("Acceptance Criteria")
+    expect(prompt).toContain("All user requirements explicitly addressed")
+  })
+
+  it("injects Interfaces acceptance criteria at INTERFACES/REVIEW", () => {
+    const prompt = buildWorkflowSystemPrompt(makeState({ phase: "INTERFACES", phaseState: "REVIEW" }))
+    expect(prompt).toContain("Acceptance Criteria")
+    expect(prompt).toContain("Every function/method has input types")
+  })
+
+  it("injects Tests acceptance criteria at TESTS/REVIEW", () => {
+    const prompt = buildWorkflowSystemPrompt(makeState({ phase: "TESTS", phaseState: "REVIEW" }))
+    expect(prompt).toContain("Acceptance Criteria")
+    expect(prompt).toContain("At least one test per interface method")
+  })
+
+  it("injects ImplPlan acceptance criteria at IMPL_PLAN/REVIEW", () => {
+    const prompt = buildWorkflowSystemPrompt(makeState({ phase: "IMPL_PLAN", phaseState: "REVIEW" }))
+    expect(prompt).toContain("Acceptance Criteria")
+    expect(prompt).toContain("Every interface method is covered")
+  })
+
+  it("injects Implementation acceptance criteria at IMPLEMENTATION/REVIEW", () => {
+    const prompt = buildWorkflowSystemPrompt(makeState({ phase: "IMPLEMENTATION", phaseState: "REVIEW" }))
+    expect(prompt).toContain("Acceptance Criteria")
+    expect(prompt).toContain("Implementation matches approved interface signatures")
+  })
+
+  it("injects Discovery/Refactor acceptance criteria at DISCOVERY/REVIEW in REFACTOR mode", () => {
+    const prompt = buildWorkflowSystemPrompt(
+      makeState({ phase: "DISCOVERY", phaseState: "REVIEW", mode: "REFACTOR" }),
+    )
+    expect(prompt).toContain("Acceptance Criteria")
+    expect(prompt).toContain("Existing architecture accurately described")
+  })
+
+  it("injects Discovery/Incremental acceptance criteria at DISCOVERY/REVIEW in INCREMENTAL mode", () => {
+    const prompt = buildWorkflowSystemPrompt(
+      makeState({ phase: "DISCOVERY", phaseState: "REVIEW", mode: "INCREMENTAL" }),
+    )
+    expect(prompt).toContain("Acceptance Criteria")
+    expect(prompt).toContain("Naming conventions documented")
+  })
+
+  it("does NOT inject acceptance criteria at DRAFT state", () => {
+    const prompt = buildWorkflowSystemPrompt(makeState({ phase: "PLANNING", phaseState: "DRAFT" }))
+    expect(prompt).not.toContain("Acceptance Criteria")
+  })
+
+  it("does NOT inject acceptance criteria at USER_GATE state", () => {
+    const prompt = buildWorkflowSystemPrompt(makeState({ phase: "PLANNING", phaseState: "USER_GATE" }))
+    expect(prompt).not.toContain("Acceptance Criteria")
+  })
+})
+
+// ---------------------------------------------------------------------------
 // Pure function
 // ---------------------------------------------------------------------------
 

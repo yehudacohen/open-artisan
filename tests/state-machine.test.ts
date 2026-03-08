@@ -316,3 +316,34 @@ describe("StateMachine — helpers", () => {
     expect(events).not.toContain("draft_complete")
   })
 })
+
+// ---------------------------------------------------------------------------
+// Review loop — self_review_fail stays in REVIEW, self_review_pass advances
+// ---------------------------------------------------------------------------
+
+describe("StateMachine — REVIEW loop behavior", () => {
+  it("self_review_fail in PLANNING/REVIEW stays in PLANNING/REVIEW", () => {
+    const result = sm.transition("PLANNING", "REVIEW", "self_review_fail", "GREENFIELD")
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    expect(result.nextPhase).toBe("PLANNING")
+    expect(result.nextPhaseState).toBe("REVIEW")
+  })
+
+  it("self_review_pass in PLANNING/REVIEW advances to PLANNING/USER_GATE", () => {
+    const result = sm.transition("PLANNING", "REVIEW", "self_review_pass", "GREENFIELD")
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    expect(result.nextPhase).toBe("PLANNING")
+    expect(result.nextPhaseState).toBe("USER_GATE")
+  })
+
+  it("self_review_pass can be used to force escalation after iteration cap (used by index.ts)", () => {
+    // The index.ts uses self_review_pass even on failure when iterationCount >= MAX_REVIEW_ITERATIONS.
+    // Verify the state machine correctly advances to USER_GATE on self_review_pass regardless of content.
+    const result = sm.transition("INTERFACES", "REVIEW", "self_review_pass", "INCREMENTAL")
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    expect(result.nextPhaseState).toBe("USER_GATE")
+  })
+})

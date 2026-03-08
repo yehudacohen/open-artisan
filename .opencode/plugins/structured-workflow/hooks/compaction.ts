@@ -53,10 +53,16 @@ export function buildCompactionContext(state: WorkflowState): string {
     lines.push("")
   }
 
-  // Conventions (if applicable)
+  // Conventions (if applicable) — capped at same limit as system-transform
+  // to prevent compaction context itself from exceeding model limits.
+  const MAX_CONVENTIONS_CHARS = 12_000
   if (state.conventions) {
+    const text = state.conventions.length > MAX_CONVENTIONS_CHARS
+      ? state.conventions.slice(0, MAX_CONVENTIONS_CHARS) +
+        `\n\n[... conventions truncated at ${MAX_CONVENTIONS_CHARS} chars ...]`
+      : state.conventions
     lines.push("### Conventions Document (Approved — Read Only)")
-    lines.push(state.conventions)
+    lines.push(text)
     lines.push("")
   }
 

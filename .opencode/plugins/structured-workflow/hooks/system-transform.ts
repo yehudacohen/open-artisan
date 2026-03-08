@@ -372,10 +372,18 @@ function buildSubStateContext(state: WorkflowState): string {
       lines.push("If any blocking criterion is not met, address it first, then call `mark_satisfied` again.")
       break
     case "USER_GATE":
-      lines.push("The artifact is ready for user review.")
-      lines.push("Present a clear summary of what was produced, key decisions made, and any tradeoffs.")
-      lines.push("Wait for the user's response. Do NOT proceed until they respond via `submit_feedback`.")
-      lines.push("Do NOT simulate approval — wait for the actual user message.")
+      if ((state as { escapePending?: boolean }).escapePending) {
+        lines.push("**ESCAPE HATCH ACTIVE** — A strategic change was detected.")
+        lines.push("The escape hatch presentation has been shown to the user.")
+        lines.push("Wait for the user's response: `accept`, a description of alternative direction, or `abort`.")
+        lines.push("Call `submit_feedback` with their response to resolve the escape hatch.")
+        lines.push("Do NOT proceed with any work until the escape hatch is resolved.")
+      } else {
+        lines.push("The artifact is ready for user review.")
+        lines.push("Present a clear summary of what was produced, key decisions made, and any tradeoffs.")
+        lines.push("Wait for the user's response. Do NOT proceed until they respond via `submit_feedback`.")
+        lines.push("Do NOT simulate approval — wait for the actual user message.")
+      }
       break
     case "REVISE":
       lines.push("You are revising the artifact based on feedback.")

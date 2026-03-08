@@ -44,8 +44,14 @@ import { evaluateMarkSatisfied } from "./tools/mark-satisfied"
 import { processRequestReview } from "./tools/request-review"
 import { processSubmitFeedback } from "./tools/submit-feedback"
 
+// Orchestrator (Layer 2)
+import { createOrchestrator } from "./orchestrator/route"
+import { createArtifactGraph } from "./artifacts"
+import { createAssessFn, createDivergeFn } from "./orchestrator/llm-calls"
+import { buildEscapeHatchPresentation, isEscapeHatchAbort } from "./orchestrator/escape-hatch"
+
 import { createHash } from "node:crypto"
-import type { WorkflowMode, ArtifactKey } from "./types"
+import type { WorkflowMode, ArtifactKey, RevisionStep } from "./types"
 import { resolveSessionId } from "./utils"
 
 // ---------------------------------------------------------------------------
@@ -87,6 +93,15 @@ export const StructuredWorkflowPlugin: Plugin = async ({ client }: { client: any
   const stateDir = join(import.meta.dirname, "..", "..")  // .opencode/
   const store = createSessionStateStore(stateDir)
   const sm = createStateMachine()
+
+  // Layer 2: Orchestrator — wires LLM-backed assess + diverge into the routing logic.
+  // The graph and orchestrator are shared across sessions (stateless pure functions).
+  const graph = createArtifactGraph()
+  const orchestrator = createOrchestrator({
+    assess: createAssessFn(client),
+    diverge: createDivergeFn(client),
+    graph,
+  })
 
   // Load persisted state on plugin startup (replaces the defunct "session.started" hook)
   await store.load()
@@ -694,18 +709,153 @@ export const StructuredWorkflowPlugin: Plugin = async ({ client }: { client: any
             if (!state.mode) {
               return "Error: Cannot process revision feedback — workflow mode not yet selected."
             }
-            // Feedback — route through orchestrator in Layer 2.
-            // For Layer 1: simple transition to REVISE
+
+            // ----------------------------------------------------------------
+            // Layer 2: Escape hatch resolution path
+            // If escapePending is true, the user is responding to an escape hatch
+            // presentation. Route based on their choice.
+            // ----------------------------------------------------------------
+            if (state.escapePending) {
+              const feedbackLower = args.feedback_text.trim().toLowerCase()
+              const isAbort = isEscapeHatchAbort(feedbackLower)
+
+              if (isAbort) {
+                // User aborts — stay in USER_GATE with no changes
+                await store.update(sessionId, (draft) => {
+                  draft.escapePending = false
+                  draft.pendingRevisionSteps = null
+                  draft.retryCount = 0
+                })
+                return (
+                  `Escape hatch: change aborted. Staying at current ${state.phase}/USER_GATE state.\n` +
+                  `The last approved checkpoint is \`${state.lastCheckpointTag ?? "none"}\`. ` +
+                  `You can roll back to it with \`git reset --hard ${state.lastCheckpointTag ?? "<tag>"}\` if needed.\n\n` +
+                  `Present the artifact again and wait for the user's next response.`
+                )
+              }
+
+              // User accepts or provides alternative direction.
+              // If alternative direction: update intentBaseline with user's direction.
+              const isAccept = feedbackLower === "accept" || feedbackLower === "proceed"
+              if (!isAccept && args.feedback_text.trim().length > 10) {
+                // O_INTENT_UPDATE: record the user's alternative direction as the new baseline
+                await store.update(sessionId, (draft) => {
+                  draft.intentBaseline = args.feedback_text.slice(0, 2000)
+                })
+              }
+
+              // Execute the pending revision plan
+              const steps = state.pendingRevisionSteps ?? []
+              const firstStep = steps[0]
+              if (!firstStep) {
+                await store.update(sessionId, (draft) => {
+                  draft.escapePending = false
+                  draft.pendingRevisionSteps = null
+                })
+                return "Error: No pending revision steps found. Please re-submit feedback."
+              }
+
+              // Transition to the first revision step
+              const outcome = sm.transition(state.phase, state.phaseState, "user_feedback", state.mode)
+              if (!outcome.success) return `Error: ${outcome.message}`
+
+              await store.update(sessionId, (draft) => {
+                draft.phase = firstStep.phase
+                draft.phaseState = "REVISE"
+                draft.escapePending = false
+                draft.pendingRevisionSteps = steps.slice(1) // remaining steps
+                draft.retryCount = 0
+              })
+
+              const remainingMsg = steps.length > 1
+                ? `\n\n**Revision cascade:** After completing this revision, ${steps.length - 1} more artifact(s) will need re-review: ${steps.slice(1).map((s) => s.artifact).join(" → ")}.`
+                : ""
+
+              return (
+                `Escape hatch resolved — proceeding with revision.\n\n` +
+                `**Step 1 of ${steps.length}:** Revise the **${firstStep.artifact}** artifact.\n` +
+                `${firstStep.instructions}${remainingMsg}\n\n` +
+                `Begin revision work now. Call \`request_review\` when the revision is complete.`
+              )
+            }
+
+            // ----------------------------------------------------------------
+            // Layer 2: Normal revise path — run orchestrator
+            // ----------------------------------------------------------------
+            let orchestratorPlan: { revisionSteps: RevisionStep[] }
+            try {
+              orchestratorPlan = await orchestrator.route({
+                feedback: args.feedback_text,
+                currentPhase: state.phase,
+                currentPhaseState: state.phaseState,
+                mode: state.mode,
+                approvedArtifacts: state.approvedArtifacts,
+              })
+            } catch {
+              // Orchestrator hard failure — fall back to simple REVISE
+              const outcome = sm.transition(state.phase, state.phaseState, "user_feedback", state.mode)
+              if (!outcome.success) return `Error: ${outcome.message}`
+              await store.update(sessionId, (draft) => {
+                draft.phase = outcome.nextPhase
+                draft.phaseState = outcome.nextPhaseState
+                draft.retryCount = 0
+              })
+              return result.responseMessage + "\n\n*(Orchestrator unavailable — proceeding with direct revision.)*"
+            }
+
+            const { revisionSteps } = orchestratorPlan
+
+            // Check if this is a strategic change requiring escape hatch
+            // The orchestrator's diverge() sets classification — we detect it by checking
+            // if the revision plan has 3+ steps (cascade_depth) or if diverge said strategic.
+            // Since the orchestrator is a black box here, we use the cascade rule as a proxy:
+            // strategic means the diverge() returned strategic — which we can detect by
+            // re-running diverge's cascade check: if steps.length >= 3.
+            // For a cleaner signal, we also check if the first step's phase is UPSTREAM of state.phase.
+
+            const PHASE_ORDER_FOR_ORCH = [
+              "DISCOVERY", "PLANNING", "INTERFACES", "TESTS", "IMPL_PLAN", "IMPLEMENTATION",
+            ]
+            const currentIdx = PHASE_ORDER_FOR_ORCH.indexOf(state.phase)
+            const firstStepIdx = PHASE_ORDER_FOR_ORCH.indexOf(revisionSteps[0]?.phase ?? state.phase)
+            const isStrategic = revisionSteps.length >= 3 || firstStepIdx < currentIdx
+
+            if (isStrategic) {
+              // Strategic — fire escape hatch. Stay at USER_GATE, store pending plan.
+              const summary = buildEscapeHatchPresentation({
+                feedback: args.feedback_text,
+                intentBaseline: state.intentBaseline,
+                assessResult: { success: true, affectedArtifacts: revisionSteps.map((s) => s.artifact), rootCauseArtifact: revisionSteps[0]!.artifact, reasoning: "orchestrator assessment" },
+                divergeResult: { success: true, classification: "strategic", reasoning: "cascade depth or upstream revision detected" },
+                revisionSteps,
+                currentPhase: state.phase,
+              })
+
+              await store.update(sessionId, (draft) => {
+                draft.escapePending = true
+                draft.pendingRevisionSteps = revisionSteps
+                draft.retryCount = 0
+              })
+
+              return summary.presentation
+            }
+
+            // Tactical — proceed directly to REVISE
+            const firstStep = revisionSteps[0]!
             const outcome = sm.transition(state.phase, state.phaseState, "user_feedback", state.mode)
             if (!outcome.success) return `Error: ${outcome.message}`
 
             await store.update(sessionId, (draft) => {
-              draft.phase = outcome.nextPhase
-              draft.phaseState = outcome.nextPhaseState
+              draft.phase = firstStep.phase
+              draft.phaseState = "REVISE"
               draft.retryCount = 0
             })
 
-            return result.responseMessage
+            return (
+              result.responseMessage + "\n\n" +
+              `**Orchestrator routing:** Revise **${firstStep.artifact}** artifact.\n` +
+              `${firstStep.instructions}`
+            )
           }
         },
       }),

@@ -39,6 +39,8 @@ function freshState(sessionId: string): WorkflowState {
     approvalCount: 0,
     orchestratorSessionId: null,
     intentBaseline: null,
+    escapePending: false,
+    pendingRevisionSteps: null,
   }
 }
 
@@ -143,6 +145,11 @@ export function createSessionStateStore(dir: string): SessionStateStore {
         for (const [id, value] of Object.entries(raw)) {
           // First gate: schema version + sessionId type check
           if (!isValidState(value)) continue
+          // Migration: fill in fields added in later schema versions with safe defaults.
+          // This allows states written before these fields existed to load correctly.
+          const migrated = value as Record<string, unknown>
+          migrated["escapePending"] ??= false
+          migrated["pendingRevisionSteps"] ??= null
           // Second gate: full invariant validation (phase/phaseState combos, counts, etc.)
           const validationError = validateWorkflowState(value)
           if (validationError) continue // silently discard states that fail invariants

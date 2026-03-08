@@ -139,6 +139,19 @@ export interface WorkflowState {
    * Captured from first user message, updated by O_INTENT_UPDATE.
    */
   intentBaseline: string | null
+
+  /**
+   * When the orchestrator detects a strategic change, this is set to true
+   * and the workflow stays at USER_GATE waiting for the user's escape hatch response.
+   * Cleared when the escape hatch is resolved (accept, alternative, or abort).
+   */
+  escapePending: boolean
+
+  /**
+   * The orchestrator's pending revision plan, waiting for escape hatch resolution.
+   * Only set when escapePending is true. Cleared after the plan is executed or aborted.
+   */
+  pendingRevisionSteps: RevisionStep[] | null
 }
 
 // ---------------------------------------------------------------------------

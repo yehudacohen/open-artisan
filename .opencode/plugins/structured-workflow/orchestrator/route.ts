@@ -34,7 +34,11 @@ const PHASE_TO_ARTIFACT: Partial<Record<string, ArtifactKey>> = {
 }
 
 function currentArtifactFor(phase: string): ArtifactKey {
-  return PHASE_TO_ARTIFACT[phase] ?? "plan"
+  const artifact = PHASE_TO_ARTIFACT[phase]
+  if (!artifact) {
+    throw new Error(`No artifact mapped for phase "${phase}" — orchestrator cannot route from this phase`)
+  }
+  return artifact
 }
 
 function buildRevisionSteps(

@@ -146,6 +146,45 @@ describe("buildCompactionContext — conventions section", () => {
     const ctx = buildCompactionContext(makeState({ conventions: null }))
     expect(ctx).not.toContain("Conventions Document")
   })
+
+  it("truncates conventions longer than 12000 chars", () => {
+    const longConventions = "z".repeat(13_000)
+    const ctx = buildCompactionContext(
+      makeState({ mode: "REFACTOR", conventions: longConventions }),
+    )
+    expect(ctx).toContain("truncated at 12000 chars")
+    expect(ctx).not.toContain("z".repeat(13_000))
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Intent baseline — placeholder filtering (N6)
+// ---------------------------------------------------------------------------
+
+describe("buildCompactionContext — intent baseline", () => {
+  it("shows intentBaseline when it is a real user message", () => {
+    const ctx = buildCompactionContext(
+      makeState({ intentBaseline: "Add user authentication to the API" }),
+    )
+    expect(ctx).toContain("Original Intent")
+    expect(ctx).toContain("Add user authentication")
+  })
+
+  it("omits intentBaseline when null", () => {
+    const ctx = buildCompactionContext(makeState({ intentBaseline: null }))
+    expect(ctx).not.toContain("Original Intent")
+  })
+
+  it("omits auto-detection placeholder from intentBaseline (N6 fix)", () => {
+    const ctx = buildCompactionContext(
+      makeState({
+        intentBaseline: "[Auto-detected workflow mode suggestion: INCREMENTAL]\nReasoning: existing repo",
+      }),
+    )
+    // Should NOT show this as "Original Intent (User's Request)"
+    expect(ctx).not.toContain("Original Intent")
+    expect(ctx).not.toContain("Auto-detected")
+  })
 })
 
 describe("buildCompactionContext — file allowlist section", () => {

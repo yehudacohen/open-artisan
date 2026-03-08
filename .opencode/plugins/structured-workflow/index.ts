@@ -24,6 +24,7 @@
 // @ts-ignore — @opencode-ai/plugin is provided by the OpenCode runtime, not installed as a dev dep
 import { tool, type Plugin } from "@opencode-ai/plugin"
 import { join } from "node:path"
+import { $ } from "bun"
 
 import { createSessionStateStore } from "./session-state"
 import { createStateMachine } from "./state-machine"
@@ -577,10 +578,10 @@ export const StructuredWorkflowPlugin: Plugin = async ({ client }: { client: any
       // submit_feedback — records user decision at a gate
       // -----------------------------------------------------------------------
       submit_feedback: tool({
-        description:
+          description:
           "Record the user's response at a review gate (approve or request revision). " +
-          "For DISCOVERY approval, pass artifact_content with the conventions document. " +
-          "For PLANNING approval in INCREMENTAL mode, pass approved_files with the file allowlist.",
+          "For any phase approval, pass artifact_content with the full artifact text to enable drift detection. " +
+          "For PLANNING approval in INCREMENTAL mode, also pass approved_files with the file allowlist.",
         args: {
           feedback_text: tool.schema.string().describe("The user's feedback text."),
           feedback_type: tool.schema
@@ -590,8 +591,9 @@ export const StructuredWorkflowPlugin: Plugin = async ({ client }: { client: any
             .string()
             .optional()
             .describe(
-              "For DISCOVERY/USER_GATE approval: the full approved conventions document text. " +
-              "Pass this to store conventions for all subsequent phases.",
+              "The full text of the approved artifact at this phase. " +
+              "For DISCOVERY: pass the conventions document (required — used in all subsequent phases). " +
+              "For other phases: pass the key artifact text (plan, interface definitions, etc.) to enable drift detection.",
             ),
           approved_files: tool.schema
             .array(tool.schema.string())
@@ -627,7 +629,6 @@ export const StructuredWorkflowPlugin: Plugin = async ({ client }: { client: any
             if (!outcome.success) return `Error: ${outcome.message}`
 
             // Git checkpoint
-            const { $ } = await import("bun")
             const newApprovalCount = state.approvalCount + 1
             const checkpointResult = await createGitCheckpoint(
               { cwd: context.directory || process.cwd(), $ },
@@ -656,10 +657,16 @@ export const StructuredWorkflowPlugin: Plugin = async ({ client }: { client: any
               if (state.phase === "PLANNING" && state.mode === "INCREMENTAL" && args.approved_files) {
                 draft.fileAllowlist = args.approved_files
               }
-              // S3: Record artifact hash for drift detection (approvedArtifacts)
+              // S3: Record artifact hash for drift detection (approvedArtifacts).
+              // If artifact_content is provided, hash it for accurate content-based drift detection.
+              // If not provided, record a time-based sentinel so the artifact key is at least
+              // marked as "approved at this point" — prevents approvedArtifacts from being
+              // permanently empty for file-based phases (PLANNING, INTERFACES, TESTS, etc.).
               const artifactKey = PHASE_TO_ARTIFACT_KEY[state.phase]
-              if (artifactKey && args.artifact_content) {
-                draft.approvedArtifacts[artifactKey] = artifactHash(args.artifact_content)
+              if (artifactKey) {
+                draft.approvedArtifacts[artifactKey] = args.artifact_content
+                  ? artifactHash(args.artifact_content)
+                  : `approved-at-${Date.now()}`
               }
             })
 

@@ -76,8 +76,11 @@ export function buildCompactionContext(state: WorkflowState): string {
     lines.push("")
   }
 
-  // Intent baseline
-  if (state.intentBaseline) {
+  // Intent baseline — exclude the mode-detection placeholder (starts with "[Auto-detected"),
+  // which is a transient annotation that gets replaced by the first real user message.
+  // Showing the placeholder as "user intent" would be misleading after compaction.
+  const isPlaceholder = state.intentBaseline?.startsWith("[Auto-detected") ?? false
+  if (state.intentBaseline && !isPlaceholder) {
     lines.push("### Original Intent (User's Request)")
     lines.push(state.intentBaseline)
     lines.push("")

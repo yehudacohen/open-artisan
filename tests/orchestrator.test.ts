@@ -158,6 +158,46 @@ describe("Orchestrator — fallback on assess error", () => {
   })
 })
 
+describe("Orchestrator — hard-throw fallback (assess throws)", () => {
+  it("falls back to tactical revision of current-phase artifact when assess throws", async () => {
+    mockAssess.mockImplementation(async () => {
+      throw new Error("Network timeout")
+    })
+
+    const orchestrator = createOrchestrator({ assess: mockAssess, diverge: mockDiverge, graph })
+    const result = await orchestrator.route({
+      feedback: "something",
+      currentPhase: "INTERFACES",
+      currentPhaseState: "USER_GATE",
+      mode: "GREENFIELD",
+      approvedArtifacts: {},
+    })
+
+    // Must still return a valid plan — current-phase artifact, REVISE
+    expect(result.revisionSteps).toHaveLength(1)
+    expect(result.revisionSteps[0]?.phase).toBe("INTERFACES")
+    expect(result.revisionSteps[0]?.phaseState).toBe("REVISE")
+  })
+
+  it("does NOT call diverge when assess throws", async () => {
+    mockAssess.mockImplementation(async () => {
+      throw new Error("Timeout")
+    })
+
+    const orchestrator = createOrchestrator({ assess: mockAssess, diverge: mockDiverge, graph })
+    await orchestrator.route({
+      feedback: "something",
+      currentPhase: "PLANNING",
+      currentPhaseState: "USER_GATE",
+      mode: "GREENFIELD",
+      approvedArtifacts: {},
+    })
+
+    // diverge should NOT have been called — early exit on hard throw
+    expect(mockDiverge).not.toHaveBeenCalled()
+  })
+})
+
 describe("Orchestrator — accumulated drift detection", () => {
   it("passes approvedArtifacts through to diverge so it can detect drift", async () => {
     mockAssess.mockImplementation(async () => ({

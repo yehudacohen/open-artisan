@@ -296,6 +296,40 @@ describe("buildWorkflowSystemPrompt — acceptance criteria at REVIEW", () => {
 })
 
 // ---------------------------------------------------------------------------
+// MAX_CONVENTIONS_CHARS truncation
+// ---------------------------------------------------------------------------
+
+describe("buildWorkflowSystemPrompt — conventions truncation", () => {
+  it("truncates conventions longer than 12000 chars with truncation notice", () => {
+    const longConventions = "x".repeat(13_000)
+    const prompt = buildWorkflowSystemPrompt(
+      makeState({
+        mode: "REFACTOR",
+        conventions: longConventions,
+        phase: "PLANNING",
+        phaseState: "DRAFT",
+      }),
+    )
+    expect(prompt).toContain("conventions truncated at 12000 chars")
+    expect(prompt).not.toContain("x".repeat(13_000)) // full text must NOT appear
+  })
+
+  it("does NOT truncate conventions under 12000 chars", () => {
+    const shortConventions = "# Rules\n" + "y".repeat(100)
+    const prompt = buildWorkflowSystemPrompt(
+      makeState({
+        mode: "REFACTOR",
+        conventions: shortConventions,
+        phase: "PLANNING",
+        phaseState: "DRAFT",
+      }),
+    )
+    expect(prompt).toContain(shortConventions)
+    expect(prompt).not.toContain("truncated")
+  })
+})
+
+// ---------------------------------------------------------------------------
 // Pure function
 // ---------------------------------------------------------------------------
 

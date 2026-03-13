@@ -89,3 +89,23 @@ describe("processSubmitFeedback — revise path", () => {
     expect(msg.includes("begin") || msg.includes("revise") || msg.includes("revision")).toBe(true)
   })
 })
+
+describe("processSubmitFeedback — feedback_type validation", () => {
+  it("unknown feedback_type treated as revise with warning", () => {
+    const result = processSubmitFeedback({
+      feedback_text: "test",
+      feedback_type: "invalid_value" as any,
+    })
+    expect(result.feedbackType).toBe("revise")
+    expect(result.responseMessage.toLowerCase()).toContain("unknown")
+  })
+
+  it("empty string feedback_type treated as revise with warning", () => {
+    const result = processSubmitFeedback({
+      feedback_text: "test",
+      feedback_type: "" as any,
+    })
+    expect(result.feedbackType).toBe("revise")
+    expect(result.responseMessage.toLowerCase()).toContain("unknown")
+  })
+})

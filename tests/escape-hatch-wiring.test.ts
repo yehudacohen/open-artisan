@@ -2,7 +2,7 @@
  * Integration tests for the escape hatch wiring in index.ts.
  *
  * These tests exercise the submit_feedback → orchestrator → escape hatch path
- * by driving the StructuredWorkflowPlugin with mocked dependencies.
+ * by driving the OpenArtisanPlugin with mocked dependencies.
  *
  * Architecture:
  * - We call the plugin's submit_feedback tool handler directly via the registered plugin.
@@ -16,17 +16,50 @@ import { createOrchestrator } from "#plugin/orchestrator/route"
 import { createArtifactGraph } from "#plugin/artifacts"
 import { createStateMachine } from "#plugin/state-machine"
 import { buildEscapeHatchPresentation, isEscapeHatchAbort } from "#plugin/orchestrator/escape-hatch"
+import { handleCascade } from "#plugin/tools/submit-feedback-handlers"
 import type {
   OrchestratorAssessResult,
   OrchestratorDivergeResult,
   ArtifactKey,
   RevisionStep,
   OrchestratorPlanResult,
+  WorkflowState,
 } from "#plugin/types"
+import { SCHEMA_VERSION } from "#plugin/types"
 
 // ---------------------------------------------------------------------------
 // Lightweight orchestrator factory driven by mocked assess/diverge
 // ---------------------------------------------------------------------------
+
+const sm = createStateMachine()
+
+function makeState(overrides: Partial<WorkflowState> = {}): WorkflowState {
+  return {
+    schemaVersion: SCHEMA_VERSION,
+    sessionId: "test-session",
+    mode: "GREENFIELD",
+    phase: "PLANNING",
+    phaseState: "USER_GATE",
+    iterationCount: 0,
+    retryCount: 0,
+    approvedArtifacts: {},
+    conventions: null,
+    fileAllowlist: [],
+    lastCheckpointTag: null,
+    approvalCount: 0,
+    orchestratorSessionId: null,
+    intentBaseline: null,
+    modeDetectionNote: null,
+    discoveryReport: null,
+    implDag: null,
+    phaseApprovalCounts: {},
+    escapePending: false,
+    pendingRevisionSteps: null,
+    currentTaskId: null,
+    feedbackHistory: [],
+    ...overrides,
+  }
+}
 
 function makeOrchestrator(
   assessResult: OrchestratorAssessResult,
@@ -175,53 +208,43 @@ describe("buildEscapeHatchPresentation — wiring integration", () => {
 // Cascade continuation — pendingRevisionSteps semantics
 // ---------------------------------------------------------------------------
 
-describe("Cascade continuation — pendingRevisionSteps", () => {
-  it("strategic plan with 3 steps: slicing step 0 leaves steps 1-2 for cascade", () => {
-    const steps: RevisionStep[] = [
-      { artifact: "plan", phase: "PLANNING", phaseState: "REVISE", instructions: "Revise plan" },
-      { artifact: "interfaces", phase: "INTERFACES", phaseState: "REVISE", instructions: "Re-align interfaces" },
-      { artifact: "tests", phase: "TESTS", phaseState: "REVISE", instructions: "Re-align tests" },
-    ]
-
-    // Simulate what index.ts does when user accepts the escape hatch:
-    // - Take firstStep = steps[0]
-    // - Store remaining = steps.slice(1) as pendingRevisionSteps
-    const firstStep = steps[0]!
-    const remaining = steps.slice(1)
-
-    expect(firstStep.artifact).toBe("plan")
-    expect(remaining).toHaveLength(2)
-    expect(remaining[0]?.artifact).toBe("interfaces")
-    expect(remaining[1]?.artifact).toBe("tests")
+describe("Cascade continuation — handleCascade handler", () => {
+  it("handleCascade consumes first step and returns remaining in pendingRevisionSteps", () => {
+    const state = makeState({
+      pendingRevisionSteps: [
+        { artifact: "plan", phase: "PLANNING", phaseState: "REVISE", instructions: "Revise plan" },
+        { artifact: "interfaces", phase: "INTERFACES", phaseState: "REVISE", instructions: "Re-align interfaces" },
+        { artifact: "tests", phase: "TESTS", phaseState: "REVISE", instructions: "Re-align tests" },
+      ],
+    })
+    const result = handleCascade(state, sm)
+    expect(result.action).toBe("revise")
+    if (result.action === "revise") {
+      expect(result.targetPhase).toBe("PLANNING")
+      expect(result.pendingRevisionSteps).toHaveLength(2)
+      expect(result.pendingRevisionSteps[0]?.artifact).toBe("interfaces")
+      expect(result.pendingRevisionSteps[1]?.artifact).toBe("tests")
+    }
   })
 
-  it("cascade continuation: after first step, remaining[0] becomes next step", () => {
-    // Simulate index.ts cascade continuation path:
-    // At next USER_GATE with pendingRevisionSteps = [interfaces, tests],
-    // we take nextStep = pendingRevisionSteps[0] and store the rest.
-    const pending: RevisionStep[] = [
-      { artifact: "interfaces", phase: "INTERFACES", phaseState: "REVISE", instructions: "Re-align interfaces" },
-      { artifact: "tests", phase: "TESTS", phaseState: "REVISE", instructions: "Re-align tests" },
-    ]
-
-    const nextStep = pending[0]!
-    const afterNext = pending.slice(1)
-
-    expect(nextStep.artifact).toBe("interfaces")
-    expect(afterNext).toHaveLength(1)
-    expect(afterNext[0]?.artifact).toBe("tests")
+  it("handleCascade on last step returns empty pendingRevisionSteps", () => {
+    const state = makeState({
+      pendingRevisionSteps: [
+        { artifact: "tests", phase: "TESTS", phaseState: "REVISE", instructions: "Re-align tests" },
+      ],
+    })
+    const result = handleCascade(state, sm)
+    expect(result.action).toBe("revise")
+    if (result.action === "revise") {
+      expect(result.targetPhase).toBe("TESTS")
+      expect(result.pendingRevisionSteps).toHaveLength(0)
+    }
   })
 
-  it("final step in cascade: remaining is empty after slice", () => {
-    const pending: RevisionStep[] = [
-      { artifact: "tests", phase: "TESTS", phaseState: "REVISE", instructions: "Re-align tests" },
-    ]
-
-    const nextStep = pending[0]!
-    const afterNext = pending.slice(1)
-
-    expect(nextStep.artifact).toBe("tests")
-    expect(afterNext).toHaveLength(0)
+  it("handleCascade with empty steps returns error", () => {
+    const state = makeState({ pendingRevisionSteps: [] })
+    const result = handleCascade(state, sm)
+    expect(result.action).toBe("error")
   })
 })
 

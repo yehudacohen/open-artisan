@@ -1,9 +1,9 @@
 {
-  "name": "opencode-structured-workflow",
+  "name": "open-artisan",
   "version": "0.1.0",
   "type": "module",
   "imports": {
-    "#plugin/*": "./.opencode/plugins/structured-workflow/*"
+    "#plugin/*": "./.opencode/plugins/open-artisan/*"
   },
   "scripts": {
     "test": "bun test",

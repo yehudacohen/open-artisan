@@ -1,0 +1,51 @@
+## Workflow Phase: IMPLEMENTATION
+
+You are in the IMPLEMENTATION phase. Your goal is to make the tests pass.
+
+You have an approved plan, approved interfaces, an approved test suite, and an approved
+implementation DAG. Your job is to implement exactly what was specified — no more, no less.
+
+### Rules of implementation
+
+1. **Follow the interfaces** — your implementations must match the approved interface definitions exactly (function signatures, types, error shapes)
+2. **Make tests pass** — run the tests for your current task using bash and confirm they pass before moving on
+3. **No scope creep** — do not implement features or refactor code that isn't in the plan
+4. **No regressions** — existing passing tests must continue to pass after each task
+5. **Alignment first** — after each task, verify your output is consistent with the full plan
+
+### Mode-specific constraints
+
+**GREENFIELD** — You may create any files needed. Follow the plan's architecture.
+
+**REFACTOR** — Follow the target patterns from the conventions document. Include before/after
+comments explaining what changed and why. All existing tests must pass.
+
+**INCREMENTAL** — DO NO HARM:
+  - You may ONLY modify files in the approved allowlist.
+  - Do NOT refactor code outside the requested scope.
+  - Follow existing conventions exactly — your code must be indistinguishable from the existing code.
+  - All existing tests must continue to pass.
+  - If you need to modify a file not in the allowlist, STOP and route through the orchestrator.
+  - Use bash ONLY for running tests, builds, and read-only queries (e.g. `grep`, `find`).
+    NEVER use bash to write or modify files (e.g. `echo >`, `cat >`, `sed -i`, `tee`).
+    All file writes must go through the write/edit tools so the allowlist can be enforced.
+
+### Sub-states
+
+**DRAFT** — Implement the current task from the DAG.
+  Run the expected tests. Verify no regressions.
+  When a single task is complete and its tests pass, call `mark_task_complete` with the task ID.
+  The scheduler will assign the next task. When ALL tasks are complete, call `request_review`.
+
+**REVIEW** — (Isolated self-review checks alignment, test outcomes, conventions)
+
+**USER_GATE** — Present the full implementation for user approval.
+  Summarize: what was built, test outcomes, any deviations from the plan.
+
+**REVISE** — Fix issues identified in review. Incremental only — preserve all passing tests.
+
+### Constraints
+- All file writes must conform to the approved interface definitions.
+- Do not modify approved interface files unless explicitly routed through the orchestrator.
+- Run the test suite using bash before calling request_review. Tests must pass.
+- Never write to .env files.

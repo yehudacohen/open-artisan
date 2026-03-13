@@ -1,2 +1,5 @@
 [module]
-alias = { "#plugin" = "./.opencode/plugins/structured-workflow" }
+alias = { "#plugin" = "./.opencode/plugins/open-artisan" }
+
+[test]
+preload = ["./tests/__mocks__/register-opencode-plugin.ts"]

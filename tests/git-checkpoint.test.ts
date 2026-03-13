@@ -136,3 +136,38 @@ describe("createGitCheckpoint — INCREMENTAL mode allowlist warnings", () => {
     expect(result.warnings).toBeUndefined()
   })
 })
+
+describe("createGitCheckpoint — no-changes tag behavior (H4 fix)", () => {
+  it("returns the real tag name when no changes to commit", async () => {
+    const { $ } = await import("bun")
+    // Do not write any new files — tree is clean
+    const result = await createGitCheckpoint(
+      { cwd: tmpDir, $ },
+      { phase: "PLANNING", approvalCount: 2 },
+    )
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    // Should return the real tag name, not "(no changes to commit)"
+    expect(result.tag).toBe("workflow/planning-v2")
+    expect(result.tag).not.toContain("no changes")
+    // commitHash should still be the HEAD
+    expect(result.commitHash).toHaveLength(40)
+  })
+
+  it("creates an annotated tag even when no changes exist (H4 — design invariant #8)", async () => {
+    const { $ } = await import("bun")
+    const result = await createGitCheckpoint(
+      { cwd: tmpDir, $ },
+      { phase: "TESTS", approvalCount: 1 },
+    )
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    expect(result.tag).toBe("workflow/tests-v1")
+    // Tag should exist even without a new commit
+    const tags = await $`git tag -l "workflow/tests-v1"`.cwd(tmpDir).text()
+    expect(tags.trim()).toBe("workflow/tests-v1")
+    // Should be an annotated tag (verify with git cat-file)
+    const tagType = await $`git cat-file -t refs/tags/workflow/tests-v1`.cwd(tmpDir).text()
+    expect(tagType.trim()).toBe("tag")
+  })
+})

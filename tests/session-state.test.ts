@@ -42,6 +42,12 @@ describe("SessionStateStore — create", () => {
     expect(state.intentBaseline).toBeNull()
   })
 
+  it("creates state with v6 fields (currentTaskId, feedbackHistory)", async () => {
+    const state = await store.create("session-v6")
+    expect(state.currentTaskId).toBeNull()
+    expect(state.feedbackHistory).toEqual([])
+  })
+
   it("throws if session already exists", async () => {
     await store.create("session-dup")
     await expect(store.create("session-dup")).rejects.toThrow()
@@ -259,6 +265,63 @@ describe("SessionStateStore — concurrent update serialization (G22)", () => {
   })
 })
 
+describe("SessionStateStore — global write lock (M4)", () => {
+  it("concurrent updates to DIFFERENT sessions do not lose writes", async () => {
+    // M4 fix: without the globalWriteLock, concurrent updates to different sessions
+    // could interleave writeAll() calls, causing one session's changes to be lost.
+    await store.create("session-a")
+    await store.create("session-b")
+
+    // Fire updates to two different sessions concurrently
+    const pa = store.update("session-a", (d) => {
+      d.phase = "PLANNING"
+      d.phaseState = "DRAFT"
+      d.mode = "GREENFIELD"
+    })
+    const pb = store.update("session-b", (d) => {
+      d.phase = "INTERFACES"
+      d.phaseState = "DRAFT"
+      d.mode = "REFACTOR"
+    })
+    await Promise.all([pa, pb])
+
+    // Both sessions should reflect their respective updates
+    expect(store.get("session-a")?.phase).toBe("PLANNING")
+    expect(store.get("session-b")?.phase).toBe("INTERFACES")
+
+    // Verify persistence: reload from disk and check both survived
+    const store2 = createSessionStateStore(tmpDir)
+    await store2.load()
+    expect(store2.get("session-a")?.phase).toBe("PLANNING")
+    expect(store2.get("session-b")?.phase).toBe("INTERFACES")
+  })
+
+  it("rapid fire updates across 3 sessions all persist correctly", async () => {
+    await store.create("rapid-1")
+    await store.create("rapid-2")
+    await store.create("rapid-3")
+
+    const updates = [
+      store.update("rapid-1", (d) => { d.approvalCount = 10 }),
+      store.update("rapid-2", (d) => { d.approvalCount = 20 }),
+      store.update("rapid-3", (d) => { d.approvalCount = 30 }),
+      store.update("rapid-1", (d) => { d.iterationCount = 1 }),
+      store.update("rapid-2", (d) => { d.iterationCount = 2 }),
+      store.update("rapid-3", (d) => { d.iterationCount = 3 }),
+    ]
+    await Promise.all(updates)
+
+    const store2 = createSessionStateStore(tmpDir)
+    await store2.load()
+    expect(store2.get("rapid-1")?.approvalCount).toBe(10)
+    expect(store2.get("rapid-2")?.approvalCount).toBe(20)
+    expect(store2.get("rapid-3")?.approvalCount).toBe(30)
+    expect(store2.get("rapid-1")?.iterationCount).toBe(1)
+    expect(store2.get("rapid-2")?.iterationCount).toBe(2)
+    expect(store2.get("rapid-3")?.iterationCount).toBe(3)
+  })
+})
+
 describe("SessionStateStore — load", () => {
   it("discards states with wrong schemaVersion", async () => {
     // Manually write a bad state file
@@ -275,6 +338,44 @@ describe("SessionStateStore — load", () => {
     const result = await store2.load()
     expect(result.success).toBe(true)
     expect(store2.get("bad-session")).toBeNull()
+  })
+
+  it("migrates v5 state (missing currentTaskId and feedbackHistory) to v6", async () => {
+    // Write a v5 state that lacks currentTaskId and feedbackHistory
+    const v5State = {
+      schemaVersion: 5,
+      sessionId: "v5-session",
+      mode: null,
+      phase: "MODE_SELECT",
+      phaseState: "DRAFT",
+      iterationCount: 0,
+      retryCount: 0,
+      approvedArtifacts: {},
+      conventions: null,
+      fileAllowlist: [],
+      lastCheckpointTag: null,
+      approvalCount: 0,
+      orchestratorSessionId: null,
+      intentBaseline: null,
+      modeDetectionNote: null,
+      discoveryReport: null,
+      implDag: null,
+      escapePending: false,
+      pendingRevisionSteps: null,
+      // Note: no currentTaskId or feedbackHistory — these are v6 fields
+    }
+    await Bun.write(
+      join(tmpDir, "workflow-state.json"),
+      JSON.stringify({ "v5-session": v5State }),
+    )
+    const store2 = createSessionStateStore(tmpDir)
+    const result = await store2.load()
+    expect(result.success).toBe(true)
+    const loaded = store2.get("v5-session")
+    expect(loaded).not.toBeNull()
+    expect(loaded?.schemaVersion).toBe(SCHEMA_VERSION)
+    expect(loaded?.currentTaskId).toBeNull()
+    expect(loaded?.feedbackHistory).toEqual([])
   })
 
   it("reports count of successfully loaded sessions", async () => {
@@ -294,6 +395,14 @@ describe("SessionStateStore — load", () => {
       approvalCount: 0,
       orchestratorSessionId: null,
       intentBaseline: null,
+      modeDetectionNote: null,
+      discoveryReport: null,
+      implDag: null,
+      phaseApprovalCounts: {},
+      escapePending: false,
+      pendingRevisionSteps: null,
+      currentTaskId: null,
+      feedbackHistory: [],
     }
     const s2: WorkflowState = { ...s1, sessionId: "s2" }
     await Bun.write(

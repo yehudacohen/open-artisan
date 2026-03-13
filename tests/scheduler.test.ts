@@ -165,16 +165,29 @@ describe("nextSchedulerDecision — blocked", () => {
     expect(decision.action).toBe("blocked")
   })
 
-  it("blocked decision includes blockedTasks with their unmet dependencies", () => {
+  it("blocked decision with in-flight tasks reports waiting, not DAG inconsistency", () => {
     const dag = createImplDAG([
       makeTask({ id: "T1", status: "in-flight" }),
       makeTask({ id: "T2", dependencies: ["T1"] }),
     ])
     const decision = nextSchedulerDecision(dag)
     if (decision.action !== "blocked") throw new Error("Expected blocked")
-    expect(decision.blockedTasks.some((bt) => bt.id === "T2")).toBe(true)
-    const t2Block = decision.blockedTasks.find((bt) => bt.id === "T2")!
-    expect(t2Block.waitingFor).toContain("T1")
+    // In-flight tasks cause a "waiting" blocked state, not a DAG inconsistency
+    expect(decision.message).toContain("in-flight")
+    expect(decision.blockedTasks).toHaveLength(0)
+  })
+
+  it("blocked decision with no in-flight tasks includes blockedTasks with unmet deps", () => {
+    // DAG inconsistency: T1 is pending but T2 depends on T1, no tasks in-flight
+    const dag = createImplDAG([
+      makeTask({ id: "T1", dependencies: ["T_MISSING"] }),
+      makeTask({ id: "T2", dependencies: ["T1"] }),
+    ])
+    const decision = nextSchedulerDecision(dag)
+    if (decision.action !== "blocked") throw new Error("Expected blocked")
+    expect(decision.blockedTasks.some((bt) => bt.id === "T1")).toBe(true)
+    const t1Block = decision.blockedTasks.find((bt) => bt.id === "T1")!
+    expect(t1Block.waitingFor).toContain("T_MISSING")
   })
 })
 
@@ -203,6 +216,16 @@ describe("markTaskComplete", () => {
     expect(result).toBeNull()
   })
 
+  it("returns null for already-complete task (status validation)", () => {
+    const dag = createImplDAG([makeTask({ id: "T1", status: "complete" })])
+    expect(markTaskComplete(dag, "T1")).toBeNull()
+  })
+
+  it("returns null for aborted task (status validation)", () => {
+    const dag = createImplDAG([makeTask({ id: "T1", status: "aborted" })])
+    expect(markTaskComplete(dag, "T1")).toBeNull()
+  })
+
   it("after marking T1 complete, T2 becomes ready", () => {
     const dag = createImplDAG([
       makeTask({ id: "T1" }),
@@ -229,6 +252,16 @@ describe("markTaskInFlight", () => {
     const dag = createImplDAG([makeTask({ id: "T1" })])
     expect(markTaskInFlight(dag, "T99")).toBeNull()
   })
+
+  it("returns null for already in-flight task (status validation)", () => {
+    const dag = createImplDAG([makeTask({ id: "T1", status: "in-flight" })])
+    expect(markTaskInFlight(dag, "T1")).toBeNull()
+  })
+
+  it("returns null for complete task (status validation)", () => {
+    const dag = createImplDAG([makeTask({ id: "T1", status: "complete" })])
+    expect(markTaskInFlight(dag, "T1")).toBeNull()
+  })
 })
 
 describe("markTaskAborted", () => {
@@ -249,8 +282,30 @@ describe("markTaskAborted", () => {
     expect(t.worktreePath).toBeUndefined()
   })
 
-  it("returns null for unknown task ID", () => {
+  it("returns empty array for unknown task ID", () => {
     const dag = createImplDAG([makeTask({ id: "T1" })])
-    expect(markTaskAborted(dag, "T99")).toBeNull()
+    expect(markTaskAborted(dag, "T99")).toEqual([])
+  })
+
+  it("cascades abort to downstream dependents", () => {
+    const dag = createImplDAG([
+      makeTask({ id: "T1", status: "in-flight" }),
+      makeTask({ id: "T2", dependencies: ["T1"], status: "pending" }),
+      makeTask({ id: "T3", dependencies: ["T2"], status: "pending" }),
+    ])
+    const aborted = markTaskAborted(dag, "T1")
+    expect(aborted.length).toBe(3)
+    expect(Array.from(dag.tasks).every((t) => t.status === "aborted")).toBe(true)
+  })
+
+  it("does not cascade to already-complete tasks", () => {
+    const dag = createImplDAG([
+      makeTask({ id: "T1", status: "in-flight" }),
+      makeTask({ id: "T2", dependencies: ["T1"], status: "complete" }),
+      makeTask({ id: "T3", dependencies: ["T1"], status: "pending" }),
+    ])
+    const aborted = markTaskAborted(dag, "T1")
+    expect(aborted.length).toBe(2) // T1 + T3, not T2
+    expect(Array.from(dag.tasks).find((t) => t.id === "T2")!.status).toBe("complete")
   })
 })

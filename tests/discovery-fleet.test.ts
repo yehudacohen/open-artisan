@@ -257,6 +257,32 @@ describe("runDiscoveryFleet — prompt content", () => {
 })
 
 // ---------------------------------------------------------------------------
+// Minimum scanner threshold — warn when too few succeed
+// ---------------------------------------------------------------------------
+
+describe("runDiscoveryFleet — minimum scanner threshold", () => {
+  it("sets lowConfidence=true when fewer than MIN_SCANNERS_THRESHOLD scanners succeed", async () => {
+    // Only 1 of 6 succeeds
+    const client = makeClientSomeThrow(/session-[2-6]/)
+    const report = await runDiscoveryFleet(client, "/workspace", "REFACTOR")
+    expect(report.lowConfidence).toBe(true)
+  })
+
+  it("sets lowConfidence=false when enough scanners succeed", async () => {
+    const client = makeClient()
+    const report = await runDiscoveryFleet(client, "/workspace", "REFACTOR")
+    expect(report.lowConfidence).toBe(false)
+  })
+
+  it("includes a warning in combinedReport when lowConfidence is true", async () => {
+    const client = makeClientAllThrow()
+    const report = await runDiscoveryFleet(client, "/workspace", "REFACTOR")
+    expect(report.lowConfidence).toBe(true)
+    expect(report.combinedReport.toLowerCase()).toContain("warning")
+  })
+})
+
+// ---------------------------------------------------------------------------
 // Works with INCREMENTAL mode
 // ---------------------------------------------------------------------------
 

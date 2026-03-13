@@ -26,8 +26,11 @@ function makeValidState(overrides: Partial<WorkflowState> = {}): WorkflowState {
     modeDetectionNote: null,
     discoveryReport: null,
     implDag: null,
+    phaseApprovalCounts: {},
     escapePending: false,
     pendingRevisionSteps: null,
+    currentTaskId: null,
+    feedbackHistory: [],
     ...overrides,
   }
 }
@@ -214,6 +217,20 @@ describe("validateWorkflowState — escapePending and pendingRevisionSteps", () 
     expect(err).not.toBeNull()
     expect(err).toContain("pendingRevisionSteps")
   })
+
+  it("rejects escapePending=true with pendingRevisionSteps=null", () => {
+    const state = makeValidState({ escapePending: true, pendingRevisionSteps: null })
+    const err = validateWorkflowState(state)
+    expect(err).not.toBeNull()
+    expect(err).toContain("escapePending")
+  })
+
+  it("rejects escapePending=true with pendingRevisionSteps=[] (empty)", () => {
+    const state = makeValidState({ escapePending: true, pendingRevisionSteps: [] })
+    const err = validateWorkflowState(state)
+    expect(err).not.toBeNull()
+    expect(err).toContain("escapePending")
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -253,5 +270,192 @@ describe("resolveSessionId — field resolution", () => {
 
   it("returns null for empty context object", () => {
     expect(resolveSessionId({})).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// New field validations (v6 schema: currentTaskId, feedbackHistory, implDag, conventions)
+// ---------------------------------------------------------------------------
+
+describe("validateWorkflowState — v6 fields", () => {
+  it("accepts valid currentTaskId (string)", () => {
+    const state = makeValidState({ currentTaskId: "T1" })
+    expect(validateWorkflowState(state)).toBeNull()
+  })
+
+  it("accepts valid currentTaskId (null)", () => {
+    const state = makeValidState({ currentTaskId: null })
+    expect(validateWorkflowState(state)).toBeNull()
+  })
+
+  it("rejects currentTaskId as a non-null non-string", () => {
+    const state = makeValidState({ currentTaskId: 42 as any })
+    const err = validateWorkflowState(state)
+    expect(err).not.toBeNull()
+    expect(err).toContain("currentTaskId")
+  })
+
+  it("accepts valid feedbackHistory (empty array)", () => {
+    const state = makeValidState({ feedbackHistory: [] })
+    expect(validateWorkflowState(state)).toBeNull()
+  })
+
+  it("accepts valid feedbackHistory (non-empty array)", () => {
+    const state = makeValidState({
+      feedbackHistory: [
+        { phase: "PLANNING" as const, feedback: "change the scope", timestamp: 1234 },
+      ],
+    })
+    expect(validateWorkflowState(state)).toBeNull()
+  })
+
+  it("rejects feedbackHistory as a non-array", () => {
+    const state = makeValidState({ feedbackHistory: "invalid" as any })
+    const err = validateWorkflowState(state)
+    expect(err).not.toBeNull()
+    expect(err).toContain("feedbackHistory")
+  })
+
+  it("accepts valid conventions (string)", () => {
+    const state = makeValidState({ conventions: "Use camelCase" })
+    expect(validateWorkflowState(state)).toBeNull()
+  })
+
+  it("rejects conventions as a non-null non-string", () => {
+    const state = makeValidState({ conventions: 42 as any })
+    const err = validateWorkflowState(state)
+    expect(err).not.toBeNull()
+    expect(err).toContain("conventions")
+  })
+
+  it("accepts valid implDag", () => {
+    const state = makeValidState({
+      implDag: [
+        { id: "T1", description: "Build it", dependencies: [], expectedTests: [], estimatedComplexity: "small" as const, status: "pending" as const },
+      ],
+    })
+    expect(validateWorkflowState(state)).toBeNull()
+  })
+
+  it("rejects implDag as a non-null non-array", () => {
+    const state = makeValidState({ implDag: "wrong" as any })
+    const err = validateWorkflowState(state)
+    expect(err).not.toBeNull()
+    expect(err).toContain("implDag")
+  })
+
+  it("rejects implDag task missing id", () => {
+    const state = makeValidState({
+      implDag: [{ description: "no id", dependencies: [], status: "pending" } as any],
+    })
+    const err = validateWorkflowState(state)
+    expect(err).not.toBeNull()
+    expect(err).toContain("id")
+  })
+
+  it("rejects implDag task missing dependencies array", () => {
+    const state = makeValidState({
+      implDag: [{ id: "T1", description: "bad", dependencies: "not-array", status: "pending" } as any],
+    })
+    const err = validateWorkflowState(state)
+    expect(err).not.toBeNull()
+    expect(err).toContain("dependencies")
+  })
+
+  it("rejects implDag task with invalid status", () => {
+    const state = makeValidState({
+      implDag: [{ id: "T1", description: "bad", dependencies: [], status: "invalid" } as any],
+    })
+    const err = validateWorkflowState(state)
+    expect(err).not.toBeNull()
+    expect(err).toContain("invalid status")
+  })
+
+  it("accepts implDag tasks with all valid statuses", () => {
+    const state = makeValidState({
+      implDag: [
+        { id: "T1", description: "a", dependencies: [], expectedTests: [], estimatedComplexity: "small" as const, status: "pending" as const },
+        { id: "T2", description: "b", dependencies: ["T1"], expectedTests: [], estimatedComplexity: "medium" as const, status: "in-flight" as const },
+        { id: "T3", description: "c", dependencies: [], expectedTests: [], estimatedComplexity: "large" as const, status: "complete" as const },
+        { id: "T4", description: "d", dependencies: [], expectedTests: [], estimatedComplexity: "small" as const, status: "aborted" as const },
+      ],
+    })
+    expect(validateWorkflowState(state)).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// feedbackHistory structural validation
+// ---------------------------------------------------------------------------
+
+describe("validateWorkflowState — feedbackHistory structural validation", () => {
+  it("accepts valid feedbackHistory entries", () => {
+    const result = validateWorkflowState(
+      makeValidState({
+        feedbackHistory: [{ phase: "PLANNING", feedback: "looks good", timestamp: 123456 }],
+      }),
+    )
+    expect(result).toBeNull()
+  })
+
+  it("rejects feedbackHistory entry with missing phase", () => {
+    const err = validateWorkflowState(
+      makeValidState({
+        feedbackHistory: [{ feedback: "test", timestamp: 123 } as any],
+      }),
+    )
+    expect(err).not.toBeNull()
+    expect(err).toContain("feedbackHistory[0].phase")
+  })
+
+  it("rejects feedbackHistory entry with missing feedback", () => {
+    const err = validateWorkflowState(
+      makeValidState({
+        feedbackHistory: [{ phase: "PLANNING", timestamp: 123 } as any],
+      }),
+    )
+    expect(err).not.toBeNull()
+    expect(err).toContain("feedbackHistory[0].feedback")
+  })
+
+  it("rejects feedbackHistory entry with negative timestamp", () => {
+    const err = validateWorkflowState(
+      makeValidState({
+        feedbackHistory: [{ phase: "PLANNING", feedback: "test", timestamp: -1 }],
+      }),
+    )
+    expect(err).not.toBeNull()
+    expect(err).toContain("feedbackHistory[0].timestamp")
+  })
+
+  it("accepts empty feedbackHistory", () => {
+    const result = validateWorkflowState(makeValidState({ feedbackHistory: [] }))
+    expect(result).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// phaseApprovalCounts validation
+// ---------------------------------------------------------------------------
+
+describe("validateWorkflowState — phaseApprovalCounts validation", () => {
+  it("accepts empty phaseApprovalCounts", () => {
+    const result = validateWorkflowState(makeValidState({ phaseApprovalCounts: {} }))
+    expect(result).toBeNull()
+  })
+
+  it("accepts valid phaseApprovalCounts", () => {
+    const result = validateWorkflowState(
+      makeValidState({ phaseApprovalCounts: { PLANNING: 2, INTERFACES: 1 } }),
+    )
+    expect(result).toBeNull()
+  })
+
+  it("rejects negative phaseApprovalCounts value", () => {
+    const err = validateWorkflowState(
+      makeValidState({ phaseApprovalCounts: { PLANNING: -1 } }),
+    )
+    expect(err).not.toBeNull()
+    expect(err).toContain("phaseApprovalCounts")
   })
 })

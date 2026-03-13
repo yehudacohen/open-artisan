@@ -101,3 +101,44 @@ describe("detectMode — existing codebase", () => {
     expect(result.sourceFileCount).toBe(0)
   })
 })
+
+describe("detectMode — result shape", () => {
+  it("always returns a ModeDetectionResult with all required fields", async () => {
+    const result = await detectMode(tmpDir)
+    expect(result).toHaveProperty("suggestedMode")
+    expect(result).toHaveProperty("hasGitHistory")
+    expect(result).toHaveProperty("sourceFileCount")
+    expect(result).toHaveProperty("reasoning")
+    expect(typeof result.reasoning).toBe("string")
+    expect(result.reasoning.length).toBeGreaterThan(0)
+  })
+
+  it("never suggests REFACTOR — that requires explicit user intent", async () => {
+    // Even a directory with source files should never auto-suggest REFACTOR
+    const { $ } = await import("bun")
+    await $`git init`.cwd(tmpDir).quiet()
+    await $`git config user.email test@test.com`.cwd(tmpDir).quiet()
+    await $`git config user.name Test`.cwd(tmpDir).quiet()
+    const srcDir = join(tmpDir, "src")
+    await mkdir(srcDir, { recursive: true })
+    for (let i = 0; i < 50; i++) {
+      await writeFile(join(srcDir, `module${i}.ts`), `export const m = ${i}`)
+    }
+    await $`git add -A`.cwd(tmpDir).quiet()
+    await $`git commit -m "big project"`.cwd(tmpDir).quiet()
+
+    const result = await detectMode(tmpDir)
+    expect(result.suggestedMode).not.toBe("REFACTOR")
+  })
+
+  it("sourceFileCount is a non-negative number", async () => {
+    const result = await detectMode(tmpDir)
+    expect(result.sourceFileCount).toBeGreaterThanOrEqual(0)
+  })
+
+  it("handles non-existent directory gracefully", async () => {
+    const result = await detectMode("/this/path/does/not/exist/at/all")
+    expect(result.suggestedMode).toBe("GREENFIELD")
+    expect(result.sourceFileCount).toBe(0)
+  })
+})

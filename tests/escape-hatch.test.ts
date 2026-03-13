@@ -6,6 +6,7 @@ import {
   buildEscapeHatchPresentation,
   isEscapeHatchAbort,
   isEscapeHatchAccept,
+  isEscapeHatchAmbiguous,
 } from "#plugin/orchestrator/escape-hatch"
 import type { OrchestratorAssessResult, OrchestratorDivergeResult, RevisionStep } from "#plugin/types"
 
@@ -173,6 +174,65 @@ describe("buildEscapeHatchPresentation — structure", () => {
 })
 
 // ---------------------------------------------------------------------------
+// Divergence context — explain why escape hatch was triggered
+// ---------------------------------------------------------------------------
+
+describe("buildEscapeHatchPresentation — divergence context", () => {
+  it("includes a human-readable explanation of what diverged", () => {
+    const result = buildEscapeHatchPresentation({
+      feedback: "Change the database to NoSQL",
+      intentBaseline: "Build a REST API with PostgreSQL",
+      assessResult: makeAssessSuccess("plan"),
+      divergeResult: {
+        success: true,
+        classification: "strategic",
+        triggerCriterion: "architectural_shift",
+        reasoning: "The change replaces the fundamental data storage architecture",
+      },
+      revisionSteps: makeRevisionSteps(),
+      currentPhase: "PLANNING",
+    })
+    // Should explain WHY this is strategic — the trigger and reasoning
+    expect(result.presentation).toContain("Architectural Shift")
+    expect(result.presentation).toContain("The change replaces the fundamental data storage architecture")
+  })
+
+  it("includes scope_expansion explanation", () => {
+    const result = buildEscapeHatchPresentation({
+      feedback: "Add WebSocket support too",
+      intentBaseline: "Add REST endpoints",
+      assessResult: makeAssessSuccess("plan"),
+      divergeResult: {
+        success: true,
+        classification: "strategic",
+        triggerCriterion: "scope_expansion",
+        reasoning: "WebSocket adds new protocol and infrastructure requirements",
+      },
+      revisionSteps: makeRevisionSteps(),
+      currentPhase: "PLANNING",
+    })
+    expect(result.presentation).toContain("Scope Expansion")
+  })
+
+  it("includes accumulated_drift explanation", () => {
+    const result = buildEscapeHatchPresentation({
+      feedback: "One more small change",
+      intentBaseline: "Original intent",
+      assessResult: makeAssessSuccess("plan"),
+      divergeResult: {
+        success: true,
+        classification: "strategic",
+        triggerCriterion: "accumulated_drift",
+        reasoning: "Multiple small changes have collectively shifted the design",
+      },
+      revisionSteps: makeRevisionSteps(),
+      currentPhase: "PLANNING",
+    })
+    expect(result.presentation).toContain("Accumulated Drift")
+  })
+})
+
+// ---------------------------------------------------------------------------
 // isEscapeHatchAbort
 // ---------------------------------------------------------------------------
 
@@ -203,4 +263,54 @@ describe("isEscapeHatchAccept", () => {
   it("returns false for alternative direction text", () => {
     expect(isEscapeHatchAccept("Use REST instead of GraphQL")).toBe(false)
   })
+
+  it("returns true for expanded accept words (go ahead, sure, lgtm)", () => {
+    expect(isEscapeHatchAccept("go ahead")).toBe(true)
+    expect(isEscapeHatchAccept("sure")).toBe(true)
+    expect(isEscapeHatchAccept("lgtm")).toBe(true)
+    expect(isEscapeHatchAccept("continue")).toBe(true)
+    expect(isEscapeHatchAccept("do it")).toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// isEscapeHatchAmbiguous
+// ---------------------------------------------------------------------------
+
+describe("isEscapeHatchAmbiguous", () => {
+  it("returns true for short text not matching any keyword", () => {
+    expect(isEscapeHatchAmbiguous("hmm")).toBe(true)
+    expect(isEscapeHatchAmbiguous("maybe")).toBe(true)
+    expect(isEscapeHatchAmbiguous("idk")).toBe(true)
+    expect(isEscapeHatchAmbiguous("what?")).toBe(true)
+  })
+
+  it("returns false for recognized abort words", () => {
+    expect(isEscapeHatchAmbiguous("abort")).toBe(false)
+    expect(isEscapeHatchAmbiguous("no")).toBe(false)
+    expect(isEscapeHatchAmbiguous("cancel")).toBe(false)
+    expect(isEscapeHatchAmbiguous("no thanks")).toBe(false)
+  })
+
+  it("returns false for recognized accept words", () => {
+    expect(isEscapeHatchAmbiguous("yes")).toBe(false)
+    expect(isEscapeHatchAmbiguous("ok")).toBe(false)
+    expect(isEscapeHatchAmbiguous("proceed")).toBe(false)
+  })
+
+  it("returns false for new direction prefix", () => {
+    expect(isEscapeHatchAmbiguous("new direction: x")).toBe(false)
+  })
+
+  it("returns false for text longer than 15 chars (treated as alternative direction)", () => {
+    expect(isEscapeHatchAmbiguous("this is a longer alternative direction that should not be ambiguous")).toBe(false)
+  })
+})
+
+describe("isEscapeHatchAbort — expanded abort words", () => {
+  it("returns true for 'no thanks'", () => expect(isEscapeHatchAbort("no thanks")).toBe(true))
+  it("returns true for 'nope'", () => expect(isEscapeHatchAbort("nope")).toBe(true))
+  it("returns true for 'skip'", () => expect(isEscapeHatchAbort("skip")).toBe(true))
+  it("returns true for 'decline'", () => expect(isEscapeHatchAbort("decline")).toBe(true))
+  it("returns true for 'nevermind'", () => expect(isEscapeHatchAbort("nevermind")).toBe(true))
 })

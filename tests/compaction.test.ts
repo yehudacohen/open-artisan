@@ -26,8 +26,11 @@ function makeState(overrides: Partial<WorkflowState> = {}): WorkflowState {
     modeDetectionNote: null,
     discoveryReport: null,
     implDag: null,
+    phaseApprovalCounts: {},
     escapePending: false,
     pendingRevisionSteps: null,
+    currentTaskId: null,
+    feedbackHistory: [],
     ...overrides,
   }
 }
@@ -221,6 +224,35 @@ describe("buildCompactionContext — file allowlist section", () => {
       makeState({ mode: "INCREMENTAL", fileAllowlist: [] }),
     )
     expect(ctx).not.toContain("File Allowlist")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Pure function
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Compaction context enhancements
+// ---------------------------------------------------------------------------
+
+describe("compaction context enhancements", () => {
+  it("includes available workflow tools list", () => {
+    const ctx = buildCompactionContext(makeState())
+    expect(ctx).toContain("Available Workflow Tools")
+    expect(ctx).toContain("select_mode")
+    expect(ctx).toContain("mark_satisfied")
+  })
+
+  it("includes acceptance criteria hint when in REVIEW state", () => {
+    const ctx = buildCompactionContext(
+      makeState({ phaseState: "REVIEW", phase: "PLANNING", mode: "GREENFIELD" }),
+    )
+    expect(ctx).toContain("Acceptance Criteria")
+  })
+
+  it("omits acceptance criteria hint when not in REVIEW", () => {
+    const ctx = buildCompactionContext(makeState({ phaseState: "DRAFT" }))
+    expect(ctx).not.toContain("### Acceptance Criteria")
   })
 })
 

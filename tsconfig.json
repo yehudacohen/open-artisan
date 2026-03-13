@@ -7,11 +7,11 @@
     "noUncheckedIndexedAccess": true,
     "exactOptionalPropertyTypes": true,
     "paths": {
-      "#plugin/*": ["./.opencode/plugins/structured-workflow/*"]
+      "#plugin/*": ["./.opencode/plugins/open-artisan/*"]
     }
   },
   "include": [
-    ".opencode/plugins/structured-workflow/**/*.ts",
+    ".opencode/plugins/open-artisan/**/*.ts",
     "tests/**/*.ts"
   ]
 }

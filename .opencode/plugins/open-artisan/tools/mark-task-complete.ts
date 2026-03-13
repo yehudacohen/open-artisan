@@ -1,0 +1,151 @@
+/**
+ * mark-task-complete.ts — Tool handler for mark_task_complete.
+ *
+ * Closes the IMPLEMENTATION phase DAG feedback loop (Layer 4 foundations).
+ *
+ * The agent calls this tool after completing a DAG task and verifying that
+ * the expected tests pass. The tool:
+ *   1. Validates the task ID exists in the DAG
+ *   2. Marks it "complete" in the serialized TaskNode[]
+ *   3. Persists the updated implDag back to state
+ *   4. Returns the next scheduler decision (dispatch next task or "all done")
+ *
+ * The scheduler's nextSchedulerDecision() reads the updated DAG on the next
+ * IMPLEMENTATION/DRAFT system prompt injection, so the agent always sees
+ * the current task — no stale "next task" re-dispatch.
+ */
+
+import type { TaskNode } from "../dag"
+import { createImplDAG } from "../dag"
+import { markTaskComplete, nextSchedulerDecision } from "../scheduler"
+
+export interface MarkTaskCompleteArgs {
+  /** The DAG task ID that was just completed (e.g. "T1", "auth-service") */
+  task_id: string
+  /**
+   * Brief description of what was implemented (for audit trail).
+   * Not stored in state but included in the tool response for context.
+   */
+  implementation_summary: string
+  /**
+   * Whether the expected tests for this task are passing.
+   * If false, the tool returns an error asking the agent to fix tests first.
+   */
+  tests_passing: boolean
+}
+
+export interface MarkTaskCompleteResult {
+  /** Updated TaskNode[] for persisting back to state.implDag */
+  updatedNodes: TaskNode[]
+  /** Human-readable response message for the agent */
+  responseMessage: string
+  /** The next dispatched task ID (null if all complete or blocked) — caller should persist to currentTaskId */
+  nextTaskId: string | null
+}
+
+/**
+ * Processes a mark_task_complete call.
+ *
+ * @param args - Tool arguments
+ * @param currentNodes - Current state.implDag (null = no DAG)
+ * @param currentTaskId - The currently dispatched task ID (M9: guard against non-dispatched completion)
+ * @returns Result with updated nodes and response message, or error string
+ */
+export function processMarkTaskComplete(
+  args: MarkTaskCompleteArgs,
+  currentNodes: TaskNode[] | null,
+  currentTaskId?: string | null,
+): MarkTaskCompleteResult | { error: string } {
+  if (args.tests_passing !== true) {
+    return {
+      error:
+        `Cannot mark task "${args.task_id}" complete — tests are not passing. ` +
+        `Fix the failing tests first, then call mark_task_complete again.`,
+    }
+  }
+
+  // M9: Guard against completing a task that was not dispatched by the scheduler.
+  // currentTaskId is set by the scheduler when it dispatches a task.
+  if (currentTaskId !== undefined && currentTaskId !== null && args.task_id !== currentTaskId) {
+    return {
+      error:
+        `Task "${args.task_id}" is not the currently dispatched task. ` +
+        `The scheduler dispatched "${currentTaskId}". Complete that task first, ` +
+        `or if the DAG was re-ordered, the scheduler will re-dispatch after the current task completes.`,
+    }
+  }
+
+  if (!currentNodes || currentNodes.length === 0) {
+    return {
+      error:
+        "No implementation DAG found in state. " +
+        "The IMPL_PLAN phase must be approved with artifact_content before calling mark_task_complete.",
+    }
+  }
+
+  const dag = createImplDAG(currentNodes)
+
+  // Validate task ID
+  const task = Array.from(dag.tasks).find((t) => t.id === args.task_id)
+  if (!task) {
+    const ids = Array.from(dag.tasks).map((t) => t.id).join(", ")
+    return {
+      error: `Task ID "${args.task_id}" not found in DAG. Valid IDs: ${ids}`,
+    }
+  }
+
+  if (task.status === "complete") {
+    return {
+      error: `Task "${args.task_id}" is already marked complete.`,
+    }
+  }
+
+  if (task.status === "aborted") {
+    return {
+      error:
+        `Task "${args.task_id}" was aborted due to an upstream revision. ` +
+        `Re-implement it as part of the current revision cycle and re-call mark_task_complete.`,
+    }
+  }
+
+  // Mark complete using the canonical scheduler helper (validates valid source states)
+  const marked = markTaskComplete(dag, args.task_id)
+  if (!marked) {
+    return {
+      error: `Task "${args.task_id}" could not be marked complete — invalid current status "${task.status}".`,
+    }
+  }
+
+  // Snapshot the updated nodes for persistence
+  const updatedNodes = Array.from(dag.tasks).map((t) => ({ ...t }))
+
+  // Determine what comes next
+  const decision = nextSchedulerDecision(dag)
+  let nextMsg: string
+
+  if (decision.action === "complete") {
+    nextMsg =
+      `\n\n**All DAG tasks complete!** ${decision.message}\n` +
+      `Call \`request_review\` to advance to the final IMPLEMENTATION review gate.`
+  } else if (decision.action === "dispatch") {
+    nextMsg =
+      `\n\n**Next task ready:**\n${decision.prompt}\n\n` +
+      `Progress: ${decision.progress.complete}/${decision.progress.total} tasks complete.`
+  } else if (decision.action === "blocked") {
+    nextMsg =
+      `\n\n**DAG BLOCKED:** All remaining tasks have incomplete dependencies — ` +
+      `this indicates a DAG state inconsistency. Call \`submit_feedback\` to alert the user.`
+  } else {
+    nextMsg = `\n\nScheduler error: ${(decision as { message: string }).message}`
+  }
+
+  // Determine the next dispatched task ID for the caller to persist
+  const nextTaskId = decision.action === "dispatch" ? decision.task.id : null
+
+  const responseMessage =
+    `Task "${args.task_id}" marked complete.\n` +
+    `Summary: ${args.implementation_summary}` +
+    nextMsg
+
+  return { updatedNodes, responseMessage, nextTaskId }
+}

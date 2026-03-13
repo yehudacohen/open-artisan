@@ -54,16 +54,37 @@ describe("Tool policy — INTERFACES allows .ts/.tsx/.d.ts writes only (G1)", ()
     expect(policy.blocked).toContain("bash")
   })
 
-  it("predicate allows .ts files", () => {
+  it("predicate allows .ts files with interface-like names", () => {
     const policy = getPhaseToolPolicy("INTERFACES", "DRAFT", "GREENFIELD", [])
     expect(policy.writePathPredicate?.("/project/src/types.ts")).toBe(true)
+    expect(policy.writePathPredicate?.("/project/src/interfaces.ts")).toBe(true)
+    expect(policy.writePathPredicate?.("/project/src/models.ts")).toBe(true)
+    expect(policy.writePathPredicate?.("/project/src/schema.ts")).toBe(true)
+    expect(policy.writePathPredicate?.("/project/src/api-types.ts")).toBe(true)
     expect(policy.writePathPredicate?.("/project/src/foo.d.ts")).toBe(true)
   })
 
-  it("predicate allows .tsx files (G1 — React component interfaces)", () => {
+  it("predicate blocks .ts files without interface-like names", () => {
     const policy = getPhaseToolPolicy("INTERFACES", "DRAFT", "GREENFIELD", [])
-    expect(policy.writePathPredicate?.("/project/src/Component.tsx")).toBe(true)
+    // Implementation files are blocked during INTERFACES phase
+    expect(policy.writePathPredicate?.("/project/src/server.ts")).toBe(false)
+    expect(policy.writePathPredicate?.("/project/src/Component.tsx")).toBe(false)
+    expect(policy.writePathPredicate?.("/project/src/utils.ts")).toBe(false)
+    expect(policy.writePathPredicate?.("/project/src/index.ts")).toBe(false)
+  })
+
+  it("predicate always allows .d.ts and .d.tsx declaration files", () => {
+    const policy = getPhaseToolPolicy("INTERFACES", "DRAFT", "GREENFIELD", [])
     expect(policy.writePathPredicate?.("/project/src/types.d.tsx")).toBe(true)
+    expect(policy.writePathPredicate?.("/project/src/global.d.ts")).toBe(true)
+  })
+
+  it("predicate allows schema/IDL formats unconditionally", () => {
+    const policy = getPhaseToolPolicy("INTERFACES", "DRAFT", "GREENFIELD", [])
+    expect(policy.writePathPredicate?.("/project/schema.proto")).toBe(true)
+    expect(policy.writePathPredicate?.("/project/api.graphql")).toBe(true)
+    expect(policy.writePathPredicate?.("/project/schema.json")).toBe(true)
+    expect(policy.writePathPredicate?.("/project/openapi.yaml")).toBe(true)
   })
 
   it("predicate blocks .js files in INTERFACES", () => {
@@ -200,6 +221,47 @@ describe("Tool policy — IMPLEMENTATION/INCREMENTAL with empty allowlist blocks
   })
 })
 
+describe("Tool policy — IMPLEMENTATION/INCREMENTAL bashCommandPredicate", () => {
+  it("provides bashCommandPredicate when allowlist is non-empty", () => {
+    const policy = getPhaseToolPolicy("IMPLEMENTATION", "DRAFT", "INCREMENTAL", ["/a.ts"])
+    expect(policy.bashCommandPredicate).toBeDefined()
+  })
+
+  it("allows read-only commands (bun test, grep, find)", () => {
+    const policy = getPhaseToolPolicy("IMPLEMENTATION", "DRAFT", "INCREMENTAL", ["/a.ts"])
+    expect(policy.bashCommandPredicate!("bun test")).toBe(true)
+    expect(policy.bashCommandPredicate!("grep -r 'foo' src/")).toBe(true)
+    expect(policy.bashCommandPredicate!("find . -name '*.ts'")).toBe(true)
+  })
+
+  it("blocks file-write operators (>, >>)", () => {
+    const policy = getPhaseToolPolicy("IMPLEMENTATION", "DRAFT", "INCREMENTAL", ["/a.ts"])
+    expect(policy.bashCommandPredicate!("echo 'bad' > /etc/foo")).toBe(false)
+    expect(policy.bashCommandPredicate!("cat data >> output.txt")).toBe(false)
+  })
+
+  it("blocks tee command", () => {
+    const policy = getPhaseToolPolicy("IMPLEMENTATION", "DRAFT", "INCREMENTAL", ["/a.ts"])
+    expect(policy.bashCommandPredicate!("echo hello | tee file.txt")).toBe(false)
+  })
+
+  it("blocks sed -i command", () => {
+    const policy = getPhaseToolPolicy("IMPLEMENTATION", "DRAFT", "INCREMENTAL", ["/a.ts"])
+    expect(policy.bashCommandPredicate!("sed -i 's/old/new/g' file.ts")).toBe(false)
+  })
+
+  it("does NOT block stderr redirect (2>&1)", () => {
+    const policy = getPhaseToolPolicy("IMPLEMENTATION", "DRAFT", "INCREMENTAL", ["/a.ts"])
+    // 2>&1 should be allowed (it redirects stderr to stdout, not to a file)
+    expect(policy.bashCommandPredicate!("bun test 2>&1")).toBe(true)
+  })
+
+  it("GREENFIELD mode does NOT have bashCommandPredicate", () => {
+    const policy = getPhaseToolPolicy("IMPLEMENTATION", "DRAFT", "GREENFIELD", [])
+    expect(policy.bashCommandPredicate).toBeUndefined()
+  })
+})
+
 describe("Tool policy — MODE_SELECT and DONE block everything except workflow tools", () => {
   it("MODE_SELECT blocks write", () => {
     const policy = getPhaseToolPolicy("MODE_SELECT", "DRAFT", null, [])
@@ -211,5 +273,28 @@ describe("Tool policy — MODE_SELECT and DONE block everything except workflow 
     const policy = getPhaseToolPolicy("DONE", "DRAFT", "GREENFIELD", [])
     expect(policy.blocked).toContain("write")
     expect(policy.blocked).toContain("edit")
+  })
+})
+
+describe("Tool policy — exhaustive default case (H5)", () => {
+  it("unknown phase returns blocked=[write,edit,bash] as safety fallback", () => {
+    // Cast an invalid string to Phase to exercise the runtime default branch.
+    // TypeScript's `never` check would catch this at compile time for real code,
+    // but at runtime we need a safe fallback.
+    const policy = getPhaseToolPolicy("NONEXISTENT_PHASE" as any, "DRAFT", null, [])
+    expect(policy.blocked).toContain("write")
+    expect(policy.blocked).toContain("edit")
+    expect(policy.blocked).toContain("bash")
+  })
+
+  it("unknown phase allowedDescription mentions the phase name", () => {
+    const policy = getPhaseToolPolicy("FUTURE_PHASE" as any, "DRAFT", null, [])
+    expect(policy.allowedDescription).toContain("FUTURE_PHASE")
+  })
+
+  it("unknown phase has no writePathPredicate or bashCommandPredicate", () => {
+    const policy = getPhaseToolPolicy("BOGUS" as any, "DRAFT", "GREENFIELD", ["/a.ts"])
+    expect(policy.writePathPredicate).toBeUndefined()
+    expect(policy.bashCommandPredicate).toBeUndefined()
   })
 })

@@ -23,6 +23,14 @@ function makeState(overrides: Partial<WorkflowState> = {}): WorkflowState {
     approvalCount: 0,
     orchestratorSessionId: null,
     intentBaseline: null,
+    modeDetectionNote: null,
+    discoveryReport: null,
+    implDag: null,
+    phaseApprovalCounts: {},
+    escapePending: false,
+    pendingRevisionSteps: null,
+    currentTaskId: null,
+    feedbackHistory: [],
     ...overrides,
   }
 }

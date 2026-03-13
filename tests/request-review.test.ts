@@ -65,4 +65,30 @@ describe("processRequestReview — phase instructions", () => {
     expect(typeof result.phaseInstructions).toBe("string")
     expect(result.phaseInstructions.length).toBeGreaterThan(0)
   })
+
+  it("handles empty summary and description gracefully", () => {
+    const result = processRequestReview({
+      summary: "",
+      artifact_description: "",
+    })
+    expect(result.responseMessage.length).toBeGreaterThan(0)
+    expect(result.phaseInstructions.length).toBeGreaterThan(0)
+  })
+
+  it("preserves special characters in summary", () => {
+    const result = processRequestReview({
+      summary: "Built types<T> and Promise<Result>",
+      artifact_description: "api.ts",
+    })
+    expect(result.responseMessage).toContain("types<T>")
+  })
+
+  it("instructs to read actual files before evaluating", () => {
+    const result = processRequestReview({
+      summary: "s",
+      artifact_description: "a",
+    })
+    // Ensures the review instructions emphasize file reading
+    expect(result.phaseInstructions.toLowerCase()).toContain("read")
+  })
 })

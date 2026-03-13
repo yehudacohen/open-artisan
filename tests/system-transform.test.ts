@@ -26,8 +26,11 @@ function makeState(overrides: Partial<WorkflowState> = {}): WorkflowState {
     modeDetectionNote: null,
     discoveryReport: null,
     implDag: null,
+    phaseApprovalCounts: {},
     escapePending: false,
     pendingRevisionSteps: null,
+    currentTaskId: null,
+    feedbackHistory: [],
     ...overrides,
   }
 }
@@ -345,6 +348,132 @@ describe("buildWorkflowSystemPrompt — conventions truncation", () => {
     )
     expect(prompt).toContain(shortConventions)
     expect(prompt).not.toContain("truncated")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Phase progress indicator
+// ---------------------------------------------------------------------------
+
+describe("buildWorkflowSystemPrompt — phase progress indicator", () => {
+  it("shows progress for PLANNING (phase 2/6 in GREENFIELD)", () => {
+    const prompt = buildWorkflowSystemPrompt(makeState({ phase: "PLANNING", phaseState: "DRAFT", mode: "GREENFIELD" }))
+    expect(prompt).toContain("Phase 1 of 5")
+  })
+
+  it("shows progress for INTERFACES (phase 3/6 in REFACTOR)", () => {
+    const prompt = buildWorkflowSystemPrompt(makeState({ phase: "INTERFACES", phaseState: "DRAFT", mode: "REFACTOR" }))
+    expect(prompt).toContain("Phase 3 of 6")
+  })
+
+  it("shows progress for IMPLEMENTATION (last phase)", () => {
+    const prompt = buildWorkflowSystemPrompt(makeState({ phase: "IMPLEMENTATION", phaseState: "DRAFT", mode: "GREENFIELD" }))
+    expect(prompt).toContain("Phase 5 of 5")
+  })
+
+  it("does NOT show progress at MODE_SELECT", () => {
+    const prompt = buildWorkflowSystemPrompt(makeState({ phase: "MODE_SELECT", phaseState: "DRAFT", mode: null }))
+    expect(prompt).not.toMatch(/Phase \d+ of \d+/)
+  })
+
+  it("does NOT show progress at DONE", () => {
+    const prompt = buildWorkflowSystemPrompt(makeState({ phase: "DONE", phaseState: "DRAFT" }))
+    expect(prompt).not.toMatch(/Phase \d+ of \d+/)
+  })
+
+  it("INCREMENTAL mode shows DISCOVERY as phase 1 of 6", () => {
+    const prompt = buildWorkflowSystemPrompt(makeState({ phase: "DISCOVERY", phaseState: "SCAN", mode: "INCREMENTAL" }))
+    expect(prompt).toContain("Phase 1 of 6")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// IMPLEMENTATION/DRAFT — "all tasks done" signal
+// ---------------------------------------------------------------------------
+
+describe("buildWorkflowSystemPrompt — IMPLEMENTATION DAG completion signal", () => {
+  it("tells agent to call request_review when DAG reports all tasks complete", () => {
+    const prompt = buildWorkflowSystemPrompt(makeState({
+      phase: "IMPLEMENTATION",
+      phaseState: "DRAFT",
+      implDag: [
+        { id: "T1", description: "First task", dependencies: [], expectedTests: [], estimatedComplexity: "small", status: "complete" },
+        { id: "T2", description: "Second task", dependencies: ["T1"], expectedTests: [], estimatedComplexity: "small", status: "complete" },
+      ],
+    }))
+    expect(prompt).toContain("request_review")
+    // The DAG status message should clearly direct the agent
+    expect(prompt).toContain("All")
+    expect(prompt.toLowerCase()).toContain("complete")
+  })
+
+  it("shows next task when DAG has pending tasks", () => {
+    const prompt = buildWorkflowSystemPrompt(makeState({
+      phase: "IMPLEMENTATION",
+      phaseState: "DRAFT",
+      implDag: [
+        { id: "T1", description: "First task", dependencies: [], expectedTests: [], estimatedComplexity: "small", status: "complete" },
+        { id: "T2", description: "Second task", dependencies: ["T1"], expectedTests: [], estimatedComplexity: "medium", status: "pending" },
+      ],
+    }))
+    expect(prompt).toContain("T2")
+    expect(prompt).toContain("Implementation Task")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// MODE_SELECT — lists REFACTOR with description
+// ---------------------------------------------------------------------------
+
+describe("buildWorkflowSystemPrompt — MODE_SELECT lists all three modes", () => {
+  it("lists REFACTOR mode with description", () => {
+    const prompt = buildWorkflowSystemPrompt(makeState({ phase: "MODE_SELECT", phaseState: "DRAFT", mode: null }))
+    expect(prompt).toContain("REFACTOR")
+    expect(prompt.toLowerCase()).toContain("restructure")
+  })
+
+  it("lists GREENFIELD mode with description", () => {
+    const prompt = buildWorkflowSystemPrompt(makeState({ phase: "MODE_SELECT", phaseState: "DRAFT", mode: null }))
+    expect(prompt).toContain("GREENFIELD")
+  })
+
+  it("lists INCREMENTAL mode with description", () => {
+    const prompt = buildWorkflowSystemPrompt(makeState({ phase: "MODE_SELECT", phaseState: "DRAFT", mode: null }))
+    expect(prompt).toContain("INCREMENTAL")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Pure function
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Blocked tools in system prompt (M10)
+// ---------------------------------------------------------------------------
+
+describe("blocked tools in system prompt (M10)", () => {
+  it("includes blocked tools section for DISCOVERY phase", () => {
+    const prompt = buildWorkflowSystemPrompt(
+      makeState({ phase: "DISCOVERY", phaseState: "SCAN", mode: "REFACTOR" }),
+    )
+    expect(prompt).toContain("Blocked Tools")
+    expect(prompt).toContain("write")
+    expect(prompt).toContain("bash")
+  })
+
+  it("omits blocked tools section for MODE_SELECT", () => {
+    const prompt = buildWorkflowSystemPrompt(
+      makeState({ phase: "MODE_SELECT", phaseState: "DRAFT", mode: null }),
+    )
+    expect(prompt).not.toContain("Blocked Tools")
+  })
+
+  it("includes blocked tools for INTERFACES phase", () => {
+    const prompt = buildWorkflowSystemPrompt(
+      makeState({ phase: "INTERFACES", phaseState: "DRAFT", mode: "GREENFIELD" }),
+    )
+    expect(prompt).toContain("Blocked Tools")
+    expect(prompt).toContain("bash")
   })
 })
 

@@ -347,3 +347,54 @@ describe("StateMachine — REVIEW loop behavior", () => {
     expect(result.nextPhaseState).toBe("USER_GATE")
   })
 })
+
+// ---------------------------------------------------------------------------
+// validEvents — mode filtering (M2)
+// ---------------------------------------------------------------------------
+describe("validEvents — mode filtering (M2)", () => {
+  it("returns only GREENFIELD transition when mode is GREENFIELD", () => {
+    const events = sm.validEvents("MODE_SELECT", "DRAFT", "GREENFIELD")
+    expect(events).toContain("mode_selected")
+    expect(events).toHaveLength(1)
+  })
+
+  it("returns only non-GREENFIELD transition when mode is REFACTOR", () => {
+    const events = sm.validEvents("MODE_SELECT", "DRAFT", "REFACTOR")
+    expect(events).toContain("mode_selected")
+    expect(events).toHaveLength(1)
+  })
+
+  it("returns both mode_selected variants when mode is undefined", () => {
+    const events = sm.validEvents("MODE_SELECT", "DRAFT")
+    expect(events).toContain("mode_selected")
+    expect(events).toHaveLength(1)
+  })
+
+  it("returns escalate_to_user in REVIEW state", () => {
+    const events = sm.validEvents("PLANNING", "REVIEW")
+    expect(events).toContain("escalate_to_user")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// escalate_to_user event (M12)
+// ---------------------------------------------------------------------------
+describe("escalate_to_user event (M12)", () => {
+  it("transitions PLANNING/REVIEW → PLANNING/USER_GATE on escalate_to_user", () => {
+    const result = sm.transition("PLANNING", "REVIEW", "escalate_to_user", "GREENFIELD")
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    expect(result.nextPhase).toBe("PLANNING")
+    expect(result.nextPhaseState).toBe("USER_GATE")
+  })
+
+  it("transitions DISCOVERY/REVIEW → DISCOVERY/USER_GATE on escalate_to_user", () => {
+    const result = sm.transition("DISCOVERY", "REVIEW", "escalate_to_user", "REFACTOR")
+    expect(result.success).toBe(true)
+  })
+
+  it("rejects escalate_to_user from DRAFT state", () => {
+    const result = sm.transition("PLANNING", "DRAFT", "escalate_to_user", "GREENFIELD")
+    expect(result.success).toBe(false)
+  })
+})

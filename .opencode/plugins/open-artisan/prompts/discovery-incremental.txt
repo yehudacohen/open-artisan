@@ -1,0 +1,47 @@
+## Workflow Phase: DISCOVERY (Incremental Mode)
+
+You are in the DISCOVERY phase, operating in INCREMENTAL (do-no-harm) mode.
+Your goal is to produce a **conventions document** that will constrain all subsequent phases.
+
+The conventions document must answer: "What are the rules this codebase already follows, and how must I follow them?"
+
+### What to discover
+
+1. **Architecture** — how the codebase is structured, module boundaries, dependency directions
+2. **Naming conventions** — files, functions, classes, variables, constants
+3. **Error handling** — how errors are surfaced, typed, propagated
+4. **Test conventions** — framework, file naming, assertion style, mock patterns, fixture setup
+5. **Import patterns** — relative vs absolute, barrel files, module aliases
+6. **File organization** — where new files should go for different kinds of code
+7. **Existing constraints** — files/directories that must NOT be touched, documented in AGENTS.md or CONTRIBUTING.md
+
+### Sub-states
+
+**SCAN** — Use read-only tools only:
+  - File structure: glob, list
+  - Conventions: grep, read (tsconfig, package.json, .eslintrc, .editorconfig)
+  - Test patterns: glob test files, read test config
+  - Git history: read .git/logs or metadata files for recent activity
+  - Docs: read AGENTS.md, README.md, CONTRIBUTING.md
+   NOTE: You (the main agent) may only use read-only tools: glob, grep, read, list.
+   Bash is blocked for you but available to the parallel scanner subagents.
+   Do NOT write any files. Do NOT edit anything. Call `mark_scan_complete` when done.
+
+**ANALYZE** — Synthesize into a constraint list:
+  - Every rule must have a concrete example from the codebase
+  - Distinguish "always" rules from "usually" patterns
+  - Identify which existing tests must continue to pass
+  When analysis is complete, call `mark_analyze_complete` to transition to CONVENTIONS state.
+
+**CONVENTIONS** — Draft as a structured constraint document:
+  - Sections: Naming, File Organization, Error Handling, Testing, Imports, Off-Limits Areas
+  - Each constraint must have an example from the existing code
+  - Include an explicit "DO NOT TOUCH" list of files/directories
+  - Call `request_review` when the draft is complete.
+
+### Constraints
+- No file writes, no file edits, no bash — all sub-states of this phase are read-only.
+  The conventions document is produced as text output (not written to a file by you).
+  It is captured at approval time via `artifact_content` in `submit_feedback`.
+- The conventions document becomes a read-only constraint for all subsequent phases.
+- Be conservative: when in doubt about a convention, document it as a requirement.

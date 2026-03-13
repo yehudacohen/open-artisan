@@ -3,7 +3,7 @@
  * Covers G9: suggestion-severity criteria don't block advancement.
  */
 import { describe, expect, it } from "bun:test"
-import { evaluateMarkSatisfied } from "#plugin/tools/mark-satisfied"
+import { evaluateMarkSatisfied, countExpectedBlockingCriteria } from "#plugin/tools/mark-satisfied"
 
 // ---------------------------------------------------------------------------
 // All criteria blocking (default behavior)
@@ -139,9 +139,10 @@ describe("evaluateMarkSatisfied — suggestion severity (G9)", () => {
 // ---------------------------------------------------------------------------
 
 describe("evaluateMarkSatisfied — edge cases", () => {
-  it("handles empty criteria list — passes (nothing to fail)", () => {
+  it("rejects empty criteria list — must evaluate every criterion", () => {
     const result = evaluateMarkSatisfied({ criteria_met: [] })
-    expect(result.passed).toBe(true)
+    expect(result.passed).toBe(false)
+    expect(result.responseMessage).toContain("criteria_met is empty")
   })
 
   it("severity of met criteria doesn't affect pass/fail", () => {
@@ -153,5 +154,91 @@ describe("evaluateMarkSatisfied — edge cases", () => {
     })
     expect(result.passed).toBe(true)
     expect(result.unmetCriteria).toHaveLength(0)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Cross-validation: countExpectedBlockingCriteria
+// ---------------------------------------------------------------------------
+
+describe("countExpectedBlockingCriteria", () => {
+  it("returns 0 for null input", () => {
+    expect(countExpectedBlockingCriteria(null)).toBe(0)
+  })
+
+  it("counts numbered items in blocking section", () => {
+    const text = `**Blocking criteria:**
+1. First criterion
+2. Second criterion
+3. Third criterion
+
+**Suggestion criteria:**
+- [S] Nice to have`
+    expect(countExpectedBlockingCriteria(text)).toBe(3)
+  })
+
+  it("does not count suggestion items", () => {
+    const text = `**Blocking criteria:**
+1. Only blocking item
+
+**Suggestion criteria (non-blocking):**
+1. This looks like numbered but is in suggestion section`
+    // Only counts up to "Suggestion criteria" split
+    expect(countExpectedBlockingCriteria(text)).toBe(1)
+  })
+
+  it("returns 0 for text with no numbered items", () => {
+    expect(countExpectedBlockingCriteria("No criteria here")).toBe(0)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Cross-validation: expectedBlockingCount parameter
+// ---------------------------------------------------------------------------
+
+describe("evaluateMarkSatisfied — cross-validation", () => {
+  it("rejects when fewer blocking criteria submitted than expected", () => {
+    const result = evaluateMarkSatisfied(
+      {
+        criteria_met: [
+          { criterion: "A", met: true, evidence: "ok" },
+        ],
+      },
+      5, // expected 5 blocking criteria
+    )
+    expect(result.passed).toBe(false)
+    expect(result.responseMessage).toContain("Only 1 blocking criteria submitted")
+    expect(result.responseMessage).toContain("requires 5")
+  })
+
+  it("passes when enough blocking criteria are submitted", () => {
+    const result = evaluateMarkSatisfied(
+      {
+        criteria_met: [
+          { criterion: "A", met: true, evidence: "ok" },
+          { criterion: "B", met: true, evidence: "ok" },
+          { criterion: "C", met: true, evidence: "ok" },
+        ],
+      },
+      3,
+    )
+    expect(result.passed).toBe(true)
+  })
+
+  it("ignores expectedBlockingCount when 0", () => {
+    const result = evaluateMarkSatisfied(
+      {
+        criteria_met: [{ criterion: "A", met: true, evidence: "ok" }],
+      },
+      0,
+    )
+    expect(result.passed).toBe(true)
+  })
+
+  it("ignores expectedBlockingCount when undefined", () => {
+    const result = evaluateMarkSatisfied({
+      criteria_met: [{ criterion: "A", met: true, evidence: "ok" }],
+    })
+    expect(result.passed).toBe(true)
   })
 })

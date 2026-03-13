@@ -91,6 +91,47 @@ export function extractEphemeralSessionId(response: unknown, label = "session"):
   return id
 }
 
+// ---------------------------------------------------------------------------
+// Shared next-action mapping — single source of truth for compaction,
+// idle-handler, and system-transform
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns a human-readable instruction describing what the agent should do
+ * in the given phase/sub-state. Used by compaction context, idle re-prompt,
+ * and system prompt sub-state context to ensure consistent guidance.
+ *
+ * This is the single source of truth — compaction.ts, idle-handler.ts, and
+ * system-transform.ts all delegate to this function.
+ */
+export function getNextActionForState(phase: string, phaseState: string): string {
+  if (phase === "DONE") {
+    return "The workflow is complete. All phases have been approved."
+  }
+  if (phase === "MODE_SELECT") {
+    return "Present the three workflow modes to the user (GREENFIELD, REFACTOR, INCREMENTAL) and ask them to select one using the `select_mode` tool."
+  }
+  if (phaseState === "SCAN") {
+    return "Continue scanning the codebase with read-only tools. Call `mark_scan_complete` when finished."
+  }
+  if (phaseState === "ANALYZE") {
+    return "Continue analyzing scan results. Synthesize findings into a coherent picture of the codebase. Call `mark_analyze_complete` when analysis is complete."
+  }
+  if (phaseState === "DRAFT" || phaseState === "CONVENTIONS") {
+    return `Continue drafting the ${phase} artifact. Review the acceptance criteria and ensure full coverage. Call \`request_review\` when complete.`
+  }
+  if (phaseState === "REVIEW") {
+    return `Continue self-reviewing the ${phase} artifact against the acceptance criteria. Evaluate each criterion independently. Call \`mark_satisfied\` when done.`
+  }
+  if (phaseState === "USER_GATE") {
+    return "The artifact is ready for user review. Present a clear summary to the user and WAIT for their response. Do not proceed until they respond."
+  }
+  if (phaseState === "REVISE") {
+    return `Continue revising the ${phase} artifact based on the feedback. Make incremental changes only — do NOT rewrite from scratch. Call \`request_review\` when revision is complete.`
+  }
+  return `Continue working on the ${phase}/${phaseState} state.`
+}
+
 /**
  * Resolves the session ID from the tool execute context.
  *

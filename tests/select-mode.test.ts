@@ -54,8 +54,22 @@ describe("parseSelectModeArgs — invalid inputs", () => {
     expect("error" in result).toBe(true)
   })
 
-  it("rejects lowercase mode (modes are uppercase)", () => {
+  it("accepts lowercase mode via normalization", () => {
     const result = parseSelectModeArgs({ mode: "greenfield" })
+    expect("error" in result).toBe(false)
+    if ("error" in result) return
+    expect(result.mode).toBe("GREENFIELD")
+  })
+
+  it("accepts mixed-case mode via normalization", () => {
+    const result = parseSelectModeArgs({ mode: "Incremental" })
+    expect("error" in result).toBe(false)
+    if ("error" in result) return
+    expect(result.mode).toBe("INCREMENTAL")
+  })
+
+  it("rejects non-string mode value", () => {
+    const result = parseSelectModeArgs({ mode: 42 })
     expect("error" in result).toBe(true)
   })
 })

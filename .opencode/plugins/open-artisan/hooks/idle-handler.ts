@@ -9,6 +9,7 @@
  * should be waiting for user input. No re-prompt in that case.
  */
 import type { WorkflowState, Phase, PhaseState } from "../types"
+import { getNextActionForState } from "../utils"
 
 export const MAX_RETRIES = 3
 
@@ -57,7 +58,7 @@ export function handleIdle(state: WorkflowState): IdleDecision {
 // ---------------------------------------------------------------------------
 
 function buildRepromptMessage(phase: Phase, phaseState: PhaseState, retryCount: number): string {
-  const action = getExpectedAction(phase, phaseState)
+  const action = getNextActionForState(phase, phaseState)
   return (
     `You stopped, but the ${phaseState} sub-state of the ${phase} phase is not yet complete. ` +
     `${action} ` +
@@ -70,23 +71,4 @@ function buildEscalationMessage(phase: Phase, phaseState: PhaseState, retries: n
     `Workflow stalled: the agent stopped ${retries} times during the ${phase}/${phaseState} ` +
     `phase without completing it. Please provide input or instructions to continue.`
   )
-}
-
-function getExpectedAction(phase: Phase, phaseState: PhaseState): string {
-  if (phaseState === "SCAN") {
-    return "Continue scanning the codebase using read-only tools. Call `mark_scan_complete` when finished."
-  }
-  if (phaseState === "ANALYZE") {
-    return "Continue analyzing the scan results. Synthesize findings into a coherent picture. Call `mark_analyze_complete` when analysis is complete."
-  }
-  if (phaseState === "DRAFT" || phaseState === "CONVENTIONS") {
-    return `Continue drafting the ${phase} artifact. Call \`request_review\` when the draft is complete.`
-  }
-  if (phaseState === "REVIEW") {
-    return `Continue self-reviewing the ${phase} artifact against the acceptance criteria. Call \`mark_satisfied\` when review is complete.`
-  }
-  if (phaseState === "REVISE") {
-    return `Continue revising the ${phase} artifact based on the feedback provided. Call \`request_review\` when revision is complete.`
-  }
-  return `Continue working on the ${phase} phase.`
 }

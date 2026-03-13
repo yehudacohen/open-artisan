@@ -33,6 +33,23 @@ subsequent phases (interfaces, tests, implementation) can proceed without ambigu
   Never rewrite from scratch. Preserve all prior approved decisions.
   When revision is complete, call `request_review` again.
 
+### Mode-specific plan requirements
+
+**REFACTOR mode** — The plan must include:
+  - **Transformation rationale** — for each change: why the current pattern is problematic, what the target pattern is, and what the migration path looks like
+  - **Before/after descriptions** — each planned change must describe the current state and the target state
+  - Alignment check: existing tests must still pass after each implementation task
+
+**INCREMENTAL mode** — The plan must:
+  - Touch ONLY what is necessary for the requested functionality. No gratuitous refactoring.
+  - Produce a **file allowlist** — an explicit list of every file that will be created or modified.
+    This allowlist will be enforced by the tool guard during implementation: any file write outside
+    the allowlist will be blocked. Be thorough — missing a file means it cannot be touched later
+    without routing through the orchestrator.
+  - Extend existing patterns rather than introducing new ones.
+
+**GREENFIELD mode** — No additional constraints beyond the standard plan requirements.
+
 ### Constraints
 - No file writes, edits, or bash execution during DRAFT or REVIEW. Plans are text only.
 - "TBD" is not acceptable — every ambiguity must be resolved.

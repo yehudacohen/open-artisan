@@ -14,8 +14,8 @@
  * 6. Last checkpoint tag
  * 7. What the agent should do next
  */
-import type { WorkflowState, Phase, PhaseState } from "../types"
-import { MAX_CONVENTIONS_CHARS, MAX_REPORT_CHARS } from "../utils"
+import type { WorkflowState } from "../types"
+import { MAX_CONVENTIONS_CHARS, MAX_REPORT_CHARS, getNextActionForState } from "../utils"
 
 // ---------------------------------------------------------------------------
 // Context block builder
@@ -144,35 +144,7 @@ export function buildCompactionContext(state: WorkflowState): string {
 
   // What to do next
   lines.push("### What To Do Next")
-  lines.push(getNextAction(state.phase, state.phaseState))
+  lines.push(getNextActionForState(state.phase, state.phaseState))
 
   return lines.join("\n")
-}
-
-function getNextAction(phase: Phase, phaseState: PhaseState): string {
-  if (phase === "DONE") {
-    return "The workflow is complete. All phases have been approved."
-  }
-  if (phase === "MODE_SELECT") {
-    return "Present the three workflow modes to the user (GREENFIELD, REFACTOR, INCREMENTAL) and ask them to select one using the `select_mode` tool."
-  }
-  if (phaseState === "SCAN") {
-    return "Continue scanning the codebase with read-only tools. Call `mark_scan_complete` when finished."
-  }
-  if (phaseState === "ANALYZE") {
-    return "Continue analyzing scan results. Synthesize findings into a coherent picture of the codebase. Call `mark_analyze_complete` when analysis is complete."
-  }
-  if (phaseState === "DRAFT" || phaseState === "CONVENTIONS") {
-    return `Continue drafting the ${phase} artifact. Review the acceptance criteria and ensure full coverage. Call \`request_review\` when complete.`
-  }
-  if (phaseState === "REVIEW") {
-    return `Continue self-reviewing the ${phase} artifact against the acceptance criteria. Evaluate each criterion independently. Call \`mark_satisfied\` when done.`
-  }
-  if (phaseState === "USER_GATE") {
-    return `The artifact is ready for user review. Present a clear summary to the user and WAIT for their response. Do not proceed until they respond.`
-  }
-  if (phaseState === "REVISE") {
-    return `Continue revising the ${phase} artifact based on the feedback. Make incremental changes only — do NOT rewrite from scratch. Call \`request_review\` when revision is complete.`
-  }
-  return `Continue working on the ${phase}/${phaseState} state.`
 }

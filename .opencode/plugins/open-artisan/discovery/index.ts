@@ -71,11 +71,24 @@ interface ScannerDef {
   prompt: (cwd: string, mode: WorkflowMode) => string
 }
 
+/**
+ * Returns a mode-specific focus preamble for scanner prompts.
+ * REFACTOR: emphasize identifying problems and improvement opportunities.
+ * INCREMENTAL: emphasize documenting constraints the agent must follow.
+ */
+function modeFocus(mode: WorkflowMode): string {
+  if (mode === "REFACTOR") {
+    return "You are in REFACTOR mode. Focus on identifying problems, anti-patterns, and improvement opportunities alongside documenting what exists. Call out what is wrong and why."
+  }
+  return "You are in INCREMENTAL mode (do-no-harm). Focus on documenting the rules and constraints the existing code follows. The goal is to produce a constraint list that ensures new code is indistinguishable from existing code."
+}
+
 const SCANNERS: ScannerDef[] = [
   {
     name: "Structure Scanner",
-    prompt: (cwd) => `You are scanning a codebase to produce a structural overview.
+    prompt: (cwd, mode) => `You are scanning a codebase to produce a structural overview.
 Working directory: ${cwd}
+${modeFocus(mode)}
 
 Your task:
 1. Use glob/list tools to enumerate all source files, grouping by type (e.g. .ts, .py, .go, .rs)
@@ -83,17 +96,20 @@ Your task:
 3. Estimate file counts and lines of code per major area (use bash "wc -l" or similar)
 4. Identify entry points (main files, index files, CLI entry points)
 5. Note any monorepo or multi-package structure
+${mode === "REFACTOR" ? "6. Flag any structural problems: overly large modules, unclear boundaries, circular directory dependencies" : "6. Document the file placement rules: where do new source files, tests, and configs go?"}
 
 Return a concise Markdown report with:
 - Directory tree (2-3 levels deep max)
 - Module/package breakdown with file counts
 - Entry points
-- Total source file count by extension`,
+- Total source file count by extension
+${mode === "REFACTOR" ? "- Structural issues identified (if any)" : "- File placement rules for new code"}`,
   },
   {
     name: "Convention Detector",
-    prompt: (cwd) => `You are scanning a codebase to detect coding conventions and style rules.
+    prompt: (cwd, mode) => `You are scanning a codebase to detect coding conventions and style rules.
 Working directory: ${cwd}
+${modeFocus(mode)}
 
 Your task:
 1. Read config files: .editorconfig, .eslintrc*, tsconfig.json, pyproject.toml, .prettierrc, etc.
@@ -102,14 +118,16 @@ Your task:
 4. Identify naming conventions: camelCase/snake_case/PascalCase for files, functions, classes, constants
 5. Identify import patterns: relative vs absolute, barrel files, path aliases
 6. Identify error handling patterns: throw vs return, typed errors, Result types
+${mode === "REFACTOR" ? "7. Flag any inconsistencies: places where the codebase violates its own conventions" : "7. For each convention, provide a concrete example that new code must match exactly"}
 
 Return a concise Markdown report with one section per convention category.
 Use concrete examples quoted from the actual files.`,
   },
   {
     name: "Architecture Analyzer",
-    prompt: (cwd) => `You are analyzing the architecture of a codebase.
+    prompt: (cwd, mode) => `You are analyzing the architecture of a codebase.
 Working directory: ${cwd}
+${modeFocus(mode)}
 
 Your task:
 1. Read key source files (interfaces, types, main modules, public APIs)
@@ -120,17 +138,20 @@ Your task:
 4. Identify layering: is there a clear separation of concerns (e.g. domain/infra/presentation)?
 5. Identify communication patterns: function calls, events, queues, HTTP, shared state
 6. Note any dependency injection, plugin systems, or factory patterns
+${mode === "REFACTOR" ? "7. Identify architectural problems: tight coupling, layering violations, missing abstractions, overly complex patterns" : "7. Document the dependency direction rules: which modules are allowed to import from which?"}
 
 Return a concise Markdown report with:
 - Core abstractions list with one-line descriptions
 - Dependency map (module A → module B → ...)
 - Layer diagram if applicable
-- Key architectural patterns in use`,
+- Key architectural patterns in use
+${mode === "REFACTOR" ? "- Architectural issues and improvement opportunities" : "- Rules for extending the architecture without violating existing patterns"}`,
   },
   {
     name: "Test Pattern Scanner",
-    prompt: (cwd) => `You are scanning a codebase to understand its test patterns.
+    prompt: (cwd, mode) => `You are scanning a codebase to understand its test patterns.
 Working directory: ${cwd}
+${modeFocus(mode)}
 
 Your task:
 1. Use glob to find all test files (*.test.*, *.spec.*, test_*.*, *_test.*)
@@ -140,18 +161,21 @@ Your task:
 5. Identify test file naming and directory conventions
 6. Check if tests are colocated with source or in a separate directory
 7. Identify test helper/fixture patterns if any
+${mode === "REFACTOR" ? "8. Flag test quality issues: missing coverage areas, fragile tests, test anti-patterns" : "8. Document the exact test structure pattern new tests must follow (copy the pattern, don't invent)"}
 
 Return a concise Markdown report with:
 - Test framework and runner
 - File naming and directory conventions
 - Test structure pattern (describe/it nesting, etc.)
 - Mock/stub approach
-- Total test file count`,
+- Total test file count
+${mode === "REFACTOR" ? "- Test quality issues identified" : "- Template for writing new tests that match existing style"}`,
   },
   {
     name: "History Analyzer",
-    prompt: (cwd) => `You are analyzing the git history of a codebase to identify patterns.
+    prompt: (cwd, mode) => `You are analyzing the git history of a codebase to identify patterns.
 Working directory: ${cwd}
+${modeFocus(mode)}
 
 Your task — use bash commands to run git queries:
 1. git log --oneline -20 to see recent commit messages (identify message style, scope conventions)
@@ -159,31 +183,36 @@ Your task — use bash commands to run git queries:
 3. git diff --stat HEAD~10 HEAD to see recently changed files (hot areas)
 4. git log --oneline --follow -- <key files> for 2-3 key files to see their change frequency
 5. Note any branch naming conventions from recent branch names if visible
+${mode === "REFACTOR" ? "6. Identify areas with high churn that may benefit from refactoring" : "6. Identify areas that are actively maintained vs. stable (to avoid disturbing stable code)"}
 
 Return a concise Markdown report with:
 - Commit message style (conventional commits? issue numbers? etc.)
 - Hot areas (most frequently changed files/directories)
 - Recent focus areas (what has changed in the last 20 commits)
 - Contributor note (number of contributors, solo vs team)
+${mode === "REFACTOR" ? "- High-churn areas that may indicate design problems" : "- Stable areas that should not be touched without strong reason"}
 
 If the directory has no git history, report that clearly.`,
   },
   {
     name: "Docs Reader",
-    prompt: (cwd) => `You are reading existing documentation files in a codebase.
+    prompt: (cwd, mode) => `You are reading existing documentation files in a codebase.
 Working directory: ${cwd}
+${modeFocus(mode)}
 
 Your task:
 1. Look for and read (if they exist): AGENTS.md, README.md, CONTRIBUTING.md, DEVELOPMENT.md, docs/, .github/
 2. Extract: setup instructions, architecture decisions, documented conventions, DO NOT TOUCH lists
 3. Extract any explicitly stated rules for AI agents (AGENTS.md content is highest priority)
 4. Note any "do not modify" or "owned by" annotations in source comments
+${mode === "REFACTOR" ? "5. Check if existing docs are outdated or inconsistent with the actual codebase" : "5. Reproduce all agent-specific rules and constraints verbatim — these are binding"}
 
 Return a concise Markdown report with:
 - Summary of AGENTS.md (if exists) — reproduce any agent-specific rules verbatim
 - Documented conventions from CONTRIBUTING.md
 - Key setup/development instructions from README
-- Any explicit "DO NOT TOUCH" or ownership constraints found`,
+- Any explicit "DO NOT TOUCH" or ownership constraints found
+${mode === "REFACTOR" ? "- Docs that appear outdated or inconsistent" : "- Complete constraint list for AI agents (binding)"}`,
   },
 ]
 

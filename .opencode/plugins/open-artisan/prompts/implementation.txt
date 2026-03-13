@@ -19,6 +19,8 @@ implementation DAG. Your job is to implement exactly what was specified — no m
 
 **REFACTOR** — Follow the target patterns from the conventions document. Include before/after
 comments explaining what changed and why. All existing tests must pass.
+As you introduce new patterns, update the conventions document to reflect them — the conventions
+document is a living document in REFACTOR mode.
 
 **INCREMENTAL** — DO NO HARM:
   - You may ONLY modify files in the approved allowlist.

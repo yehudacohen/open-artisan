@@ -6,7 +6,7 @@
  * - withTimeout: resolves on time, rejects on timeout, clears timer on resolve
  */
 import { describe, expect, it } from "bun:test"
-import { resolveSessionId, withTimeout } from "#plugin/utils"
+import { resolveSessionId, withTimeout, getNextActionForState } from "#plugin/utils"
 
 // ---------------------------------------------------------------------------
 // resolveSessionId
@@ -108,5 +108,60 @@ describe("withTimeout — label appears in timeout error", () => {
     expect(err instanceof Error).toBe(true)
     expect((err as Error).message).toContain("50ms")
     expect((err as Error).message).toContain("discovery scanner")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// getNextActionForState — shared next-action mapping
+// ---------------------------------------------------------------------------
+
+describe("getNextActionForState", () => {
+  it("returns completion message for DONE", () => {
+    expect(getNextActionForState("DONE", "DRAFT")).toContain("complete")
+  })
+
+  it("returns mode selection instruction for MODE_SELECT", () => {
+    const result = getNextActionForState("MODE_SELECT", "DRAFT")
+    expect(result).toContain("select_mode")
+    expect(result).toContain("GREENFIELD")
+  })
+
+  it("returns mark_scan_complete for SCAN", () => {
+    expect(getNextActionForState("DISCOVERY", "SCAN")).toContain("mark_scan_complete")
+  })
+
+  it("returns mark_analyze_complete for ANALYZE", () => {
+    expect(getNextActionForState("DISCOVERY", "ANALYZE")).toContain("mark_analyze_complete")
+  })
+
+  it("returns request_review for DRAFT", () => {
+    expect(getNextActionForState("PLANNING", "DRAFT")).toContain("request_review")
+  })
+
+  it("returns request_review for CONVENTIONS", () => {
+    expect(getNextActionForState("DISCOVERY", "CONVENTIONS")).toContain("request_review")
+  })
+
+  it("returns mark_satisfied for REVIEW", () => {
+    expect(getNextActionForState("INTERFACES", "REVIEW")).toContain("mark_satisfied")
+  })
+
+  it("returns wait instruction for USER_GATE", () => {
+    const result = getNextActionForState("TESTS", "USER_GATE")
+    expect(result.toLowerCase()).toContain("wait")
+  })
+
+  it("returns request_review for REVISE", () => {
+    expect(getNextActionForState("IMPL_PLAN", "REVISE")).toContain("request_review")
+  })
+
+  it("includes phase name in DRAFT instruction", () => {
+    expect(getNextActionForState("PLANNING", "DRAFT")).toContain("PLANNING")
+  })
+
+  it("returns generic fallback for unknown sub-state", () => {
+    const result = getNextActionForState("PLANNING", "UNKNOWN_STATE")
+    expect(result).toContain("PLANNING")
+    expect(result).toContain("UNKNOWN_STATE")
   })
 })

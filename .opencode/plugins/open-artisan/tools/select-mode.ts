@@ -29,10 +29,12 @@ export function parseSelectModeArgs(args: unknown): { mode: WorkflowMode } | { e
     return { error: "Invalid arguments: expected an object" }
   }
   const obj = args as Record<string, unknown>
-  const mode = obj["mode"]
+  const rawMode = obj["mode"]
+  // Normalize to uppercase so "greenfield", "Greenfield", "GREENFIELD" all work
+  const mode = typeof rawMode === "string" ? rawMode.toUpperCase() : rawMode
   if (!VALID_MODES.includes(mode as WorkflowMode)) {
     return {
-      error: `Invalid mode "${mode}". Valid modes: ${VALID_MODES.join(", ")}`,
+      error: `Invalid mode "${rawMode}". Valid modes: ${VALID_MODES.join(", ")}`,
     }
   }
   return { mode: mode as WorkflowMode }

@@ -31,6 +31,26 @@ specification that all subsequent phases (tests and implementation) must conform
 
 **REVISE** — Refine interfaces based on feedback. Never rewrite from scratch.
 
+### Additional coverage requirements
+
+7. **CRUD operations** — for every data entity in the plan, verify that create/read/update/delete
+   operations are specified where applicable. Missing CRUD operations are a blocking omission.
+8. **Consistent error handling pattern** — all interfaces must use the same error representation
+   (e.g., all use Result types, or all throw typed errors). Do not mix patterns.
+
+### Mode-specific interface requirements
+
+**INCREMENTAL mode** — Interfaces must **extend existing patterns** rather than introducing new ones.
+  Study the conventions document and the existing codebase's type definitions. Your new interfaces
+  must use the same naming style, error pattern, and structural conventions as the existing code.
+  If the codebase uses `Result<T, E>`, your interfaces must too. If it uses thrown typed errors,
+  do the same. Do NOT introduce novel patterns.
+
+**REFACTOR mode** — Interfaces should follow the **target patterns** from the conventions document.
+  Where the target pattern differs from the existing pattern, document the difference in a comment.
+
+**GREENFIELD mode** — No additional constraints beyond the standard interface requirements.
+
 ### Constraints
 - Write ONLY interface/type/schema definition files appropriate to your project's language.
   No implementation files, no test files, no markdown files.

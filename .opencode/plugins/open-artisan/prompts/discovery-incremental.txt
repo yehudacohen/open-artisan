@@ -37,11 +37,14 @@ The conventions document must answer: "What are the rules this codebase already 
   - Sections: Naming, File Organization, Error Handling, Testing, Imports, Off-Limits Areas
   - Each constraint must have an example from the existing code
   - Include an explicit "DO NOT TOUCH" list of files/directories
-  - Call `request_review` when the draft is complete.
+  - When the draft is complete, call `request_review` with the full conventions text in `artifact_content`.
+    This writes it to `.openartisan/conventions.md` immediately — the user can read it there.
+  - At REVIEW: call `mark_satisfied` with your per-criterion assessment.
+    The isolated reviewer reads `.openartisan/conventions.md` directly — do NOT pass `artifact_content` here.
 
 ### Constraints
 - No file writes, no file edits, no bash — all sub-states of this phase are read-only.
-  The conventions document is produced as text output (not written to a file by you).
-  It is captured at approval time via `artifact_content` in `submit_feedback`.
+  The conventions document is written to `.openartisan/conventions.md` automatically when you call
+  `request_review` with `artifact_content`. You do not write it yourself.
 - The conventions document becomes a read-only constraint for all subsequent phases.
 - Be conservative: when in doubt about a convention, document it as a requirement.

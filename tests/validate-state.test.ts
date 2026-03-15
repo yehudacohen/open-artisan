@@ -31,6 +31,9 @@ function makeValidState(overrides: Partial<WorkflowState> = {}): WorkflowState {
     pendingRevisionSteps: null,
     currentTaskId: null,
     feedbackHistory: [],
+    userGateMessageReceived: false,
+    artifactDiskPaths: {},
+    featureName: null,
     ...overrides,
   }
 }
@@ -457,5 +460,38 @@ describe("validateWorkflowState — phaseApprovalCounts validation", () => {
     )
     expect(err).not.toBeNull()
     expect(err).toContain("phaseApprovalCounts")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// userGateMessageReceived validation (v8)
+// ---------------------------------------------------------------------------
+
+describe("validateWorkflowState — userGateMessageReceived validation", () => {
+  it("accepts userGateMessageReceived=false", () => {
+    const result = validateWorkflowState(makeValidState({ userGateMessageReceived: false }))
+    expect(result).toBeNull()
+  })
+
+  it("accepts userGateMessageReceived=true", () => {
+    const result = validateWorkflowState(makeValidState({ userGateMessageReceived: true }))
+    expect(result).toBeNull()
+  })
+
+  it("rejects non-boolean userGateMessageReceived", () => {
+    const state = makeValidState()
+    ;(state as any).userGateMessageReceived = "yes"
+    const err = validateWorkflowState(state)
+    expect(err).not.toBeNull()
+    expect(err).toContain("userGateMessageReceived")
+    expect(err).toContain("boolean")
+  })
+
+  it("rejects undefined userGateMessageReceived", () => {
+    const state = makeValidState()
+    ;(state as any).userGateMessageReceived = undefined
+    const err = validateWorkflowState(state)
+    expect(err).not.toBeNull()
+    expect(err).toContain("userGateMessageReceived")
   })
 })

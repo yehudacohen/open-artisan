@@ -18,9 +18,9 @@
  * main session conversation and prevents the workflow state block from biasing the
  * classification LLM.
  *
- * Session lifecycle per call:
- *   1. client.session.create({ body: { ... } }) → { id }
- *   2. client.session.prompt({ path: { id }, body: { ... } }) → result
+ * Session lifecycle per call (v1 SDK path/body style):
+ *   1. client.session.create({ body: { title } }) → { data: { id } }
+ *   2. client.session.prompt({ path: { id }, body: { parts } }) → { data: { info, parts } }
  *   3. client.session.delete({ path: { id } })  [best-effort, errors ignored]
  */
 
@@ -29,7 +29,7 @@ import type {
   OrchestratorAssessResult,
   OrchestratorDivergeResult,
 } from "../types"
-import { extractTextFromPromptResult, extractEphemeralSessionId, withTimeout } from "../utils"
+import { extractTextFromPromptResult, extractEphemeralSessionId, extractJsonFromText, withTimeout } from "../utils"
 
 /** Timeout for each orchestrator LLM call (assess / diverge). */
 const ORCHESTRATOR_TIMEOUT_MS = 60_000
@@ -73,29 +73,19 @@ Rules:
 - "The plan missed a requirement" → root cause = plan
 - "This test case is missing" → root cause = tests
 - "The implementation doesn't match the interface" → root cause = implementation
-- If uncertain, bias toward the current artifact being reviewed.`
+- If uncertain, bias toward the current artifact being reviewed.
+- For affected_artifacts, ONLY include artifacts that have actually been written/approved. Do NOT
+  include downstream artifacts that haven't been created yet (e.g. if we're at INTERFACES, don't
+  list tests/impl_plan/implementation as affected unless they already exist).
 
-const ASSESS_JSON_SCHEMA = {
-  type: "object",
-  properties: {
-    affected_artifacts: {
-      type: "array",
-      items: { type: "string", enum: ARTIFACT_KEYS },
-      description: "The root cause artifact plus all downstream artifacts that need revision.",
-    },
-    root_cause_artifact: {
-      type: "string",
-      enum: ARTIFACT_KEYS,
-      description: "The single most-upstream artifact the feedback actually targets.",
-    },
-    reasoning: {
-      type: "string",
-      description: "1-2 sentences explaining why this artifact is the root cause.",
-    },
-  },
-  required: ["affected_artifacts", "root_cause_artifact", "reasoning"],
-  additionalProperties: false,
+IMPORTANT: You MUST reply with ONLY a valid JSON object — no explanation, no markdown prose, no preamble.
+The JSON must have exactly these fields:
+{
+  "affected_artifacts": ["<artifact_key>", ...],
+  "root_cause_artifact": "<artifact_key>",
+  "reasoning": "<1-2 sentence explanation>"
 }
+Valid artifact keys: conventions, plan, interfaces, tests, impl_plan, implementation`
 
 /**
  * Creates an assess() function backed by an LLM call.
@@ -120,17 +110,14 @@ export function createAssessFn(client: Client): (
         ephemeralPrompt(client, {
           parts: [{ type: "text", text: prompt }],
           system: ASSESS_SYSTEM_PROMPT,
-          format: {
-            type: "json_schema",
-            schema: ASSESS_JSON_SCHEMA,
-          },
-        }),
+        }, "Orchestrator: assess feedback"),
         ORCHESTRATOR_TIMEOUT_MS,
         "orchestrator-assess",
       )
 
       // Parse structured output from the response parts
-      const text = extractTextFromPromptResult(result, "assess")
+      // extractJsonFromText handles markdown fences the LLM may add
+      const text = extractJsonFromText(extractTextFromPromptResult(result, "assess"))
       const parsed = JSON.parse(text) as {
         affected_artifacts: ArtifactKey[]
         root_cause_artifact: ArtifactKey
@@ -153,9 +140,14 @@ export function createAssessFn(client: Client): (
         reasoning: parsed.reasoning ?? "",
       }
     } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : String(err)
+      console.error(
+        `[open-artisan] Orchestrator assess failed: ${errorMsg}`,
+        err instanceof Error ? err.stack : "",
+      )
       return {
         success: false,
-        error: err instanceof Error ? err.message : String(err),
+        error: errorMsg,
         fallbackArtifact: currentArtifact,
       }
     }
@@ -177,29 +169,16 @@ Given information about what changed and which artifacts are affected, classify 
   - accumulated_drift: many individual small changes have collectively changed the design significantly
 
 When in doubt, classify as "strategic". False positives (unnecessary user escalation) are
-preferable to false negatives (missing a real architectural pivot).`
+preferable to false negatives (missing a real architectural pivot).
 
-const DIVERGE_JSON_SCHEMA = {
-  type: "object",
-  properties: {
-    classification: {
-      type: "string",
-      enum: ["tactical", "strategic"],
-      description: "Whether this is a tactical (autonomous) or strategic (user decision required) change.",
-    },
-    trigger_criterion: {
-      type: "string",
-      enum: ["scope_expansion", "architectural_shift", "cascade_depth", "accumulated_drift"],
-      description: "For strategic changes: which criterion triggered escalation.",
-    },
-    reasoning: {
-      type: "string",
-      description: "1-2 sentences explaining the classification.",
-    },
-  },
-  required: ["classification", "reasoning"],
-  additionalProperties: false,
+IMPORTANT: You MUST reply with ONLY a valid JSON object — no explanation, no markdown prose, no preamble.
+The JSON must have exactly these fields:
+{
+  "classification": "tactical" | "strategic",
+  "trigger_criterion": "scope_expansion" | "architectural_shift" | "cascade_depth" | "accumulated_drift" | null,
+  "reasoning": "<1-2 sentence explanation>"
 }
+(trigger_criterion is required only for "strategic" classification; set to null for "tactical")`
 
 /**
  * Creates a diverge() function backed by an LLM call.
@@ -217,42 +196,50 @@ export function createDivergeFn(client: Client): (
         return { success: true, classification: "tactical", reasoning: "assess failed; defaulting to tactical" }
       }
 
-      const approvedCount = Object.keys(approvedArtifacts).length
-      const affectedCount = assessResult.affectedArtifacts.length
+      const approvedKeys = new Set(Object.keys(approvedArtifacts))
+      const approvedCount = approvedKeys.size
+
+      // Filter affected artifacts to only those that actually exist (approved).
+      // The LLM assess step lists all theoretically downstream artifacts, but
+      // unwritten artifacts (tests, impl_plan, implementation that haven't been
+      // created yet) shouldn't count toward cascade depth — there's nothing to
+      // cascade to. Always include the root cause artifact itself.
+      const materiallyAffected = assessResult.affectedArtifacts.filter(
+        (a) => approvedKeys.has(a) || a === assessResult.rootCauseArtifact,
+      )
+      const affectedCount = materiallyAffected.length
 
       const prompt = [
         `Root cause artifact: **${assessResult.rootCauseArtifact}**`,
-        `Artifacts affected: ${assessResult.affectedArtifacts.join(", ")} (${affectedCount} total)`,
+        `Artifacts materially affected (only counting approved/existing artifacts): ${materiallyAffected.join(", ")} (${affectedCount} total)`,
         `Assess reasoning: ${assessResult.reasoning}`,
         ``,
-        `Previously approved artifacts: ${approvedCount > 0 ? Object.keys(approvedArtifacts).join(", ") : "none"}`,
+        `Previously approved artifacts: ${approvedCount > 0 ? [...approvedKeys].join(", ") : "none"}`,
+        `LLM-reported affected (including unwritten): ${assessResult.affectedArtifacts.join(", ")}`,
         ``,
         `Classify this change: is it tactical (autonomous) or strategic (requires user decision)?`,
         ``,
-        `Note: cascade_depth trigger fires automatically when ${affectedCount} >= 3 artifacts are affected.`,
+        `Note: cascade_depth trigger fires when ${affectedCount} >= 3 materially affected artifacts.`,
       ].join("\n")
 
       const result = await withTimeout(
         ephemeralPrompt(client, {
           parts: [{ type: "text", text: prompt }],
           system: DIVERGE_SYSTEM_PROMPT,
-          format: {
-            type: "json_schema",
-            schema: DIVERGE_JSON_SCHEMA,
-          },
-        }),
+        }, "Orchestrator: diverge classification"),
         ORCHESTRATOR_TIMEOUT_MS,
         "orchestrator-diverge",
       )
 
-      const text = extractTextFromPromptResult(result, "diverge")
+      // extractJsonFromText handles markdown fences the LLM may add
+      const text = extractJsonFromText(extractTextFromPromptResult(result, "diverge"))
       const parsed = JSON.parse(text) as {
         classification: "tactical" | "strategic"
         trigger_criterion?: string
         reasoning: string
       }
 
-      // Hard-code cascade_depth trigger when ≥3 artifacts affected
+      // Hard-code cascade_depth trigger when ≥3 materially affected artifacts
       const classification = (affectedCount >= 3 || parsed.classification === "strategic")
         ? "strategic"
         : "tactical"
@@ -271,9 +258,14 @@ export function createDivergeFn(client: Client): (
         reasoning: parsed.reasoning ?? "",
       }
     } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : String(err)
+      console.error(
+        `[open-artisan] Orchestrator diverge failed: ${errorMsg}`,
+        err instanceof Error ? err.stack : "",
+      )
       return {
         success: false,
-        error: err instanceof Error ? err.message : String(err),
+        error: errorMsg,
         fallback: "tactical",
       }
     }
@@ -290,22 +282,36 @@ export function createDivergeFn(client: Client): (
  *
  * Using ephemeral sessions isolates classification context from the main
  * conversation. The "orch-" prefix makes them identifiable in logs.
+ *
+ * The system prompt is inlined into the parts text rather than passed as a
+ * separate `system` parameter. Although the SDK type includes `system`, this
+ * approach is more robust and consistent with self-review.ts.
  */
 async function ephemeralPrompt(
   client: Client,
-  body: Record<string, unknown>,
+  params: { parts: Array<{ type: string; text: string }>; system?: string },
+  title = "Orchestrator: classify feedback",
 ): Promise<unknown> {
-  // Create short-lived session
+  // Create short-lived session (orphaned — not linked to parent)
   const sessionResult = await client.session.create({
-    body: { title: "orch-classify" },
+    body: { title },
   })
 
   const sessionId = extractEphemeralSessionId(sessionResult, "ephemeralPrompt")
 
+  // Inline system prompt into the parts text for simplicity and consistency
+  const parts = params.system
+    ? params.parts.map((p, i) =>
+        i === 0
+          ? { ...p, text: `${params.system}\n\n---\n\n${p.text}` }
+          : p,
+      )
+    : params.parts
+
   try {
     const result = await client.session.prompt({
       path: { id: sessionId },
-      body,
+      body: { parts },
     })
     return result
   } finally {

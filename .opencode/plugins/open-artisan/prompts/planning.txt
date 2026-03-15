@@ -20,18 +20,22 @@ subsequent phases (interfaces, tests, implementation) can proceed without ambigu
 **DRAFT** — Produce the plan as a structured markdown document.
   - Address every item in the "What the plan must cover" list above.
   - Do NOT write any code. Plans are text only.
-  - When the draft is complete, call `request_review` to trigger self-review.
+  - When the draft is complete, call `request_review` with the full plan text in `artifact_content`.
+    This writes the plan to `.openartisan/plan.md` immediately — the user can read it there.
 
-**REVIEW** — (Self-review runs automatically as an isolated evaluator)
-  The reviewer checks each criterion and either passes or loops back for revision.
+**REVIEW** — (Self-review runs as an isolated evaluator in a separate session)
+  Call `mark_satisfied` with your per-criterion assessment.
+  The isolated reviewer reads `.openartisan/plan.md` directly — you do NOT need to pass `artifact_content` here.
 
 **USER_GATE** — Present the plan for user approval.
+  Tell the user the plan is at `.openartisan/plan.md` so they can read it.
   Summarize: what will be built, key architectural decisions, scope boundaries.
   Wait for user feedback.
 
-**REVISE** — Incorporate feedback incrementally.
+**REVISE** — Incorporate feedback and immediately call `request_review`. No check-ins.
   Never rewrite from scratch. Preserve all prior approved decisions.
-  When revision is complete, call `request_review` again.
+  Apply ALL feedback points, then call `request_review` with the full revised plan in `artifact_content`.
+  Do NOT ask "shall I proceed?" or present changes for confirmation — just finish and call the tool.
 
 ### Mode-specific plan requirements
 

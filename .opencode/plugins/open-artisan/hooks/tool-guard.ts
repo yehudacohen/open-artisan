@@ -3,7 +3,11 @@
  * may write/edit at each point in the workflow.
  *
  * Key rules:
- * - DISCOVERY: no writes, no edits (read-only)
+ * - DISCOVERY:
+ *   - SCAN/ANALYZE: strictly read-only (no writes, edits, or bash)
+ *   - CONVENTIONS: writes to .openartisan/ only (conventions authoring), bash blocked
+ *   - REVISE: writes to .openartisan/ only (conventions revision), bash allowed
+ *   - REVIEW/USER_GATE: no writes or edits, bash allowed for verification
  * - PLANNING / IMPL_PLAN: no writes, no edits (plan is text in memory)
  * - INTERFACES: only interface/type/schema files may be written; .env always blocked.
  *   Language-agnostic: accepts .ts, .d.ts, .py, .go, .rs, .java, .rb, .ex, .proto,
@@ -23,6 +27,11 @@ export function isEnvFile(path: string): boolean {
   // Blocks any .env file or .env.* file
   const base = path.split("/").at(-1) ?? ""
   return base === ".env" || base.startsWith(".env.")
+}
+
+/** Returns true if the file is under the .openartisan/ artifact directory. */
+export function isOpenArtisanFile(path: string): boolean {
+  return path.includes("/.openartisan/") || path.includes("\\.openartisan\\")
 }
 
 /**
@@ -126,49 +135,117 @@ export function getPhaseToolPolicy(
       }
 
     // -----------------------------------------------------------------------
-    case "DISCOVERY":
+    case "DISCOVERY": {
+      // CONVENTIONS: agent is authoring the conventions document in .openartisan/.
+      // Allow writes to .openartisan/ only, bash blocked (definition-only authoring).
+      if (phaseState === "CONVENTIONS") {
+        return {
+          blocked: ["bash"],
+          writePathPredicate: (filePath: string) => {
+            if (isEnvFile(filePath)) return false
+            return isOpenArtisanFile(filePath)
+          },
+          allowedDescription:
+            "Conventions authoring: writes allowed ONLY to .openartisan/ files. No writes to project source. bash blocked. .env writes are always blocked.",
+        }
+      }
+      // REVISE: agent is revising the conventions document after user feedback.
+      // Allow writes to .openartisan/ only, bash allowed for verification.
+      if (phaseState === "REVISE") {
+        return {
+          blocked: [],
+          writePathPredicate: (filePath: string) => {
+            if (isEnvFile(filePath)) return false
+            return isOpenArtisanFile(filePath)
+          },
+          allowedDescription:
+            "Revision phase: edits allowed ONLY to .openartisan/ convention files. No writes to project source. bash allowed for verification. .env writes are always blocked.",
+        }
+      }
+      // REVIEW/USER_GATE: bash allowed for read-only verification, no file writes.
+      if (phaseState === "REVIEW" || phaseState === "USER_GATE") {
+        return {
+          blocked: ["write", "edit"],
+          allowedDescription: "Discovery review: no file writes or edits. bash allowed for read-only verification.",
+        }
+      }
+      // SCAN/ANALYZE: strictly read-only — no writes, edits, or shell execution.
       return {
-        // Discovery is strictly read-only — no writes, edits, or shell execution
         blocked: ["write", "edit", "bash"],
         allowedDescription: "Read-only — discovery phase scans and analyzes the codebase. No writes, edits, or bash execution.",
       }
+    }
 
     // -----------------------------------------------------------------------
     case "PLANNING":
-    case "IMPL_PLAN":
+    case "IMPL_PLAN": {
+      // REVISE: the plan already exists on disk in .openartisan/. Allow surgical
+      // edits to .openartisan/ files so the agent doesn't have to reproduce the
+      // entire plan just to make targeted changes. Still block all other writes.
+      if (phaseState === "REVISE") {
+        return {
+          blocked: [],
+          writePathPredicate: (filePath: string) => {
+            if (isEnvFile(filePath)) return false
+            return isOpenArtisanFile(filePath)
+          },
+          allowedDescription:
+            "Revision phase: edits allowed ONLY to .openartisan/ plan files. No writes to project source. bash allowed for verification. .env writes are always blocked.",
+        }
+      }
+      // REVIEW/USER_GATE: bash allowed for read-only verification (same as TESTS/INTERFACES)
+      if (phaseState === "REVIEW" || phaseState === "USER_GATE") {
+        return {
+          blocked: ["write", "edit"],
+          allowedDescription: "Planning phase: no file writes or edits. bash allowed for read-only verification.",
+        }
+      }
+      // DRAFT/CONVENTIONS: fully locked — plans are produced as text output
       return {
-        // Plans are pure text; no code writes or shell execution permitted
         blocked: ["write", "edit", "bash"],
         allowedDescription: "Planning phase: no file writes and no shell execution. Produce a plan as text output.",
       }
+    }
 
     // -----------------------------------------------------------------------
-    case "INTERFACES":
+    case "INTERFACES": {
+      // During DRAFT/REVISE/CONVENTIONS: bash is blocked (definition-only authoring).
+      // During REVIEW/USER_GATE: bash is allowed so the agent (and isolated reviewer)
+      // can run read-only commands (rg, wc, find, etc.) to verify acceptance criteria.
+      const interfacesBashBlocked = phaseState === "REVIEW" || phaseState === "USER_GATE"
+        ? []
+        : ["bash"] as const
       return {
-        // bash is blocked: INTERFACES is a definition-only phase.
-        // (Future M2: allow type-checking commands via bashCommandPredicate.)
-        blocked: ["bash"],
+        blocked: [...interfacesBashBlocked],
         writePathPredicate: (filePath: string) => {
           if (isEnvFile(filePath)) return false
           return isInterfaceFile(filePath)
         },
-        allowedDescription:
-          "Only interface/type/schema files may be written (.ts, .d.ts, .py, .go, .rs, .java, .proto, .graphql, .json, .yaml, etc.). bash is blocked. .env writes are always blocked.",
+        allowedDescription: phaseState === "REVIEW" || phaseState === "USER_GATE"
+          ? "Only interface/type/schema files may be written. bash is allowed for read-only verification. .env writes are always blocked."
+          : "Only interface/type/schema files may be written (.ts, .d.ts, .py, .go, .rs, .java, .proto, .graphql, .json, .yaml, etc.). bash is blocked. .env writes are always blocked.",
       }
+    }
 
     // -----------------------------------------------------------------------
-    case "TESTS":
+    case "TESTS": {
+      // During DRAFT/REVISE/CONVENTIONS: bash is blocked (test-writing only, no running).
+      // During REVIEW/USER_GATE: bash is allowed so the agent (and isolated reviewer)
+      // can run read-only commands (rg, wc, find, etc.) to verify acceptance criteria.
+      const testsBashBlocked = phaseState === "REVIEW" || phaseState === "USER_GATE"
+        ? []
+        : ["bash"] as const
       return {
-        // bash is blocked: TESTS is a test-writing phase, not a test-running phase.
-        // (Future M2: allow test-runner commands via bashCommandPredicate.)
-        blocked: ["bash"],
+        blocked: [...testsBashBlocked],
         writePathPredicate: (filePath: string) => {
           if (isEnvFile(filePath)) return false
           return isTestFile(filePath)
         },
-        allowedDescription:
-          "Only test files may be written (files containing 'test' or 'spec' in name, or in test/tests/__tests__/spec directories). bash is blocked. .env writes are always blocked.",
+        allowedDescription: phaseState === "REVIEW" || phaseState === "USER_GATE"
+          ? "Only test files may be written. bash is allowed for read-only verification. .env writes are always blocked."
+          : "Only test files may be written (files containing 'test' or 'spec' in name, or in test/tests/__tests__/spec directories). bash is blocked. .env writes are always blocked.",
       }
+    }
 
     // -----------------------------------------------------------------------
     case "IMPLEMENTATION": {

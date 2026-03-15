@@ -24,6 +24,7 @@
 // @ts-ignore — @opencode-ai/plugin is provided by the OpenCode runtime, not installed as a dev dep
 import { tool, type Plugin } from "@opencode-ai/plugin"
 import { join } from "node:path"
+import { existsSync } from "node:fs"
 import { $ } from "bun"
 
 import { createSessionStateStore } from "./session-state"
@@ -50,20 +51,76 @@ import { createOrchestrator } from "./orchestrator/route"
 import { createArtifactGraph, PHASE_TO_ARTIFACT } from "./artifacts"
 import { createAssessFn, createDivergeFn } from "./orchestrator/llm-calls"
 import { handleEscapeHatch, handleCascade, handleNormalRevise } from "./tools/submit-feedback-handlers"
-import { dispatchSelfReview } from "./self-review"
+import { dispatchSelfReview, dispatchRebuttal } from "./self-review"
 import { getAcceptanceCriteria } from "./hooks/system-transform"
 import { runDiscoveryFleet } from "./discovery/index"
 import { parseImplPlan } from "./impl-plan-parser"
 import { resolveArtifactPaths } from "./tools/artifact-paths"
+import { writeArtifact } from "./artifact-store"
 
 import { createHash } from "node:crypto"
-import type { WorkflowMode, ArtifactKey, RevisionStep } from "./types"
+import type { WorkflowMode, WorkflowState, SessionStateStore, ArtifactKey, RevisionStep, MarkSatisfiedArgs } from "./types"
 import { VALID_PHASE_STATES } from "./types"
 import { resolveSessionId } from "./utils"
 
 /** Returns a 16-char SHA-256 hex fingerprint of the given text. */
 function artifactHash(text: string): string {
   return createHash("sha256").update(text).digest("hex").slice(0, 16)
+}
+
+/**
+ * Lazily ensures workflow state exists for a session. If `session.created`
+ * event was missed (e.g. plugin loaded after the session was already created),
+ * this creates fresh state on first tool call instead of returning an error.
+ */
+async function ensureState(
+  store: SessionStateStore,
+  sessionId: string,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  client?: any,
+): Promise<WorkflowState> {
+  const existing = store.get(sessionId)
+  if (existing) return existing
+  // State doesn't exist — likely missed session.created event. Create it now.
+  try {
+    client?.tui?.showToast?.({
+      body: {
+        title: "Workflow initialized",
+        message: "Session state created (missed startup event)",
+        variant: "info",
+        duration: 3000,
+      },
+    })
+  } catch { /* ignore */ }
+  return store.create(sessionId)
+}
+
+/**
+ * Logs a state transition as a TUI toast notification so the user can see
+ * workflow phase changes in real time. Falls back to console.log in test
+ * environments or if the TUI API is unavailable.
+ */
+function logTransition(
+  from: { phase: string; phaseState: string },
+  to: { nextPhase: string; nextPhaseState: string } | { phase: string; phaseState: string },
+  trigger: string,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  client?: any,
+): void {
+  const toPhase = "nextPhase" in to ? to.nextPhase : to.phase
+  const toState = "nextPhaseState" in to ? to.nextPhaseState : to.phaseState
+  const message = `${from.phase}/${from.phaseState} → ${toPhase}/${toState}`
+  // Show as a transient toast in the TUI (best-effort, non-blocking)
+  try {
+    client?.tui?.showToast?.({
+      body: {
+        title: `Workflow: ${trigger}`,
+        message,
+        variant: "info",
+        duration: 4000,
+      },
+    })
+  } catch { /* ignore — TUI API may not be available */ }
 }
 
 // Re-export for consumers who import from index.ts (G19)
@@ -98,10 +155,19 @@ export const MAX_REVIEW_ITERATIONS = 5
 // ---------------------------------------------------------------------------
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-export const OpenArtisanPlugin: Plugin = async ({ client }: { client: any }) => {
+export const OpenArtisanPlugin: Plugin = async ({ client, directory, worktree }: { client: any; directory?: string; worktree?: string }) => {
   // Plugin init — runs at plugin startup before the return.
   // Load persisted state from disk so sessions survive restarts.
-  const stateDir = join(import.meta.dirname, "..", "..")  // .opencode/
+  // IMPORTANT: Use the project directory (resolvedDir) to derive stateDir so that
+  // workflow-state.json is read/written from the correct project's .opencode/ folder.
+  // import.meta.dirname resolves to the symlink *target* (dev repo), so using it here
+  // would cause the plugin to read/write state from the dev repo rather than the
+  // active project. Fall back to import.meta.dirname only when no
+  // project directory context is available (e.g. legacy environments).
+  const resolvedDir = directory ?? worktree ?? process.env["OPENCODE_PROJECT_DIR"]
+  const stateDir = resolvedDir
+    ? join(resolvedDir.replace(/\/+$/, ""), ".opencode")
+    : join(import.meta.dirname, "..", "..")  // .opencode/ fallback
   const store = createSessionStateStore(stateDir)
   const sm = createStateMachine()
 
@@ -116,6 +182,33 @@ export const OpenArtisanPlugin: Plugin = async ({ client }: { client: any }) => 
 
   // Load persisted state on plugin startup (replaces the defunct "session.started" hook)
   await store.load()
+
+  // Validate that the client object has the session API methods we depend on.
+  // Subagent dispatch (discovery fleet, self-review, orchestrator) all require
+  // client.session.{create, prompt, delete}. If any are missing, log a warning
+  // at startup so the user knows subagents won't work.
+  const sessionApi = client?.session
+  const missingMethods: string[] = []
+  if (!sessionApi) {
+    console.warn("[open-artisan] client.session is missing — subagent dispatch (discovery fleet, self-review, orchestrator) will not work.")
+  } else {
+    for (const method of ["create", "prompt", "delete"] as const) {
+      if (typeof sessionApi[method] !== "function") {
+        missingMethods.push(method)
+      }
+    }
+    if (missingMethods.length > 0) {
+      console.warn(
+        `[open-artisan] client.session is missing methods: ${missingMethods.join(", ")}. ` +
+        `Subagent dispatch (discovery fleet, self-review, orchestrator) will silently fall back to degraded behavior.`,
+      )
+    }
+  }
+
+  // Idle re-prompt debounce: tracks the last re-prompt timestamp per session
+  // to prevent cascading re-prompts when the user interrupts tool calls.
+  const IDLE_COOLDOWN_MS = 10_000 // 10 seconds
+  const lastRepromptTimestamps = new Map<string, number>()
 
   return {
     // -------------------------------------------------------------------------
@@ -173,6 +266,15 @@ export const OpenArtisanPlugin: Plugin = async ({ client }: { client: any }) => 
         const state = store.get(sessionId)
         if (!state) return
 
+        // Debounce: ignore idle events that arrive within 10 seconds of the
+        // last re-prompt. This prevents a cascade when the user interrupts a
+        // tool call — the abort triggers idle, we re-prompt, the LLM retries,
+        // the user interrupts again, idle fires again, etc. The cooldown gives
+        // the user time to type or take action.
+        const now = Date.now()
+        const lastReprompt = lastRepromptTimestamps.get(sessionId) ?? 0
+        if (now - lastReprompt < IDLE_COOLDOWN_MS) return
+
         const decision = handleIdle(state)
         if (decision.action === "ignore") return
 
@@ -189,6 +291,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client }: { client: any }) => 
         // Reprompt — only increment retry count AFTER the prompt succeeds,
         // so failed prompts don't consume retry budget.
         try {
+          lastRepromptTimestamps.set(sessionId, Date.now())
           await (client as any).session?.prompt({
             path: { id: sessionId },
             body: {
@@ -213,8 +316,8 @@ export const OpenArtisanPlugin: Plugin = async ({ client }: { client: any }) => 
     // -------------------------------------------------------------------------
 
     "chat.message": async (
-      input: { sessionID?: string; sessionId?: string; session_id?: string; [key: string]: unknown },
-      output: { message: { sessionID?: string; sessionId?: string }; parts: Array<{ type: string; text?: string }> },
+      input: { sessionID?: string; sessionId?: string; session_id?: string; messageID?: string; [key: string]: unknown },
+      output: { message: { sessionID?: string; sessionId?: string; id?: string }; parts: Array<{ type: string; text?: string; id?: string; sessionID?: string; messageID?: string }> },
     ) => {
       // Resolve sessionID — probe all casing variants the SDK may use
       const sessionId = (
@@ -227,6 +330,9 @@ export const OpenArtisanPlugin: Plugin = async ({ client }: { client: any }) => 
       if (!sessionId) return
       const state = store.get(sessionId)
       if (!state) return
+
+      // Resolve messageID from input — required for v2 Part objects
+      const messageId = (input.messageID as string | undefined) ?? (output.message?.id as string | undefined) ?? ""
 
       // Capture first real user message as intent baseline (for O_DIVERGE later).
       // intentBaseline is null until the first real user message arrives.
@@ -251,8 +357,26 @@ export const OpenArtisanPlugin: Plugin = async ({ client }: { client: any }) => 
 
       const result = processUserMessage(state, output.parts as Array<{ type: string; text?: string }>)
       if (result.intercepted) {
-        // Prepend routing note to parts
-        output.parts.splice(0, 0, ...result.parts.slice(0, 1))
+        // Prepend routing note as a v2-compliant Part object.
+        // v2 requires every Part to carry id, sessionID, and messageID (PartBase).
+        // We generate a synthetic id prefixed with "oa-" so it's identifiable in logs.
+        const injectedText = result.parts[0]?.text ?? ""
+        if (injectedText) {
+          output.parts.splice(0, 0, {
+            type: "text",
+            text: injectedText,
+            id: `oa-routing-${Date.now()}`,
+            sessionID: sessionId,
+            messageID: messageId,
+          })
+        }
+
+        // Mark that a real user message was received at USER_GATE.
+        // submit_feedback(approve) checks this flag to prevent the agent
+        // from self-approving without actual user input.
+        await store.update(sessionId, (draft) => {
+          draft.userGateMessageReceived = true
+        })
       }
     },
 
@@ -378,18 +502,30 @@ export const OpenArtisanPlugin: Plugin = async ({ client }: { client: any }) => 
         description:
           "Select the workflow mode: GREENFIELD (new project, skips discovery), " +
           "REFACTOR (restructure existing project, runs discovery), " +
-          "or INCREMENTAL (add/fix specific functionality, runs discovery, do-no-harm).",
+          "or INCREMENTAL (add/fix specific functionality, runs discovery, do-no-harm). " +
+          "You MUST provide a feature_name — all plan artifacts are written to " +
+          ".openartisan/<feature_name>/ so multiple features can coexist in the same repo. " +
+          "Derive a short kebab-case slug from the user's request (e.g. 'cloud-cost-platform').",
         args: {
           mode: tool.schema.enum(["GREENFIELD", "REFACTOR", "INCREMENTAL"]).describe(
             "The workflow mode to use for this session.",
           ),
+          feature_name: tool.schema
+            .string()
+            .describe(
+              "REQUIRED. Short kebab-case identifier for this feature/task (e.g. 'cloud-cost-platform', 'auth-refactor', 'fix-billing-bug'). " +
+              "Used as a subdirectory under .openartisan/ to isolate this workflow's artifacts. " +
+              "Derive from the user's request — no spaces, use hyphens.",
+            ),
         },
-        async execute(args: { mode: string }, context: { directory: string; sessionId?: string; session?: { id: string } }) {
+        async execute(
+          args: { mode: string; feature_name: string },
+          context: { directory: string; sessionId?: string; session?: { id: string } },
+        ) {
           const sessionId = resolveSessionId(context)
           if (!sessionId) return "Error: Could not determine session ID from tool context."
 
-          const state = store.get(sessionId)
-          if (!state) return "Error: No workflow state for this session."
+          const state = await ensureState(store, sessionId, client)
 
           if (state.phase !== "MODE_SELECT") {
             return `Error: Mode already selected (current phase: ${state.phase}).`
@@ -399,18 +535,24 @@ export const OpenArtisanPlugin: Plugin = async ({ client }: { client: any }) => 
           if ("error" in parsed) return `Error: ${parsed.error}`
 
           const mode = parsed.mode as WorkflowMode
+          const featureName = args.feature_name?.trim() || null
+          if (!featureName) {
+            return "Error: feature_name is required. Provide a short kebab-case slug derived from the user's request (e.g. 'cloud-cost-platform')."
+          }
           const outcome = sm.transition(state.phase, state.phaseState, "mode_selected", mode)
           if (!outcome.success) return `Error: ${outcome.message}`
 
+          logTransition(state, outcome, "select_mode", client)
           await store.update(sessionId, (draft) => {
             draft.mode = mode
+            draft.featureName = featureName
             draft.phase = outcome.nextPhase
             draft.phaseState = outcome.nextPhaseState
             draft.iterationCount = 0
             draft.retryCount = 0
           })
 
-          return buildSelectModeResponse(mode)
+          return buildSelectModeResponse(mode) + ` Artifacts will be written to \`.openartisan/${featureName}/\`.`
         },
       }),
 
@@ -430,8 +572,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client }: { client: any }) => 
           const sessionId = resolveSessionId(context)
           if (!sessionId) return "Error: Could not determine session ID from tool context."
 
-          const state = store.get(sessionId)
-          if (!state) return "Error: No workflow state for this session."
+          const state = await ensureState(store, sessionId, client)
 
           if (state.phase !== "DISCOVERY" || state.phaseState !== "SCAN") {
             return `Error: mark_scan_complete can only be called in DISCOVERY/SCAN (current: ${state.phase}/${state.phaseState}).`
@@ -440,6 +581,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client }: { client: any }) => 
           const outcome = sm.transition(state.phase, state.phaseState, "scan_complete", state.mode)
           if (!outcome.success) return `Error: ${outcome.message}`
 
+          logTransition(state, outcome, "mark_scan_complete", client)
           await store.update(sessionId, (draft) => {
             draft.phase = outcome.nextPhase
             draft.phaseState = outcome.nextPhaseState
@@ -467,8 +609,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client }: { client: any }) => 
           const sessionId = resolveSessionId(context)
           if (!sessionId) return "Error: Could not determine session ID from tool context."
 
-          const state = store.get(sessionId)
-          if (!state) return "Error: No workflow state for this session."
+          const state = await ensureState(store, sessionId, client)
 
           if (state.phase !== "DISCOVERY" || state.phaseState !== "ANALYZE") {
             return `Error: mark_analyze_complete can only be called in DISCOVERY/ANALYZE (current: ${state.phase}/${state.phaseState}).`
@@ -486,23 +627,45 @@ export const OpenArtisanPlugin: Plugin = async ({ client }: { client: any }) => 
           if (state.mode === "REFACTOR" || state.mode === "INCREMENTAL") {
             try {
               const cwd = context.directory || process.cwd()
-              const report = await runDiscoveryFleet(client, cwd, state.mode)
+              const report = await runDiscoveryFleet(client, cwd, state.mode, sessionId ?? undefined, state.featureName)
               fleetReport = report.combinedReport
               const successCount = report.scanners.filter((s) => s.success).length
               fleetMsg = `\n\n**Discovery fleet:** ${successCount}/${report.scanners.length} scanners completed.`
-            } catch {
+            } catch (fleetErr) {
               // Non-fatal — fleet failure does not block conventions drafting
-              fleetMsg = "\n\n**Discovery fleet:** Failed to run (non-fatal). Conventions draft will proceed without fleet input."
+              const errMsg = fleetErr instanceof Error ? fleetErr.message : String(fleetErr)
+              console.error(
+                `[open-artisan] Discovery fleet dispatch failed: ${errMsg}`,
+                fleetErr instanceof Error ? fleetErr.stack : "",
+              )
+              fleetMsg = `\n\n**Discovery fleet:** Failed to run (non-fatal): ${errMsg}. Conventions draft will proceed without fleet input.`
+            }
+          }
+
+          // Write discovery report to disk so the agent can re-read it via tools
+          // rather than relying on inline context injection in long sessions.
+          let discoveryReportPath: string | null = null
+          if (fleetReport !== null) {
+            try {
+              const cwd = context.directory || process.cwd()
+              discoveryReportPath = await writeArtifact(cwd, "discovery_report", fleetReport, state.featureName)
+            } catch (writeErr) {
+              // Non-fatal — disk write failure doesn't block the workflow
+              console.error("[open-artisan] Failed to write discovery report to disk:", writeErr)
             }
           }
 
           // Single atomic update: phase transition + fleet report together
+          logTransition(state, outcome, "mark_analyze_complete", client)
           await store.update(sessionId, (draft) => {
             draft.phase = outcome.nextPhase
             draft.phaseState = outcome.nextPhaseState
             draft.retryCount = 0
             if (fleetReport !== null) {
               draft.discoveryReport = fleetReport
+            }
+            if (discoveryReportPath) {
+              draft.artifactDiskPaths["discovery_report" as ArtifactKey] = discoveryReportPath
             }
           })
 
@@ -514,12 +677,14 @@ export const OpenArtisanPlugin: Plugin = async ({ client }: { client: any }) => 
       // -----------------------------------------------------------------------
       // mark_satisfied — self-review completion signal
       // -----------------------------------------------------------------------
-      mark_satisfied: tool({
+          mark_satisfied: tool({
         description:
           "Call after completing self-review. Provide assessment of each criterion. " +
-          "If all blocking criteria are met, advances to user gate. " +
-          "If any blocking criterion is unmet, stays in REVIEW for continued work. " +
-          "Suggestion-severity criteria are advisory and do not block advancement.",
+          "If all blocking criteria are met (and all [Q] quality scores are >= 9/10), advances to user gate. " +
+          "If any blocking criterion is unmet or any quality score is below 9, stays in REVIEW. " +
+          "Suggestion-severity criteria are advisory and do not block advancement. " +
+          "The isolated reviewer subagent reads the artifact from the disk path set by request_review. " +
+          "Only pass artifact_content if request_review was called without artifact_content (legacy fallback).",
         args: {
           criteria_met: tool.schema
             .array(
@@ -531,19 +696,32 @@ export const OpenArtisanPlugin: Plugin = async ({ client }: { client: any }) => 
                   .enum(["blocking", "suggestion"])
                   .optional()
                   .describe("Defaults to 'blocking'. Use 'suggestion' for advisory-only criteria."),
+                score: tool.schema
+                  .string()
+                  .optional()
+                  .describe(
+                    "Quality score as a number string ('1' to '10') for [Q] quality-dimension criteria. " +
+                    "Required for criteria prefixed with [Q]. Score >= 9 means met, < 9 means not met.",
+                  ),
               }),
             )
-            .describe("Assessment of each acceptance criterion."),
+            .describe("Assessment of each acceptance criterion. Include score for [Q] quality criteria."),
+          artifact_content: tool.schema
+            .string()
+            .optional()
+            .describe(
+              "Fallback: the full artifact text, only needed if request_review was called without artifact_content. " +
+              "In normal flow, the artifact is already on disk from request_review — omit this field.",
+            ),
         },
         async execute(
-          args: { criteria_met: Array<{ criterion: string; met: boolean; evidence: string; severity?: "blocking" | "suggestion" }> },
+          args: { criteria_met: Array<{ criterion: string; met: boolean; evidence: string; severity?: "blocking" | "suggestion"; score?: string }>; artifact_content?: string },
           context: { directory: string; sessionId?: string; session?: { id: string } },
         ) {
           const sessionId = resolveSessionId(context)
           if (!sessionId) return "Error: Could not determine session ID from tool context."
 
-          const state = store.get(sessionId)
-          if (!state) return "Error: No workflow state for this session."
+          const state = await ensureState(store, sessionId, client)
 
           if (state.phaseState !== "REVIEW") {
             return `Error: mark_satisfied can only be called in REVIEW state (current: ${state.phaseState}).`
@@ -556,24 +734,45 @@ export const OpenArtisanPlugin: Plugin = async ({ client }: { client: any }) => 
           // to the agent's self-reported criteria (graceful degradation).
           const criteriaText = getAcceptanceCriteria(state.phase, state.phaseState, state.mode)
           const expectedBlocking = countExpectedBlockingCriteria(criteriaText)
-          let result = evaluateMarkSatisfied(args, expectedBlocking) // fallback baseline (agent self-report)
+          // Parse string scores to numbers — tool.schema has no .number() so
+          // the schema declares score as string, but MarkSatisfiedArgs expects number.
+          const parsedArgs: MarkSatisfiedArgs = {
+            criteria_met: args.criteria_met.map((c) => ({
+              criterion: c.criterion,
+              met: c.met,
+              evidence: c.evidence,
+              severity: c.severity,
+              score: c.score ? parseInt(c.score, 10) : undefined,
+            })),
+          }
+          let result = evaluateMarkSatisfied(parsedArgs, expectedBlocking) // fallback baseline (agent self-report)
 
           if (criteriaText) {
+            // resolveArtifactPaths now returns real disk paths for all phases
+            // that have written artifacts (.openartisan/). The reviewer reads
+            // files directly rather than receiving inlined content.
             const artifactPaths = resolveArtifactPaths(
               state.phase,
               state.mode,
               context.directory || process.cwd(),
               state.fileAllowlist,
+              state.artifactDiskPaths,
             )
-            // For in-memory artifact phases (DISCOVERY, PLANNING, IMPL_PLAN), pass
-            // artifact content directly so the isolated reviewer can evaluate it.
-            // DISCOVERY: conventions text is in state.conventions.
-            // PLANNING/IMPL_PLAN: artifact text is not captured — reviewer will
-            // evaluate structurally (marking criteria as unmet if evidence is missing).
-            let artifactContent: string | undefined
-            if (state.phase === "DISCOVERY" && state.conventions) {
-              artifactContent = state.conventions
-            }
+            // Upstream summary: pass the disk path to the conventions file if available,
+            // otherwise fall back to the inline conventions text (for backward compat
+            // with sessions approved before v9 disk path tracking was added).
+            const conventionsPath = state.artifactDiskPaths["conventions"]
+            const upstreamSummary = conventionsPath && existsSync(conventionsPath)
+              ? `Conventions document is at \`${conventionsPath}\`. Read it before evaluating.`
+              : (state.conventions ?? undefined)
+
+            // The artifact is now written to disk at request_review time, so artifactPaths
+            // should already contain the disk path for in-memory phases (PLANNING, DISCOVERY,
+            // IMPL_PLAN). artifact_content is only a legacy fallback for sessions where
+            // request_review was called without artifact_content.
+            const artifactContent = (artifactPaths.length === 0 && args.artifact_content)
+              ? args.artifact_content
+              : undefined
 
             let reviewResult: Awaited<ReturnType<typeof dispatchSelfReview>> | null = null
             try {
@@ -582,13 +781,21 @@ export const OpenArtisanPlugin: Plugin = async ({ client }: { client: any }) => 
                 mode: state.mode,
                 artifactPaths,
                 criteriaText,
-                ...(state.conventions ? { upstreamSummary: state.conventions } : {}),
+                ...(upstreamSummary ? { upstreamSummary } : {}),
+                // Fallback: pass artifact content only if no disk path available
                 ...(artifactContent ? { artifactContent } : {}),
+                parentSessionId: sessionId ?? undefined,
+                featureName: state.featureName,
               })
-            } catch {
+            } catch (reviewErr) {
               // dispatchSelfReview should never throw (returns SelfReviewError),
               // but guard against unexpected runtime failures. Fall through to
               // use the agent's self-report as baseline.
+              const errMsg = reviewErr instanceof Error ? reviewErr.message : String(reviewErr)
+              console.error(
+                `[open-artisan] Self-review dispatch failed unexpectedly: ${errMsg}`,
+                reviewErr instanceof Error ? reviewErr.stack : "",
+              )
             }
 
             if (reviewResult?.success) {
@@ -601,8 +808,73 @@ export const OpenArtisanPlugin: Plugin = async ({ client }: { client: any }) => 
                   met: c.met,
                   evidence: c.evidence,
                   severity: c.severity,
+                  ...(typeof c.score === "number" ? { score: c.score } : {}),
                 })),
               }, expectedBlocking)
+
+              // Agent rebuttal loop: when the review fails and we're one iteration
+              // from the escalation cap, give the agent one chance to rebut criteria
+              // that scored 7-8 (close to threshold). This avoids escalating to the
+              // user over scope disagreements the reviewer might concede.
+              const preEscalationIteration = state.iterationCount + 1 === MAX_REVIEW_ITERATIONS - 1
+              if (!result.passed && preEscalationIteration) {
+                // Find rebuttable criteria: unmet blocking with scores 7-8
+                const rebuttableCriteria = result.unmetCriteria.filter(
+                  (c) => typeof c.score === "number" && c.score >= 7 && c.score <= 8,
+                )
+                // Find agent's counterarguments for those same criteria
+                const agentCounterargs = parsedArgs.criteria_met.filter((ac) =>
+                  rebuttableCriteria.some((rc) => rc.criterion === ac.criterion) && ac.met,
+                )
+                if (rebuttableCriteria.length > 0 && agentCounterargs.length > 0) {
+                  console.log(
+                    `[open-artisan] Attempting rebuttal for ${rebuttableCriteria.length} criteria scoring 7-8`,
+                  )
+                  try {
+                    const rebuttalResult = await dispatchRebuttal(client, {
+                      phase: state.phase,
+                      mode: state.mode,
+                      reviewerVerdict: rebuttableCriteria,
+                      agentAssessment: agentCounterargs,
+                      artifactPaths,
+                      criteriaText,
+                      parentSessionId: sessionId ?? undefined,
+                      featureName: state.featureName,
+                    })
+                    if (rebuttalResult.success) {
+                      // Merge revised results: replace the disputed criteria in the
+                      // reviewer's full results with the rebuttal's revised assessments.
+                      const revisedMap = new Map(
+                        rebuttalResult.revisedResults.map((r) => [r.criterion, r]),
+                      )
+                      const mergedCriteria = reviewResult.criteriaResults.map((c) => {
+                        const revised = revisedMap.get(c.criterion)
+                        return revised ?? c
+                      })
+                      // Re-evaluate with the merged criteria
+                      result = evaluateMarkSatisfied({
+                        criteria_met: mergedCriteria.map((c) => ({
+                          criterion: c.criterion,
+                          met: c.met,
+                          evidence: c.evidence,
+                          severity: c.severity,
+                          ...(typeof c.score === "number" ? { score: c.score } : {}),
+                        })),
+                      }, expectedBlocking)
+                      if (result.passed) {
+                        console.log("[open-artisan] Rebuttal accepted — review now passes")
+                      } else {
+                        console.log("[open-artisan] Rebuttal rejected — reviewer maintained position")
+                      }
+                    }
+                    // If rebuttalResult.success === false, keep the original failing result
+                  } catch (rebuttalErr) {
+                    // Non-fatal — rebuttal failure does not change the review outcome
+                    const errMsg = rebuttalErr instanceof Error ? rebuttalErr.message : String(rebuttalErr)
+                    console.error(`[open-artisan] Rebuttal dispatch failed: ${errMsg}`)
+                  }
+                }
+              }
             }
             // If reviewResult.success === false, result keeps the agent's self-report (fallback)
           }
@@ -618,11 +890,17 @@ export const OpenArtisanPlugin: Plugin = async ({ client }: { client: any }) => 
           const outcome = sm.transition(state.phase, state.phaseState, event, state.mode)
           if (!outcome.success) return `Error: ${outcome.message}`
 
+          logTransition(state, outcome, `mark_satisfied/${event}`, client)
           await store.update(sessionId, (draft) => {
             draft.phase = outcome.nextPhase
             draft.phaseState = outcome.nextPhaseState
             draft.iterationCount = nextIterationCount
             draft.retryCount = 0
+            // Reset the user gate flag whenever we enter USER_GATE so the agent
+            // cannot reuse a stale approval signal from a previous gate.
+            if (outcome.nextPhaseState === "USER_GATE") {
+              draft.userGateMessageReceived = false
+            }
           })
 
           if (hitIterationCap) {
@@ -666,8 +944,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client }: { client: any }) => 
           const sessionId = resolveSessionId(context)
           if (!sessionId) return "Error: Could not determine session ID from tool context."
 
-          const state = store.get(sessionId)
-          if (!state) return "Error: No workflow state for this session."
+          const state = await ensureState(store, sessionId, client)
 
           if (state.phase !== "IMPLEMENTATION") {
             return `Error: mark_task_complete can only be called during the IMPLEMENTATION phase (current: ${state.phase}).`
@@ -697,7 +974,11 @@ export const OpenArtisanPlugin: Plugin = async ({ client }: { client: any }) => 
       request_review: tool({
         description:
           "Call when the current draft is complete and ready for self-review. " +
-          "Transitions to REVIEW state.",
+          "Transitions to REVIEW state. " +
+          "For in-memory phases (PLANNING, DISCOVERY conventions, IMPL_PLAN), pass the full " +
+          "artifact text in artifact_content — it will be written to .openartisan/ immediately " +
+          "so the user can read it before approving and the isolated reviewer can evaluate the " +
+          "real file. For file-based phases (INTERFACES, TESTS, IMPLEMENTATION), omit artifact_content.",
         args: {
           summary: tool.schema.string().describe(
             "Brief description of what was built in this phase.",
@@ -705,16 +986,22 @@ export const OpenArtisanPlugin: Plugin = async ({ client }: { client: any }) => 
           artifact_description: tool.schema.string().describe(
             "Description of the artifact(s) produced.",
           ),
+          artifact_content: tool.schema
+            .string()
+            .optional()
+            .describe(
+              "The full text of the artifact (required for PLANNING, DISCOVERY conventions, IMPL_PLAN). " +
+              "Written to .openartisan/ immediately so it is readable before approval.",
+            ),
         },
         async execute(
-          args: { summary: string; artifact_description: string },
+          args: { summary: string; artifact_description: string; artifact_content?: string },
           context: { directory: string; sessionId?: string; session?: { id: string } },
         ) {
           const sessionId = resolveSessionId(context)
           if (!sessionId) return "Error: Could not determine session ID from tool context."
 
-          const state = store.get(sessionId)
-          if (!state) return "Error: No workflow state for this session."
+          const state = await ensureState(store, sessionId, client)
 
           const validDraftStates = ["DRAFT", "CONVENTIONS", "REVISE"]
           if (!validDraftStates.includes(state.phaseState)) {
@@ -725,14 +1012,42 @@ export const OpenArtisanPlugin: Plugin = async ({ client }: { client: any }) => 
           const outcome = sm.transition(state.phase, state.phaseState, event, state.mode)
           if (!outcome.success) return `Error: ${outcome.message}`
 
+          logTransition(state, outcome, `request_review/${event}`, client)
+          // Write the artifact to disk immediately (before the user gate) so:
+          //   1. The user can read the real file before approving.
+          //   2. The isolated self-reviewer reads from disk (no inline content size cap).
+          //   3. On approval, the file is already in place — no re-write needed.
+          let artifactDiskPath: string | null = null
+          if (args.artifact_content) {
+            const artifactKey = PHASE_TO_ARTIFACT[state.phase]
+            if (artifactKey && artifactKey !== "implementation") {
+              try {
+                const cwd = context.directory || process.cwd()
+                artifactDiskPath = await writeArtifact(cwd, artifactKey, args.artifact_content, state.featureName)
+              } catch (writeErr) {
+                // Non-fatal — disk write failure does not block the review
+                console.error("[open-artisan] Failed to write artifact draft to disk:", writeErr)
+              }
+            }
+          }
+
           await store.update(sessionId, (draft) => {
             draft.phase = outcome.nextPhase
             draft.phaseState = outcome.nextPhaseState
             draft.retryCount = 0
+            // Record the disk path so mark_satisfied and system-transform can use it
+            if (artifactDiskPath) {
+              const artifactKey = PHASE_TO_ARTIFACT[state.phase]
+              if (artifactKey) draft.artifactDiskPaths[artifactKey] = artifactDiskPath
+            }
           })
 
+          const diskMsg = artifactDiskPath
+            ? `\n\nArtifact written to \`${artifactDiskPath}\` — the user can read it there before approving.`
+            : ""
+
           const result = processRequestReview(args)
-          return result.responseMessage + "\n\n" + result.phaseInstructions
+          return result.responseMessage + diskMsg + "\n\n" + result.phaseInstructions
         },
       }),
 
@@ -742,8 +1057,9 @@ export const OpenArtisanPlugin: Plugin = async ({ client }: { client: any }) => 
       submit_feedback: tool({
           description:
           "Record the user's response at a review gate (approve or request revision). " +
-          "For any phase approval, pass artifact_content with the full artifact text to enable drift detection. " +
-          "For PLANNING approval in INCREMENTAL mode, also pass approved_files with the file allowlist.",
+          "In the normal flow, the artifact is already on disk from request_review — you do NOT need to pass artifact_content. " +
+          "Only pass artifact_content if request_review was called without it (legacy sessions). " +
+          "For PLANNING approval in INCREMENTAL mode, pass approved_files with the file allowlist.",
         args: {
           feedback_text: tool.schema.string().describe("The user's feedback text."),
           feedback_type: tool.schema
@@ -753,9 +1069,9 @@ export const OpenArtisanPlugin: Plugin = async ({ client }: { client: any }) => 
             .string()
             .optional()
             .describe(
-              "The full text of the approved artifact at this phase. " +
-              "For DISCOVERY: pass the conventions document (required — used in all subsequent phases). " +
-              "For other phases: pass the key artifact text (plan, interface definitions, etc.) to enable drift detection.",
+              "Legacy fallback only: the full artifact text. " +
+              "In normal flow (request_review was called with artifact_content), omit this — the file is already on disk. " +
+              "Only provide this if the disk file was not written at request_review time.",
             ),
           approved_files: tool.schema
             .array(tool.schema.string())
@@ -777,8 +1093,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client }: { client: any }) => 
           const sessionId = resolveSessionId(context)
           if (!sessionId) return "Error: Could not determine session ID from tool context."
 
-          const state = store.get(sessionId)
-          if (!state) return "Error: No workflow state for this session."
+          const state = await ensureState(store, sessionId, client)
 
           if (state.phaseState !== "USER_GATE") {
             return `Error: submit_feedback can only be called at USER_GATE (current: ${state.phaseState}).`
@@ -787,9 +1102,21 @@ export const OpenArtisanPlugin: Plugin = async ({ client }: { client: any }) => 
           const result = processSubmitFeedback(args)
 
           if (result.feedbackType === "approve") {
+            // Block self-approval: the agent cannot approve its own work. A real
+            // Soft check: warn if chat.message hook has not confirmed a user message at this
+            // USER_GATE. This can happen on session resume after restart (the hook doesn't
+            // fire retroactively) or in rare race conditions. We allow approval to proceed
+            // with a warning rather than blocking — a false positive rejection here is worse
+            // than a false negative (the agent can only reach USER_GATE after self-review pass,
+            // and the routing hint tells it to call submit_feedback only on user input).
+            const approvalWarning = !state.userGateMessageReceived
+              ? "\n\n**Note:** Approval recorded without a confirmed user message via chat.message hook (possible session resume). If no real user message was received, the user may need to re-confirm."
+              : ""
+
             const outcome = sm.transition(state.phase, state.phaseState, "user_approve", state.mode)
             if (!outcome.success) return `Error: ${outcome.message}`
 
+            logTransition(state, outcome, "submit_feedback/approve", client)
             // Git checkpoint — use per-phase approval count for tag versioning (M11)
             const phaseCount = (state.phaseApprovalCounts[state.phase] ?? 0) + 1
             const newApprovalCount = state.approvalCount + 1
@@ -801,6 +1128,23 @@ export const OpenArtisanPlugin: Plugin = async ({ client }: { client: any }) => 
               checkpointOpts,
             )
 
+            // S_DISK: Ensure artifact is on disk before recording the approved path.
+            // In the new flow, the file was already written at request_review time.
+            // We re-write only if artifact_content is provided AND no disk path exists yet
+            // (backward compat for sessions started before this change, or for file-based phases
+            // where the agent didn't call request_review with artifact_content).
+            const artifactKey = PHASE_TO_ARTIFACT[state.phase]
+            let artifactDiskPath: string | null = state.artifactDiskPaths[artifactKey ?? ""] ?? null
+            if (!artifactDiskPath && args.artifact_content && artifactKey && artifactKey !== "implementation") {
+              try {
+                const cwd = context.directory || process.cwd()
+                artifactDiskPath = await writeArtifact(cwd, artifactKey, args.artifact_content, state.featureName)
+              } catch (writeErr) {
+                // Non-fatal — disk write failure does not block the approval
+                console.error("[open-artisan] Failed to write artifact to disk:", writeErr)
+              }
+            }
+
             await store.update(sessionId, (draft) => {
               draft.phase = outcome.nextPhase
               draft.phaseState = outcome.nextPhaseState
@@ -808,12 +1152,22 @@ export const OpenArtisanPlugin: Plugin = async ({ client }: { client: any }) => 
               draft.phaseApprovalCounts[state.phase] = phaseCount
               draft.iterationCount = 0
               draft.retryCount = 0
+              // Reset after approval — the next USER_GATE starts fresh.
+              draft.userGateMessageReceived = false
               if (checkpointResult.success) {
                 draft.lastCheckpointTag = checkpointResult.tag
               }
-              // S1: Capture conventions document at DISCOVERY approval
-              if (state.phase === "DISCOVERY" && args.artifact_content) {
-                draft.conventions = args.artifact_content
+              // S1: Capture conventions document at DISCOVERY approval.
+              // Prefer artifact_content if passed; fall back to reading the disk file
+              // (written at request_review time). If neither is available, conventions stays null.
+              if (state.phase === "DISCOVERY") {
+                if (args.artifact_content) {
+                  draft.conventions = args.artifact_content
+                } else if (artifactDiskPath) {
+                  // conventions will be read from disk by system-transform (path is recorded below)
+                  // We set conventions to a sentinel so downstream code knows it's on disk
+                  draft.conventions = null  // system-transform uses artifactDiskPaths["conventions"]
+                }
               }
               // S2: Capture file allowlist at PLANNING approval in INCREMENTAL mode
               if (state.phase === "PLANNING" && state.mode === "INCREMENTAL" && args.approved_files) {
@@ -824,11 +1178,14 @@ export const OpenArtisanPlugin: Plugin = async ({ client }: { client: any }) => 
               // If not provided, record a time-based sentinel so the artifact key is at least
               // marked as "approved at this point" — prevents approvedArtifacts from being
               // permanently empty for file-based phases (PLANNING, INTERFACES, TESTS, etc.).
-              const artifactKey = PHASE_TO_ARTIFACT[state.phase]
               if (artifactKey) {
                 draft.approvedArtifacts[artifactKey] = args.artifact_content
                   ? artifactHash(args.artifact_content)
                   : `approved-at-${Date.now()}`
+              }
+              // S_DISK_PATH: Record the disk path for use by resolveArtifactPaths and system-transform
+              if (artifactDiskPath && artifactKey) {
+                draft.artifactDiskPaths[artifactKey] = artifactDiskPath
               }
               // S4: Layer 4 — Parse IMPL_PLAN into DAG at IMPL_PLAN approval.
               // The sequential scheduler uses this DAG to find the next ready task
@@ -859,11 +1216,11 @@ export const OpenArtisanPlugin: Plugin = async ({ client }: { client: any }) => 
               checkpointMsg = ` (Git checkpoint failed: ${checkpointResult.error})`
             }
 
-            // Warn if DISCOVERY approved without providing the conventions document —
-            // all downstream phases rely on conventions for consistent guidance.
+            // Warn if DISCOVERY approved without conventions document on disk or inline.
+            // All downstream phases rely on conventions for consistent guidance.
             const discoveryWarning =
-              state.phase === "DISCOVERY" && !args.artifact_content
-                ? "\n\n**Warning:** No `artifact_content` provided. The conventions document will be null — downstream phases will receive no conventions context. Re-call `submit_feedback` with the conventions summary, or proceed knowing convention injection is disabled."
+              state.phase === "DISCOVERY" && !args.artifact_content && !artifactDiskPath
+                ? "\n\n**Warning:** No conventions document available (neither `artifact_content` provided nor written to disk via `request_review`). Downstream phases will receive no conventions context. Re-call `submit_feedback` with `artifact_content`, or proceed knowing convention injection is disabled."
                 : ""
 
             // Warn if IMPL_PLAN approved without artifact_content or with a DAG parse failure —
@@ -880,7 +1237,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client }: { client: any }) => 
               }
             }
 
-            return result.responseMessage + checkpointMsg + discoveryWarning + implPlanWarning
+            return result.responseMessage + checkpointMsg + discoveryWarning + implPlanWarning + approvalWarning
 
           } else {
             // N3 fix: mode must be set before revision routing
@@ -929,6 +1286,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client }: { client: any }) => 
             if (!validStates || !validStates.includes("REVISE")) {
               return `Error: Orchestrator routed to invalid phase "${handlerOutcome.targetPhase}" which does not support REVISE.`
             }
+            logTransition(state, { phase: handlerOutcome.targetPhase, phaseState: "REVISE" }, "submit_feedback/revise", client)
             await store.update(sessionId, (draft) => {
               draft.phase = handlerOutcome.targetPhase
               draft.phaseState = "REVISE"

@@ -31,6 +31,9 @@ function makeState(overrides: Partial<WorkflowState> = {}): WorkflowState {
     pendingRevisionSteps: null,
     currentTaskId: null,
     feedbackHistory: [],
+    userGateMessageReceived: false,
+    artifactDiskPaths: {},
+    featureName: null,
     ...overrides,
   }
 }
@@ -194,6 +197,7 @@ describe("buildUserGateHint", () => {
   it("instructs agent not to proceed without calling submit_feedback", () => {
     const hint = buildUserGateHint("PLANNING", "USER_GATE")
     expect(hint).toContain("submit_feedback")
-    expect(hint.toLowerCase()).toContain("wait")
+    // The hint should strongly enforce immediate routing — either via "wait" or "first and only"
+    expect(hint.toLowerCase()).toMatch(/first and only|do not|mandatory|immediate/)
   })
 })

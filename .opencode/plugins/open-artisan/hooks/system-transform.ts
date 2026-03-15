@@ -12,6 +12,7 @@
  * - What the agent should do next
  */
 import { join } from "node:path"
+import { existsSync } from "node:fs"
 import type { WorkflowState, Phase, PhaseState, WorkflowMode } from "../types"
 import { MAX_CONVENTIONS_CHARS, MAX_REPORT_CHARS } from "../utils"
 import { createImplDAG } from "../dag"
@@ -88,6 +89,9 @@ function buildStateHeader(state: WorkflowState): string {
   lines.push("")
   lines.push(`**Phase:** ${state.phase} / **Sub-state:** ${state.phaseState}`)
   lines.push(`**Mode:** ${state.mode ?? "not yet selected"}`)
+  if (state.featureName) {
+    lines.push(`**Feature:** ${state.featureName} → artifacts at \`.openartisan/${state.featureName}/\``)
+  }
 
   const progress = phaseProgress(state.phase, state.mode)
   if (progress) {
@@ -134,21 +138,24 @@ function buildStateHeader(state: WorkflowState): string {
   }
 
   // Conventions document injection
-  // NOTE: The full conventions document is injected on every LLM call for the remainder
-  // of the session. For very large conventions documents this is wasteful, but keeping
-  // state consistent across the session matters more than token savings.
-  // TODO (optimization): if conventions exceeds ~3000 tokens, summarize it once at
-  // approval time and inject the summary instead of the full text.
-  // Cap at MAX_CONVENTIONS_CHARS to prevent extreme context blowup.
+  // If the conventions file has been written to disk, instruct the agent to read it
+  // rather than embedding the full text inline (avoids truncation in long contexts).
   if (state.conventions && state.mode !== "GREENFIELD") {
-    const text = state.conventions.length > MAX_CONVENTIONS_CHARS
-      ? state.conventions.slice(0, MAX_CONVENTIONS_CHARS) +
-        `\n\n[... conventions truncated at ${MAX_CONVENTIONS_CHARS} chars to conserve context ...]`
-      : state.conventions
+    const conventionsPath = state.artifactDiskPaths?.["conventions"]
     lines.push("### Conventions Document (from Discovery Phase)")
     lines.push("The following conventions are MANDATORY. Treat them as hard requirements.")
     lines.push("")
-    lines.push(text)
+    if (conventionsPath && existsSync(conventionsPath)) {
+      lines.push(`The approved conventions document is saved at \`${conventionsPath}\`.`)
+      lines.push("**Read this file now** before doing any work. It contains binding constraints.")
+    } else {
+      // Fallback: inline injection for sessions pre-dating disk path tracking (v8 → v9 migration)
+      const text = state.conventions.length > MAX_CONVENTIONS_CHARS
+        ? state.conventions.slice(0, MAX_CONVENTIONS_CHARS) +
+          `\n\n[... conventions truncated at ${MAX_CONVENTIONS_CHARS} chars — read the full file for complete constraints ...]`
+        : state.conventions
+      lines.push(text)
+    }
     lines.push("")
   }
 
@@ -170,15 +177,115 @@ function buildStateHeader(state: WorkflowState): string {
 // Acceptance criteria (design doc §11) — injected at REVIEW state only
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Quality criteria — six dimensions scored 1-10, minimum 9/10 to pass
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns the quality-dimension criteria block for a given phase.
+ * Each [Q] criterion is a blocking criterion that requires a numeric score.
+ * Score >= 9/10 → passes. Score < 9 → fails (must revise and re-review).
+ *
+ * The seven quality dimensions (applied to every phase):
+ *   1. Design excellence — elegance, simplicity, appropriate patterns
+ *   2. Architectural cohesion — internal consistency, clear boundaries, no contradictions
+ *   3. Vision alignment — fidelity to user's original intent AND upstream approved artifacts
+ *   4. Completeness — no gaps, nothing left implicit that should be explicit
+ *   5. Readiness for execution — could the next phase proceed without questions?
+ *   6. Security standards — auth, input validation, secrets handling, least privilege
+ *   7. Operational excellence — observability, error recovery, deployment, monitoring
+ */
+function getQualityCriteria(phase: Phase): string {
+  const descriptions: Record<Phase, Record<string, string>> = {
+    MODE_SELECT: {} as Record<string, string>, // unreachable
+    DONE: {} as Record<string, string>,        // unreachable
+    DISCOVERY: {
+      "Design excellence": "Conventions document is well-structured, clear, and actionable — not a raw dump of observations",
+      "Architectural cohesion": "Conventions are internally consistent — no contradictory rules, clear hierarchy of importance",
+      "Vision alignment": "Conventions accurately reflect what the user asked to build — discovery findings are relevant to the stated intent, not generic boilerplate",
+      "Completeness": "No significant codebase convention is missing — naming, error handling, testing, imports, file org all covered",
+      "Readiness for execution": "A developer unfamiliar with the codebase could follow these conventions without asking questions",
+      "Security standards": "Security-relevant conventions identified — auth patterns, secret handling, input validation, dependency policies",
+      "Operational excellence": "Logging, monitoring, and deployment conventions documented where they exist in the codebase",
+    },
+    PLANNING: {
+      "Design excellence": "Plan is elegant and well-reasoned — chosen approaches are appropriate, not over-engineered or under-designed",
+      "Architectural cohesion": "All components fit together coherently — no contradictions between sections, consistent terminology throughout",
+      "Vision alignment": "Every design decision traces back to the user's original intent — no scope creep, no dropped requirements, and conventions document (if approved) is respected",
+      "Completeness": "Every requirement is addressed, every integration specified, every failure mode covered — no implicit assumptions",
+      "Readiness for execution": "An engineer could begin implementing interfaces directly from this plan without needing clarification",
+      "Security standards": "Auth flows, data protection, secrets management, input validation, and least-privilege access are explicitly designed",
+      "Operational excellence": "Monitoring, alerting, logging strategy, deployment pipeline, rollback plan, and incident response are covered",
+    },
+    INTERFACES: {
+      "Design excellence": "Interfaces are clean, minimal, and well-named — appropriate abstractions, no god objects or leaky abstractions",
+      "Architectural cohesion": "Interfaces align with the plan's architecture — module boundaries match, naming is consistent end-to-end",
+      "Vision alignment": "Interfaces faithfully realize the approved plan — every planned component has corresponding types, no interfaces exist that weren't planned, conventions are followed",
+      "Completeness": "Every data model, every API endpoint, every error type, every enum is fully specified — no gaps",
+      "Readiness for execution": "A developer can write tests and implementations against these interfaces without ambiguity",
+      "Security standards": "Auth interfaces defined, input validation types specified, sensitive data marked, error types don't leak internals",
+      "Operational excellence": "Health check interfaces, metrics types, log event types, and configuration interfaces specified",
+    },
+    TESTS: {
+      "Design excellence": "Tests are well-structured, readable, and follow established patterns — clear arrange/act/assert",
+      "Architectural cohesion": "Test organization mirrors the interface structure — easy to find the test for any interface method",
+      "Vision alignment": "Tests validate the behaviors the user actually requested — happy paths match the plan's use cases, edge cases reflect the plan's failure modes, not invented scenarios",
+      "Completeness": "Every interface method tested, every error path covered, every edge case considered",
+      "Readiness for execution": "Tests will compile and run (expect failures) once implementations exist — no missing setup or imports",
+      "Security standards": "Auth failure paths tested, input validation boundaries tested, privilege escalation scenarios covered",
+      "Operational excellence": "Error handling tests verify correct log output, tests for retry/timeout behavior, degradation paths tested",
+    },
+    IMPL_PLAN: {
+      "Design excellence": "DAG structure is logical and efficient — minimal critical path, appropriate parallelism, clean task boundaries",
+      "Architectural cohesion": "Tasks align with the interface and plan structure — no task crosses module boundaries unnecessarily",
+      "Vision alignment": "Every task traces to a planned feature or requirement — no gold-plating tasks, no missing tasks for approved interfaces, task priorities reflect the user's stated priorities",
+      "Completeness": "Every interface method has a task, every dependency is explicit, every merge point identified",
+      "Readiness for execution": "A developer can pick up any ready task and implement it without needing context beyond the task description",
+      "Security standards": "Security-critical tasks identified and ordered correctly — auth before features, validation before processing",
+      "Operational excellence": "Infrastructure and monitoring tasks included in the DAG — not deferred as afterthoughts",
+    },
+    IMPLEMENTATION: {
+      "Design excellence": "Code is clean, idiomatic, and well-structured — follows SOLID principles, appropriate patterns for the language",
+      "Architectural cohesion": "Implementation matches interfaces exactly, follows plan architecture, respects module boundaries",
+      "Vision alignment": "Code delivers exactly what the user requested — no feature drift, no missing functionality from the plan, conventions followed, and all upstream artifacts (plan, interfaces, tests) are faithfully realized",
+      "Completeness": "All interface methods implemented, all tests passing, no stubs or placeholder code",
+      "Readiness for execution": "Code is production-ready — no TODOs, no debug code, no hardcoded values that should be configured",
+      "Security standards": "Auth implemented correctly, inputs validated, secrets not hardcoded, error messages don't leak internals",
+      "Operational excellence": "Logging at appropriate levels, metrics emitted, health checks work, graceful degradation implemented",
+    },
+  }
+
+  const dims = descriptions[phase]
+  if (!dims || Object.keys(dims).length === 0) return ""
+
+  const lines: string[] = [
+    `**Quality criteria (blocking — each scored 1-10, minimum 9/10 to pass):**`,
+    `For each [Q] criterion below, provide a numeric \`score\` (1-10) and evidence justifying the score.`,
+    `A score below 9 means the criterion is NOT met and the artifact must be improved before advancing.`,
+    `Be a harsh critic — 9/10 means excellent with at most minor nits. 10/10 means flawless.`,
+    ``,
+  ]
+  let n = 1
+  for (const [dim, desc] of Object.entries(dims)) {
+    lines.push(`${n}. [Q] **${dim}** — ${desc}`)
+    n++
+  }
+
+  return lines.join("\n")
+}
+
 /**
  * Returns the structured acceptance criteria checklist for the given phase/mode.
  * These are the exact criteria the agent must evaluate in mark_satisfied.
  *
  * Format: each criterion is a string. The agent maps each to a CriterionResult.
  * Criteria marked [S] are suggestions (non-blocking); all others are blocking.
+ * Criteria marked [Q] require a numeric score (1-10) with minimum 9/10.
  */
 export function getAcceptanceCriteria(phase: Phase, phaseState: PhaseState, mode: WorkflowMode | null): string | null {
   if (phaseState !== "REVIEW") return null
+
+  const qualityBlock = getQualityCriteria(phase)
 
   switch (phase) {
     case "DISCOVERY":
@@ -186,6 +293,7 @@ export function getAcceptanceCriteria(phase: Phase, phaseState: PhaseState, mode
 
 Evaluate each criterion independently. For each, state whether it is met (true/false),
 provide specific evidence (quote or file reference), and mark severity (blocking/suggestion).
+For [Q] quality criteria, provide a score from 1 to 10. Minimum passing score is 9/10.
 
 **Blocking criteria (must all pass to advance):**
 1. Existing architecture accurately described — module boundaries, key abstractions, data flow
@@ -195,6 +303,8 @@ provide specific evidence (quote or file reference), and mark severity (blocking
 5. Migration path is feasible and incremental (not "rewrite everything")
 6. Risk areas identified — high coupling, no test coverage, complex state machines
 
+${qualityBlock}
+
 **Suggestion criteria (non-blocking):**
 - [S] Contributor patterns from git history noted
 - [S] Existing docs (AGENTS.md, CONTRIBUTING.md) incorporated`
@@ -203,6 +313,7 @@ provide specific evidence (quote or file reference), and mark severity (blocking
 
 Evaluate each criterion independently. For each, state whether it is met (true/false),
 provide specific evidence (quote or file reference), and mark severity (blocking/suggestion).
+For [Q] quality criteria, provide a score from 1 to 10. Minimum passing score is 9/10.
 
 **Blocking criteria (must all pass to advance):**
 1. Existing architecture accurately described — module boundaries, dependency directions
@@ -212,6 +323,8 @@ provide specific evidence (quote or file reference), and mark severity (blocking
 5. Import patterns documented — relative vs absolute, barrel files, module aliases
 6. File organization documented — where new files of each type should go
 7. Existing constraints listed — files/directories that must NOT be touched (from AGENTS.md / CONTRIBUTING.md)
+
+${qualityBlock}
 
 **Suggestion criteria (non-blocking):**
 - [S] Git history activity patterns noted (hot files, recent areas of change)
@@ -223,6 +336,7 @@ provide specific evidence (quote or file reference), and mark severity (blocking
 
 Evaluate each criterion independently. For each, state whether it is met (true/false),
 provide specific evidence, and mark severity (blocking/suggestion).
+For [Q] quality criteria, provide a score from 1 to 10. Minimum passing score is 9/10.
 
 **Blocking criteria (must all pass to advance):**
 1. All user requirements explicitly addressed — nothing from the original request is omitted
@@ -233,6 +347,8 @@ provide specific evidence, and mark severity (blocking/suggestion).
 6. Data model described — key entities, relationships, constraints, lifecycle
 7. Integration points identified — external systems, APIs, databases, filesystem interactions
 
+${qualityBlock}
+
 **Suggestion criteria (non-blocking):**
 - [S] Non-functional requirements addressed (performance targets, security, scalability)
 - [S] Decisions documented with rationale (why this approach over alternatives)`
@@ -241,6 +357,7 @@ provide specific evidence, and mark severity (blocking/suggestion).
 
 Evaluate each criterion independently. For each, state whether it is met (true/false),
 provide specific evidence (file path and line), and mark severity (blocking/suggestion).
+For [Q] quality criteria, provide a score from 1 to 10. Minimum passing score is 9/10.
 
 **Blocking criteria (must all pass to advance):**
 1. Every function/method has input types, output types, and error types — no \`any\`, no missing types
@@ -251,6 +368,8 @@ provide specific evidence (file path and line), and mark severity (blocking/sugg
 6. Consistent error handling pattern across all interfaces
 7. CRUD operations: for every data model, create/read/update/delete operations are specified (where applicable)
 
+${qualityBlock}
+
 **Suggestion criteria (non-blocking):**
 - [S] Validation constraints specified for inputs with ranges, formats, or invariants
 - [S] JSDoc / docstring comments on all public interfaces`
@@ -259,6 +378,7 @@ provide specific evidence (file path and line), and mark severity (blocking/sugg
 
 Evaluate each criterion independently. For each, state whether it is met (true/false),
 provide specific evidence (test names, counts), and mark severity (blocking/suggestion).
+For [Q] quality criteria, provide a score from 1 to 10. Minimum passing score is 9/10.
 
 **Blocking criteria (must all pass to advance):**
 1. At least one test per interface method/function
@@ -269,6 +389,8 @@ provide specific evidence (test names, counts), and mark severity (blocking/sugg
 6. Test descriptions map directly to interface specifications
 7. Tests import from interfaces, not from implementations
 
+${qualityBlock}
+
 **Suggestion criteria (non-blocking):**
 - [S] Each test is independently runnable (no shared state between tests)
 - [S] Concurrency/race condition tests where applicable`
@@ -277,6 +399,7 @@ provide specific evidence (test names, counts), and mark severity (blocking/sugg
 
 Evaluate each criterion independently. For each, state whether it is met (true/false),
 provide specific evidence (task IDs, interface names), and mark severity (blocking/suggestion).
+For [Q] quality criteria, provide a score from 1 to 10. Minimum passing score is 9/10.
 
 **Blocking criteria (must all pass to advance):**
 1. Every interface method is covered by at least one task
@@ -284,6 +407,8 @@ provide specific evidence (task IDs, interface names), and mark severity (blocki
 3. Parallelizable tasks have no shared mutable state (no shared files, no shared DB rows)
 4. Merge points explicitly identified where parallel branches converge
 5. Expected test outcomes specified per task (which tests become green)
+
+${qualityBlock}
 
 **Suggestion criteria (non-blocking):**
 - [S] Complexity estimates assigned per task (small/medium/large)
@@ -293,6 +418,7 @@ provide specific evidence (task IDs, interface names), and mark severity (blocki
 
 Evaluate each criterion independently. For each, state whether it is met (true/false),
 provide specific evidence (file paths, test outputs), and mark severity (blocking/suggestion).
+For [Q] quality criteria, provide a score from 1 to 10. Minimum passing score is 9/10.
 
 **Blocking criteria (must all pass to advance):**
 1. Implementation matches approved interface signatures exactly — no deviations
@@ -300,6 +426,8 @@ provide specific evidence (file paths, test outputs), and mark severity (blockin
 3. No regressions in previously-passing tests
 4. No scope creep — only what the plan specifies is implemented
 5. Consistent with all prior approved artifacts (plan, interfaces, conventions)
+
+${qualityBlock}
 
 **Suggestion criteria (non-blocking):**
 - [S] Code follows existing naming and style conventions
@@ -370,7 +498,11 @@ function buildSubStateContext(state: WorkflowState): string {
     lines.push("- **INCREMENTAL** — Existing project where you want to add or fix specific functionality (do-no-harm).")
     lines.push("")
     lines.push("The auto-detection suggestion (if shown above) is advisory — you can override it.")
-    lines.push("Call `select_mode` with the chosen mode to begin.")
+    lines.push("")
+    lines.push("Call `select_mode` with the chosen mode AND a `feature_name`.")
+    lines.push("The `feature_name` is **required** — derive a short kebab-case slug from the user's request")
+    lines.push("(e.g. 'cloud-cost-platform', 'auth-refactor', 'fix-billing-bug').")
+    lines.push("All artifacts will be written to `.openartisan/<feature_name>/`.")
     return lines.join("\n")
   }
 
@@ -393,18 +525,25 @@ function buildSubStateContext(state: WorkflowState): string {
     case "CONVENTIONS":
       lines.push("You are drafting the conventions document.")
       lines.push("When the draft is complete, call `request_review`.")
-      // Inject discovery fleet report if available
+      // Inject discovery fleet report reference if available
       if (state.discoveryReport) {
         lines.push("")
         lines.push("### Discovery Fleet Report")
         lines.push("The following was gathered by parallel scanner subagents. Use it as your primary source for the conventions draft.")
         lines.push("")
-        const report = state.discoveryReport
-        lines.push(
-          report.length > MAX_REPORT_CHARS
-            ? report.slice(0, MAX_REPORT_CHARS) + `\n\n[... discovery report truncated at ${MAX_REPORT_CHARS} chars ...]`
-            : report,
-        )
+        const reportPath = state.artifactDiskPaths?.["discovery_report" as keyof typeof state.artifactDiskPaths]
+        if (reportPath && existsSync(reportPath as string)) {
+          lines.push(`The discovery fleet report is saved at \`${reportPath}\`.`)
+          lines.push("**Read this file now** — it contains the full codebase analysis from all 6 scanner subagents.")
+        } else {
+          // Fallback: inline for sessions pre-dating disk path tracking
+          const report = state.discoveryReport
+          lines.push(
+            report.length > MAX_REPORT_CHARS
+              ? report.slice(0, MAX_REPORT_CHARS) + `\n\n[... discovery report truncated at ${MAX_REPORT_CHARS} chars — the .openartisan/${state.featureName ? state.featureName + "/" : ""}discovery-report.md file contains the full report ...]`
+              : report,
+          )
+        }
       }
       break
     case "DRAFT":
@@ -443,26 +582,56 @@ function buildSubStateContext(state: WorkflowState): string {
       lines.push("If any blocking criterion is not met, address it first, then call `mark_satisfied` again.")
       lines.push("If a blocking issue is caused by an upstream artifact (e.g. plan, interfaces, conventions),")
       lines.push("note it in the evidence and mark it unmet — it will escalate to the user after repeated failures.")
+      // Remind the agent where the artifact lives so it can verify claims
+      {
+        const artifactKey = state.phase === "DISCOVERY" ? "conventions"
+          : state.phase === "PLANNING" ? "plan"
+          : state.phase === "IMPL_PLAN" ? "impl-plan"
+          : null
+        const diskPath = artifactKey ? state.artifactDiskPaths?.[artifactKey as keyof typeof state.artifactDiskPaths] : null
+        if (diskPath && existsSync(diskPath as string)) {
+          lines.push("")
+          lines.push(`**Artifact location:** \`${diskPath}\` — read this file to verify your criteria assessments.`)
+          lines.push("Do NOT pass `artifact_content` to `mark_satisfied` — the reviewer reads the file directly.")
+        }
+      }
       break
     case "USER_GATE":
       if (state.escapePending) {
         lines.push("**ESCAPE HATCH ACTIVE** — A strategic change was detected.")
         lines.push("The escape hatch presentation has been shown to the user.")
-        lines.push("Wait for the user's response: `accept`, a description of alternative direction, or `abort`.")
-        lines.push("Call `submit_feedback` with their response to resolve the escape hatch.")
+        lines.push("**MANDATORY:** Call `submit_feedback` as your FIRST and ONLY tool call with the user's response.")
+        lines.push("The user's response is one of: `accept`, a description of alternative direction, or `abort`.")
+        lines.push("Do NOT perform any research, analysis, or other tool calls before calling `submit_feedback`.")
         lines.push("Do NOT proceed with any work until the escape hatch is resolved.")
       } else {
-        lines.push("The artifact is ready for user review.")
-        lines.push("Present a clear summary of what was produced, key decisions made, and any tradeoffs.")
-        lines.push("Wait for the user's response. Do NOT proceed until they respond via `submit_feedback`.")
-        lines.push("Do NOT simulate approval — wait for the actual user message.")
+        lines.push("The artifact is awaiting user approval.")
+        lines.push("")
+        lines.push("**MANDATORY PROTOCOL — READ CAREFULLY:**")
+        lines.push("1. The user's message IS their response to the artifact.")
+        lines.push("2. Your FIRST and ONLY tool call must be `submit_feedback`.")
+        lines.push("3. Do NOT do research, searches, analysis, or any other tool calls first.")
+        lines.push("4. Do NOT rewrite, improve, or re-review the artifact before routing the feedback.")
+        lines.push("5. If the user approves → call `submit_feedback(feedback_type='approve', ...)`.")
+        lines.push("6. If the user requests changes → call `submit_feedback(feedback_type='revise', ...)`.")
+        lines.push("7. Capture the user's message verbatim in `feedback_text`.")
+        lines.push("")
+        lines.push("Violating this protocol (doing work before calling `submit_feedback`) corrupts the workflow state.")
       }
       break
     case "REVISE":
-      lines.push("You are revising the artifact based on feedback.")
-      lines.push("Make targeted, incremental changes only. Do NOT rewrite from scratch.")
-      lines.push("Preserve all prior approved decisions. Only change what the feedback specifically addresses.")
-      lines.push("When revision is complete, call `request_review`.")
+      lines.push("You are in REVISE state. Apply the feedback and call `request_review` — no check-ins needed.")
+      lines.push("")
+      lines.push("**MANDATORY PROTOCOL — REVISE IS AUTONOMOUS:**")
+      lines.push("1. Apply ALL feedback points from the last `submit_feedback` call.")
+      lines.push("2. Make targeted, incremental changes only. Do NOT rewrite from scratch.")
+      lines.push("3. Preserve all prior approved decisions. Only change what the feedback specifically addresses.")
+      lines.push("4. When ALL changes are made, call `request_review` with the full revised artifact in `artifact_content`.")
+      lines.push("5. Do NOT ask the user for confirmation before calling `request_review`.")
+      lines.push("6. Do NOT ask 'Shall I proceed?' or 'Ready to review?' — just call `request_review`.")
+      lines.push("7. Do NOT present a summary and wait — finish the work and call the tool.")
+      lines.push("")
+      lines.push("The next human interaction point is USER_GATE after review passes. Until then, proceed autonomously.")
       break
   }
 

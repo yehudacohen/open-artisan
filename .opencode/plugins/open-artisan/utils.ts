@@ -44,49 +44,70 @@ export function withTimeout<T>(promise: Promise<T>, ms: number, label: string): 
 /**
  * Extracts text content from a client.session.prompt() result.
  *
- * The result shape varies by OpenCode version — this probes common shapes:
- *   1. { parts: [{ type: "text", text: "..." }] }
- *   2. { text: "..." }
- *   3. { content: "..." }
- *   4. { output: "..." }
+ * v1 SDK returns: { data: { info: AssistantMessage, parts: Part[] }, request, response }
+ * We extract the first TextPart (type === "text") from data.parts.
  *
  * Throws if no text can be extracted.
  *
- * @param result - Raw prompt result from client.session.prompt()
+ * @param result - Raw prompt result from client.session.prompt() (SDK envelope)
  * @param label  - Human-readable label for error messages (e.g. "self-review")
  */
 export function extractTextFromPromptResult(result: unknown, label = "prompt"): string {
   if (!result || typeof result !== "object") throw new Error(`Empty ${label} result`)
+  // v2 SDK returns { data: { info, parts: Part[] }, request, response }
   const r = result as Record<string, unknown>
-  if (Array.isArray(r["parts"])) {
-    for (const p of r["parts"] as Array<{ type?: string; text?: string }>) {
+  const data = (r["data"] ?? r) as Record<string, unknown>
+  if (Array.isArray(data["parts"])) {
+    for (const p of data["parts"] as Array<{ type?: string; text?: string }>) {
       if (p.type === "text" && typeof p.text === "string") return p.text
     }
   }
-  if (typeof r["text"] === "string") return r["text"]
-  if (typeof r["content"] === "string") return r["content"]
-  if (typeof r["output"] === "string") return r["output"]
   throw new Error(`Cannot extract text from ${label} result: ${JSON.stringify(result).slice(0, 200)}`)
+}
+
+/**
+ * Extracts a JSON object from a text string that may contain markdown code fences.
+ *
+ * The LLM sometimes wraps JSON in ```json ... ``` or ``` ... ``` blocks.
+ * This helper strips those fences and returns the raw JSON string, ready for JSON.parse().
+ *
+ * Strategy (in order):
+ *   1. Try to extract content from a ```json ... ``` or ``` ... ``` block
+ *   2. Try to find a bare {...} block (the outermost braces)
+ *   3. Return the original string as-is (let JSON.parse fail with a clear error)
+ *
+ * @param text - Raw LLM output text
+ * @returns JSON string (without fences), suitable for JSON.parse()
+ */
+export function extractJsonFromText(text: string): string {
+  // 1. Markdown code fence: ```json ... ``` or ``` ... ```
+  const fenceMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/)
+  if (fenceMatch) return fenceMatch[1].trim()
+
+  // 2. Bare outermost braces
+  const braceStart = text.indexOf("{")
+  const braceEnd = text.lastIndexOf("}")
+  if (braceStart !== -1 && braceEnd > braceStart) return text.slice(braceStart, braceEnd + 1)
+
+  // 3. Fallback — return as-is
+  return text.trim()
 }
 
 /**
  * Extracts a session ID from a client.session.create() response.
  *
- * Probes common SDK response shapes:
- *   1. { id: "..." }
- *   2. { sessionId: "..." }
- *   3. { session_id: "..." }
+ * v1 SDK returns: { data: Session, request, response } where Session has id: string.
  *
- * @param response - Raw response object from client.session.create()
+ * @param response - Raw response object from client.session.create() (SDK envelope)
  * @param label - Human-readable label for error messages
  * @returns The session ID string, or throws if not found
  */
 export function extractEphemeralSessionId(response: unknown, label = "session"): string {
   if (!response || typeof response !== "object") throw new Error(`${label}: empty session.create() response`)
+  // SDK returns { data: Session, request, response } where Session has id: string
   const r = response as Record<string, unknown>
-  const id = (r["id"] as string | undefined) ??
-    (r["sessionId"] as string | undefined) ??
-    (r["session_id"] as string | undefined)
+  const data = (r["data"] ?? r) as Record<string, unknown>
+  const id = data["id"] as string | undefined
   if (!id) throw new Error(`${label}: could not extract session ID from session.create() response`)
   return id
 }

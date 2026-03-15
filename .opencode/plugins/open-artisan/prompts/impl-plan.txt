@@ -29,9 +29,12 @@ For each task:
 
 **DRAFT** — Produce the DAG as a structured markdown document with a task table.
   No code. No file writes.
-  When the draft is complete, call `request_review`.
+  When the draft is complete, call `request_review` with the full impl plan text in `artifact_content`.
+  This writes it to `.openartisan/impl-plan.md` immediately — the user can read it there.
 
 **REVIEW** — (Isolated self-review validates DAG structure and coverage)
+  Call `mark_satisfied` with your per-criterion assessment.
+  The isolated reviewer reads `.openartisan/impl-plan.md` directly — do NOT pass `artifact_content` here.
 
 **USER_GATE** — Present the implementation plan for user approval.
   Summarize: total tasks, parallel groups, critical path, expected test outcomes per task.

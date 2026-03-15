@@ -87,8 +87,11 @@ export type ArtifactKey =
  *   v5: added implDag (serialized DAG from approved IMPL_PLAN artifact)
  *   v6: added currentTaskId (active DAG task pointer), feedbackHistory (accumulated drift tracking)
  *   v7: added phaseApprovalCounts (per-phase approval counter for tag versioning)
+ *   v8: added userGateMessageReceived (prevents agent from self-approving without real user input)
+ *   v9: added artifactDiskPaths (absolute paths of artifact files written to .openartisan/ dir)
+ *   v10: added featureName (subdirectory under .openartisan/ for multi-feature isolation)
  */
-export const SCHEMA_VERSION = 7
+export const SCHEMA_VERSION = 10
 
 export interface WorkflowState {
   /** Schema version for forward-compatibility. Must equal SCHEMA_VERSION. */
@@ -208,6 +211,35 @@ export interface WorkflowState {
    * Only set when escapePending is true. Cleared after the plan is executed or aborted.
    */
   pendingRevisionSteps: RevisionStep[] | null
+
+  /**
+   * True when a real user message has been received while in USER_GATE state.
+   * Set by the chat.message hook when a user message arrives at USER_GATE.
+   * Reset to false on every state transition that enters USER_GATE.
+   * Checked by submit_feedback(approve) — approval is blocked unless this is true,
+   * preventing the agent from self-approving without actual user input.
+   */
+  userGateMessageReceived: boolean
+
+  /**
+   * Absolute file paths of plan artifacts written to .openartisan/ under the project root.
+   * Populated at approval time in submit_feedback and at mark_analyze_complete (for discoveryReport).
+   * The agent reads these files via tools to retrieve artifact content rather than relying on
+   * inline context injection, avoiding loss of information in long contexts.
+   *
+   * Keys correspond to ArtifactKey values. Implementation files are not tracked here
+   * (they are written to the project by the agent directly).
+   */
+  artifactDiskPaths: Partial<Record<ArtifactKey, string>>
+
+  /**
+   * Optional subdirectory name under .openartisan/ for this workflow session.
+   * When set, all artifacts are written to .openartisan/<featureName>/ instead of
+   * .openartisan/ directly. This enables multiple concurrent workflows (different features)
+   * to coexist in the same repo without colliding on plan.md, conventions.md, etc.
+   * Set at select_mode time. null = use flat .openartisan/ layout (legacy/default).
+   */
+  featureName: string | null
 }
 
 // ---------------------------------------------------------------------------
@@ -443,6 +475,28 @@ export function validateWorkflowState(state: WorkflowState): string | null {
   if (state.escapePending && (state.pendingRevisionSteps === null || state.pendingRevisionSteps.length === 0)) {
     return `escapePending is true but pendingRevisionSteps is ${state.pendingRevisionSteps === null ? "null" : "empty"} — escape hatch requires pending steps`
   }
+  if (typeof state.userGateMessageReceived !== "boolean") {
+    return `userGateMessageReceived must be a boolean, got ${typeof state.userGateMessageReceived}`
+  }
+  if (state.artifactDiskPaths !== null && state.artifactDiskPaths !== undefined) {
+    if (typeof state.artifactDiskPaths !== "object" || Array.isArray(state.artifactDiskPaths)) {
+      return `artifactDiskPaths must be an object, got ${typeof state.artifactDiskPaths}`
+    }
+    for (const [key, val] of Object.entries(state.artifactDiskPaths)) {
+      if (typeof val !== "string") {
+        return `artifactDiskPaths["${key}"] must be a string, got ${typeof val}`
+      }
+      if (!val.startsWith("/")) {
+        return `artifactDiskPaths["${key}"] must be an absolute path (start with "/"), got "${val}"`
+      }
+    }
+  }
+  if (state.featureName !== null && typeof state.featureName !== "string") {
+    return `featureName must be null or a string, got ${typeof state.featureName}`
+  }
+  if (typeof state.featureName === "string" && state.featureName.length === 0) {
+    return `featureName must not be an empty string (use null for no feature)`
+  }
   return null
 }
 
@@ -566,6 +620,12 @@ export interface CriterionResult {
   met: boolean
   evidence: string
   severity: "blocking" | "suggestion"
+  /**
+   * Numeric quality score (1-10) for quality-dimension criteria (prefixed [Q]).
+   * For [Q] criteria, `met` is derived: score >= 9 → met, score < 9 → not met.
+   * Absent for standard boolean criteria.
+   */
+  score?: number
 }
 
 export interface SelfReviewSuccess {
@@ -582,11 +642,63 @@ export interface SelfReviewError {
 export type SelfReviewResult = SelfReviewSuccess | SelfReviewError
 
 // ---------------------------------------------------------------------------
+// Agent rebuttal (pre-escalation negotiation with reviewer)
+// ---------------------------------------------------------------------------
+
+/**
+ * When the review loop is one iteration from the escalation cap and the
+ * reviewer's unmet criteria score 7-8 (close to threshold), the agent
+ * gets one chance to rebut before escalation to USER_GATE.
+ *
+ * The rebuttal is dispatched as a fresh ephemeral session where the reviewer
+ * sees its own prior verdict plus the agent's counterarguments, and either
+ * revises scores upward or maintains its position.
+ */
+export interface RebuttalRequest {
+  phase: Phase
+  mode: WorkflowMode | null
+  /** The reviewer's original failing criteria (unmet blocking only) */
+  reviewerVerdict: CriterionResult[]
+  /** The agent's own assessment of those same criteria (its counterarguments) */
+  agentAssessment: Array<{
+    criterion: string
+    met: boolean
+    evidence: string
+    score?: number
+  }>
+  /** Artifact paths for the reviewer to re-check if needed */
+  artifactPaths: string[]
+  /** The full acceptance criteria text */
+  criteriaText: string
+  /** Parent session ID for TUI visibility */
+  parentSessionId?: string
+  /** Feature name for session title context */
+  featureName?: string | null
+}
+
+export interface RebuttalSuccess {
+  success: true
+  /** The reviewer's revised criteria results after considering the rebuttal */
+  revisedResults: CriterionResult[]
+  /** Whether the reviewer conceded (all blocking now pass) */
+  allResolved: boolean
+}
+
+export interface RebuttalError {
+  success: false
+  error: string
+}
+
+export type RebuttalResult = RebuttalSuccess | RebuttalError
+
+// ---------------------------------------------------------------------------
 // Tool argument shapes
 // ---------------------------------------------------------------------------
 
 export interface SelectModeArgs {
   mode: WorkflowMode
+  /** Required feature subdirectory name for artifact isolation (kebab-case) */
+  feature_name: string
 }
 
 export interface MarkSatisfiedArgs {
@@ -599,6 +711,12 @@ export interface MarkSatisfiedArgs {
      * "suggestion" criteria do not block advancement; they are advisory only.
      */
     severity?: "blocking" | "suggestion"
+    /**
+     * Numeric quality score (1-10) for [Q] quality-dimension criteria.
+     * For [Q] criteria: score >= 9 means met, score < 9 means not met.
+     * The `met` field is overridden by the score for [Q] criteria.
+     */
+    score?: number
   }>
 }
 
@@ -607,6 +725,15 @@ export interface RequestReviewArgs {
   summary: string
   /** Description of the artifact(s) produced */
   artifact_description: string
+  /**
+   * The full text of the artifact being submitted for review.
+   * Required for in-memory phases (PLANNING, DISCOVERY/CONVENTIONS, IMPL_PLAN) —
+   * this is written to .openartisan/ immediately so the user can read it before
+   * approving and the isolated reviewer can evaluate the real file rather than
+   * an inline copy. For file-based phases (INTERFACES, TESTS, IMPLEMENTATION),
+   * leave this empty — the agent reads/writes files directly.
+   */
+  artifact_content?: string
 }
 
 export interface MarkScanCompleteArgs {

@@ -34,11 +34,14 @@ Your goal is to produce a **conventions document** that accurately describes:
   - Write it as a structured markdown document
   - Include "Current State", "Target State", and "Migration Path" sections
   - Be specific: include file paths, function signatures, code snippets as examples
-  - When draft is complete, call `request_review` to trigger self-review.
+  - When draft is complete, call `request_review` with the full conventions text in `artifact_content`.
+    This writes it to `.openartisan/conventions.md` immediately — the user can read it there.
+  - At REVIEW: call `mark_satisfied` with your per-criterion assessment.
+    The isolated reviewer reads `.openartisan/conventions.md` directly — do NOT pass `artifact_content` here.
 
 ### Constraints
 - No file writes, no file edits, no bash — all sub-states of this phase are read-only.
-  The conventions document is produced as text output (not written to a file by you).
-  It is captured at approval time via `artifact_content` in `submit_feedback`.
+  The conventions document is written to `.openartisan/conventions.md` automatically when you call
+  `request_review` with `artifact_content`. You do not write it yourself.
 - The conventions document is a first-class artifact — every subsequent phase depends on it.
 - Be critical. Document what is actually wrong, not what could theoretically be better.

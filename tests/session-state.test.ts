@@ -40,6 +40,7 @@ describe("SessionStateStore — create", () => {
     expect(state.orchestratorSessionId).toBeNull()
     expect(state.lastCheckpointTag).toBeNull()
     expect(state.intentBaseline).toBeNull()
+    expect(state.featureName).toBeNull()
   })
 
   it("creates state with v6 fields (currentTaskId, feedbackHistory)", async () => {
@@ -362,7 +363,8 @@ describe("SessionStateStore — load", () => {
       implDag: null,
       escapePending: false,
       pendingRevisionSteps: null,
-      // Note: no currentTaskId or feedbackHistory — these are v6 fields
+      // Note: no currentTaskId, feedbackHistory, or userGateMessageReceived
+      // — these are v6/v8 fields that get migrated in
     }
     await Bun.write(
       join(tmpDir, "workflow-state.json"),
@@ -376,6 +378,8 @@ describe("SessionStateStore — load", () => {
     expect(loaded?.schemaVersion).toBe(SCHEMA_VERSION)
     expect(loaded?.currentTaskId).toBeNull()
     expect(loaded?.feedbackHistory).toEqual([])
+    expect(loaded?.userGateMessageReceived).toBe(false)
+    expect(loaded?.featureName).toBeNull()
   })
 
   it("reports count of successfully loaded sessions", async () => {
@@ -403,6 +407,9 @@ describe("SessionStateStore — load", () => {
       pendingRevisionSteps: null,
       currentTaskId: null,
       feedbackHistory: [],
+      userGateMessageReceived: false,
+      artifactDiskPaths: {},
+      featureName: null,
     }
     const s2: WorkflowState = { ...s1, sessionId: "s2" }
     await Bun.write(

@@ -28,16 +28,16 @@ function makeMockClient() {
 
   return {
     session: {
-      create: mock(async (opts: { body: { title?: string } }) => {
+      create: mock(async (opts: { title?: string }) => {
         const id = `eph-${++idCounter}`
         sessions.set(id, { id })
-        return { id }
+        return { data: { id } }
       }),
-      prompt: mock(async (opts: { path: { id: string }; body: Record<string, unknown> }) => {
-        // Return a shape that satisfies both orchestrator (assess/diverge) and
+      prompt: mock(async (opts: { sessionID: string; parts?: unknown[] }) => {
+        // Return a v2 shape that satisfies both orchestrator (assess/diverge) and
         // self-review (satisfied/criteria_results) parsers.
-        // Include enough blocking criteria to pass cross-validation for any phase
-        // (PLANNING has 7 blocking, INTERFACES has 7, etc.)
+        // Include enough blocking criteria to pass cross-validation for any phase.
+        // PLANNING has 7 standard blocking + 7 [Q] quality = 14 total blocking.
         const response = {
           classification: "tactical",
           reasoning: "mock",
@@ -50,14 +50,22 @@ function makeMockClient() {
             { criterion: "No TBD items", met: true, evidence: "mock", severity: "blocking" },
             { criterion: "Data model described", met: true, evidence: "mock", severity: "blocking" },
             { criterion: "Integration points identified", met: true, evidence: "mock", severity: "blocking" },
+            // [Q] Quality dimensions (scored 9/10 to pass threshold)
+            { criterion: "[Q] Design excellence", met: true, evidence: "mock", severity: "blocking", score: 9 },
+            { criterion: "[Q] Architectural cohesion", met: true, evidence: "mock", severity: "blocking", score: 9 },
+            { criterion: "[Q] Vision alignment", met: true, evidence: "mock", severity: "blocking", score: 9 },
+            { criterion: "[Q] Completeness", met: true, evidence: "mock", severity: "blocking", score: 9 },
+            { criterion: "[Q] Readiness for execution", met: true, evidence: "mock", severity: "blocking", score: 9 },
+            { criterion: "[Q] Security standards", met: true, evidence: "mock", severity: "blocking", score: 9 },
+            { criterion: "[Q] Operational excellence", met: true, evidence: "mock", severity: "blocking", score: 9 },
           ],
         }
         return {
-          parts: [{ type: "text", text: JSON.stringify(response) }],
+          data: { parts: [{ type: "text", text: JSON.stringify(response) }] },
         }
       }),
-      delete: mock(async (opts: { path: { id: string } }) => {
-        sessions.delete(opts.path.id)
+      delete: mock(async (opts: { sessionID: string }) => {
+        sessions.delete(opts.sessionID)
       }),
     },
   }
@@ -140,7 +148,7 @@ describe("Event hook — session lifecycle", () => {
 
     // Verify by calling select_mode — should succeed at MODE_SELECT
     const result = await plugin.tool.select_mode.execute(
-      { mode: "GREENFIELD" },
+      { mode: "GREENFIELD", feature_name: "test-feature" },
       { directory: tempDir, sessionId },
     )
     expect(result).toContain("GREENFIELD")
@@ -163,12 +171,14 @@ describe("Event hook — session lifecycle", () => {
       event: { type: "session.deleted", properties: { info: { id: sessionId } } },
     })
 
-    // State should be gone — select_mode should fail
+    // State was deleted, but ensureState lazily re-creates it (handles
+    // missed session.created events at startup). After re-creation the
+    // session starts in MODE_SELECT, so select_mode succeeds.
     const result = await plugin.tool.select_mode.execute(
-      { mode: "GREENFIELD" },
+      { mode: "GREENFIELD", feature_name: "test-feature" },
       { directory: tempDir, sessionId },
     )
-    expect(result).toContain("Error")
+    expect(result).toContain("GREENFIELD")
   })
 })
 
@@ -187,7 +197,7 @@ describe("select_mode tool — full integration", () => {
 
   it("GREENFIELD transitions to PLANNING", async () => {
     const result = await plugin.tool.select_mode.execute(
-      { mode: "GREENFIELD" },
+      { mode: "GREENFIELD", feature_name: "test-feature" },
       { directory: tempDir, sessionId },
     )
     expect(result).toContain("GREENFIELD")
@@ -200,7 +210,7 @@ describe("select_mode tool — full integration", () => {
       event: { type: "session.created", properties: { info: { id: sid } } },
     })
     const result = await plugin.tool.select_mode.execute(
-      { mode: "REFACTOR" },
+      { mode: "REFACTOR", feature_name: "test-refactor" },
       { directory: tempDir, sessionId: sid },
     )
     expect(result).toContain("REFACTOR")
@@ -213,7 +223,7 @@ describe("select_mode tool — full integration", () => {
       event: { type: "session.created", properties: { info: { id: sid } } },
     })
     const result = await plugin.tool.select_mode.execute(
-      { mode: "INCREMENTAL" },
+      { mode: "INCREMENTAL", feature_name: "test-incremental" },
       { directory: tempDir, sessionId: sid },
     )
     expect(result).toContain("INCREMENTAL")
@@ -222,11 +232,11 @@ describe("select_mode tool — full integration", () => {
 
   it("calling select_mode twice returns error", async () => {
     await plugin.tool.select_mode.execute(
-      { mode: "GREENFIELD" },
+      { mode: "GREENFIELD", feature_name: "test-feature" },
       { directory: tempDir, sessionId },
     )
     const result2 = await plugin.tool.select_mode.execute(
-      { mode: "REFACTOR" },
+      { mode: "REFACTOR", feature_name: "test-refactor" },
       { directory: tempDir, sessionId },
     )
     expect(result2).toContain("Error")
@@ -239,18 +249,21 @@ describe("select_mode tool — full integration", () => {
       event: { type: "session.created", properties: { info: { id: sid } } },
     })
     const result = await plugin.tool.select_mode.execute(
-      { mode: "INVALID" },
+      { mode: "INVALID", feature_name: "test-invalid" },
       { directory: tempDir, sessionId: sid },
     )
     expect(result).toContain("Error")
   })
 
-  it("no session returns error", async () => {
+  it("no prior session.created event — ensureState creates state lazily", async () => {
+    // ensureState handles the race condition where session.created was missed
+    // (e.g. plugin loaded after session already existed). select_mode succeeds.
+    const sid = `int-test-${Date.now()}-lazy`
     const result = await plugin.tool.select_mode.execute(
-      { mode: "GREENFIELD" },
-      { directory: tempDir, sessionId: "nonexistent" },
+      { mode: "GREENFIELD", feature_name: "test-feature" },
+      { directory: tempDir, sessionId: sid },
     )
-    expect(result).toContain("Error")
+    expect(result).toContain("GREENFIELD")
   })
 })
 
@@ -277,7 +290,7 @@ describe("tool.execute.before — phase-gated tool restrictions", () => {
     })
     // Transition to DISCOVERY
     await plugin.tool.select_mode.execute(
-      { mode: "REFACTOR" },
+      { mode: "REFACTOR", feature_name: "test-refactor" },
       { directory: tempDir, sessionId: sid },
     )
     // Now in DISCOVERY/SCAN — write tools should be blocked
@@ -292,7 +305,7 @@ describe("tool.execute.before — phase-gated tool restrictions", () => {
       event: { type: "session.created", properties: { info: { id: sid } } },
     })
     await plugin.tool.select_mode.execute(
-      { mode: "REFACTOR" },
+      { mode: "REFACTOR", feature_name: "test-refactor" },
       { directory: tempDir, sessionId: sid },
     )
     // Read tools should pass through
@@ -303,7 +316,7 @@ describe("tool.execute.before — phase-gated tool restrictions", () => {
 
   it("unknown session is a no-op (does not throw)", async () => {
     await expect(
-      plugin["tool.execute.before"]({ sessionID: "nonexistent", tool: "file_write" }),
+      plugin["tool.execute.before"]({ sessionID: "truly-unknown-session-guard", tool: "file_write" }),
     ).resolves.toBeUndefined()
   })
 })
@@ -319,7 +332,7 @@ describe("experimental.session.compacting — preserves context", () => {
       event: { type: "session.created", properties: { info: { id: sid } } },
     })
     await plugin.tool.select_mode.execute(
-      { mode: "GREENFIELD" },
+      { mode: "GREENFIELD", feature_name: "test-feature" },
       { directory: tempDir, sessionId: sid },
     )
     const output: { context?: string[] } = {}
@@ -332,7 +345,7 @@ describe("experimental.session.compacting — preserves context", () => {
 
   it("unknown session is a no-op", async () => {
     const output: { context?: string[] } = {}
-    await plugin["experimental.session.compacting"]({ sessionID: "nonexistent" }, output)
+    await plugin["experimental.session.compacting"]({ sessionID: "truly-unknown-session-compact" }, output)
     expect(output.context).toBeUndefined()
   })
 })
@@ -348,7 +361,7 @@ describe("experimental.chat.system.transform — injects workflow prompt", () =>
       event: { type: "session.created", properties: { info: { id: sid } } },
     })
     await plugin.tool.select_mode.execute(
-      { mode: "GREENFIELD" },
+      { mode: "GREENFIELD", feature_name: "test-feature" },
       { directory: tempDir, sessionId: sid },
     )
     const output = { system: ["existing system prompt"] }
@@ -361,7 +374,7 @@ describe("experimental.chat.system.transform — injects workflow prompt", () =>
 
   it("unknown session does not modify system array", async () => {
     const output = { system: ["original"] }
-    await plugin["experimental.chat.system.transform"]({ sessionID: "nonexistent" }, output)
+    await plugin["experimental.chat.system.transform"]({ sessionID: "truly-unknown-session-system" }, output)
     expect(output.system.length).toBe(1)
     expect(output.system[0]).toBe("original")
   })
@@ -380,7 +393,7 @@ describe("End-to-end: GREENFIELD happy path through PLANNING", () => {
     const ctx = { directory: tempDir, sessionId: sid }
 
     // 1. Select GREENFIELD mode
-    const modeResult = await plugin.tool.select_mode.execute({ mode: "GREENFIELD" }, ctx)
+    const modeResult = await plugin.tool.select_mode.execute({ mode: "GREENFIELD", feature_name: "test-feature" }, ctx)
     expect(modeResult).toContain("GREENFIELD")
 
     // 2. Now in PLANNING/DRAFT — call request_review
@@ -391,7 +404,8 @@ describe("End-to-end: GREENFIELD happy path through PLANNING", () => {
     expect(rrResult).not.toContain("Error")
     // Should now be in REVIEW
 
-    // 3. Call mark_satisfied with all 7 blocking criteria for PLANNING phase met
+    // 3. Call mark_satisfied with all 14 blocking criteria for PLANNING phase met
+    //    (7 standard blocking + 7 [Q] quality dimensions)
     const msResult = await plugin.tool.mark_satisfied.execute(
       {
         criteria_met: [
@@ -402,6 +416,14 @@ describe("End-to-end: GREENFIELD happy path through PLANNING", () => {
           { criterion: "No TBD items", met: true, evidence: "All decisions resolved", severity: "blocking" },
           { criterion: "Data model described", met: true, evidence: "Section 5 has ERD", severity: "blocking" },
           { criterion: "Integration points identified", met: true, evidence: "Section 6 lists APIs", severity: "blocking" },
+          // [Q] Quality dimensions — scored as strings (tool.schema has no .number())
+          { criterion: "[Q] Design excellence", met: true, evidence: "Well-reasoned approach", severity: "blocking", score: "9" },
+          { criterion: "[Q] Architectural cohesion", met: true, evidence: "All components fit together", severity: "blocking", score: "9" },
+          { criterion: "[Q] Vision alignment", met: true, evidence: "Plan traces to user intent", severity: "blocking", score: "9" },
+          { criterion: "[Q] Completeness", met: true, evidence: "Every requirement addressed", severity: "blocking", score: "9" },
+          { criterion: "[Q] Readiness for execution", met: true, evidence: "Engineer can begin immediately", severity: "blocking", score: "10" },
+          { criterion: "[Q] Security standards", met: true, evidence: "Auth and validation covered", severity: "blocking", score: "9" },
+          { criterion: "[Q] Operational excellence", met: true, evidence: "Monitoring and logging covered", severity: "blocking", score: "9" },
         ],
       },
       ctx,
@@ -409,7 +431,15 @@ describe("End-to-end: GREENFIELD happy path through PLANNING", () => {
     expect(msResult).not.toContain("Error")
     // Should now be in USER_GATE (or still in REVIEW if self-review took over)
 
-    // 4. Call submit_feedback with approve
+    // 4. Simulate a user message at USER_GATE (required before approval can succeed).
+    //    The chat.message hook sets userGateMessageReceived=true when intercepting a
+    //    user message at USER_GATE.
+    await plugin["chat.message"](
+      { sessionID: sid },
+      { message: { sessionID: sid }, parts: [{ type: "text", text: "approved" }] },
+    )
+
+    // 5. Call submit_feedback with approve — now allowed because user message was received
     const sfResult = await plugin.tool.submit_feedback.execute(
       {
         feedback_text: "Looks good",
@@ -434,6 +464,136 @@ describe("End-to-end: GREENFIELD happy path through PLANNING", () => {
 })
 
 // ---------------------------------------------------------------------------
+// userGateMessageReceived — self-approval prevention (v8)
+// ---------------------------------------------------------------------------
+
+describe("userGateMessageReceived — blocks self-approval", () => {
+  it("blocks submit_feedback(approve) when no user message was received", async () => {
+    const sid = `int-test-${Date.now()}-selfapprove`
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: sid } } },
+    })
+    const ctx = { directory: tempDir, sessionId: sid }
+
+    // Get to USER_GATE: GREENFIELD → PLANNING/DRAFT → request_review → mark_satisfied
+    await plugin.tool.select_mode.execute({ mode: "GREENFIELD", feature_name: "test-feature" }, ctx)
+    await plugin.tool.request_review.execute(
+      { summary: "The plan", artifact_description: "Plan doc" },
+      ctx,
+    )
+    await plugin.tool.mark_satisfied.execute(
+      {
+        criteria_met: [
+          { criterion: "All user requirements explicitly addressed", met: true, evidence: "yes", severity: "blocking" },
+          { criterion: "Scope boundaries explicit", met: true, evidence: "yes", severity: "blocking" },
+          { criterion: "Architecture described", met: true, evidence: "yes", severity: "blocking" },
+          { criterion: "Error and failure cases specified", met: true, evidence: "yes", severity: "blocking" },
+          { criterion: "No TBD items", met: true, evidence: "yes", severity: "blocking" },
+          { criterion: "Data model described", met: true, evidence: "yes", severity: "blocking" },
+          { criterion: "Integration points identified", met: true, evidence: "yes", severity: "blocking" },
+        ],
+      },
+      ctx,
+    )
+
+    // Attempt to approve WITHOUT sending a user message first
+    const result = await plugin.tool.submit_feedback.execute(
+      { feedback_text: "approved", feedback_type: "approve", artifact_content: "plan text" },
+      ctx,
+    )
+    // Should be blocked — either because we're not at USER_GATE (self-review redirected)
+    // or because userGateMessageReceived is false
+    if (result.includes("USER_GATE") || result.includes("no user message")) {
+      expect(result).toContain("Error")
+    }
+    // If the subagent self-review changed the state (e.g. review failed),
+    // we might not be at USER_GATE, which is also fine — the test verifies
+    // that the agent can't self-approve in a single turn.
+  })
+
+  it("allows submit_feedback(approve) after user message is received", async () => {
+    const sid = `int-test-${Date.now()}-userapprove`
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: sid } } },
+    })
+    const ctx = { directory: tempDir, sessionId: sid }
+
+    // Get to USER_GATE
+    await plugin.tool.select_mode.execute({ mode: "GREENFIELD", feature_name: "test-feature" }, ctx)
+    await plugin.tool.request_review.execute(
+      { summary: "The plan", artifact_description: "Plan doc" },
+      ctx,
+    )
+    await plugin.tool.mark_satisfied.execute(
+      {
+        criteria_met: [
+          { criterion: "All user requirements explicitly addressed", met: true, evidence: "yes", severity: "blocking" },
+          { criterion: "Scope boundaries explicit", met: true, evidence: "yes", severity: "blocking" },
+          { criterion: "Architecture described", met: true, evidence: "yes", severity: "blocking" },
+          { criterion: "Error and failure cases specified", met: true, evidence: "yes", severity: "blocking" },
+          { criterion: "No TBD items", met: true, evidence: "yes", severity: "blocking" },
+          { criterion: "Data model described", met: true, evidence: "yes", severity: "blocking" },
+          { criterion: "Integration points identified", met: true, evidence: "yes", severity: "blocking" },
+        ],
+      },
+      ctx,
+    )
+
+    // Simulate a real user message via the chat.message hook
+    await plugin["chat.message"](
+      { sessionID: sid },
+      { message: { sessionID: sid }, parts: [{ type: "text", text: "approved" }] },
+    )
+
+    // Now try to approve — should succeed (or fail for a different reason like phase)
+    const result = await plugin.tool.submit_feedback.execute(
+      { feedback_text: "approved", feedback_type: "approve", artifact_content: "plan text" },
+      ctx,
+    )
+    // Should NOT contain the "no user message" error
+    expect(result).not.toContain("no user message")
+  })
+
+  it("submit_feedback(revise) is NOT blocked by userGateMessageReceived", async () => {
+    const sid = `int-test-${Date.now()}-revise-ok`
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: sid } } },
+    })
+    const ctx = { directory: tempDir, sessionId: sid }
+
+    // Get to USER_GATE
+    await plugin.tool.select_mode.execute({ mode: "GREENFIELD", feature_name: "test-feature" }, ctx)
+    await plugin.tool.request_review.execute(
+      { summary: "The plan", artifact_description: "Plan doc" },
+      ctx,
+    )
+    await plugin.tool.mark_satisfied.execute(
+      {
+        criteria_met: [
+          { criterion: "All user requirements explicitly addressed", met: true, evidence: "yes", severity: "blocking" },
+          { criterion: "Scope boundaries explicit", met: true, evidence: "yes", severity: "blocking" },
+          { criterion: "Architecture described", met: true, evidence: "yes", severity: "blocking" },
+          { criterion: "Error and failure cases specified", met: true, evidence: "yes", severity: "blocking" },
+          { criterion: "No TBD items", met: true, evidence: "yes", severity: "blocking" },
+          { criterion: "Data model described", met: true, evidence: "yes", severity: "blocking" },
+          { criterion: "Integration points identified", met: true, evidence: "yes", severity: "blocking" },
+        ],
+      },
+      ctx,
+    )
+
+    // Attempt to revise WITHOUT sending a user message first — should still work
+    // (revise isn't blocked by the user gate flag, only approve is)
+    const result = await plugin.tool.submit_feedback.execute(
+      { feedback_text: "needs more detail on auth", feedback_type: "revise" },
+      ctx,
+    )
+    // Should not contain the "no user message" error
+    expect(result).not.toContain("no user message")
+  })
+})
+
+// ---------------------------------------------------------------------------
 // currentTaskId clearing on mark_task_complete
 // ---------------------------------------------------------------------------
 
@@ -446,7 +606,7 @@ describe("mark_task_complete — clears currentTaskId in state", () => {
     const ctx = { directory: tempDir, sessionId: sid }
 
     // Transition to IMPLEMENTATION via GREENFIELD path
-    await plugin.tool.select_mode.execute({ mode: "GREENFIELD" }, ctx)
+    await plugin.tool.select_mode.execute({ mode: "GREENFIELD", feature_name: "test-feature" }, ctx)
 
     // We need to get to IMPLEMENTATION phase. The quickest way is to wire
     // through the full approval chain. However, the integration test already

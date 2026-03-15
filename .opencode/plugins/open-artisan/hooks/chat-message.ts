@@ -101,17 +101,19 @@ export function processUserMessage(
 
 function buildApprovalNote(phase: Phase, _phaseState: PhaseState): string {
   return (
-    `[WORKFLOW] The user has approved the ${phase} artifact. ` +
-    `Call \`submit_feedback\` with feedback_type="approve" and feedback_text="approved" ` +
-    `to record the approval and advance to the next phase.`
+    `[WORKFLOW GATE — IMMEDIATE ACTION REQUIRED] ` +
+    `The user has approved the ${phase} artifact. ` +
+    `Call \`submit_feedback\` NOW with feedback_type="approve" and feedback_text set to the user's message. ` +
+    `This must be your first and only tool call. Do NOT do anything else first.`
   )
 }
 
 function buildFeedbackNote(phase: Phase, _phaseState: PhaseState): string {
   return (
-    `[WORKFLOW] The user has provided feedback on the ${phase} artifact. ` +
-    `Call \`submit_feedback\` with feedback_type="revise" and the user's feedback_text ` +
-    `to route this through the orchestrator and begin revision.`
+    `[WORKFLOW GATE — IMMEDIATE ACTION REQUIRED] ` +
+    `The user has provided feedback on the ${phase} artifact. ` +
+    `Call \`submit_feedback\` NOW with feedback_type="revise" and feedback_text set to the user's exact message. ` +
+    `This must be your first and only tool call. Do NOT do research or analysis first.`
   )
 }
 
@@ -126,14 +128,19 @@ function buildFeedbackNote(phase: Phase, _phaseState: PhaseState): string {
  */
 export function buildUserGateHint(phase: Phase, _phaseState: PhaseState): string {
   return (
-    `\n---\n## WORKFLOW USER GATE — ${phase}\n\n` +
-    `The artifact is awaiting user review. The next user message is their response.\n\n` +
-    `**If the user approves** (says "yes", "approved", "lgtm", "looks good", "ship it", etc.):\n` +
-    `  Call \`submit_feedback\` with feedback_type="approve" and feedback_text set to their message.\n\n` +
-    `**If the user provides feedback or requests changes**:\n` +
-    `  Call \`submit_feedback\` with feedback_type="revise" and feedback_text set to their exact message.\n\n` +
-    `Do NOT proceed with any work until you have called \`submit_feedback\`.\n` +
-    `Do NOT simulate approval — wait for the actual user message.\n` +
+    `\n---\n## ⚠ WORKFLOW USER GATE — ${phase} — ACTION REQUIRED\n\n` +
+    `A user message has arrived. You MUST call \`submit_feedback\` as your **first and only tool call**.\n\n` +
+    `**Do NOT:**\n` +
+    `- Do research, web searches, or file reads before calling \`submit_feedback\`\n` +
+    `- Re-review or improve the artifact before routing the feedback\n` +
+    `- Call any other tool before \`submit_feedback\`\n` +
+    `- Simulate or assume approval without calling \`submit_feedback\`\n\n` +
+    `**Do:**\n` +
+    `- If the user approves (yes / lgtm / approved / looks good / ship it / proceed / etc.):\n` +
+    `  → Call \`submit_feedback(feedback_type="approve", feedback_text=<their message>)\`\n` +
+    `- If the user requests changes or asks questions:\n` +
+    `  → Call \`submit_feedback(feedback_type="revise", feedback_text=<their exact message>)\`\n\n` +
+    `Calling \`submit_feedback\` is the ONLY correct response to a user message at USER_GATE.\n` +
     `---`
   )
 }

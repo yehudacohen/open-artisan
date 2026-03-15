@@ -20,7 +20,7 @@
 
 import { join } from "node:path"
 import { readdirSync, existsSync, statSync } from "node:fs"
-import type { Phase, WorkflowMode } from "../types"
+import type { Phase, WorkflowMode, ArtifactKey } from "../types"
 import { isInterfaceFile, isTestFile } from "../hooks/tool-guard"
 
 // ---------------------------------------------------------------------------
@@ -74,21 +74,35 @@ const MAX_PATHS = 20
  * @param mode - Workflow mode
  * @param cwd - Absolute path to the project root
  * @param fileAllowlist - INCREMENTAL allowlist (may be empty for other modes)
+ * @param artifactDiskPaths - Persisted disk paths from state (populated at approval time)
  */
 export function resolveArtifactPaths(
   phase: Phase,
   mode: WorkflowMode | null,
   cwd: string,
   fileAllowlist: string[],
+  artifactDiskPaths: Partial<Record<ArtifactKey, string>> = {},
 ): string[] {
   switch (phase) {
-    // Documents living in conversation memory, not files — reviewer uses context
-    case "DISCOVERY":
-    case "PLANNING":
-    case "IMPL_PLAN":
     case "MODE_SELECT":
     case "DONE":
       return []
+
+    // Phases whose artifacts are written to .openartisan/ at approval time.
+    // If the disk path exists in state, return it so the reviewer reads the real file.
+    // Fall back to [] if not yet written (e.g. first review before any approval).
+    case "DISCOVERY": {
+      const p = artifactDiskPaths["conventions"]
+      return p && existsSync(p) ? [p] : []
+    }
+    case "PLANNING": {
+      const p = artifactDiskPaths["plan"]
+      return p && existsSync(p) ? [p] : []
+    }
+    case "IMPL_PLAN": {
+      const p = artifactDiskPaths["impl_plan"]
+      return p && existsSync(p) ? [p] : []
+    }
 
     case "INTERFACES": {
       if (mode === "INCREMENTAL" && fileAllowlist.length > 0) {
@@ -118,17 +132,22 @@ export function resolveArtifactPaths(
       if (mode === "INCREMENTAL" && fileAllowlist.length > 0) {
         return fileAllowlist.filter(isTestFile).slice(0, MAX_PATHS)
       }
-      // GREENFIELD/REFACTOR: scan common test directories
+      // GREENFIELD/REFACTOR: scan common test directories.
+      // Includes "packages" for monorepo layouts where tests live under
+      // packages/*/src/__tests__/ or packages/*/tests/.
       const testDirs = [
         join(cwd, "tests"),
         join(cwd, "test"),
         join(cwd, "__tests__"),
         join(cwd, "spec"),
         join(cwd, "src"),
+        join(cwd, "packages"),
       ]
       const found: string[] = []
       for (const dir of testDirs) {
-        found.push(...collectFiles(dir, isTestFile))
+        // Use depth 6 to handle deep monorepo structures like
+        // packages/group/subpackage/src/__tests__/deep/test.ts
+        found.push(...collectFiles(dir, isTestFile, 6))
         if (found.length >= MAX_PATHS) break
       }
       return found.slice(0, MAX_PATHS)

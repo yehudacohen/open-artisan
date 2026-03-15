@@ -29,7 +29,7 @@ import { withTimeout, extractTextFromPromptResult, extractEphemeralSessionId } f
 type Client = any
 
 /** Maximum wall-clock time allowed per scanner subagent session. */
-const SCANNER_TIMEOUT_MS = 90_000 // 1.5 minutes per scanner
+const SCANNER_TIMEOUT_MS = 180_000 // 3 minutes per scanner
 
 /** Minimum scanners that must succeed for the report to be considered reliable. */
 export const MIN_SCANNERS_THRESHOLD = 3
@@ -224,12 +224,18 @@ async function runScannerSession(
   client: Client,
   scannerName: string,
   prompt: string,
+  parentSessionId?: string,
+  featureName?: string | null,
 ): Promise<ScannerResult> {
   let sessionId: string | undefined
 
   try {
+    const featureSlug = featureName ? ` (${featureName})` : ""
     const created = await client.session.create({
-      body: { title: `discovery-${scannerName.toLowerCase().replace(/\s+/g, "-")}`, agent: "workflow-reviewer" },
+      body: {
+        title: `Discovery: ${scannerName}${featureSlug}`,
+        ...(parentSessionId ? { parentID: parentSessionId } : {}),
+      },
     })
 
     sessionId = extractEphemeralSessionId(created, scannerName)
@@ -250,13 +256,19 @@ async function runScannerSession(
 
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
+    console.error(
+      `[open-artisan] Discovery scanner "${scannerName}" failed: ${msg}`,
+      err instanceof Error ? err.stack : "",
+    )
     return {
       scanner: scannerName,
       success: false,
       output: `*Scanner failed: ${msg}*\n\nThis section could not be completed during discovery.`,
     }
   } finally {
-    if (sessionId) {
+    // Skip delete for child sessions — OpenCode's SQLite FK constraints can
+    // reject the delete. Child sessions are cleaned up with the parent.
+    if (sessionId && !parentSessionId) {
       try { await client.session.delete({ path: { id: sessionId } }) } catch { /* ignore */ }
     }
   }
@@ -318,9 +330,11 @@ export async function runDiscoveryFleet(
   client: Client,
   cwd: string,
   mode: WorkflowMode,
+  parentSessionId?: string,
+  featureName?: string | null,
 ): Promise<DiscoveryReport> {
   const scannerRuns = SCANNERS.map((def) =>
-    runScannerSession(client, def.name, def.prompt(cwd, mode)),
+    runScannerSession(client, def.name, def.prompt(cwd, mode), parentSessionId, featureName),
   )
 
   const results = await Promise.all(scannerRuns)

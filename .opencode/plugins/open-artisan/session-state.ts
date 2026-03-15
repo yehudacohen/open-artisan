@@ -47,6 +47,9 @@ function freshState(sessionId: string): WorkflowState {
     phaseApprovalCounts: {},
     escapePending: false,
     pendingRevisionSteps: null,
+    userGateMessageReceived: false,
+    artifactDiskPaths: {},
+    featureName: null,
   }
 }
 
@@ -187,6 +190,12 @@ export function createSessionStateStore(dir: string): SessionStateStore {
           migrated["feedbackHistory"] ??= []
           // v6 → v7: add phaseApprovalCounts
           migrated["phaseApprovalCounts"] ??= {}
+          // v7 → v8: add userGateMessageReceived
+          migrated["userGateMessageReceived"] ??= false
+          // v8 → v9: add artifactDiskPaths
+          migrated["artifactDiskPaths"] ??= {}
+          // v9 → v10: add featureName
+          migrated["featureName"] ??= null
           // Always stamp with current schema version after migration
           migrated["schemaVersion"] = SCHEMA_VERSION
           // Second gate: full invariant validation (phase/phaseState combos, counts, etc.)

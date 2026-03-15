@@ -11,6 +11,7 @@
  * - Return values are bounded by MAX_PATHS (20)
  */
 import { describe, expect, it } from "bun:test"
+import { join } from "node:path"
 import { resolveArtifactPaths } from "#plugin/tools/artifact-paths"
 
 // ---------------------------------------------------------------------------
@@ -99,6 +100,20 @@ describe("resolveArtifactPaths — TESTS phase, INCREMENTAL mode", () => {
     const result = resolveArtifactPaths("TESTS", "INCREMENTAL", "/workspace", allowlist)
     expect(result).toContain("/workspace/__tests__/auth.ts")
   })
+
+  it("returns monorepo test files in packages/*/src/__tests__/ (INCREMENTAL)", () => {
+    const allowlist = [
+      "/workspace/packages/shared/src/__tests__/focus.test.ts",
+      "/workspace/packages/ingestion/src/__tests__/handler.test.ts",
+      "/workspace/packages/billing/src/__tests__/calculator.test.ts",
+      "/workspace/packages/app/src/index.ts", // non-test file should be filtered
+    ]
+    const result = resolveArtifactPaths("TESTS", "INCREMENTAL", "/workspace", allowlist)
+    expect(result).toContain("/workspace/packages/shared/src/__tests__/focus.test.ts")
+    expect(result).toContain("/workspace/packages/ingestion/src/__tests__/handler.test.ts")
+    expect(result).toContain("/workspace/packages/billing/src/__tests__/calculator.test.ts")
+    expect(result).not.toContain("/workspace/packages/app/src/index.ts")
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -137,6 +152,28 @@ describe("resolveArtifactPaths — GREENFIELD mode with no src/ dir", () => {
   it("returns [] for IMPLEMENTATION when src/ does not exist", () => {
     const result = resolveArtifactPaths("IMPLEMENTATION", "GREENFIELD", "/nonexistent/path", [])
     expect(result).toEqual([])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// GREENFIELD/REFACTOR mode — TESTS phase scans project directories
+// Uses the actual project root (this repo) to verify the scan finds .test.ts files
+// under tests/ directory (a directory that actually exists in this repo).
+// ---------------------------------------------------------------------------
+
+describe("resolveArtifactPaths — TESTS phase, GREENFIELD scan finds real test files", () => {
+  it("finds .test.ts files under tests/ directory of this project", () => {
+    // Use the actual project root — this repo has a tests/ directory with .test.ts files
+    const projectRoot = join(import.meta.dirname, "..")
+    const result = resolveArtifactPaths("TESTS", "GREENFIELD", projectRoot, [])
+    // Should find at least some of our own test files
+    expect(result.length).toBeGreaterThan(0)
+    // All returned paths should be test files
+    for (const p of result) {
+      const lower = p.toLowerCase()
+      const hasTestPattern = lower.includes("test") || lower.includes("spec")
+      expect(hasTestPattern).toBe(true)
+    }
   })
 })
 

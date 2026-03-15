@@ -79,13 +79,25 @@ export function evaluateMarkSatisfied(args: MarkSatisfiedArgs, expectedBlockingC
     }
   }
 
-  const allCriteria = args.criteria_met.map<CriterionResult>((c) => ({
-    criterion: c.criterion,
-    met: c.met,
-    evidence: c.evidence,
-    // G9: respect explicit severity; default to "blocking" if not provided
-    severity: c.severity ?? "blocking",
-  }))
+  const allCriteria = args.criteria_met.map<CriterionResult>((c) => {
+    const isQualityCriterion = c.criterion.startsWith("[Q]")
+    // For [Q] quality criteria with a score, `met` is derived from the score threshold.
+    // Score >= 9 → met; score < 9 → not met. This prevents the agent from claiming
+    // "met" while giving a low score.
+    const met = (isQualityCriterion && typeof c.score === "number")
+      ? c.score >= 9
+      : c.met
+    return {
+      criterion: c.criterion,
+      met,
+      evidence: isQualityCriterion && typeof c.score === "number"
+        ? `${c.evidence} (score: ${c.score}/10)`
+        : c.evidence,
+      // G9: respect explicit severity; default to "blocking" if not provided
+      severity: c.severity ?? "blocking",
+      ...(typeof c.score === "number" ? { score: c.score } : {}),
+    }
+  })
 
   const unmetBlocking = allCriteria.filter((c) => !c.met && c.severity === "blocking")
 
@@ -117,7 +129,10 @@ function buildPassMessage(total: number, unmetSuggestions: CriterionResult[]): s
 }
 
 function buildFailMessage(unmet: CriterionResult[]): string {
-  const list = unmet.map((c) => `  - ${c.criterion}: ${c.evidence}`).join("\n")
+  const list = unmet.map((c) => {
+    const scoreNote = typeof c.score === "number" ? ` [score: ${c.score}/10, needs ≥9]` : ""
+    return `  - ${c.criterion}: ${c.evidence}${scoreNote}`
+  }).join("\n")
   return (
     `Self-review incomplete — ${unmet.length} blocking criteria not satisfied:\n${list}\n` +
     `Continue working to address these criteria, then call mark_satisfied again.`

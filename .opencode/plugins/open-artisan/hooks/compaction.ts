@@ -14,6 +14,7 @@
  * 6. Last checkpoint tag
  * 7. What the agent should do next
  */
+import { existsSync } from "node:fs"
 import type { WorkflowState } from "../types"
 import { MAX_CONVENTIONS_CHARS, MAX_REPORT_CHARS, getNextActionForState } from "../utils"
 
@@ -54,15 +55,23 @@ export function buildCompactionContext(state: WorkflowState): string {
     lines.push("")
   }
 
-  // Conventions (if applicable) — capped at same limit as system-transform
-  // to prevent compaction context itself from exceeding model limits.
+  // Conventions — reference disk file if available, otherwise inline.
+  // After compaction the agent must re-read the conventions from disk
+  // rather than relying on the truncated version in the compaction context.
   if (state.conventions) {
-    const text = state.conventions.length > MAX_CONVENTIONS_CHARS
-      ? state.conventions.slice(0, MAX_CONVENTIONS_CHARS) +
-        `\n\n[... conventions truncated at ${MAX_CONVENTIONS_CHARS} chars ...]`
-      : state.conventions
     lines.push("### Conventions Document (Approved — Read Only)")
-    lines.push(text)
+    const conventionsPath = state.artifactDiskPaths?.["conventions"]
+    if (conventionsPath && existsSync(conventionsPath)) {
+      lines.push(`The approved conventions document is at \`${conventionsPath}\`.`)
+      lines.push("Read this file before continuing — it contains mandatory constraints for all phases.")
+    } else {
+      // Fallback inline for pre-v9 sessions
+      const text = state.conventions.length > MAX_CONVENTIONS_CHARS
+        ? state.conventions.slice(0, MAX_CONVENTIONS_CHARS) +
+          `\n\n[... conventions truncated at ${MAX_CONVENTIONS_CHARS} chars ...]`
+        : state.conventions
+      lines.push(text)
+    }
     lines.push("")
   }
 
@@ -90,14 +99,21 @@ export function buildCompactionContext(state: WorkflowState): string {
     lines.push("")
   }
 
-  // Discovery report — needed for CONVENTIONS drafting after compaction
+  // Discovery report — reference disk file if available, otherwise inline.
   if (state.discoveryReport) {
-    const report = state.discoveryReport.length > MAX_REPORT_CHARS
-      ? state.discoveryReport.slice(0, MAX_REPORT_CHARS) +
-        `\n\n[... discovery report truncated at ${MAX_REPORT_CHARS} chars ...]`
-      : state.discoveryReport
     lines.push("### Discovery Fleet Report (Preserved)")
-    lines.push(report)
+    const reportPath = state.artifactDiskPaths?.["discovery_report" as keyof typeof state.artifactDiskPaths]
+    if (reportPath && existsSync(reportPath as string)) {
+      lines.push(`The discovery fleet report is at \`${reportPath}\`.`)
+      lines.push("Read this file when drafting the conventions document.")
+    } else {
+      // Fallback inline for pre-v9 sessions
+      const report = state.discoveryReport.length > MAX_REPORT_CHARS
+        ? state.discoveryReport.slice(0, MAX_REPORT_CHARS) +
+          `\n\n[... discovery report truncated at ${MAX_REPORT_CHARS} chars ...]`
+        : state.discoveryReport
+      lines.push(report)
+    }
     lines.push("")
   }
 

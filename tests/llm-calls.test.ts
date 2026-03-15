@@ -11,19 +11,19 @@ import type { OrchestratorAssessResult } from "#plugin/types"
 // ---------------------------------------------------------------------------
 
 /**
- * The llm-calls module now uses ephemeralPrompt() which calls:
- *   client.session.create({ body: { ... } }) → { id: "mock-session-id" }
- *   client.session.prompt({ path: { id }, body: { ... } }) → { parts: [...] }
- *   client.session.delete({ path: { id } })  [best-effort, errors ignored]
+ * The llm-calls module uses ephemeralPrompt() which calls (v2 SDK flat params):
+ *   client.session.create({ title }) → { data: { id: "mock-session-id" } }
+ *   client.session.prompt({ sessionID, parts, ... }) → { data: { parts: [...] } }
+ *   client.session.delete({ sessionID })  [best-effort, errors ignored]
  */
 function makeClient(responseText: string) {
   return {
     session: {
-      create: mock(async () => ({ id: "mock-session-id" })),
+      create: mock(async () => ({ data: { id: "mock-session-id" } })),
       prompt: mock(async () => ({
-        parts: [{ type: "text", text: responseText }],
+        data: { parts: [{ type: "text", text: responseText }] },
       })),
-      delete: mock(async () => undefined),
+      delete: mock(async () => ({ data: true })),
     },
   }
 }
@@ -31,11 +31,11 @@ function makeClient(responseText: string) {
 function makeClientThrows() {
   return {
     session: {
-      create: mock(async () => ({ id: "mock-session-id" })),
+      create: mock(async () => ({ data: { id: "mock-session-id" } })),
       prompt: mock(async () => {
         throw new Error("Network error")
       }),
-      delete: mock(async () => undefined),
+      delete: mock(async () => ({ data: true })),
     },
   }
 }
@@ -87,7 +87,7 @@ describe("createAssessFn — happy path", () => {
     expect((client.session.delete as ReturnType<typeof mock>).mock.calls).toHaveLength(1)
   })
 
-  it("passes session id from create() into prompt() path param", async () => {
+  it("passes session id from create() into prompt() path.id param (v1 SDK style)", async () => {
     const client = makeClient(JSON.stringify({
       affected_artifacts: ["impl_plan"],
       root_cause_artifact: "impl_plan",
@@ -96,8 +96,27 @@ describe("createAssessFn — happy path", () => {
     const assess = createAssessFn(client)
     await assess("Impl plan is wrong", "impl_plan")
     const promptCall = (client.session.prompt as ReturnType<typeof mock>).mock.calls[0]
-    // First arg to prompt() must have path: { id: "mock-session-id" }
-    expect((promptCall?.[0] as any)?.path?.id).toBe("mock-session-id")
+    const arg = (promptCall?.[0] as any)
+    // v1 SDK style: path.id and body.parts
+    expect(arg?.path?.id).toBe("mock-session-id")
+    expect(Array.isArray(arg?.body?.parts)).toBe(true)
+  })
+
+  it("inlines system prompt into body.parts text (not as separate param)", async () => {
+    const client = makeClient(JSON.stringify({
+      affected_artifacts: ["plan"],
+      root_cause_artifact: "plan",
+      reasoning: "plan issue",
+    }))
+    const assess = createAssessFn(client)
+    await assess("Plan is wrong", "plan")
+    const promptCall = (client.session.prompt as ReturnType<typeof mock>).mock.calls[0]
+    const arg = (promptCall as Array<unknown>)[0] as Record<string, unknown>
+    // System prompt should NOT be a separate top-level param
+    expect(arg["system"]).toBeUndefined()
+    // System prompt should be inlined into the body.parts text
+    const body = arg["body"] as { parts: Array<{ type: string; text: string }> }
+    expect(body.parts[0]!.text).toContain("workflow orchestrator")
   })
 
   it("filters out invalid artifact keys from affected_artifacts", async () => {
@@ -208,8 +227,8 @@ describe("createDivergeFn — happy path", () => {
     expect((client.session.delete as ReturnType<typeof mock>).mock.calls).toHaveLength(1)
   })
 
-  it("auto-classifies as strategic when 3+ artifacts affected (cascade_depth), regardless of LLM response", async () => {
-    // LLM says tactical, but we have 3 affected artifacts → must be strategic
+  it("auto-classifies as strategic when 3+ APPROVED artifacts affected (cascade_depth)", async () => {
+    // LLM says tactical, but we have 3 materially affected (approved) artifacts → must be strategic
     const response = JSON.stringify({
       classification: "tactical",
       reasoning: "Seems small",
@@ -221,11 +240,39 @@ describe("createDivergeFn — happy path", () => {
       rootCauseArtifact: "interfaces",
       reasoning: "Cascade",
     }
-    const result = await diverge(assessResult, {})
+    // All 3 artifacts are approved → cascade_depth triggers
+    const result = await diverge(assessResult, {
+      interfaces: "/path/to/interfaces.ts",
+      tests: "/path/to/tests.ts",
+      impl_plan: "/path/to/impl_plan.md",
+    })
     expect(result.success).toBe(true)
     if (!result.success) return
-    // Must be strategic due to cascade_depth override
     expect(result.classification).toBe("strategic")
+  })
+
+  it("does NOT trigger cascade_depth when affected artifacts are unwritten (not approved)", async () => {
+    // LLM reports 4 affected artifacts, but only 1 (interfaces) is approved.
+    // Unwritten downstream artifacts shouldn't count toward cascade depth.
+    const response = JSON.stringify({
+      classification: "tactical",
+      reasoning: "Just interface fixes",
+    })
+    const diverge = createDivergeFn(makeClient(response))
+    const assessResult: OrchestratorAssessResult = {
+      success: true,
+      affectedArtifacts: ["interfaces", "tests", "impl_plan", "implementation"], // 4 artifacts
+      rootCauseArtifact: "interfaces",
+      reasoning: "Interface changes cascade",
+    }
+    // Only interfaces is approved — tests/impl_plan/implementation don't exist yet
+    const result = await diverge(assessResult, {
+      interfaces: "/path/to/interfaces.ts",
+    })
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    // Should be tactical — only 1 materially affected artifact
+    expect(result.classification).toBe("tactical")
   })
 })
 

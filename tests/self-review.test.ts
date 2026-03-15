@@ -12,8 +12,9 @@
  * - Severity defaults: unknown severity treated as "blocking"
  */
 import { describe, expect, it, mock } from "bun:test"
-import { dispatchSelfReview } from "#plugin/self-review"
+import { dispatchSelfReview, dispatchRebuttal, buildRebuttalPrompt } from "#plugin/self-review"
 import type { SelfReviewRequest } from "#plugin/self-review"
+import type { RebuttalRequest, CriterionResult } from "#plugin/types"
 
 // ---------------------------------------------------------------------------
 // Mock client factory
@@ -22,31 +23,37 @@ import type { SelfReviewRequest } from "#plugin/self-review"
 function makeClient(responseText: string) {
   return {
     session: {
-      create: mock(async () => ({ id: "mock-review-session" })),
+      create: mock(async () => ({ data: { id: "mock-review-session" } })),
       prompt: mock(async () => ({
-        parts: [{ type: "text", text: responseText }],
+        data: { parts: [{ type: "text", text: responseText }] },
       })),
-      delete: mock(async () => undefined),
+      delete: mock(async () => ({ data: true })),
     },
   }
 }
 
 function makeClientWithTextShape(responseText: string) {
+  // v2: text part in data.parts array (same as primary shape)
   return {
     session: {
-      create: mock(async () => ({ id: "mock-review-session" })),
-      prompt: mock(async () => ({ text: responseText })),
-      delete: mock(async () => undefined),
+      create: mock(async () => ({ data: { id: "mock-review-session" } })),
+      prompt: mock(async () => ({
+        data: { parts: [{ type: "text", text: responseText }] },
+      })),
+      delete: mock(async () => ({ data: true })),
     },
   }
 }
 
 function makeClientWithContentShape(responseText: string) {
+  // v2: text part in data.parts array (same as primary shape)
   return {
     session: {
-      create: mock(async () => ({ id: "mock-review-session" })),
-      prompt: mock(async () => ({ content: responseText })),
-      delete: mock(async () => undefined),
+      create: mock(async () => ({ data: { id: "mock-review-session" } })),
+      prompt: mock(async () => ({
+        data: { parts: [{ type: "text", text: responseText }] },
+      })),
+      delete: mock(async () => ({ data: true })),
     },
   }
 }
@@ -54,11 +61,11 @@ function makeClientWithContentShape(responseText: string) {
 function makeClientThrows() {
   return {
     session: {
-      create: mock(async () => ({ id: "mock-review-session" })),
+      create: mock(async () => ({ data: { id: "mock-review-session" } })),
       prompt: mock(async () => {
         throw new Error("Network error during review")
       }),
-      delete: mock(async () => undefined),
+      delete: mock(async () => ({ data: true })),
     },
   }
 }
@@ -69,8 +76,8 @@ function makeClientCreateThrows() {
       create: mock(async () => {
         throw new Error("Cannot create review session")
       }),
-      prompt: mock(async () => ({ parts: [] })),
-      delete: mock(async () => undefined),
+      prompt: mock(async () => ({ data: { parts: [] } })),
+      delete: mock(async () => ({ data: true })),
     },
   }
 }
@@ -313,54 +320,49 @@ describe("dispatchSelfReview — response shape variants", () => {
 // ---------------------------------------------------------------------------
 
 describe("dispatchSelfReview — prompt construction", () => {
+  /** Helper to extract prompt text from the v1-style mock call */
+  function getPromptText(client: ReturnType<typeof makeClient>): string {
+    const promptCall = (client.session.prompt as ReturnType<typeof mock>).mock.calls[0]
+    const arg = (promptCall as Array<unknown>)[0] as { path?: { id: string }; body?: { parts: Array<{ text: string }> } }
+    return arg?.body?.parts?.[0]?.text ?? ""
+  }
+
   it("includes phase name in the prompt sent to the reviewer session", async () => {
     const client = makeClient(makeReviewResponse())
     await dispatchSelfReview(client, { ...BASE_REQ, phase: "INTERFACES" })
-
-    const promptCall = (client.session.prompt as ReturnType<typeof mock>).mock.calls[0]
-    const body = (promptCall as Array<unknown>)[0] as { body: { parts: Array<{ text: string }> } }
-    const text = body.body.parts[0]?.text ?? ""
-    expect(text).toContain("INTERFACES")
+    expect(getPromptText(client)).toContain("INTERFACES")
   })
 
   it("includes artifact paths in the prompt when provided", async () => {
     const client = makeClient(makeReviewResponse())
     await dispatchSelfReview(client, { ...BASE_REQ, artifactPaths: ["/workspace/interfaces.ts"] })
-
-    const promptCall = (client.session.prompt as ReturnType<typeof mock>).mock.calls[0]
-    const body = (promptCall as Array<unknown>)[0] as { body: { parts: Array<{ text: string }> } }
-    const text = body.body.parts[0]?.text ?? ""
-    expect(text).toContain("/workspace/interfaces.ts")
+    expect(getPromptText(client)).toContain("/workspace/interfaces.ts")
   })
 
   it("includes criteria text in the prompt", async () => {
     const criteria = "1. Must have tests\n2. Must have docs"
     const client = makeClient(makeReviewResponse())
     await dispatchSelfReview(client, { ...BASE_REQ, criteriaText: criteria })
-
-    const promptCall = (client.session.prompt as ReturnType<typeof mock>).mock.calls[0]
-    const body = (promptCall as Array<unknown>)[0] as { body: { parts: Array<{ text: string }> } }
-    const text = body.body.parts[0]?.text ?? ""
-    expect(text).toContain("Must have tests")
+    expect(getPromptText(client)).toContain("Must have tests")
   })
 
   it("includes upstream summary in the prompt when provided", async () => {
     const client = makeClient(makeReviewResponse())
     await dispatchSelfReview(client, { ...BASE_REQ, upstreamSummary: "Conventions: use tabs" })
-
-    const promptCall = (client.session.prompt as ReturnType<typeof mock>).mock.calls[0]
-    const body = (promptCall as Array<unknown>)[0] as { body: { parts: Array<{ text: string }> } }
-    const text = body.body.parts[0]?.text ?? ""
-    expect(text).toContain("use tabs")
+    expect(getPromptText(client)).toContain("use tabs")
   })
 
-  it("creates session with agent: 'workflow-reviewer'", async () => {
+  it("uses v1 SDK path/body style in prompt() call", async () => {
     const client = makeClient(makeReviewResponse())
     await dispatchSelfReview(client, BASE_REQ)
 
-    const createCall = (client.session.create as ReturnType<typeof mock>).mock.calls[0]
-    const arg = (createCall as Array<unknown>)[0] as { body: { agent: string } }
-    expect(arg.body.agent).toBe("workflow-reviewer")
+    const promptCall = (client.session.prompt as ReturnType<typeof mock>).mock.calls[0]
+    const arg = (promptCall as Array<unknown>)[0] as Record<string, unknown>
+    // v1 SDK: path.id, body.parts — no top-level sessionID, parts, or agent
+    expect((arg["path"] as any)?.id).toBe("mock-review-session")
+    expect(Array.isArray((arg["body"] as any)?.parts)).toBe(true)
+    expect(arg["agent"]).toBeUndefined()
+    expect(arg["sessionID"]).toBeUndefined()
   })
 })
 
@@ -389,9 +391,9 @@ describe("dispatchSelfReview — timeout", () => {
   it("returns SelfReviewError when prompt hangs (simulated by never-resolving promise)", async () => {
     const client = {
       session: {
-        create: mock(async () => ({ id: "mock-review-session" })),
+        create: mock(async () => ({ data: { id: "mock-review-session" } })),
         prompt: mock(() => new Promise<never>(() => { /* hangs forever */ })),
-        delete: mock(async () => undefined),
+        delete: mock(async () => ({ data: true })),
       },
     }
     // Use a very short timeout via the SELF_REVIEW_TIMEOUT_MS constant.
@@ -402,9 +404,9 @@ describe("dispatchSelfReview — timeout", () => {
     // in the utils test. Here we just verify that a network error (throw) is handled.
     const throwsClient = {
       session: {
-        create: mock(async () => ({ id: "session" })),
+        create: mock(async () => ({ data: { id: "session" } })),
         prompt: mock(async () => { throw new Error("timeout: self-review timed out after 120000ms") }),
-        delete: mock(async () => undefined),
+        delete: mock(async () => ({ data: true })),
       },
     }
     const result = await dispatchSelfReview(throwsClient, BASE_REQ)
@@ -423,14 +425,14 @@ describe("dispatchSelfReview — artifactContent for in-memory phases", () => {
     const capturedPrompts: string[] = []
     const client = {
       session: {
-        create: mock(async () => ({ id: "content-session" })),
-        prompt: mock(async (opts: { body: { parts: Array<{ text: string }> } }) => {
-          capturedPrompts.push(opts.body.parts[0]!.text)
+        create: mock(async () => ({ data: { id: "content-session" } })),
+        prompt: mock(async (opts: { path?: { id: string }; body?: { parts: Array<{ text: string }> } }) => {
+          capturedPrompts.push(opts.body!.parts[0]!.text)
           return {
-            parts: [{ type: "text", text: makeReviewResponse() }],
+            data: { parts: [{ type: "text", text: makeReviewResponse() }] },
           }
         }),
-        delete: mock(async () => undefined),
+        delete: mock(async () => ({ data: true })),
       },
     }
 
@@ -452,14 +454,14 @@ describe("dispatchSelfReview — artifactContent for in-memory phases", () => {
     const capturedPrompts: string[] = []
     const client = {
       session: {
-        create: mock(async () => ({ id: "files-session" })),
-        prompt: mock(async (opts: { body: { parts: Array<{ text: string }> } }) => {
-          capturedPrompts.push(opts.body.parts[0]!.text)
+        create: mock(async () => ({ data: { id: "files-session" } })),
+        prompt: mock(async (opts: { path?: { id: string }; body?: { parts: Array<{ text: string }> } }) => {
+          capturedPrompts.push(opts.body!.parts[0]!.text)
           return {
-            parts: [{ type: "text", text: makeReviewResponse() }],
+            data: { parts: [{ type: "text", text: makeReviewResponse() }] },
           }
         }),
-        delete: mock(async () => undefined),
+        delete: mock(async () => ({ data: true })),
       },
     }
 
@@ -479,14 +481,14 @@ describe("dispatchSelfReview — artifactContent for in-memory phases", () => {
     const capturedPrompts: string[] = []
     const client = {
       session: {
-        create: mock(async () => ({ id: "empty-session" })),
-        prompt: mock(async (opts: { body: { parts: Array<{ text: string }> } }) => {
-          capturedPrompts.push(opts.body.parts[0]!.text)
+        create: mock(async () => ({ data: { id: "empty-session" } })),
+        prompt: mock(async (opts: { path?: { id: string }; body?: { parts: Array<{ text: string }> } }) => {
+          capturedPrompts.push(opts.body!.parts[0]!.text)
           return {
-            parts: [{ type: "text", text: makeReviewResponse() }],
+            data: { parts: [{ type: "text", text: makeReviewResponse() }] },
           }
         }),
-        delete: mock(async () => undefined),
+        delete: mock(async () => ({ data: true })),
       },
     }
 
@@ -498,5 +500,200 @@ describe("dispatchSelfReview — artifactContent for in-memory phases", () => {
     })
 
     expect(capturedPrompts[0]).toContain("mark criteria as unmet")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Agent rebuttal — dispatchRebuttal and buildRebuttalPrompt
+// ---------------------------------------------------------------------------
+
+const BASE_REBUTTAL_REQ: RebuttalRequest = {
+  phase: "TESTS",
+  mode: "GREENFIELD",
+  reviewerVerdict: [
+    {
+      criterion: "[Q] Operational excellence — structured logging",
+      met: false,
+      evidence: "No tests verify JSON log format (score: 8/10)",
+      severity: "blocking",
+      score: 8,
+    },
+  ],
+  agentAssessment: [
+    {
+      criterion: "[Q] Operational excellence — structured logging",
+      met: true,
+      evidence: "Structured logging is an implementation concern, not testable at interface level. Tests verify error contracts (retryCount) which is the interface responsibility.",
+      score: 9,
+    },
+  ],
+  artifactPaths: ["/workspace/tests/ingestion.test.ts"],
+  criteriaText: "1. All interface contracts tested\n2. [Q] Operational excellence — ...",
+}
+
+describe("buildRebuttalPrompt — prompt structure", () => {
+  it("includes the phase name", () => {
+    const prompt = buildRebuttalPrompt(BASE_REBUTTAL_REQ)
+    expect(prompt).toContain("TESTS")
+  })
+
+  it("includes the reviewer's original verdict", () => {
+    const prompt = buildRebuttalPrompt(BASE_REBUTTAL_REQ)
+    expect(prompt).toContain("No tests verify JSON log format")
+    expect(prompt).toContain("score: 8/10")
+  })
+
+  it("includes the agent's counterarguments", () => {
+    const prompt = buildRebuttalPrompt(BASE_REBUTTAL_REQ)
+    expect(prompt).toContain("implementation concern")
+    expect(prompt).toContain("agent claims score: 9/10")
+  })
+
+  it("includes artifact paths for re-checking", () => {
+    const prompt = buildRebuttalPrompt(BASE_REBUTTAL_REQ)
+    expect(prompt).toContain("/workspace/tests/ingestion.test.ts")
+  })
+
+  it("includes instructions about valid vs invalid rebuttals", () => {
+    const prompt = buildRebuttalPrompt(BASE_REBUTTAL_REQ)
+    expect(prompt).toContain("out of scope")
+    expect(prompt).toContain("INVALID")
+    expect(prompt).toContain("handwaving")
+  })
+
+  it("requests JSON output with rebuttal_accepted field", () => {
+    const prompt = buildRebuttalPrompt(BASE_REBUTTAL_REQ)
+    expect(prompt).toContain("rebuttal_accepted")
+  })
+})
+
+describe("dispatchRebuttal — reviewer concedes", () => {
+  it("returns allResolved=true when reviewer accepts rebuttal and revises score to 9+", async () => {
+    const responseText = JSON.stringify({
+      criteria_results: [
+        {
+          criterion: "[Q] Operational excellence — structured logging",
+          met: true,
+          evidence: "Agent's argument is valid: structured logging verification is an implementation concern. Tests correctly verify the error contract (retryCount field).",
+          severity: "blocking",
+          score: 9,
+          rebuttal_accepted: true,
+        },
+      ],
+    })
+    const client = makeClient(responseText)
+    const result = await dispatchRebuttal(client, BASE_REBUTTAL_REQ)
+
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    expect(result.allResolved).toBe(true)
+    expect(result.revisedResults).toHaveLength(1)
+    expect(result.revisedResults[0]!.met).toBe(true)
+    expect(result.revisedResults[0]!.score).toBe(9)
+  })
+})
+
+describe("dispatchRebuttal — reviewer holds firm", () => {
+  it("returns allResolved=false when reviewer maintains low score", async () => {
+    const responseText = JSON.stringify({
+      criteria_results: [
+        {
+          criterion: "[Q] Operational excellence — structured logging",
+          met: false,
+          evidence: "Rebuttal rejected: even at interface level, the plan explicitly requires structured JSON logging tests (Section 6.5).",
+          severity: "blocking",
+          score: 8,
+          rebuttal_accepted: false,
+        },
+      ],
+    })
+    const client = makeClient(responseText)
+    const result = await dispatchRebuttal(client, BASE_REBUTTAL_REQ)
+
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    expect(result.allResolved).toBe(false)
+    expect(result.revisedResults[0]!.met).toBe(false)
+    expect(result.revisedResults[0]!.score).toBe(8)
+  })
+})
+
+describe("dispatchRebuttal — multiple disputed criteria", () => {
+  it("handles mixed results: some accepted, some rejected", async () => {
+    const req: RebuttalRequest = {
+      ...BASE_REBUTTAL_REQ,
+      reviewerVerdict: [
+        { criterion: "[Q] Op excellence — logging", met: false, evidence: "no log tests", severity: "blocking", score: 8 },
+        { criterion: "[Q] Op excellence — retry", met: false, evidence: "shallow retry tests", severity: "blocking", score: 7 },
+      ],
+      agentAssessment: [
+        { criterion: "[Q] Op excellence — logging", met: true, evidence: "out of scope", score: 9 },
+        { criterion: "[Q] Op excellence — retry", met: true, evidence: "we test the contract", score: 9 },
+      ],
+    }
+    const responseText = JSON.stringify({
+      criteria_results: [
+        { criterion: "[Q] Op excellence — logging", met: true, evidence: "accepted", severity: "blocking", score: 9 },
+        { criterion: "[Q] Op excellence — retry", met: false, evidence: "rejected: plan says test retries", severity: "blocking", score: 7 },
+      ],
+    })
+    const client = makeClient(responseText)
+    const result = await dispatchRebuttal(client, req)
+
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    expect(result.allResolved).toBe(false) // one still failing
+    expect(result.revisedResults.filter((r) => r.met)).toHaveLength(1)
+    expect(result.revisedResults.filter((r) => !r.met)).toHaveLength(1)
+  })
+})
+
+describe("dispatchRebuttal — error handling", () => {
+  it("returns RebuttalError on network failure", async () => {
+    const client = makeClientThrows()
+    const result = await dispatchRebuttal(client, BASE_REBUTTAL_REQ)
+
+    expect(result.success).toBe(false)
+    if (result.success) return
+    expect(result.error).toContain("Network error")
+  })
+
+  it("returns RebuttalError on session creation failure", async () => {
+    const client = makeClientCreateThrows()
+    const result = await dispatchRebuttal(client, BASE_REBUTTAL_REQ)
+
+    expect(result.success).toBe(false)
+    if (result.success) return
+    expect(result.error).toContain("Cannot create review session")
+  })
+})
+
+describe("dispatchRebuttal — session lifecycle", () => {
+  it("creates session with Rebuttal title including phase and feature name", async () => {
+    const responseText = JSON.stringify({
+      criteria_results: [
+        { criterion: "[Q] Op ex", met: true, evidence: "ok", severity: "blocking", score: 9 },
+      ],
+    })
+    const client = makeClient(responseText)
+    await dispatchRebuttal(client, { ...BASE_REBUTTAL_REQ, featureName: "cloud-cost-platform" })
+
+    const createCall = (client.session.create as ReturnType<typeof mock>).mock.calls[0]
+    const createArg = (createCall as Array<unknown>)[0] as { body: { title: string } }
+    expect(createArg.body.title).toContain("Rebuttal")
+    expect(createArg.body.title).toContain("TESTS")
+    expect(createArg.body.title).toContain("cloud-cost-platform")
+  })
+
+  it("cleans up session via delete() even on success", async () => {
+    const responseText = JSON.stringify({
+      criteria_results: [
+        { criterion: "[Q] Op ex", met: true, evidence: "ok", severity: "blocking", score: 9 },
+      ],
+    })
+    const client = makeClient(responseText)
+    await dispatchRebuttal(client, BASE_REBUTTAL_REQ)
+
+    expect((client.session.delete as ReturnType<typeof mock>).mock.calls).toHaveLength(1)
   })
 })

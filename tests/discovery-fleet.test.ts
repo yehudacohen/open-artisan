@@ -21,11 +21,11 @@ import { runDiscoveryFleet, SCANNER_NAMES } from "#plugin/discovery/index"
 function makeClient(responseText = "## Analysis\nSome findings here.") {
   return {
     session: {
-      create: mock(async () => ({ id: `session-${Math.random().toString(36).slice(2)}` })),
+      create: mock(async () => ({ data: { id: `session-${Math.random().toString(36).slice(2)}` } })),
       prompt: mock(async () => ({
-        parts: [{ type: "text", text: responseText }],
+        data: { parts: [{ type: "text", text: responseText }] },
       })),
-      delete: mock(async () => undefined),
+      delete: mock(async () => ({ data: true })),
     },
   }
 }
@@ -36,16 +36,18 @@ function makeClientSomeThrow(failPattern: RegExp) {
     session: {
       create: mock(async () => {
         const id = `session-${++callCount}`
-        return { id }
+        return { data: { id } }
       }),
-      prompt: mock(async (args: { path: { id: string }; body: unknown }) => {
+      prompt: mock(async (args: { path?: { id: string }; sessionID?: string }) => {
+        // v1 SDK style: session ID is in path.id; fall back to sessionID for compat
+        const sessionId = args?.path?.id ?? args?.sessionID ?? ""
         // Fail for session IDs matching the pattern (e.g. session-2, session-4)
-        if (failPattern.test(args.path.id)) {
-          throw new Error(`Scanner failure for session ${args.path.id}`)
+        if (failPattern.test(sessionId)) {
+          throw new Error(`Scanner failure for session ${sessionId}`)
         }
-        return { parts: [{ type: "text", text: "## Analysis\nOK" }] }
+        return { data: { parts: [{ type: "text", text: "## Analysis\nOK" }] } }
       }),
-      delete: mock(async () => undefined),
+      delete: mock(async () => ({ data: true })),
     },
   }
 }
@@ -53,11 +55,11 @@ function makeClientSomeThrow(failPattern: RegExp) {
 function makeClientAllThrow() {
   return {
     session: {
-      create: mock(async () => ({ id: `session-${Math.random().toString(36).slice(2)}` })),
+      create: mock(async () => ({ data: { id: `session-${Math.random().toString(36).slice(2)}` } })),
       prompt: mock(async () => {
         throw new Error("All scanners failed")
       }),
-      delete: mock(async () => undefined),
+      delete: mock(async () => ({ data: true })),
     },
   }
 }
@@ -237,21 +239,25 @@ describe("runDiscoveryFleet — prompt content", () => {
 
     const calls = (client.session.prompt as ReturnType<typeof mock>).mock.calls
     const texts = calls.map((c: Array<unknown>) => {
-      const arg = c[0] as { body: { parts: Array<{ text: string }> } }
-      return arg.body.parts[0]?.text ?? ""
+      const arg = c[0] as { body?: { parts: Array<{ text: string }> }; parts?: Array<{ text: string }> }
+      return arg?.body?.parts?.[0]?.text ?? arg?.parts?.[0]?.text ?? ""
     })
     // At least one prompt should contain the cwd path
     expect(texts.some((t: string) => t.includes("/my/project"))).toBe(true)
   })
 
-  it("each session is created with agent: 'workflow-reviewer'", async () => {
+  it("uses v1 SDK path/body style — no top-level agent or sessionID", async () => {
     const client = makeClient()
     await runDiscoveryFleet(client, "/workspace", "REFACTOR")
 
-    const createCalls = (client.session.create as ReturnType<typeof mock>).mock.calls
-    for (const call of createCalls) {
-      const arg = (call as Array<unknown>)[0] as { body: { agent: string } }
-      expect(arg.body.agent).toBe("workflow-reviewer")
+    const promptCalls = (client.session.prompt as ReturnType<typeof mock>).mock.calls
+    for (const call of promptCalls) {
+      const arg = (call as Array<unknown>)[0] as Record<string, unknown>
+      // v1 SDK: path.id, body.parts — no top-level sessionID, parts, or agent
+      expect(arg["agent"]).toBeUndefined()
+      expect(arg["sessionID"]).toBeUndefined()
+      expect((arg["path"] as any)?.id).toBeDefined()
+      expect(Array.isArray((arg["body"] as any)?.parts)).toBe(true)
     }
   })
 })

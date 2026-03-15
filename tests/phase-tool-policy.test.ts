@@ -6,25 +6,101 @@ import { describe, expect, it } from "bun:test"
 import { getPhaseToolPolicy } from "#plugin/hooks/tool-guard"
 import type { PhaseToolPolicy } from "#plugin/types"
 
-describe("Tool policy — DISCOVERY phases block writes and bash (G2)", () => {
-  const discoverPhaseStates = ["SCAN", "ANALYZE", "CONVENTIONS", "USER_GATE", "REVISE"] as const
-
-  for (const ps of discoverPhaseStates) {
+describe("Tool policy — DISCOVERY/SCAN and DISCOVERY/ANALYZE are strictly read-only", () => {
+  for (const ps of ["SCAN", "ANALYZE"] as const) {
     it(`DISCOVERY/${ps} blocks write`, () => {
-      const policy: PhaseToolPolicy = getPhaseToolPolicy("DISCOVERY", ps, "GREENFIELD", [])
+      const policy: PhaseToolPolicy = getPhaseToolPolicy("DISCOVERY", ps, "REFACTOR", [])
       expect(policy.blocked).toContain("write")
     })
 
     it(`DISCOVERY/${ps} blocks edit`, () => {
-      const policy: PhaseToolPolicy = getPhaseToolPolicy("DISCOVERY", ps, "GREENFIELD", [])
+      const policy: PhaseToolPolicy = getPhaseToolPolicy("DISCOVERY", ps, "REFACTOR", [])
       expect(policy.blocked).toContain("edit")
     })
 
-    it(`DISCOVERY/${ps} blocks bash (G2 — discovery is read-only)`, () => {
-      const policy: PhaseToolPolicy = getPhaseToolPolicy("DISCOVERY", ps, "GREENFIELD", [])
+    it(`DISCOVERY/${ps} blocks bash`, () => {
+      const policy: PhaseToolPolicy = getPhaseToolPolicy("DISCOVERY", ps, "REFACTOR", [])
       expect(policy.blocked).toContain("bash")
     })
   }
+})
+
+describe("Tool policy — DISCOVERY/CONVENTIONS allows writes to .openartisan/ only", () => {
+  it("DISCOVERY/CONVENTIONS does not block write or edit", () => {
+    const policy = getPhaseToolPolicy("DISCOVERY", "CONVENTIONS", "REFACTOR", [])
+    expect(policy.blocked).not.toContain("write")
+    expect(policy.blocked).not.toContain("edit")
+  })
+
+  it("DISCOVERY/CONVENTIONS blocks bash", () => {
+    const policy = getPhaseToolPolicy("DISCOVERY", "CONVENTIONS", "REFACTOR", [])
+    expect(policy.blocked).toContain("bash")
+  })
+
+  it("DISCOVERY/CONVENTIONS allows writes to .openartisan/ files", () => {
+    const policy = getPhaseToolPolicy("DISCOVERY", "CONVENTIONS", "REFACTOR", [])
+    expect(policy.writePathPredicate).toBeDefined()
+    expect(policy.writePathPredicate?.("/project/.openartisan/conventions.md")).toBe(true)
+    expect(policy.writePathPredicate?.("/project/.openartisan/discovery/notes.md")).toBe(true)
+  })
+
+  it("DISCOVERY/CONVENTIONS blocks writes to project source files", () => {
+    const policy = getPhaseToolPolicy("DISCOVERY", "CONVENTIONS", "REFACTOR", [])
+    expect(policy.writePathPredicate?.("/project/src/index.ts")).toBe(false)
+    expect(policy.writePathPredicate?.("/project/package.json")).toBe(false)
+  })
+
+  it("DISCOVERY/CONVENTIONS blocks writes to .env files even in .openartisan/", () => {
+    const policy = getPhaseToolPolicy("DISCOVERY", "CONVENTIONS", "REFACTOR", [])
+    expect(policy.writePathPredicate?.("/project/.openartisan/.env")).toBe(false)
+  })
+})
+
+describe("Tool policy — DISCOVERY/REVISE allows writes to .openartisan/ only", () => {
+  it("DISCOVERY/REVISE does not block write or edit", () => {
+    const policy = getPhaseToolPolicy("DISCOVERY", "REVISE", "REFACTOR", [])
+    expect(policy.blocked).not.toContain("edit")
+    expect(policy.blocked).not.toContain("write")
+  })
+
+  it("DISCOVERY/REVISE does not block bash", () => {
+    const policy = getPhaseToolPolicy("DISCOVERY", "REVISE", "REFACTOR", [])
+    expect(policy.blocked).not.toContain("bash")
+  })
+
+  it("DISCOVERY/REVISE allows writes to .openartisan/ files", () => {
+    const policy = getPhaseToolPolicy("DISCOVERY", "REVISE", "REFACTOR", [])
+    expect(policy.writePathPredicate).toBeDefined()
+    expect(policy.writePathPredicate?.("/project/.openartisan/conventions.md")).toBe(true)
+    expect(policy.writePathPredicate?.("/project/.openartisan/discovery/notes.md")).toBe(true)
+  })
+
+  it("DISCOVERY/REVISE blocks writes to project source files", () => {
+    const policy = getPhaseToolPolicy("DISCOVERY", "REVISE", "REFACTOR", [])
+    expect(policy.writePathPredicate?.("/project/src/index.ts")).toBe(false)
+    expect(policy.writePathPredicate?.("/project/package.json")).toBe(false)
+  })
+
+  it("DISCOVERY/REVISE blocks writes to .env files even in .openartisan/", () => {
+    const policy = getPhaseToolPolicy("DISCOVERY", "REVISE", "REFACTOR", [])
+    expect(policy.writePathPredicate?.("/project/.openartisan/.env")).toBe(false)
+  })
+})
+
+describe("Tool policy — DISCOVERY/REVIEW and USER_GATE allow bash for verification", () => {
+  it("DISCOVERY/REVIEW blocks write and edit but allows bash", () => {
+    const policy = getPhaseToolPolicy("DISCOVERY", "REVIEW", "REFACTOR", [])
+    expect(policy.blocked).toContain("write")
+    expect(policy.blocked).toContain("edit")
+    expect(policy.blocked).not.toContain("bash")
+  })
+
+  it("DISCOVERY/USER_GATE blocks write and edit but allows bash", () => {
+    const policy = getPhaseToolPolicy("DISCOVERY", "USER_GATE", "REFACTOR", [])
+    expect(policy.blocked).toContain("write")
+    expect(policy.blocked).toContain("edit")
+    expect(policy.blocked).not.toContain("bash")
+  })
 })
 
 describe("Tool policy — PLANNING and IMPL_PLAN block writes and bash", () => {
@@ -41,6 +117,72 @@ describe("Tool policy — PLANNING and IMPL_PLAN block writes and bash", () => {
     expect(policy.blocked).toContain("edit")
     expect(policy.blocked).toContain("bash")
   })
+
+  it("PLANNING/CONVENTIONS blocks write, edit, bash", () => {
+    const policy = getPhaseToolPolicy("PLANNING", "CONVENTIONS", "GREENFIELD", [])
+    expect(policy.blocked).toContain("write")
+    expect(policy.blocked).toContain("edit")
+    expect(policy.blocked).toContain("bash")
+  })
+})
+
+describe("Tool policy — PLANNING/REVISE allows edits to .openartisan/ only", () => {
+  it("PLANNING/REVISE does not block edit or write", () => {
+    const policy = getPhaseToolPolicy("PLANNING", "REVISE", "GREENFIELD", [])
+    expect(policy.blocked).not.toContain("edit")
+    expect(policy.blocked).not.toContain("write")
+  })
+
+  it("PLANNING/REVISE does not block bash", () => {
+    const policy = getPhaseToolPolicy("PLANNING", "REVISE", "GREENFIELD", [])
+    expect(policy.blocked).not.toContain("bash")
+  })
+
+  it("PLANNING/REVISE allows writes to .openartisan/ files", () => {
+    const policy = getPhaseToolPolicy("PLANNING", "REVISE", "GREENFIELD", [])
+    expect(policy.writePathPredicate).toBeDefined()
+    expect(policy.writePathPredicate?.("/project/.openartisan/plan.md")).toBe(true)
+    expect(policy.writePathPredicate?.("/project/.openartisan/feature-x/plan.md")).toBe(true)
+  })
+
+  it("PLANNING/REVISE blocks writes to project source files", () => {
+    const policy = getPhaseToolPolicy("PLANNING", "REVISE", "GREENFIELD", [])
+    expect(policy.writePathPredicate?.("/project/src/index.ts")).toBe(false)
+    expect(policy.writePathPredicate?.("/project/package.json")).toBe(false)
+  })
+
+  it("PLANNING/REVISE blocks writes to .env files even in .openartisan/", () => {
+    const policy = getPhaseToolPolicy("PLANNING", "REVISE", "GREENFIELD", [])
+    expect(policy.writePathPredicate?.("/project/.openartisan/.env")).toBe(false)
+  })
+
+  it("IMPL_PLAN/REVISE allows writes to .openartisan/ files", () => {
+    const policy = getPhaseToolPolicy("IMPL_PLAN", "REVISE", "GREENFIELD", [])
+    expect(policy.writePathPredicate).toBeDefined()
+    expect(policy.writePathPredicate?.("/project/.openartisan/impl-plan.md")).toBe(true)
+    expect(policy.writePathPredicate?.("/project/src/server.ts")).toBe(false)
+  })
+})
+
+describe("Tool policy — PLANNING/REVIEW and USER_GATE allow bash for verification", () => {
+  it("PLANNING/REVIEW blocks write and edit but allows bash", () => {
+    const policy = getPhaseToolPolicy("PLANNING", "REVIEW", "GREENFIELD", [])
+    expect(policy.blocked).toContain("write")
+    expect(policy.blocked).toContain("edit")
+    expect(policy.blocked).not.toContain("bash")
+  })
+
+  it("PLANNING/USER_GATE blocks write and edit but allows bash", () => {
+    const policy = getPhaseToolPolicy("PLANNING", "USER_GATE", "GREENFIELD", [])
+    expect(policy.blocked).toContain("write")
+    expect(policy.blocked).toContain("edit")
+    expect(policy.blocked).not.toContain("bash")
+  })
+
+  it("IMPL_PLAN/REVIEW allows bash for verification", () => {
+    const policy = getPhaseToolPolicy("IMPL_PLAN", "REVIEW", "GREENFIELD", [])
+    expect(policy.blocked).not.toContain("bash")
+  })
 })
 
 describe("Tool policy — INTERFACES allows .ts/.tsx/.d.ts writes only (G1)", () => {
@@ -49,9 +191,31 @@ describe("Tool policy — INTERFACES allows .ts/.tsx/.d.ts writes only (G1)", ()
     expect(policy.writePathPredicate).toBeDefined()
   })
 
-  it("bash is blocked in INTERFACES", () => {
+  it("bash is blocked in INTERFACES/DRAFT", () => {
     const policy = getPhaseToolPolicy("INTERFACES", "DRAFT", "GREENFIELD", [])
     expect(policy.blocked).toContain("bash")
+  })
+
+  it("bash is blocked in INTERFACES/REVISE", () => {
+    const policy = getPhaseToolPolicy("INTERFACES", "REVISE", "GREENFIELD", [])
+    expect(policy.blocked).toContain("bash")
+  })
+
+  it("bash is allowed in INTERFACES/REVIEW (read-only verification)", () => {
+    const policy = getPhaseToolPolicy("INTERFACES", "REVIEW", "GREENFIELD", [])
+    expect(policy.blocked).not.toContain("bash")
+  })
+
+  it("bash is allowed in INTERFACES/USER_GATE (read-only verification)", () => {
+    const policy = getPhaseToolPolicy("INTERFACES", "USER_GATE", "GREENFIELD", [])
+    expect(policy.blocked).not.toContain("bash")
+  })
+
+  it("INTERFACES/REVIEW still restricts writes to interface files", () => {
+    const policy = getPhaseToolPolicy("INTERFACES", "REVIEW", "GREENFIELD", [])
+    expect(policy.writePathPredicate).toBeDefined()
+    expect(policy.writePathPredicate?.("/project/src/types.ts")).toBe(true)
+    expect(policy.writePathPredicate?.("/project/src/server.ts")).toBe(false)
   })
 
   it("predicate allows .ts files with interface-like names", () => {
@@ -99,9 +263,31 @@ describe("Tool policy — INTERFACES allows .ts/.tsx/.d.ts writes only (G1)", ()
 })
 
 describe("Tool policy — TESTS allows .test.ts/.test.tsx writes only (G1)", () => {
-  it("bash is blocked in TESTS", () => {
+  it("bash is blocked in TESTS/DRAFT", () => {
     const policy = getPhaseToolPolicy("TESTS", "DRAFT", "GREENFIELD", [])
     expect(policy.blocked).toContain("bash")
+  })
+
+  it("bash is blocked in TESTS/REVISE", () => {
+    const policy = getPhaseToolPolicy("TESTS", "REVISE", "GREENFIELD", [])
+    expect(policy.blocked).toContain("bash")
+  })
+
+  it("bash is allowed in TESTS/REVIEW (read-only verification)", () => {
+    const policy = getPhaseToolPolicy("TESTS", "REVIEW", "GREENFIELD", [])
+    expect(policy.blocked).not.toContain("bash")
+  })
+
+  it("bash is allowed in TESTS/USER_GATE (read-only verification)", () => {
+    const policy = getPhaseToolPolicy("TESTS", "USER_GATE", "GREENFIELD", [])
+    expect(policy.blocked).not.toContain("bash")
+  })
+
+  it("TESTS/REVIEW still restricts writes to test files", () => {
+    const policy = getPhaseToolPolicy("TESTS", "REVIEW", "GREENFIELD", [])
+    expect(policy.writePathPredicate).toBeDefined()
+    expect(policy.writePathPredicate?.("/project/tests/foo.test.ts")).toBe(true)
+    expect(policy.writePathPredicate?.("/project/src/index.ts")).toBe(false)
   })
 
   it("predicate allows .test.ts files", () => {

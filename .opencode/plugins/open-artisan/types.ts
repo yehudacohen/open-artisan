@@ -32,6 +32,7 @@ export type PhaseState =
   | "DRAFT"
   | "REVIEW"
   | "USER_GATE"
+  | "ESCAPE_HATCH"
   | "REVISE"
 
 /**
@@ -40,28 +41,30 @@ export type PhaseState =
  */
 export const VALID_PHASE_STATES: Record<Phase, PhaseState[]> = {
   MODE_SELECT: ["DRAFT"],
-  DISCOVERY: ["SCAN", "ANALYZE", "CONVENTIONS", "REVIEW", "USER_GATE", "REVISE"],
-  PLANNING: ["DRAFT", "REVIEW", "USER_GATE", "REVISE"],
-  INTERFACES: ["DRAFT", "REVIEW", "USER_GATE", "REVISE"],
-  TESTS: ["DRAFT", "REVIEW", "USER_GATE", "REVISE"],
-  IMPL_PLAN: ["DRAFT", "REVIEW", "USER_GATE", "REVISE"],
-  IMPLEMENTATION: ["DRAFT", "REVIEW", "USER_GATE", "REVISE"],
+  DISCOVERY: ["SCAN", "ANALYZE", "CONVENTIONS", "REVIEW", "USER_GATE", "ESCAPE_HATCH", "REVISE"],
+  PLANNING: ["DRAFT", "REVIEW", "USER_GATE", "ESCAPE_HATCH", "REVISE"],
+  INTERFACES: ["DRAFT", "REVIEW", "USER_GATE", "ESCAPE_HATCH", "REVISE"],
+  TESTS: ["DRAFT", "REVIEW", "USER_GATE", "ESCAPE_HATCH", "REVISE"],
+  IMPL_PLAN: ["DRAFT", "REVIEW", "USER_GATE", "ESCAPE_HATCH", "REVISE"],
+  IMPLEMENTATION: ["DRAFT", "REVIEW", "USER_GATE", "ESCAPE_HATCH", "REVISE"],
   DONE: ["DRAFT"],
 }
 
 export type WorkflowEvent =
-  | "mode_selected"        // MODE_SELECT → DISCOVERY or PLANNING
-  | "scan_complete"        // DISCOVERY/SCAN → DISCOVERY/ANALYZE
-  | "analyze_complete"     // DISCOVERY/ANALYZE → DISCOVERY/CONVENTIONS
-  | "draft_complete"       // */DRAFT → */REVIEW
-  | "self_review_pass"     // */REVIEW → */USER_GATE
-  | "self_review_fail"     // */REVIEW → */REVIEW (loop, increments iterationCount)
-  | "escalate_to_user"     // */REVIEW → */USER_GATE (iteration cap reached — M12)
-  | "user_approve"         // */USER_GATE → next Phase/DRAFT (+ git checkpoint)
-  | "user_feedback"        // */USER_GATE → orchestrator → */REVISE
-  | "revision_complete"    // */REVISE → */REVIEW
+  | "mode_selected"           // MODE_SELECT → DISCOVERY or PLANNING
+  | "scan_complete"           // DISCOVERY/SCAN → DISCOVERY/ANALYZE
+  | "analyze_complete"        // DISCOVERY/ANALYZE → DISCOVERY/CONVENTIONS
+  | "draft_complete"          // */DRAFT → */REVIEW
+  | "self_review_pass"        // */REVIEW → */USER_GATE
+  | "self_review_fail"        // */REVIEW → */REVIEW (loop, increments iterationCount)
+  | "escalate_to_user"        // */REVIEW → */USER_GATE (iteration cap reached — M12)
+  | "user_approve"            // */USER_GATE → next Phase/DRAFT (+ git checkpoint)
+  | "user_feedback"           // */USER_GATE or */ESCAPE_HATCH → orchestrator → */REVISE
+  | "escape_hatch_triggered"  // */USER_GATE → */ESCAPE_HATCH (strategic pivot detected)
+  | "revision_complete"       // */REVISE → */REVIEW
 
 export type ArtifactKey =
+  | "design"
   | "conventions"
   | "plan"
   | "interfaces"
@@ -93,8 +96,16 @@ export type ArtifactKey =
  *   v11: added revisionBaseline (artifact hash at REVISE entry, used as diff gate)
  *   v12: added TaskCategory/HumanGateInfo on implDag nodes, "human-gated" TaskStatus,
  *        for stub detection, human gate mechanism, and plan structuring
+ *   v13: added activeAgent (tracks which agent file is driving the session —
+ *        "artisan", "robot-artisan", or null for non-artisan agents like Plan/Build)
+ *   v14: added taskCompletionInProgress (re-entry guard for mark_task_complete —
+ *        prevents concurrent per-task review + DAG mutations from corrupting state)
+ *   v15: added taskReviewCount (per-task review iteration cap — prevents infinite
+ *        review loops when a task repeatedly fails per-task review),
+ *        added pendingFeedback (crash-safe feedback persistence — stores feedback
+ *        text during orchestrator LLM calls so it survives process crashes)
  */
-export const SCHEMA_VERSION = 12
+export const SCHEMA_VERSION = 15
 
 export interface WorkflowState {
   /** Schema version for forward-compatibility. Must equal SCHEMA_VERSION. */
@@ -258,6 +269,45 @@ export interface WorkflowState {
    * null when not in REVISE state or when the baseline could not be captured.
    */
   revisionBaseline: { type: "content-hash"; hash: string } | { type: "git-sha"; sha: string } | null
+
+  /**
+   * The name of the agent file currently driving this session.
+   * Set when a custom tool's execute() context contains `context.agent`.
+   * Used by the tool guard to go dormant for non-artisan agents (Plan, Build)
+   * and by robot-artisan mode for auto-approval at USER_GATE.
+   *
+   * Values: "artisan", "robot-artisan", or null (unknown / non-artisan agent).
+   * null means the plugin has not yet detected which agent is active — the tool
+   * guard defaults to ACTIVE in this case so existing sessions aren't broken.
+   */
+  activeAgent: string | null
+
+  /**
+   * Re-entry guard for mark_task_complete. Set to the task_id when
+   * mark_task_complete begins processing (before per-task review dispatch).
+   * Cleared when processing completes (success, failure, or error).
+   * Concurrent calls are rejected while this is non-null.
+   *
+   * null = no mark_task_complete call in progress.
+   */
+  taskCompletionInProgress: string | null
+
+  /**
+   * Number of times mark_task_complete has been called for the current task
+   * without the task passing per-task review. Reset to 0 when currentTaskId
+   * changes (new task dispatched). When this exceeds MAX_TASK_REVIEW_ITERATIONS,
+   * per-task review is bypassed and the task is accepted (the full implementation
+   * review at request_review will catch issues).
+   */
+  taskReviewCount: number
+
+  /**
+   * User feedback text persisted before orchestrator LLM calls (assess/diverge).
+   * If the process crashes during the orchestrator call, this field preserves
+   * the feedback so it can be replayed on restart.
+   * null = no orchestrator call in flight.
+   */
+  pendingFeedback: string | null
 }
 
 // ---------------------------------------------------------------------------
@@ -523,6 +573,11 @@ export function validateWorkflowState(state: WorkflowState): string | null {
   if (state.escapePending && (state.pendingRevisionSteps === null || state.pendingRevisionSteps.length === 0)) {
     return `escapePending is true but pendingRevisionSteps is ${state.pendingRevisionSteps === null ? "null" : "empty"} — escape hatch requires pending steps`
   }
+  // M2: Cross-field invariant — escapePending requires ESCAPE_HATCH phaseState
+  // (structural guarantee: the state machine enforces this via the escape_hatch_triggered event)
+  if (state.escapePending && state.phaseState !== "ESCAPE_HATCH") {
+    return `escapePending is true but phaseState is "${state.phaseState}" — must be "ESCAPE_HATCH" (state machine should enforce this)`
+  }
   if (typeof state.userGateMessageReceived !== "boolean") {
     return `userGateMessageReceived must be a boolean, got ${typeof state.userGateMessageReceived}`
   }
@@ -544,6 +599,34 @@ export function validateWorkflowState(state: WorkflowState): string | null {
   }
   if (typeof state.featureName === "string" && state.featureName.length === 0) {
     return `featureName must not be an empty string (use null for no feature)`
+  }
+  // v13: activeAgent
+  if (state.activeAgent !== null && state.activeAgent !== undefined) {
+    if (typeof state.activeAgent !== "string") {
+      return `activeAgent must be null or a string, got ${typeof state.activeAgent}`
+    }
+    if (state.activeAgent.length === 0) {
+      return `activeAgent must not be an empty string (use null for unknown/non-artisan agents)`
+    }
+  }
+  // v14: taskCompletionInProgress
+  if (state.taskCompletionInProgress !== null && state.taskCompletionInProgress !== undefined) {
+    if (typeof state.taskCompletionInProgress !== "string") {
+      return `taskCompletionInProgress must be null or a string, got ${typeof state.taskCompletionInProgress}`
+    }
+    if (state.taskCompletionInProgress.length === 0) {
+      return `taskCompletionInProgress must not be an empty string (use null when no completion is in progress)`
+    }
+  }
+  // v15: taskReviewCount
+  if (typeof state.taskReviewCount !== "number" || state.taskReviewCount < 0 || !Number.isInteger(state.taskReviewCount)) {
+    return `taskReviewCount must be a non-negative integer, got ${state.taskReviewCount}`
+  }
+  // v15: pendingFeedback
+  if (state.pendingFeedback !== null && state.pendingFeedback !== undefined) {
+    if (typeof state.pendingFeedback !== "string") {
+      return `pendingFeedback must be null or a string, got ${typeof state.pendingFeedback}`
+    }
   }
   // v11: revisionBaseline
   if (state.revisionBaseline !== null && state.revisionBaseline !== undefined) {
@@ -683,7 +766,16 @@ export interface CriterionResult {
   criterion: string
   met: boolean
   evidence: string
-  severity: "blocking" | "suggestion"
+  /**
+   * Criterion severity level:
+   * - "blocking"          — must be met; standard boolean criteria (default)
+   * - "suggestion"        — non-blocking; reported but does not prevent advancement
+   * - "design-invariant"  — must be met AND non-rebuttable; used for binary structural
+   *                         questions from the design document (prefixed [D] in criteria text).
+   *                         The rebuttal loop cannot upgrade these — a design invariant violation
+   *                         requires the deviation register to be updated and user-approved.
+   */
+  severity: "blocking" | "suggestion" | "design-invariant"
   /**
    * Numeric quality score (1-10) for quality-dimension criteria (prefixed [Q]).
    * For [Q] criteria, `met` is derived: score >= 9 → met, score < 9 → not met.
@@ -772,9 +864,11 @@ export interface MarkSatisfiedArgs {
     evidence: string
     /**
      * Optional severity override. Defaults to "blocking" if not provided.
-     * "suggestion" criteria do not block advancement; they are advisory only.
+     * - "blocking"         — must be met to advance (default)
+     * - "suggestion"       — advisory only, does not block advancement
+     * - "design-invariant" — must be met AND cannot be rebutted (used for [D] criteria)
      */
-    severity?: "blocking" | "suggestion"
+    severity?: "blocking" | "suggestion" | "design-invariant"
     /**
      * Numeric quality score (1-10) for [Q] quality-dimension criteria.
      * For [Q] criteria: score >= 9 means met, score < 9 means not met.

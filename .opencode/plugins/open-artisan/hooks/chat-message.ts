@@ -57,8 +57,8 @@ export function processUserMessage(
   state: WorkflowState,
   parts: Array<{ type: string; text?: string }>,
 ): ChatMessageOutput {
-  // Only intercept at user gate states
-  if (state.phaseState !== "USER_GATE") {
+  // Only intercept at user gate states (USER_GATE or ESCAPE_HATCH)
+  if (state.phaseState !== "USER_GATE" && state.phaseState !== "ESCAPE_HATCH") {
     return { parts, intercepted: false, feedbackType: null }
   }
 
@@ -67,13 +67,17 @@ export function processUserMessage(
     .map((p) => p.text!)
     .join(" ")
 
-  const isApproval = looksLikeApproval(textContent)
+  // In ESCAPE_HATCH, the user message is ALWAYS feedback (approval is structurally
+  // blocked by the state machine — there is no user_approve transition from ESCAPE_HATCH).
+  const isApproval = state.phaseState === "ESCAPE_HATCH" ? false : looksLikeApproval(textContent)
   const feedbackType = isApproval ? "approve" : "feedback"
 
   // Inject routing instructions as a new leading text part
-  const routingNote = isApproval
-    ? buildApprovalNote(state.phase, state.phaseState)
-    : buildFeedbackNote(state.phase, state.phaseState)
+  const routingNote = state.phaseState === "ESCAPE_HATCH"
+    ? buildEscapeHatchNote(state.phase)
+    : isApproval
+      ? buildApprovalNote(state.phase, state.phaseState)
+      : buildFeedbackNote(state.phase, state.phaseState)
 
   const injectedParts: Array<{ type: string; text?: string }> = [
     { type: "text", text: routingNote },
@@ -102,6 +106,16 @@ function buildFeedbackNote(phase: Phase, _phaseState: PhaseState): string {
     `The user has provided feedback on the ${phase} artifact. ` +
     `Call \`submit_feedback\` NOW with feedback_type="revise" and feedback_text set to the user's exact message. ` +
     `This must be your first and only tool call. Do NOT do research or analysis first.`
+  )
+}
+
+function buildEscapeHatchNote(phase: Phase): string {
+  return (
+    `[WORKFLOW ESCAPE HATCH — IMMEDIATE ACTION REQUIRED] ` +
+    `An escape hatch is active for the ${phase} phase. The user has provided their decision. ` +
+    `Call \`submit_feedback\` NOW with feedback_type="revise" and feedback_text set to the user's exact message. ` +
+    `This must be your first and only tool call. Do NOT do research or analysis first. ` +
+    `Note: approval is NOT available during an escape hatch — only revision feedback.`
   )
 }
 

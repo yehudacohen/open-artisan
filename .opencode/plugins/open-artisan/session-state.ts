@@ -51,6 +51,10 @@ function freshState(sessionId: string): WorkflowState {
     artifactDiskPaths: {},
     featureName: null,
     revisionBaseline: null,
+    activeAgent: null,
+    taskCompletionInProgress: null,
+    taskReviewCount: 0,
+    pendingFeedback: null,
   }
 }
 
@@ -197,6 +201,13 @@ export function createSessionStateStore(dir: string): SessionStateStore {
           migrated["artifactDiskPaths"] ??= {}
           // v9 → v10: add featureName
           migrated["featureName"] ??= null
+          // v12 → v13: add activeAgent
+          migrated["activeAgent"] ??= null
+          // v13 → v14: add taskCompletionInProgress
+          migrated["taskCompletionInProgress"] ??= null
+          // v14 → v15: add taskReviewCount, pendingFeedback
+          migrated["taskReviewCount"] ??= 0
+          migrated["pendingFeedback"] ??= null
           // Always stamp with current schema version after migration
           migrated["schemaVersion"] = SCHEMA_VERSION
           // Second gate: full invariant validation (phase/phaseState combos, counts, etc.)

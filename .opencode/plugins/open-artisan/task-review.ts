@@ -222,6 +222,7 @@ async function ephemeralTaskReviewSession(
   const created = await client.session.create({
     body: {
       title,
+      agent: "workflow-reviewer",
       ...(parentSessionId ? { parentID: parentSessionId } : {}),
     },
   })

@@ -77,9 +77,11 @@ function buildTable(): TableEntry[] {
   table.push({ from: ["DISCOVERY", "REVIEW"], event: "escalate_to_user", modePredicate: null, to: ["DISCOVERY", "USER_GATE"] })
   table.push({ from: ["DISCOVERY", "USER_GATE"], event: "user_approve", modePredicate: null, to: ["PLANNING", "DRAFT"] })
   table.push({ from: ["DISCOVERY", "USER_GATE"], event: "user_feedback", modePredicate: null, to: ["DISCOVERY", "REVISE"] })
+  table.push({ from: ["DISCOVERY", "USER_GATE"], event: "escape_hatch_triggered", modePredicate: null, to: ["DISCOVERY", "ESCAPE_HATCH"] })
+  table.push({ from: ["DISCOVERY", "ESCAPE_HATCH"], event: "user_feedback", modePredicate: null, to: ["DISCOVERY", "REVISE"] })
   table.push({ from: ["DISCOVERY", "REVISE"], event: "revision_complete", modePredicate: null, to: ["DISCOVERY", "REVIEW"] })
 
-  // Standard phases with DRAFT→REVIEW→USER_GATE→REVISE cycle
+  // Standard phases with DRAFT→REVIEW→USER_GATE→(ESCAPE_HATCH?)→REVISE cycle
   for (const phase of STANDARD_PHASES) {
     const next = nextPhase(phase)
     table.push({ from: [phase, "DRAFT"], event: "draft_complete", modePredicate: null, to: [phase, "REVIEW"] })
@@ -88,6 +90,11 @@ function buildTable(): TableEntry[] {
     table.push({ from: [phase, "REVIEW"], event: "escalate_to_user", modePredicate: null, to: [phase, "USER_GATE"] })
     table.push({ from: [phase, "USER_GATE"], event: "user_approve", modePredicate: null, to: [next, "DRAFT"] })
     table.push({ from: [phase, "USER_GATE"], event: "user_feedback", modePredicate: null, to: [phase, "REVISE"] })
+    // ESCAPE_HATCH: strategic pivot detected at USER_GATE → structural guard
+    // user_approve is NOT valid in ESCAPE_HATCH — the SM will reject it.
+    // Only user_feedback (the escape hatch response) exits ESCAPE_HATCH → REVISE.
+    table.push({ from: [phase, "USER_GATE"], event: "escape_hatch_triggered", modePredicate: null, to: [phase, "ESCAPE_HATCH"] })
+    table.push({ from: [phase, "ESCAPE_HATCH"], event: "user_feedback", modePredicate: null, to: [phase, "REVISE"] })
     table.push({ from: [phase, "REVISE"], event: "revision_complete", modePredicate: null, to: [phase, "REVIEW"] })
   }
 
@@ -184,12 +191,12 @@ export function createStateMachine(): StateMachine {
     },
 
     isUserGate(phase: Phase, phaseState: PhaseState): boolean {
-      return phaseState === "USER_GATE" && phase !== "DONE"
+      return (phaseState === "USER_GATE" || phaseState === "ESCAPE_HATCH") && phase !== "DONE"
     },
 
     isAgentActive(phase: Phase, phaseState: PhaseState): boolean {
       if (phase === "DONE") return false
-      if (phaseState === "USER_GATE") return false
+      if (phaseState === "USER_GATE" || phaseState === "ESCAPE_HATCH") return false
       return true
     },
   }

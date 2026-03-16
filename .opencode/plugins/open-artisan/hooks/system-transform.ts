@@ -275,14 +275,80 @@ function getQualityCriteria(phase: Phase): string {
 }
 
 /**
+ * Builds the design-invariant criteria block for phases that must comply with
+ * a user-authored design document. These criteria use the [D] prefix, meaning
+ * they are blocking AND non-rebuttable.
+ *
+ * The block is only generated when a design doc path is provided.
+ */
+function getDesignInvariantCriteria(phase: Phase, designDocPath: string): string {
+  switch (phase) {
+    case "PLANNING":
+      return `
+**Design-invariant criteria [D] (blocking, non-rebuttable — the design document is at \`${designDocPath}\`):**
+
+These criteria verify compliance with the user-authored design document. If the plan deviates
+from the design document, the deviation MUST be explicitly documented in a **deviation register**
+and presented at the USER_GATE for user approval. Undocumented deviations are a blocking failure.
+
+[D] criteria CANNOT be rebutted in the review loop — they are binary structural questions,
+not quality judgments. If the design says X and the plan does Y, that is a deviation regardless
+of whether Y is "simpler" or "equivalent."
+
+1. [D] **Design deviation register present.** The plan includes a section titled "Design Deviations" that
+   lists every point where the plan deviates from the design document. Each entry classifies the deviation
+   as "equivalent" (no guarantee lost), "downgraded" (structural guarantee replaced with procedural check),
+   or "deferred" (feature cut). An empty register is valid if the plan fully conforms to the design.
+2. [D] **Every structural invariant from the design document is either structurally enforced or registered
+   as a deviation.** Read the design document and identify its structural invariants (state machine
+   constraints, type system guarantees, required gates). For each invariant, verify it is either
+   (a) preserved in the plan, or (b) listed in the deviation register with the correct classification.
+3. [D] **No "downgraded" deviations are hidden.** If the plan replaces a structural guarantee with a
+   procedural check (e.g., a state machine constraint replaced by a boolean flag), the deviation register
+   must classify it as "downgraded" with a risk note — not "equivalent."`
+
+    case "IMPL_PLAN":
+      return `
+**Design-invariant criteria [D] (blocking, non-rebuttable — design doc at \`${designDocPath}\`):**
+
+1. [D] **DAG tasks preserve approved design deviations.** Every deviation classified in the plan's
+   deviation register is accounted for in the task descriptions. No task silently introduces a new
+   deviation that wasn't approved in the planning phase.
+2. [D] **Structural guarantees map to specific tasks.** Every structural invariant from the design
+   document (that was NOT registered as a deviation) has at least one task that implements or
+   preserves that guarantee.`
+
+    case "IMPLEMENTATION":
+      return `
+**Design-invariant criteria [D] (blocking, non-rebuttable — design doc at \`${designDocPath}\`):**
+
+1. [D] **Implementation matches approved deviation register.** Every "downgraded" or "deferred"
+   deviation from the plan's register is implemented exactly as approved — no further downgrades
+   beyond what was registered.
+2. [D] **Structural invariants from the design document are enforced.** For each structural invariant
+   that was NOT registered as a deviation, verify it is enforced structurally (state machine, type
+   system, or compile-time check) — not merely documented or checked at runtime with a procedural guard.`
+
+    default:
+      return ""
+  }
+}
+
+/**
  * Returns the structured acceptance criteria checklist for the given phase/mode.
  * These are the exact criteria the agent must evaluate in mark_satisfied.
  *
  * Format: each criterion is a string. The agent maps each to a CriterionResult.
  * Criteria marked [S] are suggestions (non-blocking); all others are blocking.
  * Criteria marked [Q] require a numeric score (1-10) with minimum 9/10.
+ * Criteria marked [D] are design-invariant (blocking + non-rebuttable) — only
+ * injected when a design document is present (designDocPath is non-null).
+ *
+ * @param designDocPath  Absolute path to the design document, or null/undefined if none.
+ *   When set, [D] design-invariant criteria are appended to PLANNING, IMPL_PLAN,
+ *   and IMPLEMENTATION phases.
  */
-export function getAcceptanceCriteria(phase: Phase, phaseState: PhaseState, mode: WorkflowMode | null): string | null {
+export function getAcceptanceCriteria(phase: Phase, phaseState: PhaseState, mode: WorkflowMode | null, designDocPath?: string | null): string | null {
   if (phaseState !== "REVIEW") return null
 
   const qualityBlock = getQualityCriteria(phase)
@@ -332,11 +398,14 @@ ${qualityBlock}
 
       return null // GREENFIELD skips discovery
 
-    case "PLANNING": return `### Acceptance Criteria — Plan
+    case "PLANNING": {
+      const designBlock = designDocPath ? getDesignInvariantCriteria("PLANNING", designDocPath) : ""
+      return `### Acceptance Criteria — Plan
 
 Evaluate each criterion independently. For each, state whether it is met (true/false),
 provide specific evidence, and mark severity (blocking/suggestion).
 For [Q] quality criteria, provide a score from 1 to 10. Minimum passing score is 9/10.
+${designDocPath ? "For [D] design-invariant criteria, these are BINARY (met/not met) and CANNOT be rebutted." : ""}
 
 **Blocking criteria (must all pass to advance):**
 1. All user requirements explicitly addressed — nothing from the original request is omitted
@@ -348,10 +417,12 @@ For [Q] quality criteria, provide a score from 1 to 10. Minimum passing score is
 7. Integration points identified — external systems, APIs, databases, filesystem interactions
 
 ${qualityBlock}
+${designBlock}
 
 **Suggestion criteria (non-blocking):**
 - [S] Non-functional requirements addressed (performance targets, security, scalability)
 - [S] Decisions documented with rationale (why this approach over alternatives)`
+    }
 
     case "INTERFACES": return `### Acceptance Criteria — Interfaces & Data Models
 
@@ -395,11 +466,14 @@ ${qualityBlock}
 - [S] Each test is independently runnable (no shared state between tests)
 - [S] Concurrency/race condition tests where applicable`
 
-    case "IMPL_PLAN": return `### Acceptance Criteria — Implementation Plan (DAG)
+    case "IMPL_PLAN": {
+      const designBlock = designDocPath ? getDesignInvariantCriteria("IMPL_PLAN", designDocPath) : ""
+      return `### Acceptance Criteria — Implementation Plan (DAG)
 
 Evaluate each criterion independently. For each, state whether it is met (true/false),
 provide specific evidence (task IDs, interface names), and mark severity (blocking/suggestion).
 For [Q] quality criteria, provide a score from 1 to 10. Minimum passing score is 9/10.
+${designDocPath ? "For [D] design-invariant criteria, these are BINARY (met/not met) and CANNOT be rebutted." : ""}
 
 **Blocking criteria (must all pass to advance):**
 1. Every interface method is covered by at least one task
@@ -409,16 +483,21 @@ For [Q] quality criteria, provide a score from 1 to 10. Minimum passing score is
 5. Expected test outcomes specified per task (which tests become green)
 
 ${qualityBlock}
+${designBlock}
 
 **Suggestion criteria (non-blocking):**
 - [S] Complexity estimates assigned per task (small/medium/large)
 - [S] Critical path identified through the DAG`
+    }
 
-    case "IMPLEMENTATION": return `### Acceptance Criteria — Implementation
+    case "IMPLEMENTATION": {
+      const designBlock = designDocPath ? getDesignInvariantCriteria("IMPLEMENTATION", designDocPath) : ""
+      return `### Acceptance Criteria — Implementation
 
 Evaluate each criterion independently. For each, state whether it is met (true/false),
 provide specific evidence (file paths, test outputs), and mark severity (blocking/suggestion).
 For [Q] quality criteria, provide a score from 1 to 10. Minimum passing score is 9/10.
+${designDocPath ? "For [D] design-invariant criteria, these are BINARY (met/not met) and CANNOT be rebutted." : ""}
 
 **Blocking criteria (must all pass to advance):**
 1. Implementation matches approved interface signatures exactly — no deviations
@@ -428,10 +507,12 @@ For [Q] quality criteria, provide a score from 1 to 10. Minimum passing score is
 5. Consistent with all prior approved artifacts (plan, interfaces, conventions)
 
 ${qualityBlock}
+${designBlock}
 
 **Suggestion criteria (non-blocking):**
 - [S] Code follows existing naming and style conventions
 - [S] No dead code or unnecessary complexity introduced`
+    }
 
     default:
       return null
@@ -465,6 +546,28 @@ export function buildWorkflowSystemPrompt(state: WorkflowState): string {
     blocks.push(loadPrompt(promptFile))
   }
 
+  // 2b. Design document constraint block (if a design doc is tracked)
+  const designDocPath = state.artifactDiskPaths?.design ?? null
+  if (designDocPath && (state.phase === "PLANNING" || state.phase === "IMPL_PLAN" || state.phase === "IMPLEMENTATION")) {
+    blocks.push(
+      `### Design Document — Mandatory Constraint\n\n` +
+      `A user-authored design document is tracked at \`${designDocPath}\`.\n` +
+      `Read this document before drafting. It defines structural invariants that the ` +
+      `${state.phase === "PLANNING" ? "plan" : state.phase === "IMPL_PLAN" ? "implementation plan" : "implementation"} ` +
+      `must comply with.\n\n` +
+      (state.phase === "PLANNING"
+        ? `**You MUST include a "Design Deviations" section** in the plan that lists every point ` +
+          `where the plan deviates from the design document. Each deviation must be classified as:\n` +
+          `- **equivalent** — no structural guarantee lost (different approach, same protection)\n` +
+          `- **downgraded** — structural guarantee replaced with a procedural check (with risk note)\n` +
+          `- **deferred** — feature/guarantee cut from this iteration\n\n` +
+          `An empty deviation register is valid if the plan fully conforms to the design. ` +
+          `The deviation register will be presented to the user at the approval gate.`
+        : `The plan's "Design Deviations" register (if present) defines approved deviations. ` +
+          `Do not introduce new deviations beyond what was approved in the plan.`),
+    )
+  }
+
   // 3. Current sub-state context (with MODE_SELECT and DONE special cases)
   blocks.push(buildSubStateContext(state))
 
@@ -477,8 +580,9 @@ export function buildWorkflowSystemPrompt(state: WorkflowState): string {
   }
 
   // 5. At REVIEW state: inject structured acceptance criteria so the agent
-  //    knows exactly what to evaluate for mark_satisfied
-  const criteria = getAcceptanceCriteria(state.phase, state.phaseState, state.mode)
+  //    knows exactly what to evaluate for mark_satisfied.
+  //    If a design doc is tracked, [D] criteria are injected for design compliance.
+  const criteria = getAcceptanceCriteria(state.phase, state.phaseState, state.mode, designDocPath)
   if (criteria) {
     blocks.push(criteria)
   }
@@ -729,15 +833,16 @@ function buildSubStateContext(state: WorkflowState): string {
         }
       }
       break
+    case "ESCAPE_HATCH":
+      lines.push("**ESCAPE HATCH ACTIVE** — A strategic change was detected.")
+      lines.push("The escape hatch presentation has been shown to the user.")
+      lines.push("**MANDATORY:** Call `submit_feedback` as your FIRST and ONLY tool call with the user's response.")
+      lines.push("The user's response is one of: `accept`, a description of alternative direction, or `abort`.")
+      lines.push("Do NOT perform any research, analysis, or other tool calls before calling `submit_feedback`.")
+      lines.push("Do NOT proceed with any work until the escape hatch is resolved.")
+      break
     case "USER_GATE":
-      if (state.escapePending) {
-        lines.push("**ESCAPE HATCH ACTIVE** — A strategic change was detected.")
-        lines.push("The escape hatch presentation has been shown to the user.")
-        lines.push("**MANDATORY:** Call `submit_feedback` as your FIRST and ONLY tool call with the user's response.")
-        lines.push("The user's response is one of: `accept`, a description of alternative direction, or `abort`.")
-        lines.push("Do NOT perform any research, analysis, or other tool calls before calling `submit_feedback`.")
-        lines.push("Do NOT proceed with any work until the escape hatch is resolved.")
-      } else {
+      {
         lines.push("The artifact is awaiting user approval.")
         lines.push("")
         lines.push("**MANDATORY PROTOCOL — READ CAREFULLY:**")

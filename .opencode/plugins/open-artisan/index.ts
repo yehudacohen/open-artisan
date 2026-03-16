@@ -58,9 +58,11 @@ import { parseImplPlan } from "./impl-plan-parser"
 import { createImplDAG, type TaskCategory, type HumanGateInfo } from "./dag"
 import { nextSchedulerDecision, resolveHumanGate } from "./scheduler"
 import { resolveArtifactPaths } from "./tools/artifact-paths"
-import { writeArtifact } from "./artifact-store"
+import { writeArtifact, detectDesignDoc } from "./artifact-store"
 import { dispatchTaskReview } from "./task-review"
+import { dispatchDriftCheck } from "./task-drift"
 import { captureRevisionBaseline, hasArtifactChanged } from "./revision-baseline"
+import { dispatchAutoApproval } from "./auto-approve"
 import { createLogger } from "./logger"
 
 import { createHash } from "node:crypto"
@@ -70,6 +72,7 @@ import type { PluginClient } from "./client-types"
 import { resolveSessionId } from "./utils"
 import {
   MAX_REVIEW_ITERATIONS,
+  MAX_TASK_REVIEW_ITERATIONS,
   MAX_INTENT_BASELINE_CHARS,
   MAX_FEEDBACK_CHARS,
   IDLE_COOLDOWN_MS,
@@ -79,6 +82,26 @@ import {
 function artifactHash(text: string): string {
   return createHash("sha256").update(text).digest("hex").slice(0, 16)
 }
+
+/**
+ * Extended tool execute context — includes optional agent name.
+ * The base context has directory, sessionId, session. OpenCode passes
+ * `agent` when the session was created with an agent identifier.
+ */
+interface ToolExecuteContext {
+  directory: string
+  sessionId?: string
+  session?: { id: string }
+  /** Agent name from the session's agent file (e.g. "artisan", "robot-artisan") */
+  agent?: string
+  [key: string]: unknown
+}
+
+/**
+ * Known artisan agent names. Only these agents activate the full workflow.
+ * Non-artisan agents (Plan, Build, or unknown) cause the plugin to go dormant.
+ */
+export const ARTISAN_AGENT_NAMES = new Set(["artisan", "robot-artisan"])
 
 /**
  * Lazily ensures workflow state exists for a session. If `session.created`
@@ -104,6 +127,32 @@ async function ensureState(
     })
   } catch { /* ignore */ }
   return store.create(sessionId)
+}
+
+/**
+ * Detects the active agent from the tool execute context and persists it
+ * to state.activeAgent if changed. Called at the top of every custom tool's
+ * execute() handler — the first tool call in a session captures the agent
+ * and subsequent calls short-circuit if already set.
+ *
+ * context.agent is only available inside custom tool execute() — NOT in
+ * tool.execute.before hooks or session.created events.
+ */
+async function detectAgent(
+  store: SessionStateStore,
+  sessionId: string,
+  context: ToolExecuteContext,
+): Promise<void> {
+  const agentName = context.agent
+  if (!agentName) return // Agent not in context — can't detect
+
+  const state = store.get(sessionId)
+  if (!state) return
+  if (state.activeAgent === agentName) return // Already set — no-op
+
+  await store.update(sessionId, (draft) => {
+    draft.activeAgent = agentName
+  })
 }
 
 /**
@@ -154,6 +203,29 @@ export const WORKFLOW_TOOL_NAMES = new Set([
   "resolve_human_gate",
 ])
 
+/**
+ * OpenCode-internal infrastructure tools that should never be blocked by the
+ * workflow tool guard. These are agent plumbing — task management, search,
+ * reading, web access — not file write operations. Without this allowlist,
+ * the substring match on "write"/"edit" would block tools like "todowrite"
+ * because they contain "write" in the name.
+ *
+ * Matched by exact tool name (lowercase). This is intentionally narrow to
+ * avoid accidentally allowing file-write tools with similar names.
+ */
+export const PASSTHROUGH_TOOL_NAMES = new Set([
+  "todowrite",       // Task management — agent's own todo list
+  "todoread",        // Task management — read agent's todo list
+  "task",            // Subagent dispatch (child session gets its own tool guard)
+  "glob",            // File pattern search (read-only)
+  "grep",            // Content search (read-only)
+  "read",            // File reading (read-only)
+  "webfetch",        // Web content fetch (read-only)
+  "google_search",   // Web search (read-only)
+  "skill",           // Skill loading (read-only)
+  "question",        // User interaction (read-only)
+])
+
 // MAX_REVIEW_ITERATIONS is imported from constants.ts
 // Re-export for backward compatibility with consumers that import from index.ts
 export { MAX_REVIEW_ITERATIONS } from "./constants"
@@ -185,10 +257,19 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
 
   // Layer 2: Orchestrator — wires LLM-backed assess + diverge into the routing logic.
   // The graph and orchestrator are shared across sessions (stateless pure functions).
-  const graph = createArtifactGraph()
+  // Design doc detection: if a user-authored design document exists, it becomes an
+  // upstream dependency of the plan artifact. This makes the orchestrator cascade
+  // changes through the design doc and enables design invariant acceptance criteria.
+  const designDocPath = detectDesignDoc(process.cwd())
+  const hasDesignDoc = designDocPath !== null
+  if (hasDesignDoc) {
+    log.info("Design document detected", { detail: designDocPath! })
+  }
+  const graph = createArtifactGraph(hasDesignDoc)
+  const getActiveSessionId = () => activeSessionId
   const orchestrator = createOrchestrator({
-    assess: createAssessFn(client),
-    diverge: createDivergeFn(client),
+    assess: createAssessFn(client, getActiveSessionId),
+    diverge: createDivergeFn(client, getActiveSessionId),
     graph,
   })
 
@@ -218,6 +299,10 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
   // to prevent cascading re-prompts when the user interrupts tool calls.
   // IDLE_COOLDOWN_MS is imported from constants.ts
   const lastRepromptTimestamps = new Map<string, number>()
+
+  // Active session tracking: stores the most recently active primary session ID.
+  // Used to pass parentID to orchestrator sessions so they appear in the session tree.
+  let activeSessionId: string | undefined
 
   // Child session tracking: maps child session IDs → parent session IDs.
   // Used to resolve the parent's workflow state for tool guard and system-transform
@@ -431,6 +516,9 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
         const state = store.get(sessionId)
         if (!state) return
 
+        // Agent-aware dormancy: skip idle re-prompts for non-artisan agents
+        if (state.activeAgent !== null && !ARTISAN_AGENT_NAMES.has(state.activeAgent)) return
+
         // Debounce: ignore idle events that arrive within 10 seconds of the
         // last re-prompt. This prevents a cascade when the user interrupts a
         // tool call — the abort triggers idle, we re-prompt, the LLM retries,
@@ -495,6 +583,9 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
       if (!sessionId) return
       const state = store.get(sessionId)
       if (!state) return
+
+      // Agent-aware dormancy: skip chat.message processing for non-artisan agents
+      if (state.activeAgent !== null && !ARTISAN_AGENT_NAMES.has(state.activeAgent)) return
 
       // Resolve messageID from input — required for v2 Part objects
       const messageId = (input.messageID as string | undefined) ?? (output.message?.id as string | undefined) ?? ""
@@ -574,6 +665,14 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
       const state = store.get(sessionId)
       if (!state) return
 
+      // Agent-aware dormancy: if the active agent is NOT an artisan agent,
+      // skip workflow prompt injection entirely. The plugin should be invisible
+      // to non-artisan agents (Plan, Build). activeAgent === null means "not yet
+      // detected" — default to ACTIVE for backward compatibility.
+      if (state.activeAgent !== null && !ARTISAN_AGENT_NAMES.has(state.activeAgent)) {
+        return // DORMANT — non-artisan agent, no workflow prompt injection
+      }
+
       const promptBlock = buildWorkflowSystemPrompt(state)
       // Prepend the workflow block before existing system parts
       output.system.unshift(promptBlock)
@@ -598,6 +697,9 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
       // parent's tool policy but CANNOT call workflow tools.
       const parentId = childSessionParents.get(sessionId)
       if (parentId) {
+        // Never block OpenCode infrastructure tools in child sessions
+        if (PASSTHROUGH_TOOL_NAMES.has(input.tool.toLowerCase())) return
+
         // Block workflow tools in child sessions — only the parent can
         // advance workflow state. This prevents state mutation races when
         // multiple Task subagents run concurrently.
@@ -652,9 +754,26 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
       const state = store.get(sessionId)
       if (!state) return
 
+      // Track the most recently active primary session ID for orchestrator parentID.
+      activeSessionId = sessionId
+
+      // Agent-aware dormancy: if the active agent is NOT an artisan agent
+      // (e.g. Plan, Build, or any unknown agent), skip ALL tool blocking.
+      // The plugin should be invisible to non-artisan agents.
+      // activeAgent === null means "not yet detected" — default to ACTIVE
+      // for backward compatibility (existing sessions before schema v13).
+      if (state.activeAgent !== null && !ARTISAN_AGENT_NAMES.has(state.activeAgent)) {
+        return // DORMANT — non-artisan agent, skip tool guard entirely
+      }
+
       // Never block our own workflow tools regardless of phase — they are the
       // only way the agent can signal state transitions.
       if (WORKFLOW_TOOL_NAMES.has(input.tool)) return
+
+      // Never block OpenCode infrastructure tools (todowrite, glob, read, etc.)
+      // These are agent plumbing, not file operations. The substring match on
+      // "write"/"edit" would otherwise false-positive on tools like "todowrite".
+      if (PASSTHROUGH_TOOL_NAMES.has(input.tool.toLowerCase())) return
 
       const policy = getPhaseToolPolicy(
         state.phase,
@@ -720,6 +839,9 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
       const state = store.get(sessionId)
       if (!state) return
 
+      // Agent-aware dormancy: skip compaction context for non-artisan agents
+      if (state.activeAgent !== null && !ARTISAN_AGENT_NAMES.has(state.activeAgent)) return
+
       const contextBlock = buildCompactionContext(state)
       // Ensure output.context exists — runtime may not initialize it
       output.context ??= []
@@ -756,12 +878,13 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
         },
         async execute(
           args: { mode: string; feature_name: string },
-          context: { directory: string; sessionId?: string; session?: { id: string } },
+          context: ToolExecuteContext,
         ) {
           const sessionId = resolveSessionId(context)
           if (!sessionId) return "Error: Could not determine session ID from tool context."
 
           const state = await ensureState(store, sessionId, client)
+          await detectAgent(store, sessionId, context)
 
           if (state.phase !== "MODE_SELECT") {
             return `Error: Mode already selected (current phase: ${state.phase}).`
@@ -779,6 +902,11 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
           if (!outcome.success) return `Error: ${outcome.message}`
 
           logTransition(state, outcome, "select_mode", client)
+
+          // Detect design doc now that feature name is known (enables feature-scoped detection)
+          const cwd = context.directory || process.cwd()
+          const featureDesignDocPath = detectDesignDoc(cwd, featureName)
+
           await store.update(sessionId, (draft) => {
             draft.mode = mode
             draft.featureName = featureName
@@ -786,9 +914,17 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             draft.phaseState = outcome.nextPhaseState
             draft.iterationCount = 0
             draft.retryCount = 0
+            // Register design doc in artifact disk paths if detected
+            if (featureDesignDocPath) {
+              draft.artifactDiskPaths = { ...draft.artifactDiskPaths, design: featureDesignDocPath }
+            }
           })
 
-          return buildSelectModeResponse(mode) + ` Artifacts will be written to \`.openartisan/${featureName}/\`.`
+          const designDocNote = featureDesignDocPath
+            ? ` Design document detected at \`${featureDesignDocPath}\` — it will be used as a constraint for all subsequent phases.`
+            : ""
+
+          return buildSelectModeResponse(mode) + ` Artifacts will be written to \`.openartisan/${featureName}/\`.` + designDocNote
         },
       }),
 
@@ -804,11 +940,12 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             "Brief summary of what was scanned and key observations.",
           ),
         },
-        async execute(args: { scan_summary: string }, context: { directory: string; sessionId?: string; session?: { id: string } }) {
+        async execute(args: { scan_summary: string }, context: ToolExecuteContext) {
           const sessionId = resolveSessionId(context)
           if (!sessionId) return "Error: Could not determine session ID from tool context."
 
           const state = await ensureState(store, sessionId, client)
+          await detectAgent(store, sessionId, context)
 
           if (state.phase !== "DISCOVERY" || state.phaseState !== "SCAN") {
             return `Error: mark_scan_complete can only be called in DISCOVERY/SCAN (current: ${state.phase}/${state.phaseState}).`
@@ -841,11 +978,12 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             "Brief summary of what was analyzed and key architectural/convention findings.",
           ),
         },
-        async execute(args: { analysis_summary: string }, context: { directory: string; sessionId?: string; session?: { id: string } }) {
+        async execute(args: { analysis_summary: string }, context: ToolExecuteContext) {
           const sessionId = resolveSessionId(context)
           if (!sessionId) return "Error: Could not determine session ID from tool context."
 
           const state = await ensureState(store, sessionId, client)
+          await detectAgent(store, sessionId, context)
 
           if (state.phase !== "DISCOVERY" || state.phaseState !== "ANALYZE") {
             return `Error: mark_analyze_complete can only be called in DISCOVERY/ANALYZE (current: ${state.phase}/${state.phaseState}).`
@@ -949,12 +1087,13 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
         },
         async execute(
           args: { criteria_met: Array<{ criterion: string; met: boolean; evidence: string; severity?: "blocking" | "suggestion"; score?: string }>; artifact_content?: string },
-          context: { directory: string; sessionId?: string; session?: { id: string } },
+          context: ToolExecuteContext,
         ) {
           const sessionId = resolveSessionId(context)
           if (!sessionId) return "Error: Could not determine session ID from tool context."
 
           const state = await ensureState(store, sessionId, client)
+          await detectAgent(store, sessionId, context)
 
           if (state.phaseState !== "REVIEW") {
             return `Error: mark_satisfied can only be called in REVIEW state (current: ${state.phaseState}).`
@@ -965,7 +1104,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
           // artifact files and acceptance criteria — never the authoring conversation.
           // This eliminates anchoring bias. If the reviewer call fails, fall back
           // to the agent's self-reported criteria (graceful degradation).
-          const criteriaText = getAcceptanceCriteria(state.phase, state.phaseState, state.mode)
+          const criteriaText = getAcceptanceCriteria(state.phase, state.phaseState, state.mode, state.artifactDiskPaths?.design ?? null)
           const expectedBlocking = countExpectedBlockingCriteria(criteriaText)
           // Parse string scores to numbers — tool.schema has no .number() so
           // the schema declares score as string, but MarkSatisfiedArgs expects number.
@@ -974,8 +1113,8 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
               criterion: c.criterion,
               met: c.met,
               evidence: c.evidence,
-              severity: c.severity,
-              score: c.score ? parseInt(c.score, 10) : undefined,
+              ...(c.severity ? { severity: c.severity } : {}),
+              ...(c.score ? { score: parseInt(c.score, 10) } : {}),
             })),
           }
           // Iteration info for display in fail messages: "Review iteration X of Y"
@@ -1064,9 +1203,13 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
               // user over scope disagreements the reviewer might concede.
               const preEscalationIteration = state.iterationCount + 1 === MAX_REVIEW_ITERATIONS - 1
               if (!result.passed && preEscalationIteration) {
-                // Find rebuttable criteria: unmet blocking with scores 7-8
+                // Find rebuttable criteria: unmet blocking with scores 7-8.
+                // Design-invariant [D] criteria are NEVER rebuttable — they represent
+                // binary structural questions from the design doc that require user
+                // approval to deviate from, not quality judgments that can be argued.
                 const rebuttableCriteria = result.unmetCriteria.filter(
-                  (c) => typeof c.score === "number" && c.score >= 7 && c.score <= 8,
+                  (c) => typeof c.score === "number" && c.score >= 7 && c.score <= 8
+                    && c.severity !== "design-invariant",
                 )
                 // Find agent's counterarguments for those same criteria
                 const agentCounterargs = parsedArgs.criteria_met.filter((ac) =>
@@ -1147,6 +1290,60 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             }
           })
 
+          // Robot-artisan auto-approval: when the active agent is "robot-artisan"
+          // and we've entered USER_GATE, dispatch an auto-approver instead of
+          // waiting for human input. The auto-approver evaluates the artifact
+          // and returns either an approval or specific revision feedback.
+          const currentState = store.get(sessionId)
+          if (
+            outcome.nextPhaseState === "USER_GATE" &&
+            currentState?.activeAgent === "robot-artisan"
+          ) {
+            try {
+              const autoResult = await dispatchAutoApproval(client, {
+                phase: state.phase,
+                mode: state.mode,
+                artifactDiskPaths: state.artifactDiskPaths,
+                featureName: state.featureName,
+                conventionsPath: state.artifactDiskPaths["conventions"] ?? null,
+                parentSessionId: sessionId ?? undefined,
+                isEscalation: hitIterationCap,
+              })
+
+              if (autoResult.success) {
+                if (autoResult.approve) {
+                  // Auto-approved: set userGateMessageReceived so submit_feedback(approve)
+                  // won't warn about missing user input, then instruct the agent to approve.
+                  await store.update(sessionId, (draft) => {
+                    draft.userGateMessageReceived = true
+                  })
+                  log.info("Robot-artisan: auto-approved", { detail: `confidence: ${autoResult.confidence.toFixed(2)}` })
+                  return (
+                    `**Auto-approved** (robot-artisan mode, confidence: ${autoResult.confidence.toFixed(2)}).\n\n` +
+                    `${autoResult.reasoning}\n\n` +
+                    `Call \`submit_feedback\` with \`feedback_type: "approve"\` and \`feedback_text: "Auto-approved by robot-artisan"\` to proceed.`
+                  )
+                } else {
+                  // Auto-approve rejected: return revision feedback for the agent to address.
+                  // Stay at USER_GATE — the agent must revise and re-submit.
+                  log.info("Robot-artisan: auto-approve rejected", { detail: `confidence: ${autoResult.confidence.toFixed(2)}` })
+                  return (
+                    `**Auto-approve rejected** (robot-artisan mode, confidence: ${autoResult.confidence.toFixed(2)}).\n\n` +
+                    `${autoResult.reasoning}\n\n` +
+                    `**Required revisions:**\n${autoResult.feedback ?? "Address quality issues and re-submit."}\n\n` +
+                    `Call \`submit_feedback\` with \`feedback_type: "revise"\` and the revision feedback in \`feedback_text\` to re-enter REVISE.`
+                  )
+                }
+              }
+              // autoResult.success === false — fall through to normal USER_GATE behavior
+              log.warn("Robot-artisan: auto-approval failed, falling back to manual", { detail: autoResult.error })
+            } catch (autoErr) {
+              // Non-fatal — fall through to normal USER_GATE behavior
+              const errMsg = autoErr instanceof Error ? autoErr.message : String(autoErr)
+              log.warn("Robot-artisan: auto-approval dispatch error", { detail: errMsg })
+            }
+          }
+
           if (hitIterationCap) {
             // Build a structured verdict table for the user. The agent MUST
             // present this verbatim — not paraphrased — so the user sees the
@@ -1204,12 +1401,13 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
         },
         async execute(
           args: { task_id: string; implementation_summary: string; tests_passing: boolean },
-          context: { directory: string; sessionId?: string; session?: { id: string } },
+          context: ToolExecuteContext,
         ) {
           const sessionId = resolveSessionId(context)
           if (!sessionId) return "Error: Could not determine session ID from tool context."
 
           const state = await ensureState(store, sessionId, client)
+          await detectAgent(store, sessionId, context)
 
           if (state.phase !== "IMPLEMENTATION") {
             return `Error: mark_task_complete can only be called during the IMPLEMENTATION phase (current: ${state.phase}).`
@@ -1219,85 +1417,230 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             return `Error: mark_task_complete can only be called in DRAFT or REVISE state (current: ${state.phase}/${state.phaseState}).`
           }
 
-          const result = processMarkTaskComplete(args, state.implDag, state.currentTaskId)
-
-          if ("error" in result) return `Error: ${result.error}`
-
-          // Per-task review: dispatch a lightweight subagent to verify the task
-          // was implemented correctly before marking it complete in the DAG.
-          // The reviewer runs tests, checks interface alignment, and verifies
-          // no regressions. If the review fails, the task is NOT marked complete
-          // and the agent must fix the issues before re-calling mark_task_complete.
-          const taskNode = state.implDag?.find((t) => t.id === args.task_id)
-          if (taskNode) {
-            let taskReviewResult: Awaited<ReturnType<typeof dispatchTaskReview>> | null = null
-            try {
-              taskReviewResult = await dispatchTaskReview(client, {
-                task: taskNode,
-                implementationSummary: args.implementation_summary,
-                mode: state.mode,
-                cwd: context.directory || process.cwd(),
-                parentSessionId: sessionId ?? undefined,
-                featureName: state.featureName,
-                conventions: state.conventions,
-                artifactDiskPaths: state.artifactDiskPaths,
-              })
-            } catch (reviewErr) {
-              // dispatchTaskReview should never throw (returns TaskReviewError),
-              // but guard against unexpected runtime failures. Fall through to
-              // accept the task (graceful degradation — full review catches issues later).
-              const errMsg = reviewErr instanceof Error ? reviewErr.message : String(reviewErr)
-              log.warn("Task review dispatch failed", { detail: errMsg })
-            }
-
-            // If the task review succeeded and found issues, reject the completion.
-            // The agent must fix the issues and re-call mark_task_complete.
-            if (taskReviewResult?.success && !taskReviewResult.passed) {
-              const issuesList = taskReviewResult.issues.map((i) => `  - ${i}`).join("\n")
-              return (
-                `Task "${args.task_id}" did NOT pass the per-task review. ` +
-                `Fix the following issues before calling \`mark_task_complete\` again:\n\n` +
-                `**Issues found:**\n${issuesList}\n\n` +
-                `**Reviewer reasoning:** ${taskReviewResult.reasoning}\n\n` +
-                `Address each issue, ensure all tests pass, then re-call \`mark_task_complete\`.`
-              )
-            }
-            // If taskReviewResult is null (dispatch failed) or success===false (error),
-            // we fall through and accept the task — graceful degradation.
-            // The full implementation review at request_review will catch issues.
+          // Re-entry guard (14.1): prevent concurrent mark_task_complete calls.
+          // Per-task review + DAG mutation is not atomic — concurrent calls could
+          // corrupt the DAG or double-dispatch the same task.
+          if (state.taskCompletionInProgress) {
+            return (
+              `Error: mark_task_complete is already in progress for task "${state.taskCompletionInProgress}". ` +
+              `Wait for the current completion to finish before calling again.`
+            )
           }
 
-          // Persist the updated DAG and set currentTaskId to the next dispatched task
+          // Set the re-entry guard and increment task review counter
           await store.update(sessionId, (draft) => {
-            draft.implDag = result.updatedNodes
-            draft.currentTaskId = result.nextTaskId
+            draft.taskCompletionInProgress = args.task_id
+            draft.taskReviewCount += 1
           })
 
-          // If all remaining tasks are blocked behind human gates, auto-advance
-          // to USER_GATE so the user can resolve them. This is a system-initiated
-          // transition — the agent doesn't need to call request_review manually.
-          if (result.awaitingHuman) {
-            log.info("Auto-advancing to USER_GATE for human gate resolution")
-            const currentState = store.get(sessionId)
-            if (currentState && (currentState.phaseState === "DRAFT" || currentState.phaseState === "REVISE")) {
-              // Transition through REVIEW → USER_GATE (skipping self-review since
-              // the implementation isn't complete — we're just presenting human gates)
-              await store.update(sessionId, (draft) => {
-                draft.phaseState = "USER_GATE"
-                draft.iterationCount = 0
-                draft.retryCount = 0
-                draft.userGateMessageReceived = false
-              })
-              logTransition(
-                currentState,
-                { phase: currentState.phase, phaseState: "USER_GATE" },
-                "mark_task_complete/awaiting-human",
-                client,
-              )
-            }
-          }
+          // Everything below is wrapped in try/finally to guarantee the
+          // re-entry guard is cleared on every exit path (success, failure, error).
+          try {
+            const result = processMarkTaskComplete(args, state.implDag, state.currentTaskId)
 
-          return result.responseMessage
+            if ("error" in result) return `Error: ${result.error}`
+
+            // Per-task review: dispatch a lightweight subagent to verify the task
+            // was implemented correctly before marking it complete in the DAG.
+            // The reviewer runs tests, checks interface alignment, and verifies
+            // no regressions. If the review fails, the task is NOT marked complete
+            // and the agent must fix the issues before re-calling mark_task_complete.
+            //
+            // 14.4: Skip per-task review if the iteration cap has been reached.
+            // The agent has tried MAX_TASK_REVIEW_ITERATIONS times — accept the task
+            // and let the full implementation review catch outstanding issues.
+            const reviewCapped = state.taskReviewCount + 1 >= MAX_TASK_REVIEW_ITERATIONS
+            const taskNode = state.implDag?.find((t) => t.id === args.task_id)
+            if (taskNode && !reviewCapped) {
+              let taskReviewResult: Awaited<ReturnType<typeof dispatchTaskReview>> | null = null
+              try {
+                taskReviewResult = await dispatchTaskReview(client, {
+                  task: taskNode,
+                  implementationSummary: args.implementation_summary,
+                  mode: state.mode,
+                  cwd: context.directory || process.cwd(),
+                  parentSessionId: sessionId ?? undefined,
+                  featureName: state.featureName,
+                  conventions: state.conventions,
+                  artifactDiskPaths: state.artifactDiskPaths,
+                })
+              } catch (reviewErr) {
+                // dispatchTaskReview should never throw (returns TaskReviewError),
+                // but guard against unexpected runtime failures. Fall through to
+                // accept the task (graceful degradation — full review catches issues later).
+                const errMsg = reviewErr instanceof Error ? reviewErr.message : String(reviewErr)
+                log.warn("Task review dispatch failed", { detail: errMsg })
+              }
+
+              // If the task review succeeded and found issues, reject the completion.
+              // The agent must fix the issues and re-call mark_task_complete.
+              if (taskReviewResult?.success && !taskReviewResult.passed) {
+                const issuesList = taskReviewResult.issues.map((i) => `  - ${i}`).join("\n")
+                return (
+                  `Task "${args.task_id}" did NOT pass the per-task review ` +
+                  `(attempt ${state.taskReviewCount + 1}/${MAX_TASK_REVIEW_ITERATIONS}). ` +
+                  `Fix the following issues before calling \`mark_task_complete\` again:\n\n` +
+                  `**Issues found:**\n${issuesList}\n\n` +
+                  `**Reviewer reasoning:** ${taskReviewResult.reasoning}\n\n` +
+                  `Address each issue, ensure all tests pass, then re-call \`mark_task_complete\`.`
+                )
+              }
+              // If taskReviewResult is null (dispatch failed) or success===false (error),
+              // we fall through and accept the task — graceful degradation.
+              // The full implementation review at request_review will catch issues.
+            } else if (reviewCapped) {
+              log.warn("Per-task review cap reached", {
+                detail: `Task ${args.task_id}: ${MAX_TASK_REVIEW_ITERATIONS} attempts — bypassing review`,
+              })
+            }
+
+            // Per-task drift check (14.2): after review passes, check if the
+            // implementation has drifted from the plan in ways that affect
+            // downstream tasks. If drift is detected, update their descriptions.
+            // This is the X_ALIGN -> O_ASSESS path from the original design.
+            if (taskNode && state.implDag && state.implDag.length > 1) {
+              try {
+                const driftResult = await dispatchDriftCheck(client, {
+                  task: taskNode,
+                  implementationSummary: args.implementation_summary,
+                  dagTasks: state.implDag,
+                  parentSessionId: sessionId ?? undefined,
+                })
+                if (driftResult.success && driftResult.driftDetected) {
+                  // Patch downstream task descriptions in the result nodes
+                  for (const node of result.updatedNodes) {
+                    const updated = driftResult.updatedDescriptions[node.id]
+                    if (updated) {
+                      node.description = updated
+                    }
+                  }
+                  log.info("Per-task drift correction applied", {
+                    detail: `${Object.keys(driftResult.updatedDescriptions).length} task description(s) updated after ${args.task_id}`,
+                  })
+                }
+                // If driftResult.success is false, gracefully degrade — accept the task as-is
+              } catch (driftErr) {
+                const errMsg = driftErr instanceof Error ? driftErr.message : String(driftErr)
+                log.warn("Drift check threw unexpectedly", { detail: errMsg })
+                // Graceful degradation — accept the task as-is
+              }
+            }
+
+            // Persist the updated DAG and set currentTaskId to the next dispatched task.
+            // Reset taskReviewCount when moving to a new task (14.4).
+            await store.update(sessionId, (draft) => {
+              draft.implDag = result.updatedNodes
+              draft.currentTaskId = result.nextTaskId
+              if (result.nextTaskId !== args.task_id) {
+                draft.taskReviewCount = 0
+              }
+            })
+
+            // If all remaining tasks are blocked behind human gates, handle based on agent mode.
+            if (result.awaitingHuman) {
+              const currentState = store.get(sessionId)
+
+              // Robot-artisan mode: auto-abort human-gated tasks and their dependents
+              // instead of waiting for human resolution. The robot can't provision
+              // infrastructure or configure credentials — it aborts those tasks and
+              // continues with any remaining non-blocked work, or proceeds to review.
+              if (currentState?.activeAgent === "robot-artisan" && currentState.implDag) {
+                const dag = createImplDAG(Array.from(currentState.implDag))
+                const humanGated = Array.from(dag.tasks).filter(
+                  (t) => t.status === "human-gated" && (!t.humanGate || !t.humanGate.resolved),
+                )
+                const abortedIds: string[] = []
+
+                for (const gate of humanGated) {
+                  // Abort the gate task itself
+                  gate.status = "aborted"
+                  abortedIds.push(gate.id)
+                  // Abort all dependents (transitively)
+                  for (const dep of dag.getDependents(gate.id)) {
+                    if (dep.status !== "complete" && dep.status !== "aborted") {
+                      dep.status = "aborted"
+                      abortedIds.push(dep.id)
+                    }
+                  }
+                }
+
+                const updatedNodes = Array.from(dag.tasks).map((t) => ({
+                  ...t,
+                  ...(t.humanGate ? { humanGate: { ...t.humanGate } } : {}),
+                }))
+
+                // Check if there's remaining non-blocked work
+                const remaining = updatedNodes.filter(
+                  (t) => t.status !== "complete" && t.status !== "aborted" && t.status !== "human-gated",
+                )
+
+                if (remaining.length > 0) {
+                  // More work to do — stay in DRAFT with updated DAG
+                  const nextReady = remaining.find(
+                    (t) => t.status === "pending" && t.dependencies.every(
+                      (dep) => updatedNodes.find((d) => d.id === dep)?.status === "complete",
+                    ),
+                  )
+                  await store.update(sessionId, (draft) => {
+                    draft.implDag = updatedNodes
+                    draft.currentTaskId = nextReady?.id ?? null
+                  })
+                  log.info("Robot-artisan: auto-aborted human gates", {
+                    detail: `${abortedIds.length} tasks aborted: ${abortedIds.join(", ")}`,
+                  })
+                  return (
+                    result.responseMessage + "\n\n" +
+                    `**Robot-artisan mode:** Auto-aborted ${humanGated.length} human-gated task(s) and ` +
+                    `${abortedIds.length - humanGated.length} dependent(s): ${abortedIds.join(", ")}.\n` +
+                    `These tasks require human action that cannot be automated.\n\n` +
+                    (nextReady
+                      ? `**Next task ready:** ${nextReady.id} — ${nextReady.description}\nContinue with this task.`
+                      : `No more ready tasks. Call \`request_review\` to submit the partial implementation.`)
+                  )
+                } else {
+                  // All remaining work is human-gated or aborted — proceed to review
+                  await store.update(sessionId, (draft) => {
+                    draft.implDag = updatedNodes
+                    draft.currentTaskId = null
+                  })
+                  log.info("Robot-artisan: all remaining tasks human-gated, proceeding to review", {
+                    detail: `${abortedIds.length} tasks aborted`,
+                  })
+                  return (
+                    result.responseMessage + "\n\n" +
+                    `**Robot-artisan mode:** Auto-aborted ${abortedIds.length} human-gated task(s) and dependents.\n` +
+                    `All remaining work requires human action. Call \`request_review\` to submit the partial implementation for review.`
+                  )
+                }
+              }
+
+              // Artisan mode (or unknown): advance to USER_GATE for human resolution
+              log.info("Auto-advancing to USER_GATE for human gate resolution")
+              if (currentState && (currentState.phaseState === "DRAFT" || currentState.phaseState === "REVISE")) {
+                // Transition through REVIEW → USER_GATE (skipping self-review since
+                // the implementation isn't complete — we're just presenting human gates)
+                await store.update(sessionId, (draft) => {
+                  draft.phaseState = "USER_GATE"
+                  draft.iterationCount = 0
+                  draft.retryCount = 0
+                  draft.userGateMessageReceived = false
+                })
+                logTransition(
+                  currentState,
+                  { phase: currentState.phase, phaseState: "USER_GATE" },
+                  "mark_task_complete/awaiting-human",
+                  client,
+                )
+              }
+            }
+
+            return result.responseMessage
+          } finally {
+            // Clear the re-entry guard on every exit path
+            await store.update(sessionId, (draft) => {
+              draft.taskCompletionInProgress = null
+            })
+          }
         },
       }),
 
@@ -1327,12 +1670,13 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
         },
         async execute(
           args: { task_id: string; what_is_needed: string; why: string; verification_steps: string },
-          context: { directory: string; sessionId?: string; session?: { id: string } },
+          context: ToolExecuteContext,
         ) {
           const sessionId = resolveSessionId(context)
           if (!sessionId) return "Error: Could not determine session ID from tool context."
 
           const state = await ensureState(store, sessionId, client)
+          await detectAgent(store, sessionId, context)
 
           if (state.phase !== "IMPLEMENTATION") {
             return `Error: resolve_human_gate can only be called during IMPLEMENTATION (current: ${state.phase}).`
@@ -1386,7 +1730,42 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             const dag = createImplDAG(updatedState.implDag)
             const decision = nextSchedulerDecision(dag)
             if (decision.action === "awaiting-human") {
-              // Auto-advance to USER_GATE
+              // Robot-artisan mode: auto-abort human gates instead of advancing to USER_GATE
+              if (updatedState.activeAgent === "robot-artisan") {
+                const humanGated = Array.from(dag.tasks).filter(
+                  (t) => t.status === "human-gated" && (!t.humanGate || !t.humanGate.resolved),
+                )
+                const abortedIds: string[] = []
+                for (const gate of humanGated) {
+                  gate.status = "aborted"
+                  abortedIds.push(gate.id)
+                  for (const dep of dag.getDependents(gate.id)) {
+                    if (dep.status !== "complete" && dep.status !== "aborted") {
+                      dep.status = "aborted"
+                      abortedIds.push(dep.id)
+                    }
+                  }
+                }
+                const updatedNodes = Array.from(dag.tasks).map((t) => ({
+                  ...t,
+                  ...(t.humanGate ? { humanGate: { ...t.humanGate } } : {}),
+                }))
+                await store.update(sessionId, (draft) => {
+                  draft.implDag = updatedNodes
+                  draft.currentTaskId = null
+                })
+                log.info("Robot-artisan: auto-aborted human gates from resolve_human_gate", {
+                  detail: `${abortedIds.length} tasks aborted`,
+                })
+                return (
+                  `Human gate activated for task "${args.task_id}".\n\n` +
+                  `**Robot-artisan mode:** Auto-aborted ${abortedIds.length} human-gated task(s) and dependents.\n` +
+                  `These tasks require human action that cannot be automated.\n\n` +
+                  `Call \`request_review\` to submit the partial implementation for review.`
+                )
+              }
+
+              // Artisan mode: auto-advance to USER_GATE for human resolution
               await store.update(sessionId, (draft) => {
                 draft.implDag = Array.from(dag.tasks).map((t) => ({
                   ...t,
@@ -1473,12 +1852,13 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
         },
         async execute(
           args: { summary: string; artifact_description: string; artifact_content?: string },
-          context: { directory: string; sessionId?: string; session?: { id: string } },
+          context: ToolExecuteContext,
         ) {
           const sessionId = resolveSessionId(context)
           if (!sessionId) return "Error: Could not determine session ID from tool context."
 
           const state = await ensureState(store, sessionId, client)
+          await detectAgent(store, sessionId, context)
 
           const validDraftStates = ["DRAFT", "CONVENTIONS", "REVISE"]
           if (!validDraftStates.includes(state.phaseState)) {
@@ -1647,20 +2027,31 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             approved_files?: string[]
             resolved_human_gates?: string[]
           },
-          context: { directory: string; sessionId?: string; session?: { id: string } },
+          context: ToolExecuteContext,
         ) {
           const sessionId = resolveSessionId(context)
           if (!sessionId) return "Error: Could not determine session ID from tool context."
 
           const state = await ensureState(store, sessionId, client)
+          await detectAgent(store, sessionId, context)
 
-          if (state.phaseState !== "USER_GATE") {
-            return `Error: submit_feedback can only be called at USER_GATE (current: ${state.phaseState}).`
+          if (state.phaseState !== "USER_GATE" && state.phaseState !== "ESCAPE_HATCH") {
+            return `Error: submit_feedback can only be called at USER_GATE or ESCAPE_HATCH (current: ${state.phaseState}).`
           }
 
           const result = processSubmitFeedback(args)
 
           if (result.feedbackType === "approve") {
+            // Structural guard: approval is impossible in ESCAPE_HATCH state.
+            // The state machine rejects user_approve in ESCAPE_HATCH, but we
+            // catch it here with a clear error message before even trying.
+            if (state.phaseState === "ESCAPE_HATCH") {
+              return (
+                "Error: Cannot approve while an escape hatch is pending. " +
+                "You must respond to the escape hatch first (accept, provide alternative direction, or abort). " +
+                "Call submit_feedback with feedback_type='revise' and your response."
+              )
+            }
             // Block self-approval: the agent cannot approve its own work. A real
             // Soft check: warn if chat.message hook has not confirmed a user message at this
             // USER_GATE. This can happen on session resume after restart (the hook doesn't
@@ -1869,7 +2260,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             // (backward compat for sessions started before this change, or for file-based phases
             // where the agent didn't call request_review with artifact_content).
             const artifactKey = PHASE_TO_ARTIFACT[state.phase]
-            let artifactDiskPath: string | null = state.artifactDiskPaths[artifactKey ?? ""] ?? null
+            let artifactDiskPath: string | null = (artifactKey ? state.artifactDiskPaths[artifactKey] : undefined) ?? null
             if (!artifactDiskPath && args.artifact_content && artifactKey && artifactKey !== "implementation") {
               try {
                 const cwd = context.directory || process.cwd()
@@ -1982,13 +2373,35 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
 
             // Route to the appropriate handler based on state context.
             // Three paths: escape hatch resolution, cascade continuation, normal revise.
+            // ESCAPE_HATCH phaseState is the structural guard — replaces the old
+            // procedural escapePending check for routing decisions.
+            //
+            // 14.5: Persist feedback text before orchestrator LLM calls so it
+            // survives process crashes. Cleared after the handler completes.
+            const needsOrchestrator = state.phaseState === "ESCAPE_HATCH" ||
+              !(state.pendingRevisionSteps && state.pendingRevisionSteps.length > 0)
+            if (needsOrchestrator) {
+              await store.update(sessionId, (draft) => {
+                draft.pendingFeedback = args.feedback_text
+              })
+            }
+
             let handlerOutcome
-            if (state.escapePending) {
-              handlerOutcome = await handleEscapeHatch(args.feedback_text, state, sm, orchestrator)
-            } else if (state.pendingRevisionSteps && state.pendingRevisionSteps.length > 0) {
-              handlerOutcome = handleCascade(state, sm)
-            } else {
-              handlerOutcome = await handleNormalRevise(args.feedback_text, result.responseMessage, state, sm, orchestrator)
+            try {
+              if (state.phaseState === "ESCAPE_HATCH") {
+                handlerOutcome = await handleEscapeHatch(args.feedback_text, state, sm, orchestrator)
+              } else if (state.pendingRevisionSteps && state.pendingRevisionSteps.length > 0) {
+                handlerOutcome = handleCascade(state, sm)
+              } else {
+                handlerOutcome = await handleNormalRevise(args.feedback_text, result.responseMessage, state, sm, orchestrator)
+              }
+            } finally {
+              // Clear pendingFeedback after handler completes (success or failure)
+              if (needsOrchestrator) {
+                await store.update(sessionId, (draft) => {
+                  draft.pendingFeedback = null
+                })
+              }
             }
 
             // Apply state mutations based on outcome
@@ -1997,7 +2410,9 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             }
 
             if (handlerOutcome.action === "abort") {
+              // Return from ESCAPE_HATCH to USER_GATE (abort = discard the escape hatch)
               await store.update(sessionId, (draft) => {
+                draft.phaseState = "USER_GATE"
                 draft.escapePending = false
                 draft.pendingRevisionSteps = null
                 draft.retryCount = 0
@@ -2007,7 +2422,18 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             }
 
             if (handlerOutcome.action === "escape_represent") {
+              // Transition to ESCAPE_HATCH — structural guard against escape hatch bypass.
+              // The SM will reject user_approve in ESCAPE_HATCH, so the only way out is
+              // user_feedback (the escape hatch response) → REVISE.
+              const escapeTransition = sm.transition(state.phase, state.phaseState, "escape_hatch_triggered", state.mode)
+              if (!escapeTransition.success) {
+                // Should never happen — USER_GATE always has escape_hatch_triggered
+                return `Error: Failed to transition to ESCAPE_HATCH: ${escapeTransition.message}`
+              }
+              logTransition(state, escapeTransition, "submit_feedback/escape_hatch_triggered", client)
               await store.update(sessionId, (draft) => {
+                draft.phase = escapeTransition.nextPhase
+                draft.phaseState = escapeTransition.nextPhaseState
                 draft.escapePending = true
                 draft.pendingRevisionSteps = handlerOutcome.pendingRevisionSteps
                 draft.retryCount = 0

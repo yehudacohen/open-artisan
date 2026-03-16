@@ -411,6 +411,10 @@ describe("SessionStateStore — load", () => {
       artifactDiskPaths: {},
       featureName: null,
       revisionBaseline: null,
+      activeAgent: null,
+      taskCompletionInProgress: null,
+      taskReviewCount: 0,
+      pendingFeedback: null,
     }
     const s2: WorkflowState = { ...s1, sessionId: "s2" }
     await Bun.write(

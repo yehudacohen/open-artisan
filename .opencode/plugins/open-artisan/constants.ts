@@ -113,6 +113,15 @@ export const SELF_REVIEW_TIMEOUT_MS = 300_000
 export const TASK_REVIEW_TIMEOUT_MS = 180_000
 
 /**
+ * Maximum number of times the agent can call mark_task_complete for the same
+ * task before per-task review is bypassed. Prevents infinite review loops when
+ * the task reviewer keeps finding issues that the agent cannot resolve.
+ * After this cap, the task is accepted and the full implementation review
+ * at request_review will catch outstanding issues.
+ */
+export const MAX_TASK_REVIEW_ITERATIONS = 10
+
+/**
  * Maximum wall-clock time per discovery scanner subagent session (ms).
  * Set to 3 minutes per scanner.
  */

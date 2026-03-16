@@ -154,6 +154,7 @@ async function ephemeralReviewSession(
   const created = await client.session.create({
     body: {
       title,
+      agent: "workflow-reviewer",
       ...(parentSessionId ? { parentID: parentSessionId } : {}),
     },
   })
@@ -195,26 +196,35 @@ function parseReviewResult(raw: string): SelfReviewResult {
   }
 
   const criteriaResults: CriterionResult[] = (parsed.criteria_results ?? []).map((c) => {
-    const isQuality = (c.criterion ?? "").startsWith("[Q]")
+    const criterionText = c.criterion ?? ""
+    const isQuality = criterionText.startsWith("[Q]")
+    const isDesignInvariant = criterionText.startsWith("[D]")
     const score = typeof c.score === "number" ? c.score : undefined
     // For [Q] criteria with a score, derive `met` from score threshold (same logic as mark-satisfied.ts)
     const met = (isQuality && score !== undefined)
       ? score >= 9
       : (c.met ?? false)
+    // Determine severity: [D] = design-invariant (blocking + non-rebuttable),
+    // [S] = suggestion, everything else = blocking
+    const severity: CriterionResult["severity"] = isDesignInvariant
+      ? "design-invariant"
+      : c.severity === "suggestion" ? "suggestion" : "blocking"
     return {
-      criterion: c.criterion ?? "unknown",
+      criterion: criterionText || "unknown",
       met,
       evidence: (isQuality && score !== undefined)
         ? `${c.evidence ?? ""} (score: ${score}/10)`
         : (c.evidence ?? ""),
-      severity: c.severity === "suggestion" ? "suggestion" as const : "blocking" as const,
+      severity,
       ...(score !== undefined ? { score } : {}),
     }
   })
 
   // Recompute `satisfied` from criteria to guard against LLM inconsistency:
-  // satisfied must be false if any blocking criterion is not met.
-  const hasUnmetBlocking = criteriaResults.some((c) => !c.met && c.severity === "blocking")
+  // satisfied must be false if any blocking or design-invariant criterion is not met.
+  const hasUnmetBlocking = criteriaResults.some(
+    (c) => !c.met && (c.severity === "blocking" || c.severity === "design-invariant"),
+  )
   const satisfied = !hasUnmetBlocking
 
   return { success: true, satisfied, criteriaResults }

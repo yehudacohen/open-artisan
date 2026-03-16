@@ -49,6 +49,10 @@ function makeState(overrides: Partial<WorkflowState> = {}): WorkflowState {
     artifactDiskPaths: {},
     featureName: null,
     revisionBaseline: null,
+    activeAgent: null,
+    taskCompletionInProgress: null,
+    taskReviewCount: 0,
+    pendingFeedback: null,
     ...overrides,
   }
 }

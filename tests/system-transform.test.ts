@@ -35,6 +35,10 @@ function makeState(overrides: Partial<WorkflowState> = {}): WorkflowState {
     artifactDiskPaths: {},
     featureName: null,
     revisionBaseline: null,
+    activeAgent: null,
+    taskCompletionInProgress: null,
+    taskReviewCount: 0,
+    pendingFeedback: null,
     ...overrides,
   }
 }
@@ -126,15 +130,13 @@ describe("buildWorkflowSystemPrompt — USER_GATE sub-state", () => {
     expect(prompt).toContain("submit_feedback")
   })
 
-  it("shows escape hatch warning when escapePending is true", () => {
-    // Cast to any to set the extra field without TypeScript error in test
-    const state = makeState({ phaseState: "USER_GATE", phase: "INTERFACES" }) as WorkflowState & { escapePending: boolean }
-    state.escapePending = true
+  it("shows escape hatch warning when phaseState is ESCAPE_HATCH", () => {
+    const state = makeState({ phaseState: "ESCAPE_HATCH", phase: "INTERFACES", escapePending: true })
     const prompt = buildWorkflowSystemPrompt(state)
     expect(prompt.toUpperCase()).toContain("ESCAPE HATCH")
   })
 
-  it("does NOT show escape hatch warning when escapePending is false", () => {
+  it("does NOT show escape hatch warning at USER_GATE", () => {
     const prompt = buildWorkflowSystemPrompt(makeState({ phaseState: "USER_GATE" }))
     expect(prompt.toUpperCase()).not.toContain("ESCAPE HATCH")
   })

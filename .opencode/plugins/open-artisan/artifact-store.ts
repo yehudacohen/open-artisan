@@ -22,7 +22,7 @@
  */
 
 import { join } from "node:path"
-import { mkdirSync } from "node:fs"
+import { mkdirSync, existsSync } from "node:fs"
 import type { ArtifactKey } from "./types"
 
 // ---------------------------------------------------------------------------
@@ -37,6 +37,7 @@ export const ARTIFACT_DIR = ".openartisan"
  * These filenames are stable — do not change them without a migration plan.
  */
 const ARTIFACT_FILENAMES: Record<ArtifactKey | "discovery_report", string> = {
+  design: "design.md",
   conventions: "conventions.md",
   plan: "plan.md",
   interfaces: "interfaces.md",
@@ -101,4 +102,49 @@ export async function writeArtifact(
   const filePath = join(dir, ARTIFACT_FILENAMES[key])
   await Bun.write(filePath, text)
   return filePath
+}
+
+// ---------------------------------------------------------------------------
+// Design doc detection
+// ---------------------------------------------------------------------------
+
+/**
+ * Candidate file paths for a user-authored design document, checked in order.
+ * First match wins. The `.openartisan/` scoped paths are checked first (most
+ * specific), then common project-root conventions.
+ */
+const DESIGN_DOC_CANDIDATES = [
+  // Feature-scoped (populated dynamically)
+  // Flat .openartisan layout
+  (cwd: string, _feature: string | null) => join(cwd, ARTIFACT_DIR, "design.md"),
+  // Common project-root conventions
+  (cwd: string, _feature: string | null) => join(cwd, "docs", "design.md"),
+  (cwd: string, _feature: string | null) => join(cwd, "DESIGN.md"),
+  (cwd: string, _feature: string | null) => join(cwd, "design.md"),
+  (cwd: string, _feature: string | null) => join(cwd, "docs", "DESIGN.md"),
+]
+
+/**
+ * Scans known locations for a user-authored design document.
+ * Returns the absolute path if found, null otherwise.
+ *
+ * When a design doc is detected, the workflow registers it as a tracked artifact
+ * upstream of the plan. Acceptance criteria then include design invariant compliance.
+ *
+ * @param cwd         - Absolute path to the project root
+ * @param featureName - Optional feature subdirectory
+ */
+export function detectDesignDoc(cwd: string, featureName?: string | null): string | null {
+  // Feature-scoped path takes highest priority
+  if (featureName) {
+    const featurePath = join(getArtifactDir(cwd, featureName), "design.md")
+    if (existsSync(featurePath)) return featurePath
+  }
+
+  for (const candidateFn of DESIGN_DOC_CANDIDATES) {
+    const path = candidateFn(cwd, featureName ?? null)
+    if (existsSync(path)) return path
+  }
+
+  return null
 }

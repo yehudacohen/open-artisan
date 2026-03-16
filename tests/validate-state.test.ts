@@ -35,6 +35,10 @@ function makeValidState(overrides: Partial<WorkflowState> = {}): WorkflowState {
     artifactDiskPaths: {},
     featureName: null,
     revisionBaseline: null,
+    activeAgent: null,
+    taskCompletionInProgress: null,
+    taskReviewCount: 0,
+    pendingFeedback: null,
     ...overrides,
   }
 }
@@ -198,9 +202,10 @@ describe("validateWorkflowState — escapePending and pendingRevisionSteps", () 
     expect(validateWorkflowState(state)).toBeNull()
   })
 
-  it("accepts escapePending=true with non-null pendingRevisionSteps", () => {
+  it("accepts escapePending=true with non-null pendingRevisionSteps and ESCAPE_HATCH phaseState", () => {
     const state = makeValidState({
       escapePending: true,
+      phaseState: "ESCAPE_HATCH",
       pendingRevisionSteps: [
         { artifact: "interfaces", phase: "INTERFACES", phaseState: "REVISE", instructions: "fix it" },
       ],

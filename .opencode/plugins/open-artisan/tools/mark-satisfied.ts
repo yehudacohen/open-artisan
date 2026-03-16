@@ -67,7 +67,10 @@ export function evaluateMarkSatisfied(args: MarkSatisfiedArgs, expectedBlockingC
   // Cross-validate: if the expected blocking count is known, reject submissions
   // that evaluate fewer blocking criteria than expected (prevents gaming).
   if (expectedBlockingCount && expectedBlockingCount > 0) {
-    const submittedBlockingCount = args.criteria_met.filter((c) => (c.severity ?? "blocking") === "blocking").length
+    const submittedBlockingCount = args.criteria_met.filter((c) => {
+      const sev = c.severity ?? "blocking"
+      return sev === "blocking" || sev === "design-invariant"
+    }).length
     if (submittedBlockingCount < expectedBlockingCount) {
       return {
         passed: false,
@@ -82,25 +85,32 @@ export function evaluateMarkSatisfied(args: MarkSatisfiedArgs, expectedBlockingC
 
   const allCriteria = args.criteria_met.map<CriterionResult>((c) => {
     const isQualityCriterion = c.criterion.startsWith("[Q]")
+    const isDesignInvariant = c.criterion.startsWith("[D]")
     // For [Q] quality criteria with a score, `met` is derived from the score threshold.
     // Score >= 9 → met; score < 9 → not met. This prevents the agent from claiming
     // "met" while giving a low score.
     const met = (isQualityCriterion && typeof c.score === "number")
       ? c.score >= 9
       : c.met
+    // [D] criteria are design-invariant (blocking + non-rebuttable)
+    const severity: CriterionResult["severity"] = isDesignInvariant
+      ? "design-invariant"
+      : (c.severity ?? "blocking")
     return {
       criterion: c.criterion,
       met,
       evidence: isQualityCriterion && typeof c.score === "number"
         ? `${c.evidence} (score: ${c.score}/10)`
         : c.evidence,
-      // G9: respect explicit severity; default to "blocking" if not provided
-      severity: c.severity ?? "blocking",
+      severity,
       ...(typeof c.score === "number" ? { score: c.score } : {}),
     }
   })
 
-  const unmetBlocking = allCriteria.filter((c) => !c.met && c.severity === "blocking")
+  // Both "blocking" and "design-invariant" prevent advancement
+  const unmetBlocking = allCriteria.filter(
+    (c) => !c.met && (c.severity === "blocking" || c.severity === "design-invariant"),
+  )
 
   if (unmetBlocking.length === 0) {
     const unmetSuggestions = allCriteria.filter((c) => !c.met && c.severity === "suggestion")

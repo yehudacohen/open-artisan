@@ -127,7 +127,7 @@ export function buildCompactionContext(state: WorkflowState): string {
   }
 
   // Escape hatch state — needed so the agent knows an escape hatch is active
-  if (state.escapePending) {
+  if (state.phaseState === "ESCAPE_HATCH") {
     lines.push("### Escape Hatch")
     lines.push("**An escape hatch is currently ACTIVE.** Wait for the user's decision before proceeding.")
     if (state.pendingRevisionSteps && state.pendingRevisionSteps.length > 0) {

@@ -179,8 +179,8 @@ export function getPhaseToolPolicy(
             "Discovery review: writes allowed ONLY to .openartisan/ files (to fix review issues). bash allowed for verification. .env writes are always blocked.",
         }
       }
-      // USER_GATE: no file writes — waiting for user response.
-      if (phaseState === "USER_GATE") {
+      // USER_GATE / ESCAPE_HATCH: no file writes — waiting for user response.
+      if (phaseState === "USER_GATE" || phaseState === "ESCAPE_HATCH") {
         return {
           blocked: ["write", "edit"],
           allowedDescription: "Discovery user gate: no file writes or edits. bash allowed for read-only verification.",
@@ -223,8 +223,8 @@ export function getPhaseToolPolicy(
             "Planning review: writes allowed ONLY to .openartisan/ files (to fix review issues). bash allowed for verification. .env writes are always blocked.",
         }
       }
-      // USER_GATE: no file writes — waiting for user response.
-      if (phaseState === "USER_GATE") {
+      // USER_GATE / ESCAPE_HATCH: no file writes — waiting for user response.
+      if (phaseState === "USER_GATE" || phaseState === "ESCAPE_HATCH") {
         return {
           blocked: ["write", "edit"],
           allowedDescription: "Planning phase: no file writes or edits. bash allowed for read-only verification.",
@@ -243,7 +243,7 @@ export function getPhaseToolPolicy(
       // During REVISE/REVIEW/USER_GATE: bash is allowed so the agent can run
       // read-only commands (rg, wc, find, etc.) to verify acceptance criteria
       // or understand what needs revising from feedback.
-      const interfacesBashBlocked = phaseState === "REVISE" || phaseState === "REVIEW" || phaseState === "USER_GATE"
+      const interfacesBashBlocked = phaseState === "REVISE" || phaseState === "REVIEW" || phaseState === "USER_GATE" || phaseState === "ESCAPE_HATCH"
         ? []
         : ["bash"] as const
       return {
@@ -252,7 +252,7 @@ export function getPhaseToolPolicy(
           if (isEnvFile(filePath)) return false
           return isInterfaceFile(filePath)
         },
-        allowedDescription: phaseState === "REVISE" || phaseState === "REVIEW" || phaseState === "USER_GATE"
+        allowedDescription: phaseState === "REVISE" || phaseState === "REVIEW" || phaseState === "USER_GATE" || phaseState === "ESCAPE_HATCH"
           ? "Only interface/type/schema files may be written. bash is allowed for read-only verification. .env writes are always blocked."
           : "Only interface/type/schema files may be written (.ts, .d.ts, .py, .go, .rs, .java, .proto, .graphql, .json, .yaml, etc.). bash is blocked. .env writes are always blocked.",
       }
@@ -264,7 +264,7 @@ export function getPhaseToolPolicy(
       // During REVISE/REVIEW/USER_GATE: bash is allowed so the agent can run
       // read-only commands (rg, wc, find, test runner) to verify acceptance criteria
       // or understand what needs revising from feedback.
-      const testsBashBlocked = phaseState === "REVISE" || phaseState === "REVIEW" || phaseState === "USER_GATE"
+      const testsBashBlocked = phaseState === "REVISE" || phaseState === "REVIEW" || phaseState === "USER_GATE" || phaseState === "ESCAPE_HATCH"
         ? []
         : ["bash"] as const
       return {
@@ -273,7 +273,7 @@ export function getPhaseToolPolicy(
           if (isEnvFile(filePath)) return false
           return isTestFile(filePath)
         },
-        allowedDescription: phaseState === "REVISE" || phaseState === "REVIEW" || phaseState === "USER_GATE"
+        allowedDescription: phaseState === "REVISE" || phaseState === "REVIEW" || phaseState === "USER_GATE" || phaseState === "ESCAPE_HATCH"
           ? "Only test files may be written. bash is allowed for read-only verification. .env writes are always blocked."
           : "Only test files may be written (files containing 'test' or 'spec' in name, or in test/tests/__tests__/spec directories). bash is blocked. .env writes are always blocked.",
       }

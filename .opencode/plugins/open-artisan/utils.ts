@@ -72,7 +72,7 @@ export function extractTextFromPromptResult(result: unknown, label = "prompt"): 
 export function extractJsonFromText(text: string): string {
   // 1. Markdown code fence: ```json ... ``` or ``` ... ```
   const fenceMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/)
-  if (fenceMatch) return fenceMatch[1].trim()
+  if (fenceMatch && fenceMatch[1] !== undefined) return fenceMatch[1].trim()
 
   // 2. Bare outermost braces
   const braceStart = text.indexOf("{")

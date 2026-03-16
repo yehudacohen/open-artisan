@@ -232,6 +232,7 @@ async function runScannerSession(
     const created = await client.session.create({
       body: {
         title: `Discovery: ${scannerName}${featureSlug}`,
+        agent: "workflow-reviewer",
         ...(parentSessionId ? { parentID: parentSessionId } : {}),
       },
     })

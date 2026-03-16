@@ -1,8 +1,9 @@
 /**
  * artifacts.ts — Artifact dependency graph. Pure logic, no side effects.
  *
- * The full DAG from design doc §5:
+ * The full DAG:
  *
+ *   design (optional) ──→ plan
  *   conventions ──→ plan ──→ interfaces ──→ tests ──→ impl_plan ──→ implementation
  *         │                      ↑              │         ↑               ↑
  *         └──────────────────────┘              └─────────┘               │
@@ -11,12 +12,18 @@
  *                          interfaces ────────────────────────────────────┘
  *
  * In plain terms:
+ *   design       → plan (optional — only when a user-authored design doc exists)
  *   conventions  → plan, interfaces
  *   plan         → interfaces, impl_plan, implementation
  *   interfaces   → tests, impl_plan, implementation
  *   tests        → impl_plan, implementation
  *   impl_plan    → implementation
  *   implementation → (none)
+ *
+ * The "design" artifact is a user-authored pre-existing document. It does not have
+ * an owning Phase (no DESIGN phase exists). When present, it is an upstream dependency
+ * of "plan", meaning changes to the design doc cascade through the full dependency chain.
+ * When absent, the graph behaves exactly as before.
  */
 import type {
   ArtifactKey,
@@ -31,7 +38,11 @@ import type {
 
 // Direct upstream dependencies for each artifact
 // (inverse of "what does X depend on?")
+// NOTE: "design" depends on "plan" conditionally — only when a design doc exists.
+// The dependency is injected at runtime by getDependencies/getAllDependents based
+// on the `hasDesignDoc` parameter, not hardcoded here.
 const DEPENDENCIES_MAP: Record<ArtifactKey, ArtifactKey[]> = {
+  design:         [],
   conventions:    [],
   plan:           ["conventions"],
   interfaces:     ["conventions", "plan"],
@@ -51,8 +62,10 @@ export const PHASE_TO_ARTIFACT: Partial<Record<Phase, ArtifactKey>> = {
   IMPLEMENTATION: "implementation",
 }
 
-// owning phase per artifact
-const OWNING_PHASE: Record<ArtifactKey, Phase> = {
+// Owning phase per artifact. "design" has no owning phase — it is a user-authored
+// pre-existing input, not produced by any workflow phase. We use a Partial<Record>
+// and handle the missing mapping explicitly in getOwningPhase/getReviseTarget.
+const OWNING_PHASE: Partial<Record<ArtifactKey, Phase>> = {
   conventions: "DISCOVERY",
   plan: "PLANNING",
   interfaces: "INTERFACES",
@@ -67,7 +80,7 @@ const OWNING_PHASE: Record<ArtifactKey, Phase> = {
 
 // Canonical artifact order — used for deterministic topological sort tie-breaking
 const ARTIFACT_TOPO_ORDER: ArtifactKey[] = [
-  "conventions", "plan", "interfaces", "tests", "impl_plan", "implementation",
+  "design", "conventions", "plan", "interfaces", "tests", "impl_plan", "implementation",
 ]
 
 /**
@@ -82,7 +95,7 @@ const ARTIFACT_TOPO_ORDER: ArtifactKey[] = [
  *     virtual source whose edges have already been "consumed" (i.e., nodes that depend only
  *     on `artifact` start with in-degree 0 inside the subgraph).
  */
-function getAllDependents(artifact: ArtifactKey, mode: WorkflowMode): ArtifactKey[] {
+function getAllDependents(artifact: ArtifactKey, mode: WorkflowMode, hasDesignDoc = false): ArtifactKey[] {
   // Step 1: build forward adjacency (upstream → list of direct dependents)
   // by iterating DEPENDENCIES_MAP keys explicitly to avoid type-cast issues
   const forwardAdj = new Map<ArtifactKey, ArtifactKey[]>()
@@ -94,6 +107,13 @@ function getAllDependents(artifact: ArtifactKey, mode: WorkflowMode): ArtifactKe
       if (!list) { list = []; forwardAdj.set(upstream, list) }
       list.push(downstream)
     }
+  }
+
+  // Inject design → plan edge if a design doc exists
+  if (hasDesignDoc) {
+    const planDeps = forwardAdj.get("design") ?? []
+    if (!planDeps.includes("plan")) planDeps.push("plan")
+    forwardAdj.set("design", planDeps)
   }
 
   // Step 2: collect reachable descendants via BFS (excludes `artifact` itself)
@@ -155,8 +175,12 @@ function getAllDependents(artifact: ArtifactKey, mode: WorkflowMode): ArtifactKe
   return result
 }
 
-function getDirectDependencies(artifact: ArtifactKey, mode: WorkflowMode): ArtifactKey[] {
-  const deps: ArtifactKey[] = DEPENDENCIES_MAP[artifact] ?? []
+function getDirectDependencies(artifact: ArtifactKey, mode: WorkflowMode, hasDesignDoc = false): ArtifactKey[] {
+  const deps: ArtifactKey[] = [...(DEPENDENCIES_MAP[artifact] ?? [])]
+  // Inject design as an upstream dependency of plan when a design doc exists
+  if (hasDesignDoc && artifact === "plan" && !deps.includes("design")) {
+    deps.unshift("design")
+  }
   return deps.filter((dep) => !(mode === "GREENFIELD" && dep === "conventions"))
 }
 
@@ -164,22 +188,46 @@ function getDirectDependencies(artifact: ArtifactKey, mode: WorkflowMode): Artif
 // Factory
 // ---------------------------------------------------------------------------
 
-export function createArtifactGraph(): ArtifactGraph {
+/**
+ * Creates the artifact dependency graph.
+ *
+ * @param hasDesignDoc If true, "design" is injected as an upstream dependency of
+ *   "plan". This makes plan-level acceptance criteria include design invariant
+ *   compliance, and orchestrator cascades flow through the design doc.
+ *   Default: false (backward compatible — graph behaves as before).
+ */
+export function createArtifactGraph(hasDesignDoc = false): ArtifactGraph {
   return {
     getDependents(artifact: ArtifactKey, mode: WorkflowMode): ArtifactKey[] {
-      return getAllDependents(artifact, mode)
+      return getAllDependents(artifact, mode, hasDesignDoc)
     },
 
     getDependencies(artifact: ArtifactKey, mode: WorkflowMode): ArtifactKey[] {
-      return getDirectDependencies(artifact, mode)
+      return getDirectDependencies(artifact, mode, hasDesignDoc)
     },
 
     getOwningPhase(artifact: ArtifactKey): Phase {
-      return OWNING_PHASE[artifact]
+      const phase = OWNING_PHASE[artifact]
+      if (!phase) {
+        // "design" has no owning phase — it's user-authored, not produced by the workflow.
+        // Callers should not be asking for the owning phase of "design" directly.
+        throw new Error(`Artifact "${artifact}" has no owning phase — it is a pre-existing input, not produced by any workflow phase`)
+      }
+      return phase
     },
 
     getReviseTarget(artifact: ArtifactKey): { phase: Phase; phaseState: "REVISE" } {
-      return { phase: OWNING_PHASE[artifact], phaseState: "REVISE" }
+      // Design doc cascades route to PLANNING — the plan is the nearest agent-controlled
+      // artifact that depends on the design doc. If the design doc changes, the plan
+      // needs revision to re-align with the new design.
+      if (artifact === "design") {
+        return { phase: "PLANNING", phaseState: "REVISE" }
+      }
+      const phase = OWNING_PHASE[artifact]
+      if (!phase) {
+        throw new Error(`Artifact "${artifact}" has no owning phase — cannot determine revise target`)
+      }
+      return { phase, phaseState: "REVISE" }
     },
   }
 }

@@ -41,7 +41,7 @@ const ORCHESTRATOR_TIMEOUT_MS = 60_000
 // ---------------------------------------------------------------------------
 
 const ARTIFACT_KEYS: ArtifactKey[] = [
-  "conventions", "plan", "interfaces", "tests", "impl_plan", "implementation",
+  "design", "conventions", "plan", "interfaces", "tests", "impl_plan", "implementation",
 ]
 
 /** Valid divergence trigger criteria — module-level constant (not recreated per call). */
@@ -57,6 +57,7 @@ Given feedback text and the current artifact being reviewed, identify:
 2. Which artifacts are affected (the root cause artifact and all downstream artifacts that depend on it).
 
 Artifacts in dependency order (upstream first):
+- design: a user-authored design document with structural invariants (optional — may not exist)
 - conventions: the codebase conventions document
 - plan: the feature plan and architecture
 - interfaces: TypeScript/language interfaces and data models
@@ -71,6 +72,7 @@ Rules:
 - "The plan missed a requirement" → root cause = plan
 - "This test case is missing" → root cause = tests
 - "The implementation doesn't match the interface" → root cause = implementation
+- "This violates the design document" → root cause = design (only if a design doc exists)
 - If uncertain, bias toward the current artifact being reviewed.
 - For affected_artifacts, ONLY include artifacts that have actually been written/approved. Do NOT
   include downstream artifacts that haven't been created yet (e.g. if we're at INTERFACES, don't
@@ -83,13 +85,16 @@ The JSON must have exactly these fields:
   "root_cause_artifact": "<artifact_key>",
   "reasoning": "<1-2 sentence explanation>"
 }
-Valid artifact keys: conventions, plan, interfaces, tests, impl_plan, implementation`
+Valid artifact keys: design, conventions, plan, interfaces, tests, impl_plan, implementation`
 
 /**
  * Creates an assess() function backed by an LLM call.
  * The returned function matches OrchestratorDeps.assess.
+ *
+ * @param getParentSessionId Optional getter that returns the current parent session ID.
+ *   Called at dispatch time so the orchestrator session appears as a child of the active session.
  */
-export function createAssessFn(client: PluginClient): (
+export function createAssessFn(client: PluginClient, getParentSessionId?: () => string | undefined): (
   feedback: string,
   currentArtifact: ArtifactKey,
 ) => Promise<OrchestratorAssessResult> {
@@ -108,7 +113,7 @@ export function createAssessFn(client: PluginClient): (
         ephemeralPrompt(client, {
           parts: [{ type: "text", text: prompt }],
           system: ASSESS_SYSTEM_PROMPT,
-        }, "Orchestrator: assess feedback"),
+        }, "Orchestrator: assess feedback", getParentSessionId?.()),
         ORCHESTRATOR_TIMEOUT_MS,
         "orchestrator-assess",
       )
@@ -179,8 +184,10 @@ The JSON must have exactly these fields:
 /**
  * Creates a diverge() function backed by an LLM call.
  * The returned function matches OrchestratorDeps.diverge.
+ *
+ * @param getParentSessionId Optional getter for parent session ID (see createAssessFn).
  */
-export function createDivergeFn(client: PluginClient): (
+export function createDivergeFn(client: PluginClient, getParentSessionId?: () => string | undefined): (
   assessResult: OrchestratorAssessResult,
   approvedArtifacts: Partial<Record<ArtifactKey, string>>,
 ) => Promise<OrchestratorDivergeResult> {
@@ -222,7 +229,7 @@ export function createDivergeFn(client: PluginClient): (
         ephemeralPrompt(client, {
           parts: [{ type: "text", text: prompt }],
           system: DIVERGE_SYSTEM_PROMPT,
-        }, "Orchestrator: diverge classification"),
+        }, "Orchestrator: diverge classification", getParentSessionId?.()),
         ORCHESTRATOR_TIMEOUT_MS,
         "orchestrator-diverge",
       )
@@ -285,11 +292,15 @@ async function ephemeralPrompt(
   client: PluginClient,
   params: { parts: Array<{ type: string; text: string }>; system?: string },
   title = "Orchestrator: classify feedback",
+  parentSessionId?: string,
 ): Promise<unknown> {
   if (!client.session) throw new Error("client.session is not available — cannot dispatch orchestrator call")
-  // Create short-lived session (orphaned — not linked to parent)
   const sessionResult = await client.session.create({
-    body: { title },
+    body: {
+      title,
+      agent: "workflow-orchestrator",
+      ...(parentSessionId ? { parentID: parentSessionId } : {}),
+    },
   })
 
   const sessionId = extractEphemeralSessionId(sessionResult, "ephemeralPrompt")
@@ -310,11 +321,11 @@ async function ephemeralPrompt(
     })
     return result
   } finally {
-    // Best-effort cleanup — never throw from delete()
-    try {
-      await client.session.delete({ path: { id: sessionId } })
-    } catch {
-      // Ignore cleanup errors
+    // Preserve child sessions for audit trail; delete orphaned sessions.
+    if (!parentSessionId) {
+      try {
+        await client.session.delete({ path: { id: sessionId } })
+      } catch { /* ignore cleanup errors */ }
     }
   }
 }

@@ -1,9 +1,12 @@
 ---
 name: workflow-reviewer
 description: Critical evaluator for workflow artifacts. Reviews against structured acceptance criteria. READ-ONLY access only.
+mode: subagent
+hidden: true
+tools:
+  write: false
+  edit: false
 disallowedTools:
-  - write
-  - edit
   - patch
   - create
   - overwrite
@@ -14,6 +17,7 @@ disallowedTools:
   - mark_task_complete
   - request_review
   - submit_feedback
+  - resolve_human_gate
 ---
 
 You are a critical code reviewer operating in an isolated context.

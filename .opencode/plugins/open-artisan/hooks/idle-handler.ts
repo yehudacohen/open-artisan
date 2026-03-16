@@ -27,8 +27,8 @@ export type IdleDecision =
  * Pure function — does NOT mutate the state (caller must apply retryCount increment).
  */
 export function handleIdle(state: WorkflowState): IdleDecision {
-  // Expected idle states: USER_GATE and DONE
-  if (state.phaseState === "USER_GATE" || state.phase === "DONE") {
+  // Expected idle states: USER_GATE, ESCAPE_HATCH, and DONE
+  if (state.phaseState === "USER_GATE" || state.phaseState === "ESCAPE_HATCH" || state.phase === "DONE") {
     return { action: "ignore" }
   }
 

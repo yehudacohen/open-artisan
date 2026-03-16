@@ -1,6 +1,6 @@
 # Structured Coding Workflow — Design Document
 
-**Version:** v10 (reflects implementation as of schema v15, March 2026)
+**Version:** v11 (reflects implementation as of schema v15, March 2026)
 **Status:** This document describes the **current implemented system**, not aspirational design. Section 14 documents structural gaps that have all been resolved. Section 14.6 documents meta-structural improvements that prevent agents from silently downgrading structural guarantees. Section 15 documents deferred features.
 
 ---
@@ -206,6 +206,8 @@ DRAFT ──[draft_complete]──► REVIEW ──[self_review_fail]──► R
 ```
 
 The DISCOVERY phase has a prefix: SCAN → ANALYZE → CONVENTIONS → REVIEW → USER_GATE → REVISE.
+
+**Artifact re-submit at REVIEW:** If the agent realizes the artifact content is stale or wrong while already in REVIEW, it can call `request_review` again with updated `artifact_content`. This overwrites the on-disk artifact, resets the iteration count, and restarts the review cycle (stays in REVIEW). The `artifact_content` parameter is required for re-submission — omitting it returns an error. This prevents the agent from being stuck with stale content that the isolated reviewer would evaluate.
 
 ### 5.4 Phase Progression
 
@@ -491,7 +493,7 @@ After `MAX_REVIEW_ITERATIONS` (10) consecutive review failures, the system escal
 | `mark_analyze_complete` | DISCOVERY/ANALYZE | Signal analysis complete |
 | `request_review` | */DRAFT, */CONVENTIONS, */REVISE, */REVIEW | Submit artifact for review. At REVIEW: re-submits updated content (requires `artifact_content`), resets iteration count. |
 | `mark_satisfied` | */REVIEW | Submit criteria assessment (triggers isolated reviewer) |
-| `submit_feedback` | */USER_GATE | Route user feedback (approve or revise) |
+| `submit_feedback` | */USER_GATE, */ESCAPE_HATCH | Route user feedback (approve or revise). At ESCAPE_HATCH: accept drift, provide alternative direction, start new direction, or abort. |
 | `mark_task_complete` | IMPLEMENTATION/DRAFT, IMPLEMENTATION/REVISE | Complete a DAG task (triggers per-task review) |
 | `resolve_human_gate` | IMPLEMENTATION/* | Activate a human gate for a DAG task |
 
@@ -556,6 +558,19 @@ When the agent goes idle without completing a tool call, the `session.idle` even
 ### 13.5 Compaction Hook
 
 When OpenCode compacts the conversation, the `experimental.session.compacting` hook injects the current workflow state as structured context. This ensures the agent retains its workflow position after compaction.
+
+### 13.6 Error Resilience
+
+**Design invariant:** Hooks must never throw to the OpenCode runtime. An unhandled exception from any hook causes OpenCode to surface "internal server error" and may trigger retry loops.
+
+**Implementation:**
+
+- **All 4 non-throwing hooks** (`event`, `chat.message`, `experimental.chat.system.transform`, `experimental.session.compacting`) are wrapped in top-level try/catch. Errors are logged and swallowed.
+- **`tool.execute.before`** catches accidental errors but re-throws intentional `[Workflow]` tool blocks (these are the mechanism for phase-gated tool restrictions).
+- **All 8 tool `execute()` handlers** are wrapped by `wrapToolMap`/`safeToolExecute`. Uncaught exceptions (e.g. from `store.update()` validation failures or disk I/O errors) are converted to `"Error: ..."` strings returned to the agent, instead of propagating as unhandled rejections.
+- **`store.update()` in `finally` blocks** (`mark_task_complete`, `submit_feedback`) has inner try/catch to prevent cleanup errors from replacing original exceptions.
+
+**Persistent error log:** All errors and warnings are appended to `.opencode/openartisan-errors.log` as JSON lines (`{ts, level, message, detail?, sessionId?}`). This file survives agent recovery and can be inspected after the fact for post-mortem tracing. The logger never throws on write failure (best-effort).
 
 ---
 
@@ -725,7 +740,7 @@ These must hold true at all times. Items marked *(procedural)* are enforced by c
         ├── constants.ts            # All magic numbers
         ├── client-types.ts         # Typed plugin client interface
         ├── utils.ts                # Shared utilities
-        ├── logger.ts               # TUI toast-based logger
+        ├── logger.ts               # TUI toast logger + persistent error log
         ├── vocabulary.ts           # Shared keyword sets
         ├── artifacts.ts            # Artifact dependency graph
         ├── artifact-store.ts       # Disk artifact writer
@@ -798,6 +813,7 @@ tests/
 ├── git-checkpoint.test.ts
 ├── mode-detect.test.ts
 ├── impl-plan-parser.test.ts
+├── logger.test.ts
 ├── dag.test.ts
 ├── scheduler.test.ts
 ├── orchestrator.test.ts
@@ -808,7 +824,11 @@ tests/
 └── utils.test.ts
 ```
 
-**Test count:** 989 tests across 35 files (schema v15).
+**Test count:** 1023 tests across 36 files (schema v15).
+
+**Runtime artifacts** (in target project's `.opencode/` directory):
+- `workflow-state.json` — persisted session state (all sessions, JSON object keyed by session ID)
+- `openartisan-errors.log` — persistent error/warning log (JSON lines, append-only)
 
 ---
 

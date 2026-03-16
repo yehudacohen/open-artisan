@@ -63,7 +63,7 @@ import { dispatchTaskReview } from "./task-review"
 import { dispatchDriftCheck } from "./task-drift"
 import { captureRevisionBaseline, hasArtifactChanged } from "./revision-baseline"
 import { dispatchAutoApproval } from "./auto-approve"
-import { createLogger } from "./logger"
+import { createLogger, type Logger } from "./logger"
 
 import { createHash } from "node:crypto"
 import type { WorkflowMode, WorkflowState, SessionStateStore, ArtifactKey, RevisionStep, MarkSatisfiedArgs } from "./types"
@@ -187,6 +187,49 @@ function logTransition(
 export { resolveSessionId }
 
 /**
+ * Wraps a tool execute function so any uncaught exception is converted to an
+ * error string rather than propagating to the OpenCode runtime. Without this,
+ * a store.update() validation failure or disk I/O error inside a tool handler
+ * would surface as an "internal server error" instead of a readable message.
+ *
+ * Also logs the error to the persistent error log for post-mortem tracing.
+ */
+function safeToolExecute<A, C>(
+  toolName: string,
+  fn: (args: A, context: C) => Promise<string>,
+  logFn: Logger,
+): (args: A, context: C) => Promise<string> {
+  return async (args: A, context: C): Promise<string> => {
+    try {
+      return await fn(args, context)
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e)
+      const stack = e instanceof Error ? e.stack : undefined
+      logFn.error(`Unexpected error in ${toolName}`, { detail: stack ?? message })
+      return `Error: Unexpected internal error in ${toolName}: ${message}`
+    }
+  }
+}
+
+/**
+ * Wraps every tool's execute() function in a safety net so that unexpected
+ * exceptions (store.update validation failures, disk I/O errors, etc.) are
+ * caught and returned as error strings. Without this, an unhandled throw
+ * from any tool handler would surface as an "internal server error" in
+ * the OpenCode runtime.
+ */
+function wrapToolMap<T extends Record<string, { execute: (...args: any[]) => Promise<string>; [key: string]: unknown }>>(
+  tools: T,
+  logFn: Logger,
+): T {
+  for (const [name, def] of Object.entries(tools)) {
+    const original = def.execute
+    def.execute = safeToolExecute(name, original.bind(def), logFn)
+  }
+  return tools
+}
+
+/**
  * Names of all custom workflow control tools.
  * The tool guard must never block these regardless of phase — they are the
  * mechanism by which the agent signals state transitions.
@@ -253,7 +296,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
     : join(import.meta.dirname, "..", "..")  // .opencode/ fallback
   const store = createSessionStateStore(stateDir)
   const sm = createStateMachine()
-  const log = createLogger(client)
+  const log = createLogger(client, stateDir)
 
   // Layer 2: Orchestrator — wires LLM-backed assess + diverge into the routing logic.
   // The graph and orchestrator are shared across sessions (stateless pure functions).
@@ -450,6 +493,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
     // -------------------------------------------------------------------------
 
     event: async ({ event }: { event: { type: string; properties?: Record<string, unknown> } }) => {
+      try {
       // Session created: initialize fresh workflow state.
       // SDK type: { type: "session.created", properties: { info: Session } }
       // The session ID lives at properties.info.id
@@ -499,7 +543,11 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
         if (!sessionId) return
         // Clean up child session mapping if this was a child session
         childSessionParents.delete(sessionId)
-        await store.delete(sessionId)
+        try {
+          await store.delete(sessionId)
+        } catch (e) {
+          log.warn("Failed to delete session state", { detail: e instanceof Error ? e.message : String(e), sessionId })
+        }
         return
       }
 
@@ -541,7 +589,11 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             })
           } catch { /* ignore */ }
           // Reset retry count so the agent gets fresh attempts after user input
-          await store.update(sessionId, (draft) => { draft.retryCount = 0 })
+          try {
+            await store.update(sessionId, (draft) => { draft.retryCount = 0 })
+          } catch (e) {
+            log.warn("Failed to reset retryCount on escalation", { detail: e instanceof Error ? e.message : String(e), sessionId })
+          }
           try {
             await client.session?.prompt({
               path: { id: sessionId },
@@ -574,6 +626,11 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
           })
         } catch { /* ignore if API shape differs */ }
       }
+      } catch (e) {
+        // Top-level safety net — hooks must never throw to the OpenCode runtime.
+        // Errors here cause "internal server error" retries if left unhandled.
+        log.error("Unhandled error in event hook", { detail: e instanceof Error ? e.stack ?? e.message : String(e) })
+      }
     },
 
     // -------------------------------------------------------------------------
@@ -589,6 +646,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
       input: { sessionID?: string; sessionId?: string; session_id?: string; messageID?: string; [key: string]: unknown },
       output: { message: { sessionID?: string; sessionId?: string; id?: string }; parts: Array<{ type: string; text?: string; id?: string; sessionID?: string; messageID?: string }> },
     ) => {
+      try {
       // Resolve sessionID — probe all casing variants the SDK may use
       const sessionId = (
         (input.sessionID as string | undefined) ??
@@ -691,6 +749,9 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
           draft.userGateMessageReceived = true
         })
       }
+      } catch (e) {
+        log.error("Unhandled error in chat.message hook", { detail: e instanceof Error ? e.stack ?? e.message : String(e) })
+      }
     },
 
     // -------------------------------------------------------------------------
@@ -703,6 +764,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
       input: { sessionID?: string; sessionId?: string; session_id?: string; model?: unknown },
       output: { system: string[] },
     ) => {
+      try {
       const sessionId = (input.sessionID ?? input.sessionId ?? input.session_id) as string | undefined
       if (!sessionId) return
 
@@ -739,6 +801,9 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
         const hint = buildUserGateHint(state.phase, state.phaseState)
         output.system.push(hint)
       }
+      } catch (e) {
+        log.error("Unhandled error in system.transform hook", { detail: e instanceof Error ? e.stack ?? e.message : String(e) })
+      }
     },
 
     // -------------------------------------------------------------------------
@@ -746,6 +811,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
     // -------------------------------------------------------------------------
 
     "tool.execute.before": async (input: { sessionID?: string; sessionId?: string; session_id?: string; tool: string; args?: Record<string, unknown> }) => {
+      try {
       const sessionId = (input.sessionID ?? input.sessionId ?? input.session_id) as string | undefined
       if (!sessionId) return
 
@@ -881,6 +947,13 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
           )
         }
       }
+      } catch (e) {
+        // Re-throw intentional tool blocks — these are the mechanism for enforcing
+        // phase-gated tool restrictions. Only swallow truly unexpected errors.
+        if (e instanceof Error && e.message.startsWith("[Workflow]")) throw e
+        log.error("Unhandled error in tool.execute.before hook", { detail: e instanceof Error ? e.stack ?? e.message : String(e) })
+        // Swallow — failing open is safer than blocking all tools on an internal error
+      }
     },
 
     // -------------------------------------------------------------------------
@@ -891,6 +964,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
       input: { sessionID?: string; sessionId?: string; session_id?: string },
       output: { context?: string[] },
     ) => {
+      try {
       const sessionId = (input.sessionID ?? input.sessionId ?? input.session_id) as string | undefined
       if (!sessionId) return
       const state = store.get(sessionId)
@@ -903,13 +977,20 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
       // Ensure output.context exists — runtime may not initialize it
       output.context ??= []
       output.context.push(contextBlock)
+      } catch (e) {
+        log.error("Unhandled error in compacting hook", { detail: e instanceof Error ? e.stack ?? e.message : String(e) })
+      }
     },
 
     // -------------------------------------------------------------------------
     // Custom tools — "tool" (singular) with tool() helper and tool.schema.*
+    // Each tool's execute() is wrapped by safeToolExecute at the end of this
+    // block so that store.update() failures and other unexpected exceptions
+    // are caught and returned as error strings instead of propagating as
+    // unhandled exceptions to the OpenCode runtime.
     // -------------------------------------------------------------------------
 
-    tool: {
+    tool: wrapToolMap({
       // -----------------------------------------------------------------------
       // select_mode — first call in every session
       // -----------------------------------------------------------------------
@@ -1694,9 +1775,16 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             return result.responseMessage
           } finally {
             // Clear the re-entry guard on every exit path
-            await store.update(sessionId, (draft) => {
-              draft.taskCompletionInProgress = null
-            })
+            try {
+              await store.update(sessionId, (draft) => {
+                draft.taskCompletionInProgress = null
+              })
+            } catch (cleanupErr) {
+              log.warn("Failed to clear taskCompletionInProgress", {
+                detail: cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr),
+                sessionId,
+              })
+            }
           }
         },
       }),
@@ -2455,9 +2543,16 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             } finally {
               // Clear pendingFeedback after handler completes (success or failure)
               if (needsOrchestrator) {
-                await store.update(sessionId, (draft) => {
-                  draft.pendingFeedback = null
-                })
+                try {
+                  await store.update(sessionId, (draft) => {
+                    draft.pendingFeedback = null
+                  })
+                } catch (cleanupErr) {
+                  log.warn("Failed to clear pendingFeedback", {
+                    detail: cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr),
+                    sessionId,
+                  })
+                }
               }
             }
 
@@ -2556,7 +2651,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
           }
         },
       }),
-    },
+    }, log),
 
     // Test-only: exposes the internal store for integration tests that need to
     // force state (e.g. setting phase to DONE without traversing all 8 phases).

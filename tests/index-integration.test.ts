@@ -952,3 +952,63 @@ describe("DONE → MODE_SELECT auto-reset", () => {
     expect(state.intentBaseline).toBeNull()
   })
 })
+
+// ---------------------------------------------------------------------------
+// Error resilience — hooks and tools don't throw to OpenCode runtime
+// ---------------------------------------------------------------------------
+
+describe("Error resilience — hooks swallow errors instead of propagating", () => {
+  it("chat.message hook does not throw on malformed output", async () => {
+    // Passing null/undefined parts should not throw — the hook should catch it
+    await expect(
+      plugin["chat.message"](
+        { sessionID: "nonexistent-session" },
+        { message: { sessionID: "nonexistent-session" }, parts: null as any },
+      ),
+    ).resolves.toBeUndefined()
+  })
+
+  it("system.transform hook does not throw on malformed output", async () => {
+    // Passing undefined system array should not throw
+    await expect(
+      plugin["experimental.chat.system.transform"](
+        { sessionID: "nonexistent-session" },
+        { system: null as any },
+      ),
+    ).resolves.toBeUndefined()
+  })
+
+  it("compacting hook does not throw on malformed output", async () => {
+    await expect(
+      plugin["experimental.session.compacting"](
+        { sessionID: "nonexistent-session" },
+        {} as any,
+      ),
+    ).resolves.toBeUndefined()
+  })
+
+  it("event hook does not throw on malformed event", async () => {
+    await expect(
+      plugin.event({ event: { type: null as any } }),
+    ).resolves.toBeUndefined()
+  })
+
+  it("tool.execute.before does not throw for unknown sessions (non-workflow errors)", async () => {
+    // Non-workflow errors should be swallowed; only [Workflow] errors propagate
+    await expect(
+      plugin["tool.execute.before"]({ sessionID: "nonexistent-session", tool: "read_file" }),
+    ).resolves.toBeUndefined()
+  })
+})
+
+describe("Error resilience — tool execute returns error string on unexpected failure", () => {
+  it("select_mode with missing context returns error string (not throw)", async () => {
+    // Passing an empty context (no sessionId) should return an error string
+    const result = await plugin.tool.select_mode.execute(
+      { mode: "GREENFIELD", feature_name: "test" },
+      {} as any,
+    )
+    expect(typeof result).toBe("string")
+    expect(result).toContain("Error")
+  })
+})

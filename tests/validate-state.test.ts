@@ -34,6 +34,7 @@ function makeValidState(overrides: Partial<WorkflowState> = {}): WorkflowState {
     userGateMessageReceived: false,
     artifactDiskPaths: {},
     featureName: null,
+    revisionBaseline: null,
     ...overrides,
   }
 }

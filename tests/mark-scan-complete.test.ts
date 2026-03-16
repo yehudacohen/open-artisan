@@ -32,7 +32,8 @@ describe("processMarkScanComplete", () => {
 
   it("handles empty summary gracefully", () => {
     const result = processMarkScanComplete({ scan_summary: "" })
-    expect(result.responseMessage).toContain("Scan complete")
+    expect(result.responseMessage).toContain("Warning: Empty scan summary")
+    expect(result.responseMessage).toContain("ANALYZE")
   })
 
   it("response message is a string", () => {
@@ -48,6 +49,7 @@ describe("processMarkScanComplete", () => {
 
   it("handles whitespace-only summary like empty", () => {
     const result = processMarkScanComplete({ scan_summary: "   " })
-    expect(result.responseMessage).toContain("Scan complete")
+    expect(result.responseMessage).toContain("Warning: Empty scan summary")
+    expect(result.responseMessage).toContain("ANALYZE")
   })
 })

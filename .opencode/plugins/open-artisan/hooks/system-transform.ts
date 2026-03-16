@@ -236,21 +236,21 @@ function getQualityCriteria(phase: Phase): string {
       "Operational excellence": "Error handling tests verify correct log output, tests for retry/timeout behavior, degradation paths tested",
     },
     IMPL_PLAN: {
-      "Design excellence": "DAG structure is logical and efficient — minimal critical path, appropriate parallelism, clean task boundaries",
-      "Architectural cohesion": "Tasks align with the interface and plan structure — no task crosses module boundaries unnecessarily",
+      "Design excellence": "DAG structure is logical and efficient — minimal critical path, appropriate parallelism, clean task boundaries. Task categories (scaffold/human-gate/integration/standalone) are correctly assigned.",
+      "Architectural cohesion": "Tasks align with the interface and plan structure — no task crosses module boundaries unnecessarily. Integration tasks depend on their corresponding scaffold and human-gate tasks.",
       "Vision alignment": "Every task traces to a planned feature or requirement — no gold-plating tasks, no missing tasks for approved interfaces, task priorities reflect the user's stated priorities",
-      "Completeness": "Every interface method has a task, every dependency is explicit, every merge point identified",
-      "Readiness for execution": "A developer can pick up any ready task and implement it without needing context beyond the task description",
+      "Completeness": "Every interface method has a task, every dependency is explicit, every merge point identified. Tasks requiring external services/credentials are split into scaffold → human-gate → integration chains.",
+      "Readiness for execution": "A developer can pick up any ready task and implement it without needing context beyond the task description. Human-gate tasks clearly describe what the human must do and how to verify completion.",
       "Security standards": "Security-critical tasks identified and ordered correctly — auth before features, validation before processing",
-      "Operational excellence": "Infrastructure and monitoring tasks included in the DAG — not deferred as afterthoughts",
+      "Operational excellence": "Infrastructure and monitoring tasks included in the DAG — not deferred as afterthoughts. Human-gate tasks for infrastructure provisioning are explicitly modeled, not assumed.",
     },
     IMPLEMENTATION: {
       "Design excellence": "Code is clean, idiomatic, and well-structured — follows SOLID principles, appropriate patterns for the language",
       "Architectural cohesion": "Implementation matches interfaces exactly, follows plan architecture, respects module boundaries",
       "Vision alignment": "Code delivers exactly what the user requested — no feature drift, no missing functionality from the plan, conventions followed, and all upstream artifacts (plan, interfaces, tests) are faithfully realized",
-      "Completeness": "All interface methods implemented, all tests passing, no stubs or placeholder code",
-      "Readiness for execution": "Code is production-ready — no TODOs, no debug code, no hardcoded values that should be configured",
-      "Security standards": "Auth implemented correctly, inputs validated, secrets not hardcoded, error messages don't leak internals",
+      "Completeness": "All interface methods implemented, all tests passing. CRITICAL stub check: scan for functions returning hardcoded values (return 0, return \"\", return [], return ok({})), functions throwing \"not implemented\" / \"TODO\", placeholder credentials (localhost:5432, test-bucket, dummy-api-key), TODO/FIXME/HACK comments, console.log standing in for real logging, empty catch blocks, and conditional test stubs (if NODE_ENV === 'test'). Exception: tasks with category 'scaffold' may contain stubs for methods that will be implemented by a later integration task. All other tasks must have real, functional implementations — not placeholders.",
+      "Readiness for execution": "Code is production-ready — no TODOs, no debug code, no hardcoded values that should be configured. Every function contains real logic, not stub returns. Configuration values come from environment or config files, not inline constants.",
+      "Security standards": "Auth implemented correctly, inputs validated, secrets not hardcoded (check for literal API keys, passwords, connection strings in source), error messages don't leak internals",
       "Operational excellence": "Logging at appropriate levels, metrics emitted, health checks work, graceful degradation implemented",
     },
   }
@@ -484,6 +484,139 @@ export function buildWorkflowSystemPrompt(state: WorkflowState): string {
   }
 
   return blocks.join("\n\n")
+}
+
+/**
+ * Builds a context block for Task subagent sessions that inherit a parent's
+ * workflow state. Provides the subagent with:
+ *
+ *   - Current phase/mode/feature context (so it knows WHERE it is in the workflow)
+ *   - Artifact disk paths (so it can read conventions, interfaces, tests, plan)
+ *   - Mode constraints (INCREMENTAL allowlist, REFACTOR conventions, etc.)
+ *   - Full DAG with task statuses (so it can see what's done and what's pending)
+ *   - Tool restrictions (workflow tools are blocked; file writes follow parent policy)
+ *   - Instructions on how to report completion (back to parent, not via workflow tools)
+ *
+ * Does NOT include: workflow tool descriptions, acceptance criteria, review
+ * instructions, or sub-state routing hints — those are parent-only concerns.
+ *
+ * Pure function — does NOT mutate anything.
+ */
+export function buildSubagentContext(parentState: WorkflowState): string {
+  const lines: string[] = []
+
+  lines.push("---")
+  lines.push("## WORKFLOW CONTEXT — SUBAGENT SESSION")
+  lines.push("")
+  lines.push("You are a **Task subagent** working within a structured workflow.")
+  lines.push("The parent session manages workflow state — you focus on implementation work.")
+  lines.push("")
+  lines.push(`**Phase:** ${parentState.phase} / **Sub-state:** ${parentState.phaseState}`)
+  lines.push(`**Mode:** ${parentState.mode ?? "not yet selected"}`)
+  if (parentState.featureName) {
+    lines.push(`**Feature:** ${parentState.featureName}`)
+  }
+  lines.push("")
+
+  // Mode constraints
+  if (parentState.mode === "INCREMENTAL") {
+    lines.push("### Do-No-Harm Directive (INCREMENTAL mode)")
+    lines.push("- Modify ONLY files in the approved allowlist")
+    lines.push("- Do NOT refactor outside the requested scope")
+    lines.push("- Follow existing conventions exactly — your code must be indistinguishable from existing code")
+    lines.push("- All existing tests must continue to pass")
+    lines.push("- Do NOT use bash to write/modify files — use write/edit tools only")
+    lines.push("")
+    if (parentState.fileAllowlist.length > 0) {
+      lines.push("**Approved file allowlist:**")
+      for (const f of parentState.fileAllowlist) {
+        lines.push(`  - ${f}`)
+      }
+      lines.push("")
+    }
+  } else if (parentState.mode === "REFACTOR") {
+    lines.push("### Refactor Mode Constraints")
+    lines.push("- Follow the target patterns from the conventions document")
+    lines.push("- All existing tests must pass after each change")
+    lines.push("")
+  }
+
+  // Conventions reference
+  if (parentState.conventions && parentState.mode !== "GREENFIELD") {
+    const conventionsPath = parentState.artifactDiskPaths?.["conventions"]
+    lines.push("### Conventions Document")
+    lines.push("The following conventions are MANDATORY. Treat them as hard requirements.")
+    lines.push("")
+    if (conventionsPath && existsSync(conventionsPath)) {
+      lines.push(`Read the conventions document at \`${conventionsPath}\` before starting any work.`)
+    } else {
+      const text = parentState.conventions.length > MAX_CONVENTIONS_CHARS
+        ? parentState.conventions.slice(0, MAX_CONVENTIONS_CHARS) + "\n\n[... truncated ...]"
+        : parentState.conventions
+      lines.push(text)
+    }
+    lines.push("")
+  }
+
+  // Artifact disk paths — so the subagent can reference upstream artifacts
+  const pathEntries = Object.entries(parentState.artifactDiskPaths).filter(([, v]) => v)
+  if (pathEntries.length > 0) {
+    lines.push("### Upstream Artifacts (on disk)")
+    lines.push("Reference these approved artifacts while working:")
+    lines.push("")
+    for (const [key, path] of pathEntries) {
+      lines.push(`- **${key}**: \`${path}\``)
+    }
+    lines.push("")
+  }
+
+  // DAG status — full task list with current statuses
+  if (parentState.implDag && parentState.implDag.length > 0) {
+    const tasks = parentState.implDag
+    const complete = tasks.filter((t) => t.status === "complete").length
+    const total = tasks.length
+    lines.push(`### Implementation DAG (${complete}/${total} complete)`)
+    lines.push("")
+    lines.push("| Task | Status | Description | Expected Tests |")
+    lines.push("|------|--------|-------------|----------------|")
+    for (const t of tasks) {
+      const statusIcon = t.status === "complete" ? "DONE" : t.status === "in-flight" ? "IN-FLIGHT" : t.status === "aborted" ? "ABORTED" : "PENDING"
+      const tests = t.expectedTests.length > 0 ? t.expectedTests.join(", ") : "—"
+      const desc = t.description.length > 80 ? t.description.slice(0, 77) + "..." : t.description
+      lines.push(`| ${t.id} | ${statusIcon} | ${desc} | ${tests} |`)
+    }
+    lines.push("")
+  }
+
+  // Phase-specific instructions (implementation.txt content)
+  if (parentState.phase === "IMPLEMENTATION") {
+    const promptFile = getPhasePromptFilename(parentState.phase, parentState.mode)
+    if (promptFile) {
+      lines.push(loadPrompt(promptFile))
+      lines.push("")
+    }
+  }
+
+  // Tool restrictions
+  lines.push("### Subagent Tool Restrictions")
+  lines.push("")
+  lines.push("You **cannot** call workflow control tools (`mark_task_complete`, `request_review`,")
+  lines.push("`submit_feedback`, `select_mode`, `mark_satisfied`, etc.). Only the parent session")
+  lines.push("manages workflow state transitions.")
+  lines.push("")
+  lines.push("You **can** use all other tools (read, write, edit, bash, glob, grep, etc.)")
+  lines.push("subject to the mode constraints above.")
+  lines.push("")
+  lines.push("### Reporting Completion")
+  lines.push("")
+  lines.push("When you finish your assigned work:")
+  lines.push("1. Ensure all relevant tests pass (run them with bash)")
+  lines.push("2. Report what you implemented, which files were created/modified, and test results")
+  lines.push("3. The parent session will call `mark_task_complete` for each finished task")
+  lines.push("")
+  lines.push("---")
+
+  return lines.join("\n")
 }
 
 function buildSubStateContext(state: WorkflowState): string {

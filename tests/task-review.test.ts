@@ -1,0 +1,344 @@
+/**
+ * Tests for task-review.ts — per-task review prompt building and result parsing.
+ *
+ * Covers:
+ * - buildTaskReviewPrompt: includes task ID, description, tests, conventions, artifact paths
+ * - parseTaskReviewResult: valid JSON, pass/fail, issues extraction, error handling
+ * - dispatchTaskReview: mock client, success path, failure fallback
+ */
+import { describe, expect, it, mock } from "bun:test"
+import {
+  buildTaskReviewPrompt,
+  parseTaskReviewResult,
+  dispatchTaskReview,
+  type TaskReviewRequest,
+} from "#plugin/task-review"
+import type { TaskNode } from "#plugin/dag"
+
+// ---------------------------------------------------------------------------
+// Fixtures
+// ---------------------------------------------------------------------------
+
+function makeTask(overrides: Partial<TaskNode> & { id: string }): TaskNode {
+  return {
+    description: `Implement ${overrides.id}`,
+    dependencies: [],
+    expectedTests: [],
+    estimatedComplexity: "medium",
+    status: "pending",
+    ...overrides,
+  }
+}
+
+function makeRequest(overrides: Partial<TaskReviewRequest> = {}): TaskReviewRequest {
+  return {
+    task: makeTask({ id: "T1", expectedTests: ["tests/auth.test.ts"] }),
+    implementationSummary: "Implemented auth service with JWT tokens",
+    mode: "GREENFIELD",
+    cwd: "/tmp/test-project",
+    ...overrides,
+  }
+}
+
+// ---------------------------------------------------------------------------
+// buildTaskReviewPrompt
+// ---------------------------------------------------------------------------
+
+describe("buildTaskReviewPrompt", () => {
+  it("includes task ID and description", () => {
+    const prompt = buildTaskReviewPrompt(makeRequest())
+    expect(prompt).toContain("T1")
+    expect(prompt).toContain("Implement T1")
+  })
+
+  it("includes implementation summary", () => {
+    const prompt = buildTaskReviewPrompt(makeRequest({
+      implementationSummary: "Added JWT auth with refresh tokens",
+    }))
+    expect(prompt).toContain("Added JWT auth with refresh tokens")
+  })
+
+  it("includes expected tests when present", () => {
+    const prompt = buildTaskReviewPrompt(makeRequest({
+      task: makeTask({ id: "T1", expectedTests: ["tests/auth.test.ts", "tests/jwt.test.ts"] }),
+    }))
+    expect(prompt).toContain("tests/auth.test.ts")
+    expect(prompt).toContain("tests/jwt.test.ts")
+  })
+
+  it("omits expected tests section when none specified", () => {
+    const prompt = buildTaskReviewPrompt(makeRequest({
+      task: makeTask({ id: "T1", expectedTests: [] }),
+    }))
+    expect(prompt).not.toContain("Expected Tests")
+  })
+
+  it("includes dependencies when present", () => {
+    const prompt = buildTaskReviewPrompt(makeRequest({
+      task: makeTask({ id: "T2", dependencies: ["T1"] }),
+    }))
+    expect(prompt).toContain("T1")
+    expect(prompt).toContain("Dependencies")
+  })
+
+  it("includes artifact disk paths when provided", () => {
+    const prompt = buildTaskReviewPrompt(makeRequest({
+      artifactDiskPaths: {
+        plan: "/tmp/project/.openartisan/feature/plan.md",
+        interfaces: "/tmp/project/.openartisan/feature/interfaces.md",
+      },
+    }))
+    expect(prompt).toContain("plan.md")
+    expect(prompt).toContain("interfaces.md")
+  })
+
+  it("includes conventions reference when provided", () => {
+    const prompt = buildTaskReviewPrompt(makeRequest({
+      conventions: "Use camelCase for all function names",
+      artifactDiskPaths: { conventions: "/tmp/project/.openartisan/conventions.md" },
+    }))
+    expect(prompt).toContain("conventions")
+  })
+
+  it("includes complexity estimate", () => {
+    const prompt = buildTaskReviewPrompt(makeRequest({
+      task: makeTask({ id: "T1", estimatedComplexity: "large" }),
+    }))
+    expect(prompt).toContain("large")
+  })
+
+  it("includes review instructions", () => {
+    const prompt = buildTaskReviewPrompt(makeRequest())
+    expect(prompt).toContain("Run the tests")
+    expect(prompt).toContain("Verify interface alignment")
+    expect(prompt).toContain("Check for regressions")
+    expect(prompt).toContain("Check conventions alignment")
+  })
+
+  it("includes JSON response format", () => {
+    const prompt = buildTaskReviewPrompt(makeRequest())
+    expect(prompt).toContain("passed")
+    expect(prompt).toContain("issues")
+    expect(prompt).toContain("reasoning")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// parseTaskReviewResult
+// ---------------------------------------------------------------------------
+
+describe("parseTaskReviewResult", () => {
+  it("parses a passing result", () => {
+    const raw = JSON.stringify({
+      passed: true,
+      issues: [],
+      reasoning: "All tests pass, interfaces match",
+    })
+    const result = parseTaskReviewResult(raw)
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    expect(result.passed).toBe(true)
+    expect(result.issues).toEqual([])
+    expect(result.reasoning).toContain("All tests pass")
+  })
+
+  it("parses a failing result with issues", () => {
+    const raw = JSON.stringify({
+      passed: false,
+      issues: ["Test auth.test.ts fails", "Missing method getUser()"],
+      reasoning: "Two critical issues found",
+    })
+    const result = parseTaskReviewResult(raw)
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    expect(result.passed).toBe(false)
+    expect(result.issues).toHaveLength(2)
+    expect(result.issues[0]).toContain("auth.test.ts")
+    expect(result.issues[1]).toContain("getUser")
+  })
+
+  it("handles markdown-fenced JSON", () => {
+    const raw = `Here is my review:\n\`\`\`json\n${JSON.stringify({
+      passed: true,
+      issues: [],
+      reasoning: "Looks good",
+    })}\n\`\`\``
+    const result = parseTaskReviewResult(raw)
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    expect(result.passed).toBe(true)
+  })
+
+  it("handles bare JSON without fences", () => {
+    const raw = `Some preamble text\n${JSON.stringify({
+      passed: false,
+      issues: ["test failure"],
+      reasoning: "Tests fail",
+    })}\nSome trailing text`
+    const result = parseTaskReviewResult(raw)
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    expect(result.passed).toBe(false)
+  })
+
+  it("returns error for invalid JSON", () => {
+    const result = parseTaskReviewResult("not valid json at all")
+    expect(result.success).toBe(false)
+    if (result.success) return
+    expect(result.error).toContain("Failed to parse")
+  })
+
+  it("treats truthy non-boolean passed as false", () => {
+    const raw = JSON.stringify({
+      passed: "yes",
+      issues: [],
+      reasoning: "looks good",
+    })
+    const result = parseTaskReviewResult(raw)
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    expect(result.passed).toBe(false) // "yes" !== true
+  })
+
+  it("filters non-string items from issues array", () => {
+    const raw = JSON.stringify({
+      passed: false,
+      issues: ["real issue", 42, null, "another issue"],
+      reasoning: "mixed types",
+    })
+    const result = parseTaskReviewResult(raw)
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    expect(result.issues).toEqual(["real issue", "another issue"])
+  })
+
+  it("handles missing issues array gracefully", () => {
+    const raw = JSON.stringify({ passed: true, reasoning: "ok" })
+    const result = parseTaskReviewResult(raw)
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    expect(result.issues).toEqual([])
+  })
+
+  it("handles missing reasoning gracefully", () => {
+    const raw = JSON.stringify({ passed: true, issues: [] })
+    const result = parseTaskReviewResult(raw)
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    expect(result.reasoning).toBe("")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// dispatchTaskReview — mock client
+// ---------------------------------------------------------------------------
+
+describe("dispatchTaskReview", () => {
+  function makeMockClient(promptResponse?: unknown) {
+    const defaultResponse = {
+      data: {
+        parts: [{
+          type: "text",
+          text: JSON.stringify({
+            passed: true,
+            issues: [],
+            reasoning: "All checks pass",
+          }),
+        }],
+      },
+    }
+    return {
+      session: {
+        create: mock(async () => ({ data: { id: "review-session-1" } })),
+        prompt: mock(async () => promptResponse ?? defaultResponse),
+        delete: mock(async () => {}),
+      },
+    }
+  }
+
+  it("returns passing result on successful review", async () => {
+    const client = makeMockClient()
+    const result = await dispatchTaskReview(client as any, makeRequest())
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    expect(result.passed).toBe(true)
+  })
+
+  it("returns failing result when reviewer finds issues", async () => {
+    const client = makeMockClient({
+      data: {
+        parts: [{
+          type: "text",
+          text: JSON.stringify({
+            passed: false,
+            issues: ["Test fails"],
+            reasoning: "Auth test fails",
+          }),
+        }],
+      },
+    })
+    const result = await dispatchTaskReview(client as any, makeRequest())
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    expect(result.passed).toBe(false)
+    expect(result.issues[0]).toContain("Test fails")
+  })
+
+  it("creates an ephemeral session with task-specific title", async () => {
+    const client = makeMockClient()
+    await dispatchTaskReview(client as any, makeRequest({
+      featureName: "auth-refactor",
+    }))
+    expect(client.session.create).toHaveBeenCalledTimes(1)
+  })
+
+  it("returns error when session.create fails", async () => {
+    const client = {
+      session: {
+        create: mock(async () => { throw new Error("Cannot create session") }),
+        prompt: mock(async () => ({})),
+        delete: mock(async () => {}),
+      },
+    }
+    const result = await dispatchTaskReview(client as any, makeRequest())
+    expect(result.success).toBe(false)
+    if (result.success) return
+    expect(result.error).toContain("Cannot create session")
+  })
+
+  it("returns error when session.prompt fails", async () => {
+    const client = {
+      session: {
+        create: mock(async () => ({ data: { id: "review-1" } })),
+        prompt: mock(async () => { throw new Error("Network error") }),
+        delete: mock(async () => {}),
+      },
+    }
+    const result = await dispatchTaskReview(client as any, makeRequest())
+    expect(result.success).toBe(false)
+    if (result.success) return
+    expect(result.error).toContain("Network error")
+  })
+
+  it("returns error when client.session is missing", async () => {
+    const client = {} // no session API
+    const result = await dispatchTaskReview(client as any, makeRequest())
+    expect(result.success).toBe(false)
+    if (result.success) return
+    expect(result.error).toContain("not available")
+  })
+
+  it("cleans up orphaned sessions (no parentSessionId)", async () => {
+    const client = makeMockClient()
+    await dispatchTaskReview(client as any, makeRequest())
+    expect(client.session.delete).toHaveBeenCalledTimes(1)
+  })
+
+  it("does not delete child sessions (parentSessionId set)", async () => {
+    const client = makeMockClient()
+    await dispatchTaskReview(client as any, makeRequest({
+      parentSessionId: "parent-123",
+    }))
+    expect(client.session.delete).not.toHaveBeenCalled()
+  })
+})

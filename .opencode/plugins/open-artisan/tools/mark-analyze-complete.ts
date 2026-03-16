@@ -6,6 +6,7 @@
  * to DISCOVERY/CONVENTIONS.
  */
 import type { MarkAnalyzeCompleteArgs } from "../types"
+import { MAX_SUMMARY_CHARS } from "../constants"
 
 // Re-export for test convenience
 export type { MarkAnalyzeCompleteArgs }
@@ -30,14 +31,22 @@ export interface MarkAnalyzeCompleteResult {
  * Builds the response for mark_analyze_complete.
  */
 export function processMarkAnalyzeComplete(args: MarkAnalyzeCompleteArgs): MarkAnalyzeCompleteResult {
+  const summary = (args.analysis_summary ?? "").trim()
+  if (!summary) {
+    return {
+      responseMessage:
+        "Warning: Empty analysis summary provided. A meaningful summary helps guide conventions drafting. " +
+        "Transitioning to CONVENTIONS state. Call `request_review` when conventions document is complete.",
+    }
+  }
   return {
-    responseMessage: buildAnalyzeCompleteMessage(args.analysis_summary),
+    responseMessage: buildAnalyzeCompleteMessage(summary),
   }
 }
 
 function buildAnalyzeCompleteMessage(summary: string): string {
   return (
-    `Analysis complete. Summary recorded:\n\n${summary.slice(0, 500)}${summary.length > 500 ? "..." : ""}\n\n` +
+    `Analysis complete. Summary recorded:\n\n${summary.slice(0, MAX_SUMMARY_CHARS)}${summary.length > MAX_SUMMARY_CHARS ? "..." : ""}\n\n` +
     `Transitioning to CONVENTIONS state. ` +
     `Now draft the full conventions document covering:\n` +
     `  1. Naming conventions (files, functions, types, variables)\n` +

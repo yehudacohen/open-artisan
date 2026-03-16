@@ -6,6 +6,7 @@
  * to DISCOVERY/ANALYZE.
  */
 import type { MarkScanCompleteArgs } from "../types"
+import { MAX_SUMMARY_CHARS } from "../constants"
 
 // Re-export for test convenience
 export type { MarkScanCompleteArgs }
@@ -30,14 +31,22 @@ export interface MarkScanCompleteResult {
  * Builds the response for mark_scan_complete.
  */
 export function processMarkScanComplete(args: MarkScanCompleteArgs): MarkScanCompleteResult {
+  const summary = (args.scan_summary ?? "").trim()
+  if (!summary) {
+    return {
+      responseMessage:
+        "Warning: Empty scan summary provided. A meaningful summary helps track what was discovered. " +
+        "Transitioning to ANALYZE state. Call `mark_analyze_complete` when analysis is complete.",
+    }
+  }
   return {
-    responseMessage: buildScanCompleteMessage(args.scan_summary),
+    responseMessage: buildScanCompleteMessage(summary),
   }
 }
 
 function buildScanCompleteMessage(summary: string): string {
   return (
-    `Scan complete. Summary recorded:\n\n${summary.slice(0, 500)}${summary.length > 500 ? "..." : ""}\n\n` +
+    `Scan complete. Summary recorded:\n\n${summary.slice(0, MAX_SUMMARY_CHARS)}${summary.length > MAX_SUMMARY_CHARS ? "..." : ""}\n\n` +
     `Transitioning to ANALYZE state. ` +
     `Now synthesize your scan findings into a coherent picture of the codebase — ` +
     `architecture, conventions, patterns, dependencies, and potential risks. ` +

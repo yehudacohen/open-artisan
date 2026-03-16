@@ -41,6 +41,8 @@ export interface MarkTaskCompleteResult {
   responseMessage: string
   /** The next dispatched task ID (null if all complete or blocked) — caller should persist to currentTaskId */
   nextTaskId: string | null
+  /** When true, all remaining tasks are blocked behind human gates — caller should auto-advance to request_review */
+  awaitingHuman: boolean
 }
 
 /**
@@ -108,6 +110,15 @@ export function processMarkTaskComplete(
     }
   }
 
+  if (task.status === "human-gated") {
+    return {
+      error:
+        `Task "${args.task_id}" is human-gated — it requires the user to perform an action ` +
+        `(${task.humanGate?.whatIsNeeded ?? "see task description"}). ` +
+        `This task will be resolved by the user at USER_GATE, not by the agent via mark_task_complete.`,
+    }
+  }
+
   // Mark complete using the canonical scheduler helper (validates valid source states)
   const marked = markTaskComplete(dag, args.task_id)
   if (!marked) {
@@ -122,6 +133,7 @@ export function processMarkTaskComplete(
   // Determine what comes next
   const decision = nextSchedulerDecision(dag)
   let nextMsg: string
+  let awaitingHuman = false
 
   if (decision.action === "complete") {
     nextMsg =
@@ -131,6 +143,18 @@ export function processMarkTaskComplete(
     nextMsg =
       `\n\n**Next task ready:**\n${decision.prompt}\n\n` +
       `Progress: ${decision.progress.complete}/${decision.progress.total} tasks complete.`
+  } else if (decision.action === "awaiting-human") {
+    awaitingHuman = true
+    const gateList = decision.humanGatedTasks
+      .map((g) => `  - **${g.id}:** ${g.whatIsNeeded}`)
+      .join("\n")
+    nextMsg =
+      `\n\n**Awaiting human action.** All remaining tasks are blocked behind unresolved human gates:\n\n` +
+      `${gateList}\n\n` +
+      `Progress: ${decision.progress.complete}/${decision.progress.total} tasks complete, ` +
+      `${decision.progress.humanGated} human-gated.\n\n` +
+      `The system will auto-advance to USER_GATE so the user can resolve these gates. ` +
+      `Call \`request_review\` to proceed.`
   } else if (decision.action === "blocked") {
     nextMsg =
       `\n\n**DAG BLOCKED:** All remaining tasks have incomplete dependencies — ` +
@@ -138,6 +162,13 @@ export function processMarkTaskComplete(
   } else {
     nextMsg = `\n\nScheduler error: ${(decision as { message: string }).message}`
   }
+
+  // Re-snapshot after scheduler may have auto-transitioned human-gate tasks
+  const finalNodes = Array.from(dag.tasks).map((t) => ({
+    ...t,
+    // Deep copy humanGate if present
+    ...(t.humanGate ? { humanGate: { ...t.humanGate } } : {}),
+  }))
 
   // Determine the next dispatched task ID for the caller to persist
   const nextTaskId = decision.action === "dispatch" ? decision.task.id : null
@@ -147,5 +178,5 @@ export function processMarkTaskComplete(
     `Summary: ${args.implementation_summary}` +
     nextMsg
 
-  return { updatedNodes, responseMessage, nextTaskId }
+  return { updatedNodes: finalNodes, responseMessage, nextTaskId, awaitingHuman }
 }

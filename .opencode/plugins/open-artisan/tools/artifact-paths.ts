@@ -22,6 +22,7 @@ import { join } from "node:path"
 import { readdirSync, existsSync, statSync } from "node:fs"
 import type { Phase, WorkflowMode, ArtifactKey } from "../types"
 import { isInterfaceFile, isTestFile } from "../hooks/tool-guard"
+import { MAX_ARTIFACT_PATHS, SOURCE_EXTENSIONS } from "../constants"
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -60,8 +61,7 @@ function collectFiles(
   return results
 }
 
-/** Cap paths to a reasonable number to avoid bloating the reviewer's prompt. */
-const MAX_PATHS = 20
+// MAX_ARTIFACT_PATHS imported from constants.ts
 
 // ---------------------------------------------------------------------------
 // Main export
@@ -106,7 +106,7 @@ export function resolveArtifactPaths(
 
     case "INTERFACES": {
       if (mode === "INCREMENTAL" && fileAllowlist.length > 0) {
-        return fileAllowlist.filter(isInterfaceFile).slice(0, MAX_PATHS)
+        return fileAllowlist.filter(isInterfaceFile).slice(0, MAX_ARTIFACT_PATHS)
       }
       // GREENFIELD/REFACTOR: scan common source directories for interface-like files
       const sourceDirs = [
@@ -118,19 +118,19 @@ export function resolveArtifactPaths(
       const candidates: string[] = []
       for (const dir of sourceDirs) {
         candidates.push(...collectFiles(dir, isInterfaceFile))
-        if (candidates.length >= MAX_PATHS) break
+        if (candidates.length >= MAX_ARTIFACT_PATHS) break
       }
       // Prefer files with "types", "interfaces", "models", "schema" in name
       const preferred = candidates.filter((p) =>
         /types|interfaces|models|schema|api/i.test(p.split("/").at(-1) ?? ""),
       )
       const rest = candidates.filter((p) => !preferred.includes(p))
-      return [...preferred, ...rest].slice(0, MAX_PATHS)
+      return [...preferred, ...rest].slice(0, MAX_ARTIFACT_PATHS)
     }
 
     case "TESTS": {
       if (mode === "INCREMENTAL" && fileAllowlist.length > 0) {
-        return fileAllowlist.filter(isTestFile).slice(0, MAX_PATHS)
+        return fileAllowlist.filter(isTestFile).slice(0, MAX_ARTIFACT_PATHS)
       }
       // GREENFIELD/REFACTOR: scan common test directories.
       // Includes "packages" for monorepo layouts where tests live under
@@ -148,14 +148,14 @@ export function resolveArtifactPaths(
         // Use depth 6 to handle deep monorepo structures like
         // packages/group/subpackage/src/__tests__/deep/test.ts
         found.push(...collectFiles(dir, isTestFile, 6))
-        if (found.length >= MAX_PATHS) break
+        if (found.length >= MAX_ARTIFACT_PATHS) break
       }
-      return found.slice(0, MAX_PATHS)
+      return found.slice(0, MAX_ARTIFACT_PATHS)
     }
 
     case "IMPLEMENTATION": {
       if (mode === "INCREMENTAL" && fileAllowlist.length > 0) {
-        return fileAllowlist.slice(0, MAX_PATHS)
+        return fileAllowlist.slice(0, MAX_ARTIFACT_PATHS)
       }
       // GREENFIELD/REFACTOR: scan common source directories for source files (non-test)
       const implDirs = [
@@ -167,17 +167,14 @@ export function resolveArtifactPaths(
       const all: string[] = []
       for (const dir of implDirs) {
         all.push(...collectFiles(dir, (p) => {
-          const lower = p.toLowerCase()
-          return (
-            !isTestFile(p) &&
-            (lower.endsWith(".ts") || lower.endsWith(".js") ||
-             lower.endsWith(".py") || lower.endsWith(".go") ||
-             lower.endsWith(".rs") || lower.endsWith(".java"))
-          )
+          if (isTestFile(p)) return false
+          const dotIdx = p.lastIndexOf(".")
+          const ext = dotIdx >= 0 ? p.slice(dotIdx).toLowerCase() : ""
+          return ext !== "" && SOURCE_EXTENSIONS.has(ext)
         }))
-        if (all.length >= MAX_PATHS) break
+        if (all.length >= MAX_ARTIFACT_PATHS) break
       }
-      return all.slice(0, MAX_PATHS)
+      return all.slice(0, MAX_ARTIFACT_PATHS)
     }
 
     default: {

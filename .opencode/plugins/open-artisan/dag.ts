@@ -15,9 +15,38 @@
 // Core types
 // ---------------------------------------------------------------------------
 
-export type TaskStatus = "pending" | "in-flight" | "complete" | "aborted"
+export type TaskStatus = "pending" | "in-flight" | "complete" | "aborted" | "human-gated"
 
 export type TaskComplexity = "small" | "medium" | "large"
+
+/**
+ * Task category — classifies what kind of work a task represents.
+ * Used for stub detection (stubs allowed in "scaffold" but not "integration"/"standalone")
+ * and human gate routing (only "human-gate" tasks can be resolved by the user).
+ *
+ * - scaffold: Contract-satisfying code structure without real integration logic. Stubs allowed.
+ * - human-gate: Requires human action (provision infra, configure creds). No code.
+ * - integration: Real implementation that connects to external services. No stubs.
+ * - standalone: Self-contained logic (business rules, utilities). No stubs.
+ */
+export type TaskCategory = "scaffold" | "human-gate" | "integration" | "standalone"
+
+/**
+ * Metadata attached to a human-gated task describing what the human must do.
+ * Set when the agent calls `resolve_human_gate`, read at USER_GATE for resolution.
+ */
+export interface HumanGateInfo {
+  /** What the human needs to do (e.g. "Configure AWS S3 credentials in .env") */
+  whatIsNeeded: string
+  /** Why this is needed (e.g. "The real S3 stager needs bucket access") */
+  why: string
+  /** Steps the human can run to verify the gate is resolved (e.g. "Run `aws s3 ls`") */
+  verificationSteps: string
+  /** Whether the user has confirmed this gate is resolved */
+  resolved: boolean
+  /** ISO timestamp of when the gate was resolved (set by submit_feedback) */
+  resolvedAt?: string
+}
 
 export interface TaskNode {
   /** Unique identifier within this DAG — e.g. "T1", "T2", "auth-service" */
@@ -41,6 +70,18 @@ export interface TaskNode {
 
   /** Current execution state */
   status: TaskStatus
+
+  /**
+   * Task category — classifies what kind of work this task represents.
+   * Optional for backward compatibility: defaults to "standalone" when absent.
+   */
+  category?: TaskCategory
+
+  /**
+   * Human gate metadata — only present on tasks with status "human-gated".
+   * Describes what the human must do and whether they've confirmed completion.
+   */
+  humanGate?: HumanGateInfo
 
   /**
    * Git branch name when in-flight (populated by scheduler in Layer 4 full).
@@ -78,17 +119,30 @@ export interface ImplDAG {
 
   /**
    * Returns tasks whose dependencies are all in "complete" status,
-   * and whose own status is "pending".
+   * whose own status is "pending", and whose category is NOT "human-gate".
    * In topological order (approximate: sorted by number of dependencies).
    */
   getReady(): TaskNode[]
 
   /**
+   * Returns human-gate tasks whose dependencies are all complete and whose
+   * status is still "pending". These are ready to be auto-transitioned to
+   * "human-gated" status by the scheduler.
+   */
+  getReadyHumanGates(): TaskNode[]
+
+  /**
    * Returns true iff all tasks are in "complete" or "aborted" status.
-   * (Aborted tasks are not re-run by the sequential scheduler — they
-   * represent tasks that were invalidated by an upstream revision.)
+   * Note: "human-gated" tasks are NOT considered complete — the DAG is
+   * not done until all human gates are resolved and downstream tasks finish.
    */
   isComplete(): boolean
+
+  /**
+   * Returns true if there are unresolved human-gated tasks that block
+   * downstream progress. Used by the scheduler to detect "awaiting-human".
+   */
+  hasUnresolvedHumanGates(): boolean
 
   /**
    * Returns the subset of tasks reachable from the given task ID
@@ -114,6 +168,8 @@ export function createImplDAG(tasks: TaskNode[]): ImplDAG {
     ...t,
     dependencies: [...t.dependencies],
     expectedTests: [...t.expectedTests],
+    // Deep copy humanGate if present (nested object)
+    ...(t.humanGate ? { humanGate: { ...t.humanGate } } : {}),
   }))
 
   function validate(): DAGValidationResult {
@@ -186,14 +242,48 @@ export function createImplDAG(tasks: TaskNode[]): ImplDAG {
     const ready = nodes.filter(
       (t) =>
         t.status === "pending" &&
+        // Human-gate tasks are not dispatchable to the agent — they are
+        // auto-transitioned to "human-gated" by the scheduler and resolved
+        // by the user at USER_GATE. Exclude them from ready dispatch.
+        t.category !== "human-gate" &&
         t.dependencies.every((dep) => completeIds.has(dep)),
     )
     // Sort by number of dependencies ascending (simpler tasks tend to be less constrained)
     return ready.sort((a, b) => a.dependencies.length - b.dependencies.length)
   }
 
+  /**
+   * Returns human-gated tasks that are ready to be gated (all deps complete,
+   * category is "human-gate", status is still "pending").
+   * Used by the scheduler to transition these tasks to "human-gated" status
+   * before checking for dispatchable work.
+   */
+  function getReadyHumanGates(): TaskNode[] {
+    const completeIds = new Set(
+      nodes.filter((t) => t.status === "complete").map((t) => t.id),
+    )
+    return nodes.filter(
+      (t) =>
+        t.status === "pending" &&
+        t.category === "human-gate" &&
+        t.dependencies.every((dep) => completeIds.has(dep)),
+    )
+  }
+
   function isComplete(): boolean {
-    return nodes.every((t) => t.status === "complete" || t.status === "aborted")
+    return nodes.every(
+      (t) => t.status === "complete" || t.status === "aborted",
+    )
+  }
+
+  /**
+   * Returns true if there are unresolved human-gated tasks blocking progress.
+   * Used by the scheduler to detect the "awaiting-human" state.
+   */
+  function hasUnresolvedHumanGates(): boolean {
+    return nodes.some(
+      (t) => t.status === "human-gated" && (!t.humanGate || !t.humanGate.resolved),
+    )
   }
 
   function getDependents(taskId: string): TaskNode[] {
@@ -215,5 +305,5 @@ export function createImplDAG(tasks: TaskNode[]): ImplDAG {
     return result
   }
 
-  return { tasks: nodes, validate, getReady, isComplete, getDependents }
+  return { tasks: nodes, validate, getReady, getReadyHumanGates, isComplete, hasUnresolvedHumanGates, getDependents }
 }

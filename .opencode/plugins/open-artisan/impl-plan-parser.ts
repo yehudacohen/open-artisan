@@ -28,7 +28,7 @@
  */
 
 import { createImplDAG } from "./dag"
-import type { ImplDAG, TaskNode, TaskComplexity } from "./dag"
+import type { ImplDAG, TaskNode, TaskComplexity, TaskCategory } from "./dag"
 
 // ---------------------------------------------------------------------------
 // Types
@@ -76,6 +76,9 @@ const TESTS_RE = /^\*{0,2}Expected\s+tests?[*:\s]+(.+)/i
 /** Matches "**Complexity:** small" */
 const COMPLEXITY_RE = /^\*{0,2}Complexity[*:\s]+(.+)/i
 
+/** Matches "**Category:** scaffold" or "**Category:** human-gate" */
+const CATEGORY_RE = /^\*{0,2}Category[*:\s]+(.+)/i
+
 // ---------------------------------------------------------------------------
 // Line-level parsers
 // ---------------------------------------------------------------------------
@@ -97,6 +100,19 @@ function parseComplexity(raw: string): TaskComplexity {
   return "medium" // default for unknown/medium/anything else
 }
 
+/**
+ * Parses a task category string. Returns undefined for absent/unrecognized values,
+ * which means the task defaults to "standalone" (handled at node construction time).
+ */
+function parseCategory(raw: string): TaskCategory | undefined {
+  const lower = raw.trim().toLowerCase().replace(/[\s_]+/g, "-")
+  if (lower === "scaffold") return "scaffold"
+  if (lower === "human-gate" || lower === "humangate") return "human-gate"
+  if (lower === "integration") return "integration"
+  if (lower === "standalone") return "standalone"
+  return undefined // unknown — will default to "standalone"
+}
+
 // ---------------------------------------------------------------------------
 // Block extractor
 // ---------------------------------------------------------------------------
@@ -107,6 +123,7 @@ interface RawBlock {
   rawDeps: string
   rawTests: string
   rawComplexity: string
+  rawCategory: string
   bodyLines: string[]
 }
 
@@ -142,6 +159,7 @@ function extractRawBlocks(text: string): RawBlock[] {
         rawDeps: "",
         rawTests: "",
         rawComplexity: "",
+        rawCategory: "",
         bodyLines: [],
       }
       continue
@@ -164,6 +182,12 @@ function extractRawBlocks(text: string): RawBlock[] {
     const complexityMatch = COMPLEXITY_RE.exec(line)
     if (complexityMatch) {
       current.rawComplexity = complexityMatch[1]!.trim()
+      continue
+    }
+
+    const categoryMatch = CATEGORY_RE.exec(line)
+    if (categoryMatch) {
+      current.rawCategory = categoryMatch[1]!.trim()
       continue
     }
 
@@ -218,6 +242,7 @@ export function parseImplPlan(artifactText: string): ParseResult {
       ? `${block.description} — ${bodyProse}`.slice(0, 500)
       : block.description
 
+    const category = parseCategory(block.rawCategory)
     nodes.push({
       id: block.id,
       description,
@@ -225,6 +250,9 @@ export function parseImplPlan(artifactText: string): ParseResult {
       expectedTests: parseList(block.rawTests),
       estimatedComplexity: parseComplexity(block.rawComplexity),
       status: "pending",
+      // Only set category if explicitly specified; undefined = defaults to "standalone"
+      // semantics in stub detection and scheduler logic
+      ...(category ? { category } : {}),
     })
   }
 

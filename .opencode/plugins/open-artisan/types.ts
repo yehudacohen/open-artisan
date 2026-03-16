@@ -90,8 +90,11 @@ export type ArtifactKey =
  *   v8: added userGateMessageReceived (prevents agent from self-approving without real user input)
  *   v9: added artifactDiskPaths (absolute paths of artifact files written to .openartisan/ dir)
  *   v10: added featureName (subdirectory under .openartisan/ for multi-feature isolation)
+ *   v11: added revisionBaseline (artifact hash at REVISE entry, used as diff gate)
+ *   v12: added TaskCategory/HumanGateInfo on implDag nodes, "human-gated" TaskStatus,
+ *        for stub detection, human gate mechanism, and plan structuring
  */
-export const SCHEMA_VERSION = 10
+export const SCHEMA_VERSION = 12
 
 export interface WorkflowState {
   /** Schema version for forward-compatibility. Must equal SCHEMA_VERSION. */
@@ -240,6 +243,21 @@ export interface WorkflowState {
    * Set at select_mode time. null = use flat .openartisan/ layout (legacy/default).
    */
   featureName: string | null
+
+  /**
+   * Snapshot of the artifact state captured at the moment the workflow enters REVISE.
+   * Used as a diff gate by request_review: if the artifact has not changed since this
+   * baseline, the agent is blocked from transitioning to REVIEW (it must actually make
+   * changes to address the revision feedback).
+   *
+   * For in-memory phases (PLANNING, DISCOVERY, IMPL_PLAN): stores a SHA-256 content hash
+   * of the artifact file on disk (from artifactDiskPaths).
+   * For file-based phases (INTERFACES, TESTS, IMPLEMENTATION): stores the git commit SHA
+   * at REVISE entry (the working tree is diffed against this to detect changes).
+   *
+   * null when not in REVISE state or when the baseline could not be captured.
+   */
+  revisionBaseline: { type: "content-hash"; hash: string } | { type: "git-sha"; sha: string } | null
 }
 
 // ---------------------------------------------------------------------------
@@ -449,9 +467,39 @@ export function validateWorkflowState(state: WorkflowState): string | null {
       if (!Array.isArray(node.dependencies)) {
         return `implDag task "${node.id}" missing required "dependencies" array`
       }
-      const validStatuses = ["pending", "in-flight", "complete", "aborted"]
+      const validStatuses = ["pending", "in-flight", "complete", "aborted", "human-gated"]
       if (typeof node.status !== "string" || !validStatuses.includes(node.status)) {
         return `implDag task "${node.id}" has invalid status "${node.status}"`
+      }
+      // v12: validate optional category field
+      if (node.category !== undefined && node.category !== null) {
+        const validCategories = ["scaffold", "human-gate", "integration", "standalone"]
+        if (typeof node.category !== "string" || !validCategories.includes(node.category)) {
+          return `implDag task "${node.id}" has invalid category "${node.category}". Valid: ${validCategories.join(", ")}`
+        }
+      }
+      // v12: validate humanGate field if present
+      if (node.humanGate !== undefined && node.humanGate !== null) {
+        const hg = node.humanGate
+        if (typeof hg !== "object" || Array.isArray(hg)) {
+          return `implDag task "${node.id}" humanGate must be an object`
+        }
+        if (typeof hg.whatIsNeeded !== "string") {
+          return `implDag task "${node.id}" humanGate.whatIsNeeded must be a string`
+        }
+        if (typeof hg.why !== "string") {
+          return `implDag task "${node.id}" humanGate.why must be a string`
+        }
+        if (typeof hg.verificationSteps !== "string") {
+          return `implDag task "${node.id}" humanGate.verificationSteps must be a string`
+        }
+        if (typeof hg.resolved !== "boolean") {
+          return `implDag task "${node.id}" humanGate.resolved must be a boolean`
+        }
+      }
+      // v12: cross-field invariant — human-gated status requires humanGate metadata
+      if (node.status === "human-gated" && (!node.humanGate || typeof node.humanGate !== "object")) {
+        return `implDag task "${node.id}" has status "human-gated" but no humanGate metadata`
       }
     }
   }
@@ -496,6 +544,22 @@ export function validateWorkflowState(state: WorkflowState): string | null {
   }
   if (typeof state.featureName === "string" && state.featureName.length === 0) {
     return `featureName must not be an empty string (use null for no feature)`
+  }
+  // v11: revisionBaseline
+  if (state.revisionBaseline !== null && state.revisionBaseline !== undefined) {
+    const rb = state.revisionBaseline as Record<string, unknown>
+    if (typeof rb !== "object" || Array.isArray(rb)) {
+      return `revisionBaseline must be null or an object, got ${typeof rb}`
+    }
+    if (rb.type !== "content-hash" && rb.type !== "git-sha") {
+      return `revisionBaseline.type must be "content-hash" or "git-sha", got "${rb.type}"`
+    }
+    if (rb.type === "content-hash" && typeof rb.hash !== "string") {
+      return `revisionBaseline of type "content-hash" must have a string "hash" field`
+    }
+    if (rb.type === "git-sha" && typeof rb.sha !== "string") {
+      return `revisionBaseline of type "git-sha" must have a string "sha" field`
+    }
   }
   return null
 }
@@ -761,6 +825,23 @@ export interface SubmitFeedbackArgs {
    * When approving the PLANNING phase in INCREMENTAL mode, pass the approved file allowlist here.
    */
   approved_files?: string[]
+  /**
+   * Optional: list of human-gated task IDs that the user confirms are resolved.
+   * Only valid at IMPLEMENTATION/USER_GATE. Each listed task must have status "human-gated".
+   * The user is confirming they have completed the required infrastructure/credential setup.
+   */
+  resolved_human_gates?: string[]
+}
+
+export interface ResolveHumanGateArgs {
+  /** The DAG task ID of the human-gate task being activated */
+  task_id: string
+  /** Description of what the human needs to do */
+  what_is_needed: string
+  /** Why this human action is needed for the implementation */
+  why: string
+  /** Steps the human can take to verify the gate is resolved */
+  verification_steps: string
 }
 
 // ---------------------------------------------------------------------------

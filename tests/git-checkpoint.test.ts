@@ -3,7 +3,7 @@
  */
 import { describe, expect, it, beforeEach, afterEach } from "bun:test"
 import { join } from "node:path"
-import { mkdtemp, rm, writeFile } from "node:fs/promises"
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 
 import { createGitCheckpoint } from "#plugin/hooks/git-checkpoint"
@@ -29,7 +29,8 @@ afterEach(async () => {
 describe("createGitCheckpoint — success cases", () => {
   it("creates a commit and returns success with tag", async () => {
     const { $ } = await import("bun")
-    await writeFile(join(tmpDir, "new-file.ts"), "export const x = 1")
+    await mkdir(join(tmpDir, ".openartisan"), { recursive: true })
+    await writeFile(join(tmpDir, ".openartisan", "plan.md"), "# Plan")
     const result = await createGitCheckpoint(
       { cwd: tmpDir, $ },
       { phase: "PLANNING", approvalCount: 1 },
@@ -42,7 +43,8 @@ describe("createGitCheckpoint — success cases", () => {
 
   it("tag follows format workflow/<phase>-v<approvalCount>", async () => {
     const { $ } = await import("bun")
-    await writeFile(join(tmpDir, "file2.ts"), "export const y = 2")
+    await mkdir(join(tmpDir, ".openartisan"), { recursive: true })
+    await writeFile(join(tmpDir, ".openartisan", "interfaces.md"), "# Interfaces")
     const result = await createGitCheckpoint(
       { cwd: tmpDir, $ },
       { phase: "INTERFACES", approvalCount: 3 },
@@ -54,7 +56,8 @@ describe("createGitCheckpoint — success cases", () => {
 
   it("git tag is actually created in the repo", async () => {
     const { $ } = await import("bun")
-    await writeFile(join(tmpDir, "impl.ts"), "export const z = 3")
+    await mkdir(join(tmpDir, ".openartisan"), { recursive: true })
+    await writeFile(join(tmpDir, ".openartisan", "impl-plan.md"), "# Impl Plan")
     await createGitCheckpoint(
       { cwd: tmpDir, $ },
       { phase: "IMPLEMENTATION", approvalCount: 5 },
@@ -96,7 +99,11 @@ describe("createGitCheckpoint — failure cases", () => {
 describe("createGitCheckpoint — INCREMENTAL mode allowlist warnings", () => {
   it("no warning when all staged files are in the allowlist", async () => {
     const { $ } = await import("bun")
+    // Create and track the file first, then modify it so `git add -u` stages it
     const allowedFile = join(tmpDir, "allowed.ts")
+    await writeFile(allowedFile, "export const x = 0")
+    await $`git add allowed.ts`.cwd(tmpDir).quiet()
+    await $`git commit -m "add allowed"`.cwd(tmpDir).quiet()
     await writeFile(allowedFile, "export const x = 1")
     const result = await createGitCheckpoint(
       { cwd: tmpDir, $ },
@@ -109,8 +116,13 @@ describe("createGitCheckpoint — INCREMENTAL mode allowlist warnings", () => {
 
   it("warns when a staged file is outside the allowlist", async () => {
     const { $ } = await import("bun")
+    // Create and track both files, then modify so `git add -u` stages them
     const allowedFile = join(tmpDir, "allowed.ts")
     const unexpectedFile = join(tmpDir, "unexpected.ts")
+    await writeFile(allowedFile, "export const x = 0")
+    await writeFile(unexpectedFile, "export const y = 0")
+    await $`git add allowed.ts unexpected.ts`.cwd(tmpDir).quiet()
+    await $`git commit -m "add files"`.cwd(tmpDir).quiet()
     await writeFile(allowedFile, "export const x = 1")
     await writeFile(unexpectedFile, "export const y = 2")
     const result = await createGitCheckpoint(
@@ -126,7 +138,9 @@ describe("createGitCheckpoint — INCREMENTAL mode allowlist warnings", () => {
 
   it("no warning when fileAllowlist is empty (allowlist not configured)", async () => {
     const { $ } = await import("bun")
-    await writeFile(join(tmpDir, "any-file.ts"), "export const z = 3")
+    // Place file in .openartisan/ so it gets staged by `git add -A .openartisan/`
+    await mkdir(join(tmpDir, ".openartisan"), { recursive: true })
+    await writeFile(join(tmpDir, ".openartisan", "any-file.md"), "# Content")
     const result = await createGitCheckpoint(
       { cwd: tmpDir, $ },
       { phase: "IMPLEMENTATION", approvalCount: 1, fileAllowlist: [] },

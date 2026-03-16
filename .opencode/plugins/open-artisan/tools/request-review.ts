@@ -33,6 +33,24 @@ export interface RequestReviewResult {
  * Builds the response when the agent calls request_review.
  */
 export function processRequestReview(args: RequestReviewArgs): RequestReviewResult {
+  const summary = (args.summary ?? "").trim()
+  const artifactDesc = (args.artifact_description ?? "").trim()
+  if (!summary) {
+    return {
+      responseMessage:
+        "Warning: Empty summary provided. Provide a brief summary of what was built. " +
+        "Proceeding to REVIEW state — call `mark_satisfied` when self-review is complete.",
+      phaseInstructions: buildReviewInstructions(),
+    }
+  }
+  if (!artifactDesc) {
+    return {
+      responseMessage:
+        "Warning: Empty artifact_description provided. Describe the artifact(s) produced. " +
+        "Proceeding to REVIEW state — call `mark_satisfied` when self-review is complete.",
+      phaseInstructions: buildReviewInstructions(),
+    }
+  }
   return {
     responseMessage: buildResponseMessage(args),
     phaseInstructions: buildReviewInstructions(),

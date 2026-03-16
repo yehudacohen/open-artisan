@@ -39,7 +39,8 @@ describe("processMarkAnalyzeComplete", () => {
 
   it("handles empty summary gracefully", () => {
     const result = processMarkAnalyzeComplete({ analysis_summary: "" })
-    expect(result.responseMessage).toContain("Analysis complete")
+    expect(result.responseMessage).toContain("Warning: Empty analysis summary")
+    expect(result.responseMessage).toContain("CONVENTIONS")
   })
 
   it("response message is a string", () => {
@@ -54,6 +55,7 @@ describe("processMarkAnalyzeComplete", () => {
 
   it("handles whitespace-only summary like empty", () => {
     const result = processMarkAnalyzeComplete({ analysis_summary: "   " })
-    expect(result.responseMessage).toContain("Analysis complete")
+    expect(result.responseMessage).toContain("Warning: Empty analysis summary")
+    expect(result.responseMessage).toContain("CONVENTIONS")
   })
 })

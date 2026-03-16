@@ -87,12 +87,16 @@ describe("Tool policy — DISCOVERY/REVISE allows writes to .openartisan/ only",
   })
 })
 
-describe("Tool policy — DISCOVERY/REVIEW and USER_GATE allow bash for verification", () => {
-  it("DISCOVERY/REVIEW blocks write and edit but allows bash", () => {
+describe("Tool policy — DISCOVERY/REVIEW allows .openartisan/ writes + bash for verification", () => {
+  it("DISCOVERY/REVIEW allows writes to .openartisan/ and bash", () => {
     const policy = getPhaseToolPolicy("DISCOVERY", "REVIEW", "REFACTOR", [])
-    expect(policy.blocked).toContain("write")
-    expect(policy.blocked).toContain("edit")
+    expect(policy.blocked).not.toContain("write")
+    expect(policy.blocked).not.toContain("edit")
     expect(policy.blocked).not.toContain("bash")
+    // Must restrict writes to .openartisan/ only
+    expect(policy.writePathPredicate).toBeDefined()
+    expect(policy.writePathPredicate?.("/project/.openartisan/conventions.md")).toBe(true)
+    expect(policy.writePathPredicate?.("/project/src/index.ts")).toBe(false)
   })
 
   it("DISCOVERY/USER_GATE blocks write and edit but allows bash", () => {
@@ -164,12 +168,16 @@ describe("Tool policy — PLANNING/REVISE allows edits to .openartisan/ only", (
   })
 })
 
-describe("Tool policy — PLANNING/REVIEW and USER_GATE allow bash for verification", () => {
-  it("PLANNING/REVIEW blocks write and edit but allows bash", () => {
+describe("Tool policy — PLANNING/REVIEW allows .openartisan/ writes + bash for verification", () => {
+  it("PLANNING/REVIEW allows writes to .openartisan/ and bash", () => {
     const policy = getPhaseToolPolicy("PLANNING", "REVIEW", "GREENFIELD", [])
-    expect(policy.blocked).toContain("write")
-    expect(policy.blocked).toContain("edit")
+    expect(policy.blocked).not.toContain("write")
+    expect(policy.blocked).not.toContain("edit")
     expect(policy.blocked).not.toContain("bash")
+    // Must restrict writes to .openartisan/ only
+    expect(policy.writePathPredicate).toBeDefined()
+    expect(policy.writePathPredicate?.("/project/.openartisan/plan.md")).toBe(true)
+    expect(policy.writePathPredicate?.("/project/src/index.ts")).toBe(false)
   })
 
   it("PLANNING/USER_GATE blocks write and edit but allows bash", () => {
@@ -179,9 +187,13 @@ describe("Tool policy — PLANNING/REVIEW and USER_GATE allow bash for verificat
     expect(policy.blocked).not.toContain("bash")
   })
 
-  it("IMPL_PLAN/REVIEW allows bash for verification", () => {
+  it("IMPL_PLAN/REVIEW allows .openartisan/ writes and bash for verification", () => {
     const policy = getPhaseToolPolicy("IMPL_PLAN", "REVIEW", "GREENFIELD", [])
     expect(policy.blocked).not.toContain("bash")
+    expect(policy.blocked).not.toContain("write")
+    expect(policy.writePathPredicate).toBeDefined()
+    expect(policy.writePathPredicate?.("/project/.openartisan/impl-plan.md")).toBe(true)
+    expect(policy.writePathPredicate?.("/project/src/server.ts")).toBe(false)
   })
 })
 
@@ -196,9 +208,9 @@ describe("Tool policy — INTERFACES allows .ts/.tsx/.d.ts writes only (G1)", ()
     expect(policy.blocked).toContain("bash")
   })
 
-  it("bash is blocked in INTERFACES/REVISE", () => {
+  it("bash is allowed in INTERFACES/REVISE (read-only verification for revision)", () => {
     const policy = getPhaseToolPolicy("INTERFACES", "REVISE", "GREENFIELD", [])
-    expect(policy.blocked).toContain("bash")
+    expect(policy.blocked).not.toContain("bash")
   })
 
   it("bash is allowed in INTERFACES/REVIEW (read-only verification)", () => {
@@ -268,9 +280,9 @@ describe("Tool policy — TESTS allows .test.ts/.test.tsx writes only (G1)", () 
     expect(policy.blocked).toContain("bash")
   })
 
-  it("bash is blocked in TESTS/REVISE", () => {
+  it("bash is allowed in TESTS/REVISE (read-only verification for revision)", () => {
     const policy = getPhaseToolPolicy("TESTS", "REVISE", "GREENFIELD", [])
-    expect(policy.blocked).toContain("bash")
+    expect(policy.blocked).not.toContain("bash")
   })
 
   it("bash is allowed in TESTS/REVIEW (read-only verification)", () => {

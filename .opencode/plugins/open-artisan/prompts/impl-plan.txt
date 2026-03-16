@@ -13,17 +13,52 @@ For each task:
 2. **Description** — what this task implements, which interface methods/types it covers
 3. **Dependencies** — IDs of tasks that must complete before this one starts
 4. **Expected tests** — which test file paths should pass when this task is complete
-5. **Parallelizable** — can this task run simultaneously with its siblings? (no shared mutable state)
+5. **Category** — one of: `scaffold`, `human-gate`, `integration`, `standalone` (see below)
 6. **Complexity** — small / medium / large estimate
 7. **Merge point** — if parallel tasks converge here, identify it
+
+### Task categories
+
+Every task must be categorized as one of:
+
+1. **scaffold** — Writes the contract-satisfying code structure (types, module files,
+   function signatures, constructor wiring) without real integration logic. Stubs are
+   acceptable ONLY in scaffold tasks. Scaffold tasks should make tests compile but
+   may not make all assertions pass.
+
+2. **human-gate** — Requires human action (provision infrastructure, configure credentials,
+   approve third-party service signups, set up external accounts). The agent cannot complete
+   these — they are automatically held for user resolution at USER_GATE. These tasks have
+   NO code — just a clear description of what the human must do and how to verify it.
+
+3. **integration** — Writes the real implementation logic that connects to real services,
+   databases, APIs. Integration tasks MUST depend on their corresponding scaffold task
+   AND any relevant human-gate tasks. Integration tasks are where stubs get replaced
+   with real code. Stubs are NOT acceptable in integration tasks.
+
+4. **standalone** — Self-contained tasks that don't require external services (pure
+   business logic, data transformations, utility functions). Stubs are NOT acceptable.
+   This is the default category if not specified.
+
+### Planning rules for categories
+
+- If a task requires external credentials or infrastructure, it MUST be split into:
+  (a) scaffold task → (b) human-gate task → (c) integration task
+- A single task CANNOT be both scaffold and integration
+- Human-gate tasks must list exactly what the human needs to do and how to verify it
+- Integration tasks must explicitly list which scaffold stubs they replace
+- The critical path analysis must account for human-gate delays
+- Tasks that are pure business logic with no external dependencies should be `standalone`
 
 ### DAG validity requirements
 
 - No cycles (task cannot depend on itself, directly or transitively)
 - Every interface method is covered by at least one task
-- Parallelizable tasks must have truly independent state (no shared files, no shared DB rows)
 - Merge points explicitly identified where parallel branches converge
 - Expected test outcomes specified per task (which tests become green)
+- Every `integration` task depends on its corresponding `scaffold` task
+- Every `integration` task depends on relevant `human-gate` tasks for credentials/infra
+- No `standalone` task depends on a `human-gate` task
 
 ### Sub-states
 
@@ -38,11 +73,11 @@ For each task:
 
 **USER_GATE** — Present the implementation plan for user approval.
   Summarize: total tasks, parallel groups, critical path, expected test outcomes per task.
+  Highlight any human-gate tasks that require user action.
 
 **REVISE** — Refine the plan incrementally. Never remove a task without replacing its coverage.
 
 ### Constraints
 - No file writes, edits, or bash execution in this phase. The plan is text only.
 - The plan must cover every interface — no implementation gaps.
-- Parallelism claims must be verified: if two tasks touch the same file, they cannot be parallel.
 - If a conventions document was approved in DISCOVERY, follow its naming and structural conventions when defining tasks.

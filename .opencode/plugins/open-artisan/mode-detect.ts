@@ -13,12 +13,7 @@
  */
 import { $ } from "bun"
 import type { ModeDetectionResult, WorkflowMode } from "./types"
-
-const SOURCE_EXTENSIONS = new Set([
-  ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs",
-  ".py", ".rb", ".go", ".rs", ".java", ".cs", ".cpp", ".c", ".h",
-  ".swift", ".kt", ".scala", ".ex", ".exs", ".clj",
-])
+import { SOURCE_EXTENSIONS } from "./constants"
 
 async function hasGitCommits(cwd: string): Promise<boolean> {
   try {
@@ -35,18 +30,29 @@ async function countSourceFiles(cwd: string): Promise<number> {
     const result = await $`git ls-files`.cwd(cwd).quiet()
     if (result.exitCode !== 0) {
       // Fallback: glob if not a git repo
+      // Exclude common non-source directories that would inflate the count
+      const EXCLUDED_DIRS = new Set([
+        "node_modules", "dist", "build", ".next", "coverage", "vendor",
+        "__pycache__", ".cache", ".output", "out", "target",
+      ])
       const glob = new Bun.Glob("**/*")
       let count = 0
       for await (const file of glob.scan({ cwd, onlyFiles: true })) {
-        const ext = "." + file.split(".").pop()
-        if (SOURCE_EXTENSIONS.has(ext) && !file.startsWith(".")) count++
+        if (file.startsWith(".")) continue
+        // Check if any path segment is an excluded directory
+        const segments = file.split("/")
+        if (segments.some((seg) => EXCLUDED_DIRS.has(seg))) continue
+        const dotIdx = file.lastIndexOf(".")
+        const ext = dotIdx >= 0 ? file.slice(dotIdx) : ""
+        if (ext && SOURCE_EXTENSIONS.has(ext)) count++
       }
       return count
     }
     const files = result.stdout.toString().trim().split("\n").filter(Boolean)
     return files.filter((f) => {
-      const ext = "." + f.split(".").pop()
-      return SOURCE_EXTENSIONS.has(ext)
+      const dotIdx = f.lastIndexOf(".")
+      const ext = dotIdx >= 0 ? f.slice(dotIdx) : ""
+      return ext !== "" && SOURCE_EXTENSIONS.has(ext)
     }).length
   } catch {
     return 0
@@ -63,7 +69,7 @@ export async function detectMode(cwd: string): Promise<ModeDetectionResult> {
     const reasoning = hasHistory
       ? `Git history present but no source files found — treating as a new project. Override with REFACTOR or INCREMENTAL if needed.`
       : "No git commits found — treating as a new project."
-    return { suggestedMode: "GREENFIELD" as WorkflowMode, hasGitHistory: hasHistory, sourceFileCount, reasoning }
+    return { suggestedMode: "GREENFIELD", hasGitHistory: hasHistory, sourceFileCount, reasoning }
   }
 
   // Existing project with source files → INCREMENTAL.
@@ -73,5 +79,5 @@ export async function detectMode(cwd: string): Promise<ModeDetectionResult> {
     `Found ${sourceFileCount} source file(s) with git history — existing project detected. ` +
     `Suggesting INCREMENTAL (add/fix functionality without touching unrelated files). ` +
     `Override with REFACTOR if your goal is to restructure the entire codebase.`
-  return { suggestedMode: "INCREMENTAL" as WorkflowMode, hasGitHistory: hasHistory, sourceFileCount, reasoning }
+  return { suggestedMode: "INCREMENTAL", hasGitHistory: hasHistory, sourceFileCount, reasoning }
 }

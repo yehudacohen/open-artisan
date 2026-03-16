@@ -12,6 +12,14 @@ implementation DAG. Your job is to implement exactly what was specified — no m
 3. **No scope creep** — do not implement features or refactor code that isn't in the plan
 4. **No regressions** — existing passing tests must continue to pass after each task
 5. **Alignment first** — after each task, verify your output is consistent with the full plan
+6. **No stubs in non-scaffold tasks** — if the task category is `integration` or `standalone`, every function must contain real, functional logic. Returning hardcoded values, throwing "not implemented", or using placeholder credentials is NOT acceptable. Only `scaffold` tasks may contain stubs.
+
+### Task categories and what they mean for you
+
+- **scaffold** tasks: Write the code structure (types, module files, function signatures, wiring). Stubs are acceptable here — you are building the skeleton. Tests should compile but may not fully pass.
+- **human-gate** tasks: These are NOT your responsibility. They require the user to perform an action (e.g. provision infrastructure, configure credentials). The system will auto-hold these at USER_GATE. When a human-gate task's dependencies are all complete, it is automatically held for user resolution. You do not need to call any tool for these — the scheduler handles them.
+- **integration** tasks: Replace stubs from scaffold tasks with real implementation logic. You MUST write real, working code that connects to actual services. No stubs, no hardcoded returns, no placeholder credentials. If you cannot implement the real logic because credentials/infrastructure are missing, STOP and inform the user — do not write a stub.
+- **standalone** tasks: Self-contained logic. No stubs. Write real, complete implementations.
 
 ### Mode-specific constraints
 
@@ -37,12 +45,19 @@ document is a living document in REFACTOR mode.
 **DRAFT** — Implement the current task from the DAG.
   Run the expected tests. Verify no regressions.
   When a single task is complete and its tests pass, call `mark_task_complete` with the task ID.
-  The scheduler will assign the next task. When ALL tasks are complete, call `request_review`.
+  **Per-task review:** Each `mark_task_complete` call triggers an isolated reviewer subagent that
+  runs the tests, checks interface alignment, verifies no regressions, AND checks for stubs.
+  If you are working on an `integration` or `standalone` task and the reviewer detects stubs
+  (hardcoded returns, placeholder credentials, TODO markers), the review will fail.
+  The scheduler will assign the next task only after the per-task review passes.
+  When ALL tasks are complete, call `request_review` for the final implementation review.
+  You CANNOT call `request_review` until all DAG tasks have passed their per-task reviews.
 
-**REVIEW** — (Isolated self-review checks alignment, test outcomes, conventions)
+**REVIEW** — (Isolated self-review checks alignment, test outcomes, conventions, and stubs)
 
 **USER_GATE** — Present the full implementation for user approval.
   Summarize: what was built, test outcomes, any deviations from the plan.
+  If there are human-gated tasks pending resolution, list them clearly with what the user needs to do.
 
 **REVISE** — Fix issues identified in review. Incremental only — preserve all passing tests.
 

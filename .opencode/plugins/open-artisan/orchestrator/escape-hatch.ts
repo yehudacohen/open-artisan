@@ -19,6 +19,8 @@ import type {
   ArtifactKey,
   Phase,
 } from "../types"
+import { APPROVAL_WORDS, ABORT_WORDS } from "../vocabulary"
+import { MAX_ESCAPE_FEEDBACK_CHARS, MAX_AMBIGUOUS_RESPONSE_LENGTH } from "../constants"
 
 // ---------------------------------------------------------------------------
 // Types
@@ -87,7 +89,7 @@ export function buildEscapeHatchPresentation(opts: {
   // 2. Detected divergence
   lines.push("### 2. Detected Divergence")
   lines.push(`The following feedback was received:`)
-  lines.push(`> ${feedback.slice(0, 500)}${feedback.length > 500 ? "..." : ""}`)
+  lines.push(`> ${feedback.slice(0, MAX_ESCAPE_FEEDBACK_CHARS)}${feedback.length > MAX_ESCAPE_FEEDBACK_CHARS ? "..." : ""}`)
   lines.push("")
   if (assessResult.success) {
     lines.push(`**Root cause artifact:** ${rootCause}`)
@@ -147,19 +149,7 @@ export function buildEscapeHatchPresentation(opts: {
   }
 }
 
-/** Words/phrases that unambiguously signal abort intent. */
-const ABORT_WORDS = new Set([
-  "abort", "abort change", "no", "cancel", "stop", "reject",
-  "no thanks", "nope", "nah", "nevermind", "never mind", "don't",
-  "dont", "skip", "pass", "decline",
-])
-
-/** Words/phrases that unambiguously signal accept intent. */
-const ACCEPT_WORDS = new Set([
-  "accept", "proceed", "yes", "ok", "okay", "go ahead",
-  "go", "sure", "yep", "yeah", "y", "approve", "lgtm",
-  "continue", "do it",
-])
+// ABORT_WORDS and APPROVAL_WORDS are imported from vocabulary.ts (shared single source of truth)
 
 /**
  * Detects whether the user's response to an escape hatch is an abort.
@@ -172,7 +162,7 @@ export function isEscapeHatchAbort(text: string): boolean {
  * Detects whether the user's response to an escape hatch is an accept.
  */
 export function isEscapeHatchAccept(text: string): boolean {
-  return ACCEPT_WORDS.has(text.trim().toLowerCase())
+  return APPROVAL_WORDS.has(text.trim().toLowerCase())
 }
 
 /**
@@ -182,10 +172,10 @@ export function isEscapeHatchAccept(text: string): boolean {
  */
 export function isEscapeHatchAmbiguous(text: string): boolean {
   const t = text.trim()
-  // Only flag short responses (≤ 15 chars) that aren't a recognized keyword
-  if (t.length > 15) return false
+  // Only flag short responses that aren't a recognized keyword
+  if (t.length > MAX_AMBIGUOUS_RESPONSE_LENGTH) return false
   const lower = t.toLowerCase()
-  return !ABORT_WORDS.has(lower) && !ACCEPT_WORDS.has(lower) && !lower.startsWith("new direction:")
+  return !ABORT_WORDS.has(lower) && !APPROVAL_WORDS.has(lower) && !lower.startsWith("new direction:")
 }
 
 /**

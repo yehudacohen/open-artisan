@@ -50,6 +50,7 @@ function freshState(sessionId: string): WorkflowState {
     userGateMessageReceived: false,
     artifactDiskPaths: {},
     featureName: null,
+    revisionBaseline: null,
   }
 }
 

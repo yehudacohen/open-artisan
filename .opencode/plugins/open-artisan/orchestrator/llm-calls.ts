@@ -29,14 +29,12 @@ import type {
   OrchestratorAssessResult,
   OrchestratorDivergeResult,
 } from "../types"
+import type { PluginClient } from "../client-types"
 import { extractTextFromPromptResult, extractEphemeralSessionId, extractJsonFromText, withTimeout } from "../utils"
+import { createLogger } from "../logger"
 
 /** Timeout for each orchestrator LLM call (assess / diverge). */
 const ORCHESTRATOR_TIMEOUT_MS = 60_000
-
-// The OpenCode SDK client shape (minimal surface we actually use)
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type Client = any
 
 // ---------------------------------------------------------------------------
 // Shared: JSON schema structured output helpers
@@ -91,7 +89,7 @@ Valid artifact keys: conventions, plan, interfaces, tests, impl_plan, implementa
  * Creates an assess() function backed by an LLM call.
  * The returned function matches OrchestratorDeps.assess.
  */
-export function createAssessFn(client: Client): (
+export function createAssessFn(client: PluginClient): (
   feedback: string,
   currentArtifact: ArtifactKey,
 ) => Promise<OrchestratorAssessResult> {
@@ -141,10 +139,8 @@ export function createAssessFn(client: Client): (
       }
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err)
-      console.error(
-        `[open-artisan] Orchestrator assess failed: ${errorMsg}`,
-        err instanceof Error ? err.stack : "",
-      )
+      const log = createLogger(client)
+      log.warn("Orchestrator assess failed", { detail: errorMsg })
       return {
         success: false,
         error: errorMsg,
@@ -184,7 +180,7 @@ The JSON must have exactly these fields:
  * Creates a diverge() function backed by an LLM call.
  * The returned function matches OrchestratorDeps.diverge.
  */
-export function createDivergeFn(client: Client): (
+export function createDivergeFn(client: PluginClient): (
   assessResult: OrchestratorAssessResult,
   approvedArtifacts: Partial<Record<ArtifactKey, string>>,
 ) => Promise<OrchestratorDivergeResult> {
@@ -259,10 +255,8 @@ export function createDivergeFn(client: Client): (
       }
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err)
-      console.error(
-        `[open-artisan] Orchestrator diverge failed: ${errorMsg}`,
-        err instanceof Error ? err.stack : "",
-      )
+      const log = createLogger(client)
+      log.warn("Orchestrator diverge failed", { detail: errorMsg })
       return {
         success: false,
         error: errorMsg,
@@ -288,10 +282,11 @@ export function createDivergeFn(client: Client): (
  * approach is more robust and consistent with self-review.ts.
  */
 async function ephemeralPrompt(
-  client: Client,
+  client: PluginClient,
   params: { parts: Array<{ type: string; text: string }>; system?: string },
   title = "Orchestrator: classify feedback",
 ): Promise<unknown> {
+  if (!client.session) throw new Error("client.session is not available — cannot dispatch orchestrator call")
   // Create short-lived session (orphaned — not linked to parent)
   const sessionResult = await client.session.create({
     body: { title },

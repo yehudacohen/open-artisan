@@ -410,6 +410,7 @@ describe("SessionStateStore — load", () => {
       userGateMessageReceived: false,
       artifactDiskPaths: {},
       featureName: null,
+      revisionBaseline: null,
     }
     const s2: WorkflowState = { ...s1, sessionId: "s2" }
     await Bun.write(

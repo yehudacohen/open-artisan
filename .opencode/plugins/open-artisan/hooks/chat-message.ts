@@ -12,6 +12,7 @@
  * This hook is a "hint injector" — it doesn't mutate state, it guides the agent.
  */
 import type { WorkflowState, Phase, PhaseState } from "../types"
+import { APPROVAL_WORDS, APPROVAL_PREFIX_RE } from "../vocabulary"
 
 export interface ChatMessageInput {
   sessionId: string
@@ -32,29 +33,16 @@ export interface ChatMessageOutput {
 // ---------------------------------------------------------------------------
 
 /**
+ * Uses shared vocabulary from vocabulary.ts.
  * Approval patterns: only match when the ENTIRE trimmed message matches.
  * We anchor to end-of-string so "approved but I have a concern" is not matched.
- *
- * Short single-word/phrase signals (yes, lgtm, etc.) are matched anywhere
- * when the message is short (≤ 20 chars), longer messages require a prefix match
- * followed by optional trailing punctuation/whitespace only.
  */
-const APPROVAL_EXACT = new Set([
-  "approve", "approved", "lgtm", "looks good", "ship it",
-  "yes", "y", "ok", "okay", "good", "perfect", "done",
-  "continue", "proceed", "next", "✓", "👍",
-])
-
-// Prefix-anchored patterns: message starts with one of these AND has no substantive
-// continuation (only punctuation/whitespace follows)
-const APPROVAL_PREFIX = /^(approve[sd]?|lgtm|looks good|ship it|yes|y|ok|okay|good|perfect|done|continue|proceed|next)[.!?\s]*$/i
-
 function looksLikeApproval(text: string): boolean {
   const trimmed = text.trim().toLowerCase()
   // Exact match against known approval tokens
-  if (APPROVAL_EXACT.has(trimmed)) return true
+  if (APPROVAL_WORDS.has(trimmed)) return true
   // Prefix match: starts with an approval signal and nothing substantive follows
-  return APPROVAL_PREFIX.test(trimmed)
+  return APPROVAL_PREFIX_RE.test(trimmed)
 }
 
 // ---------------------------------------------------------------------------

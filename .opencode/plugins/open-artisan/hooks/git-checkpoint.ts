@@ -70,8 +70,14 @@ export async function createGitCheckpoint(
     }
     const repoRoot = rootResult.stdout.toString().trim()
 
-    // Stage all changes (if any)
-    await $`git add -A`.cwd(cwd).quiet()
+    // Stage only workflow-related changes: .openartisan/ artifacts and any files
+    // already tracked by git that have been modified. This avoids capturing
+    // unrelated working tree changes (e.g. user's uncommitted work) in the
+    // checkpoint commit.
+    // 1. Always stage .openartisan/ (plan artifacts)
+    await $`git add -A .openartisan/`.cwd(cwd).quiet().nothrow()
+    // 2. Stage modified tracked files only (excludes untracked files outside .openartisan/)
+    await $`git add -u`.cwd(cwd).quiet().nothrow()
 
     // Check if there's anything to commit
     const status = await $`git status --porcelain`.cwd(cwd).quiet()

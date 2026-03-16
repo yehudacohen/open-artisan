@@ -23,16 +23,13 @@
  */
 
 import type { WorkflowMode } from "../types"
+import type { PluginClient } from "../client-types"
 import { withTimeout, extractTextFromPromptResult, extractEphemeralSessionId } from "../utils"
+import { SCANNER_TIMEOUT_MS, MIN_SCANNERS_THRESHOLD } from "../constants"
+import { createLogger } from "../logger"
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type Client = any
-
-/** Maximum wall-clock time allowed per scanner subagent session. */
-const SCANNER_TIMEOUT_MS = 180_000 // 3 minutes per scanner
-
-/** Minimum scanners that must succeed for the report to be considered reliable. */
-export const MIN_SCANNERS_THRESHOLD = 3
+// Re-export for consumers that import from this module
+export { MIN_SCANNERS_THRESHOLD }
 
 // ---------------------------------------------------------------------------
 // Types
@@ -181,7 +178,7 @@ Your task — use bash commands to run git queries:
 1. git log --oneline -20 to see recent commit messages (identify message style, scope conventions)
 2. git shortlog -sn --no-merges -10 to identify top contributors
 3. git diff --stat HEAD~10 HEAD to see recently changed files (hot areas)
-4. git log --oneline --follow -- <key files> for 2-3 key files to see their change frequency
+4. Pick 2-3 key files you identified (e.g. main entry point, core modules) and run git log --oneline --follow on them to see their change frequency
 5. Note any branch naming conventions from recent branch names if visible
 ${mode === "REFACTOR" ? "6. Identify areas with high churn that may benefit from refactoring" : "6. Identify areas that are actively maintained vs. stable (to avoid disturbing stable code)"}
 
@@ -221,7 +218,7 @@ ${mode === "REFACTOR" ? "- Docs that appear outdated or inconsistent" : "- Compl
 // ---------------------------------------------------------------------------
 
 async function runScannerSession(
-  client: Client,
+  client: PluginClient,
   scannerName: string,
   prompt: string,
   parentSessionId?: string,
@@ -230,6 +227,7 @@ async function runScannerSession(
   let sessionId: string | undefined
 
   try {
+    if (!client.session) throw new Error("client.session is not available — cannot dispatch scanner")
     const featureSlug = featureName ? ` (${featureName})` : ""
     const created = await client.session.create({
       body: {
@@ -256,10 +254,8 @@ async function runScannerSession(
 
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
-    console.error(
-      `[open-artisan] Discovery scanner "${scannerName}" failed: ${msg}`,
-      err instanceof Error ? err.stack : "",
-    )
+    const log = createLogger(client)
+    log.warn("Discovery scanner failed", { detail: msg })
     return {
       scanner: scannerName,
       success: false,
@@ -269,7 +265,7 @@ async function runScannerSession(
     // Skip delete for child sessions — OpenCode's SQLite FK constraints can
     // reject the delete. Child sessions are cleaned up with the parent.
     if (sessionId && !parentSessionId) {
-      try { await client.session.delete({ path: { id: sessionId } }) } catch { /* ignore */ }
+      try { await client.session?.delete({ path: { id: sessionId } }) } catch { /* ignore */ }
     }
   }
 }
@@ -327,7 +323,7 @@ function buildCombinedReport(scanners: ScannerResult[], lowConfidence: boolean):
  * @param mode - Workflow mode (currently unused, reserved for future mode-specific scan adjustments)
  */
 export async function runDiscoveryFleet(
-  client: Client,
+  client: PluginClient,
   cwd: string,
   mode: WorkflowMode,
   parentSessionId?: string,

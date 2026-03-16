@@ -4,19 +4,9 @@
  * (which requires @opencode-ai/plugin at runtime).
  */
 
-/**
- * Maximum characters for conventions document injection.
- * Shared across system-transform.ts and compaction.ts to prevent divergence.
- * ~3000 tokens at ~4 chars/token.
- */
-export const MAX_CONVENTIONS_CHARS = 12_000
-
-/**
- * Maximum characters for discovery report injection.
- * Shared across system-transform.ts and compaction.ts to prevent divergence.
- * ~4000 tokens at ~4 chars/token.
- */
-export const MAX_REPORT_CHARS = 16_000
+// Re-export from constants.ts for backward compatibility.
+// New code should import directly from constants.ts.
+export { MAX_CONVENTIONS_CHARS, MAX_REPORT_CHARS } from "./constants"
 
 /**
  * Wraps a promise with a timeout. Rejects with a descriptive error if the

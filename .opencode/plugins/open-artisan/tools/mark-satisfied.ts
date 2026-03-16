@@ -50,8 +50,9 @@ export function countExpectedBlockingCriteria(criteriaText: string | null): numb
  * @param expectedBlockingCount - Optional: expected number of blocking criteria from
  *   getAcceptanceCriteria(). If provided and the submitted count is less, the review
  *   fails with a warning to evaluate all criteria.
+ * @param iterationInfo - Optional: current iteration count for display in fail messages.
  */
-export function evaluateMarkSatisfied(args: MarkSatisfiedArgs, expectedBlockingCount?: number): MarkSatisfiedResult {
+export function evaluateMarkSatisfied(args: MarkSatisfiedArgs, expectedBlockingCount?: number, iterationInfo?: { current: number; max: number }): MarkSatisfiedResult {
   if (!args.criteria_met || args.criteria_met.length === 0) {
     return {
       passed: false,
@@ -113,7 +114,7 @@ export function evaluateMarkSatisfied(args: MarkSatisfiedArgs, expectedBlockingC
   return {
     passed: false,
     unmetCriteria: unmetBlocking,
-    responseMessage: buildFailMessage(unmetBlocking),
+    responseMessage: buildFailMessage(unmetBlocking, iterationInfo),
   }
 }
 
@@ -128,13 +129,16 @@ function buildPassMessage(total: number, unmetSuggestions: CriterionResult[]): s
   )
 }
 
-function buildFailMessage(unmet: CriterionResult[]): string {
+function buildFailMessage(unmet: CriterionResult[], iterationInfo?: { current: number; max: number }): string {
   const list = unmet.map((c) => {
     const scoreNote = typeof c.score === "number" ? ` [score: ${c.score}/10, needs ≥9]` : ""
     return `  - ${c.criterion}: ${c.evidence}${scoreNote}`
   }).join("\n")
+  const iterationNote = iterationInfo
+    ? `Review iteration ${iterationInfo.current} of ${iterationInfo.max}. `
+    : ""
   return (
-    `Self-review incomplete — ${unmet.length} blocking criteria not satisfied:\n${list}\n` +
+    `${iterationNote}Self-review incomplete — ${unmet.length} blocking criteria not satisfied:\n${list}\n` +
     `Continue working to address these criteria, then call mark_satisfied again.`
   )
 }

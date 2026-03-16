@@ -26,15 +26,10 @@ import type {
   RebuttalRequest,
   RebuttalResult,
 } from "./types"
+import type { PluginClient } from "./client-types"
 import { withTimeout, extractTextFromPromptResult, extractEphemeralSessionId, extractJsonFromText } from "./utils"
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type Client = any
-
-/** Maximum wall-clock time allowed for a self-review subagent session.
- * Set to 5 minutes — the reviewer evaluates 14+ blocking criteria (including
- * 7 quality dimensions with numeric scores), which is substantial work. */
-const SELF_REVIEW_TIMEOUT_MS = 300_000 // 5 minutes
+import { SELF_REVIEW_TIMEOUT_MS, MAX_ARTIFACT_CONTENT_CHARS } from "./constants"
+import { createLogger } from "./logger"
 
 // ---------------------------------------------------------------------------
 // Prompt builder
@@ -84,9 +79,9 @@ function buildReviewPrompt(req: SelfReviewRequest): string {
     )
     lines.push("")
     lines.push("```")
-    // Cap at 10000 chars to prevent extreme prompt size
-    const capped = req.artifactContent.length > 10_000
-      ? req.artifactContent.slice(0, 10_000) + "\n\n[... artifact truncated at 10000 chars ...]"
+    // Cap at MAX_ARTIFACT_CONTENT_CHARS to prevent extreme prompt size
+    const capped = req.artifactContent.length > MAX_ARTIFACT_CONTENT_CHARS
+      ? req.artifactContent.slice(0, MAX_ARTIFACT_CONTENT_CHARS) + `\n\n[... artifact truncated at ${MAX_ARTIFACT_CONTENT_CHARS} chars — read the full file from disk for complete content ...]`
       : req.artifactContent
     lines.push(capped)
     lines.push("```")
@@ -150,11 +145,12 @@ function buildReviewPrompt(req: SelfReviewRequest): string {
 // ---------------------------------------------------------------------------
 
 async function ephemeralReviewSession(
-  client: Client,
+  client: PluginClient,
   prompt: string,
   parentSessionId?: string,
   title = "workflow-review",
 ): Promise<unknown> {
+  if (!client.session) throw new Error("client.session is not available — cannot dispatch review")
   const created = await client.session.create({
     body: {
       title,
@@ -237,7 +233,7 @@ function parseReviewResult(raw: string): SelfReviewResult {
  * the authoring conversation. This enforces the isolation invariant.
  */
 export async function dispatchSelfReview(
-  client: Client,
+  client: PluginClient,
   req: SelfReviewRequest,
 ): Promise<SelfReviewResult> {
   try {
@@ -254,10 +250,8 @@ export async function dispatchSelfReview(
     return parseReviewResult(text)
   } catch (err) {
     const errorMsg = err instanceof Error ? err.message : String(err)
-    console.error(
-      `[open-artisan] Self-review subagent dispatch failed: ${errorMsg}`,
-      err instanceof Error ? err.stack : "",
-    )
+    const log = createLogger(client)
+    log.error("Self-review dispatch failed", { detail: errorMsg })
     return {
       success: false,
       error: errorMsg,
@@ -350,7 +344,7 @@ export function buildRebuttalPrompt(req: RebuttalRequest): string {
  * scope argument could be valid).
  */
 export async function dispatchRebuttal(
-  client: Client,
+  client: PluginClient,
   req: RebuttalRequest,
 ): Promise<RebuttalResult> {
   try {
@@ -394,10 +388,8 @@ export async function dispatchRebuttal(
     return { success: true, revisedResults, allResolved }
   } catch (err) {
     const errorMsg = err instanceof Error ? err.message : String(err)
-    console.error(
-      `[open-artisan] Rebuttal dispatch failed: ${errorMsg}`,
-      err instanceof Error ? err.stack : "",
-    )
+    const log = createLogger(client)
+    log.warn("Rebuttal dispatch failed", { detail: errorMsg })
     return { success: false, error: errorMsg }
   }
 }

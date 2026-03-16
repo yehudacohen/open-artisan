@@ -23,7 +23,7 @@
 
 // @ts-ignore — @opencode-ai/plugin is provided by the OpenCode runtime, not installed as a dev dep
 import { tool, type Plugin } from "@opencode-ai/plugin"
-import { join } from "node:path"
+import { join, resolve } from "node:path"
 import { existsSync } from "node:fs"
 import { $ } from "bun"
 
@@ -2478,9 +2478,15 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                   draft.conventions = null  // system-transform uses artifactDiskPaths["conventions"]
                 }
               }
-              // S2: Capture file allowlist at PLANNING approval in INCREMENTAL mode
+              // S2: Capture file allowlist at PLANNING approval in INCREMENTAL mode.
+              // Normalize to absolute paths — the agent may pass relative paths
+              // (e.g. ".gitignore" instead of "/project/.gitignore"). The validator
+              // rejects relative paths, so we resolve them against the project dir.
               if (state.phase === "PLANNING" && state.mode === "INCREMENTAL" && args.approved_files) {
-                draft.fileAllowlist = args.approved_files
+                const cwd = context.directory || process.cwd()
+                draft.fileAllowlist = args.approved_files.map((p) =>
+                  p.startsWith("/") ? p : resolve(cwd, p),
+                )
               }
               // S3: Record artifact hash for drift detection (approvedArtifacts).
               // If artifact_content is provided, hash it for accurate content-based drift detection.

@@ -1103,3 +1103,55 @@ describe("request_review — re-submit at REVIEW state", () => {
     expect(result).toContain("USER_GATE")
   })
 })
+
+// ---------------------------------------------------------------------------
+// fileAllowlist — relative path normalization
+// ---------------------------------------------------------------------------
+
+describe("fileAllowlist — relative paths are normalized to absolute", () => {
+  it("normalizes relative paths in approved_files to absolute using project directory", async () => {
+    const sid = `int-test-${Date.now()}-allowlist-normalize`
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: sid } } },
+    })
+    const ctx = { directory: tempDir, sessionId: sid }
+
+    // Set up INCREMENTAL mode → PLANNING → USER_GATE
+    await plugin.tool.select_mode.execute(
+      { mode: "INCREMENTAL", feature_name: "allowlist-test" },
+      ctx,
+    )
+
+    const store = plugin._testStore
+    // Skip discovery, force to PLANNING/USER_GATE
+    await store.update(sid, (draft: any) => {
+      draft.phase = "PLANNING"
+      draft.phaseState = "USER_GATE"
+      draft.userGateMessageReceived = true
+    })
+
+    // Approve with mixed relative and absolute paths
+    const result = await plugin.tool.submit_feedback.execute(
+      {
+        feedback_type: "approve",
+        feedback_text: "approved",
+        approved_files: [".gitignore", "src/index.ts", "/already/absolute.ts"],
+      },
+      ctx,
+    )
+
+    // Should NOT contain "Error" — relative paths should be normalized
+    expect(result).not.toContain("must be an absolute path")
+
+    // Verify the stored paths are all absolute
+    const state = store.get(sid)
+    for (const path of state.fileAllowlist) {
+      expect(path.startsWith("/")).toBe(true)
+    }
+    // Relative paths should be resolved against tempDir
+    expect(state.fileAllowlist).toContain(`${tempDir}/.gitignore`)
+    expect(state.fileAllowlist).toContain(`${tempDir}/src/index.ts`)
+    // Already absolute path should be preserved as-is
+    expect(state.fileAllowlist).toContain("/already/absolute.ts")
+  })
+})

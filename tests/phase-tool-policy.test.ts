@@ -460,14 +460,20 @@ describe("Tool policy — IMPLEMENTATION/INCREMENTAL bashCommandPredicate", () =
   })
 })
 
-describe("Tool policy — MODE_SELECT and DONE block write, edit, AND bash", () => {
-  it("MODE_SELECT blocks write, edit, and bash", () => {
+describe("Tool policy — MODE_SELECT blocks write and edit but allows bash", () => {
+  it("MODE_SELECT blocks write and edit", () => {
     const policy = getPhaseToolPolicy("MODE_SELECT", "DRAFT", null, [])
     expect(policy.blocked).toContain("write")
     expect(policy.blocked).toContain("edit")
-    expect(policy.blocked).toContain("bash")
   })
 
+  it("MODE_SELECT allows bash (read-only exploration for mode selection)", () => {
+    const policy = getPhaseToolPolicy("MODE_SELECT", "DRAFT", null, [])
+    expect(policy.blocked).not.toContain("bash")
+  })
+})
+
+describe("Tool policy — DONE blocks write, edit, AND bash", () => {
   it("DONE blocks write, edit, and bash", () => {
     const policy = getPhaseToolPolicy("DONE", "DRAFT", "GREENFIELD", [])
     expect(policy.blocked).toContain("write")

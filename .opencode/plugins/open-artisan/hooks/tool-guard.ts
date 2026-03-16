@@ -132,10 +132,14 @@ export function getPhaseToolPolicy(
   switch (phase) {
     // -----------------------------------------------------------------------
     case "MODE_SELECT":
+      return {
+        blocked: ["write", "edit"],
+        allowedDescription: "No file writes or edits until a workflow mode is selected. Bash is allowed for read-only exploration. Call select_mode to begin.",
+      }
     case "DONE":
       return {
         blocked: ["write", "edit", "bash"],
-        allowedDescription: "Only workflow control tools and read-only exploration are allowed. Start a new workflow with select_mode.",
+        allowedDescription: "Workflow complete — no writes, edits, or bash. Send a new message to start a fresh workflow cycle.",
       }
 
     // -----------------------------------------------------------------------

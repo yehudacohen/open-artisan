@@ -505,7 +505,8 @@ The `tool.execute.before` hook intercepts every tool call and applies phase-spec
 
 | Phase | Sub-State | Blocked | Writes Allowed To | Bash |
 |-------|-----------|---------|-------------------|------|
-| MODE_SELECT, DONE | * | `write`, `edit`, `bash` | nothing | blocked |
+| MODE_SELECT | * | `write`, `edit` | nothing | allowed |
+| DONE | * | `write`, `edit`, `bash` | nothing | blocked |
 | DISCOVERY | SCAN, ANALYZE | `write`, `edit`, `bash` | nothing | blocked |
 | DISCOVERY | CONVENTIONS | `bash` | `.openartisan/` only | blocked |
 | DISCOVERY | REVIEW | (none) | `.openartisan/` only | allowed |

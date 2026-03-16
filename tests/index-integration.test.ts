@@ -1012,3 +1012,94 @@ describe("Error resilience — tool execute returns error string on unexpected f
     expect(result).toContain("Error")
   })
 })
+
+// ---------------------------------------------------------------------------
+// request_review — re-submit at REVIEW state
+// ---------------------------------------------------------------------------
+
+describe("request_review — re-submit at REVIEW state", () => {
+  it("allows request_review at REVIEW state with artifact_content", async () => {
+    const sid = `int-test-${Date.now()}-resubmit`
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: sid } } },
+    })
+    const ctx = { directory: tempDir, sessionId: sid }
+
+    // Get to PLANNING/DRAFT then request_review to get to REVIEW
+    await plugin.tool.select_mode.execute(
+      { mode: "GREENFIELD", feature_name: "resubmit-test" },
+      ctx,
+    )
+    const rrResult = await plugin.tool.request_review.execute(
+      { summary: "Initial plan", artifact_description: "Plan v1", artifact_content: "Old plan content" },
+      ctx,
+    )
+    expect(rrResult).not.toContain("Error")
+
+    // Now in REVIEW — re-submit with updated content
+    const resubmitResult = await plugin.tool.request_review.execute(
+      { summary: "Updated plan", artifact_description: "Plan v2", artifact_content: "New comprehensive 200-line plan" },
+      ctx,
+    )
+    expect(resubmitResult).not.toContain("Error")
+    expect(resubmitResult).toContain("re-submitted")
+    expect(resubmitResult).toContain("updated")
+
+    // State should still be in REVIEW
+    const store = plugin._testStore
+    const state = store.get(sid)
+    expect(state.phaseState).toBe("REVIEW")
+    expect(state.iterationCount).toBe(0)
+  })
+
+  it("rejects request_review at REVIEW state without artifact_content", async () => {
+    const sid = `int-test-${Date.now()}-resubmit-no-content`
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: sid } } },
+    })
+    const ctx = { directory: tempDir, sessionId: sid }
+
+    await plugin.tool.select_mode.execute(
+      { mode: "GREENFIELD", feature_name: "resubmit-no-content" },
+      ctx,
+    )
+    await plugin.tool.request_review.execute(
+      { summary: "Plan", artifact_description: "Plan", artifact_content: "Content" },
+      ctx,
+    )
+
+    // Re-submit without artifact_content — should error
+    const result = await plugin.tool.request_review.execute(
+      { summary: "Updated plan", artifact_description: "Plan v2" },
+      ctx,
+    )
+    expect(result).toContain("Error")
+    expect(result).toContain("artifact_content")
+  })
+
+  it("still blocks request_review at USER_GATE", async () => {
+    const sid = `int-test-${Date.now()}-resubmit-usergate`
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: sid } } },
+    })
+    const ctx = { directory: tempDir, sessionId: sid }
+
+    await plugin.tool.select_mode.execute(
+      { mode: "GREENFIELD", feature_name: "block-at-usergate" },
+      ctx,
+    )
+
+    // Force to USER_GATE
+    const store = plugin._testStore
+    await store.update(sid, (draft: any) => {
+      draft.phaseState = "USER_GATE"
+    })
+
+    const result = await plugin.tool.request_review.execute(
+      { summary: "Plan", artifact_description: "Plan", artifact_content: "Content" },
+      ctx,
+    )
+    expect(result).toContain("Error")
+    expect(result).toContain("USER_GATE")
+  })
+})

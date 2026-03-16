@@ -489,7 +489,7 @@ After `MAX_REVIEW_ITERATIONS` (10) consecutive review failures, the system escal
 | `select_mode` | MODE_SELECT | Choose workflow mode + feature name |
 | `mark_scan_complete` | DISCOVERY/SCAN | Signal scan phase complete |
 | `mark_analyze_complete` | DISCOVERY/ANALYZE | Signal analysis complete |
-| `request_review` | */DRAFT, */CONVENTIONS, */REVISE | Submit artifact for review |
+| `request_review` | */DRAFT, */CONVENTIONS, */REVISE, */REVIEW | Submit artifact for review. At REVIEW: re-submits updated content (requires `artifact_content`), resets iteration count. |
 | `mark_satisfied` | */REVIEW | Submit criteria assessment (triggers isolated reviewer) |
 | `submit_feedback` | */USER_GATE | Route user feedback (approve or revise) |
 | `mark_task_complete` | IMPLEMENTATION/DRAFT, IMPLEMENTATION/REVISE | Complete a DAG task (triggers per-task review) |

@@ -2005,9 +2005,47 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
           const state = await ensureState(store, sessionId, client)
           await detectAgent(store, sessionId, context)
 
-          const validDraftStates = ["DRAFT", "CONVENTIONS", "REVISE"]
-          if (!validDraftStates.includes(state.phaseState)) {
-            return `Error: request_review can only be called from DRAFT/CONVENTIONS/REVISE state (current: ${state.phaseState}).`
+          const validStates = ["DRAFT", "CONVENTIONS", "REVISE", "REVIEW"]
+          if (!validStates.includes(state.phaseState)) {
+            return `Error: request_review can only be called from DRAFT/CONVENTIONS/REVISE/REVIEW state (current: ${state.phaseState}).`
+          }
+
+          // Re-submit at REVIEW: the agent realized the artifact content is stale
+          // or wrong and wants to update it before the reviewer sees it. Overwrite
+          // the artifact on disk and restart the review cycle (reset iterationCount).
+          // No state machine transition — we stay in REVIEW.
+          if (state.phaseState === "REVIEW") {
+            if (!args.artifact_content) {
+              return (
+                "Error: request_review at REVIEW state requires artifact_content — " +
+                "you must provide the updated artifact text to replace the version on disk."
+              )
+            }
+            let artifactDiskPath: string | null = null
+            const artifactKey = PHASE_TO_ARTIFACT[state.phase]
+            if (artifactKey && artifactKey !== "implementation") {
+              try {
+                const cwd = context.directory || process.cwd()
+                artifactDiskPath = await writeArtifact(cwd, artifactKey, args.artifact_content, state.featureName)
+              } catch (writeErr) {
+                log.warn("Failed to re-write artifact to disk on re-submit")
+              }
+            }
+            await store.update(sessionId, (draft) => {
+              draft.iterationCount = 0
+              draft.retryCount = 0
+              if (artifactDiskPath) {
+                if (artifactKey) draft.artifactDiskPaths[artifactKey] = artifactDiskPath
+              }
+            })
+            const diskMsg = artifactDiskPath
+              ? `\nArtifact updated on disk at \`${artifactDiskPath}\`.`
+              : ""
+            return (
+              `Artifact re-submitted for ${state.phase} review. The on-disk version has been updated.${diskMsg}\n\n` +
+              `Review cycle restarted (iteration count reset to 0). ` +
+              `Now call \`mark_satisfied\` with your criteria evaluation to proceed with the review.`
+            )
           }
 
           // Hard gate: during IMPLEMENTATION, request_review is only allowed when

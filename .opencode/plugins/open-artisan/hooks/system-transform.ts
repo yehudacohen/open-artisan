@@ -326,8 +326,13 @@ of whether Y is "simpler" or "equivalent."
    deviation from the plan's register is implemented exactly as approved — no further downgrades
    beyond what was registered.
 2. [D] **Structural invariants from the design document are enforced.** For each structural invariant
-   that was NOT registered as a deviation, verify it is enforced structurally (state machine, type
-   system, or compile-time check) — not merely documented or checked at runtime with a procedural guard.`
+   that was NOT registered as a deviation, verify it is enforced by a mechanism that cannot be bypassed
+   by the agent in a single code change. Examples of structural enforcement: transition tables that
+   reject invalid events, type system constraints (union types, branded types), required function
+   parameters, exhaustive switch statements. Examples of NON-structural enforcement that should be
+   flagged: boolean flags checked by if-statements, comments saying "do not call this", prompt-level
+   instructions, runtime assertions that can be deleted. If an invariant uses a non-structural
+   mechanism, it must be registered as a "downgraded" deviation.`
 
     default:
       return ""

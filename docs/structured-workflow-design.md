@@ -1,6 +1,6 @@
 # Structured Coding Workflow — Design Document
 
-**Version:** v9 (reflects implementation as of schema v15, March 2026)
+**Version:** v10 (reflects implementation as of schema v15, March 2026)
 **Status:** This document describes the **current implemented system**, not aspirational design. Section 14 documents structural gaps that have all been resolved. Section 14.6 documents meta-structural improvements that prevent agents from silently downgrading structural guarantees. Section 15 documents deferred features.
 
 ---
@@ -83,7 +83,7 @@ These constraints are injected into the system prompt at every phase and enforce
 **Incremental mode (Do No Harm):**
 - Tool guard enforces a **file allowlist** — only files identified in the approved plan can be written/edited
 - Writes to unlisted files are blocked with a specific error message
-- Bash commands that modify the filesystem are blocked (except in REVISE)
+- Bash write operators (`>`, `>>`, `tee`, `sed -i`) are blocked in all sub-states (enforced via `bashCommandPredicate`)
 - The conventions document is read-only — the agent follows it but cannot modify it
 
 **Refactor mode:**
@@ -129,6 +129,7 @@ Robot-artisan replaces human gates with AI evaluation:
 
 **Auto-approval at USER_GATE:** When `activeAgent === "robot-artisan"` and the workflow reaches USER_GATE (via self-review pass or escalation), `auto-approve.ts` dispatches an `auto-approver` subagent:
 - The auto-approver evaluates the artifact against completeness, correctness, alignment, and quality
+- An `isEscalation` flag is passed when the review cap was hit, making the auto-approver more lenient on quality scores but strict on correctness and completeness
 - Returns `{ approve: boolean, confidence: number, reasoning: string, feedback?: string }`
 - Confidence >= 0.7 → auto-approve (sets `userGateMessageReceived = true`)
 - Confidence < 0.7 → returns revision feedback for the agent to address
@@ -149,12 +150,13 @@ All `session.create()` calls pass:
 | Task review (`task-review.ts`) | `workflow-reviewer` | parent session |
 | Orchestrator assess/diverge (`orchestrator/llm-calls.ts`) | `workflow-orchestrator` | `activeSessionId` getter |
 | Auto-approval (`auto-approve.ts`) | `auto-approver` | parent session |
+| Per-task drift check (`task-drift.ts`) | `workflow-orchestrator` | parent session |
 
 ---
 
 ## 5. State Machine
 
-The workflow uses a simplified state machine encoding states as `(Phase, PhaseState)` tuples. There are 8 phases and 7 possible sub-states, with `VALID_PHASE_STATES` constraining the valid combinations to approximately 30 pairs.
+The workflow uses a simplified state machine encoding states as `(Phase, PhaseState)` tuples. There are 8 phases and 8 possible sub-states, with `VALID_PHASE_STATES` constraining the valid combinations to 34 pairs (MODE_SELECT: 1, DISCOVERY: 7, five standard phases × 5 each: 25, DONE: 1).
 
 ### 5.1 Phases and Sub-States
 
@@ -162,12 +164,12 @@ The workflow uses a simplified state machine encoding states as `(Phase, PhaseSt
 Phase           Valid Sub-States
 ─────────────   ──────────────────────────────────────────────
 MODE_SELECT     DRAFT (sentinel only)
-DISCOVERY       SCAN, ANALYZE, CONVENTIONS, REVIEW, USER_GATE, REVISE
-PLANNING        DRAFT, REVIEW, USER_GATE, REVISE
-INTERFACES      DRAFT, REVIEW, USER_GATE, REVISE
-TESTS           DRAFT, REVIEW, USER_GATE, REVISE
-IMPL_PLAN       DRAFT, REVIEW, USER_GATE, REVISE
-IMPLEMENTATION  DRAFT, REVIEW, USER_GATE, REVISE
+DISCOVERY       SCAN, ANALYZE, CONVENTIONS, REVIEW, USER_GATE, ESCAPE_HATCH, REVISE
+PLANNING        DRAFT, REVIEW, USER_GATE, ESCAPE_HATCH, REVISE
+INTERFACES      DRAFT, REVIEW, USER_GATE, ESCAPE_HATCH, REVISE
+TESTS           DRAFT, REVIEW, USER_GATE, ESCAPE_HATCH, REVISE
+IMPL_PLAN       DRAFT, REVIEW, USER_GATE, ESCAPE_HATCH, REVISE
+IMPLEMENTATION  DRAFT, REVIEW, USER_GATE, ESCAPE_HATCH, REVISE
 DONE            DRAFT (sentinel only)
 ```
 
@@ -184,11 +186,12 @@ DONE            DRAFT (sentinel only)
 | `escalate_to_user` | Review iteration cap reached | `mark_satisfied` (after MAX_REVIEW_ITERATIONS) |
 | `user_approve` | User approves artifact | `submit_feedback(approve)` |
 | `user_feedback` | User requests changes | `submit_feedback(revise)` → orchestrator |
+| `escape_hatch_triggered` | Strategic pivot detected at USER_GATE | Orchestrator diverge → strategic classification |
 | `revision_complete` | Revision done, ready for re-review | `request_review` tool |
 
 ### 5.3 Phase Pattern (Repeating Unit)
 
-Every sequential phase (PLANNING through IMPLEMENTATION) follows this four-state pattern:
+Every sequential phase (PLANNING through IMPLEMENTATION) follows this five-state pattern:
 
 ```
 DRAFT ──[draft_complete]──► REVIEW ──[self_review_fail]──► REVIEW (loop)
@@ -196,6 +199,9 @@ DRAFT ──[draft_complete]──► REVIEW ──[self_review_fail]──► R
                                     ──[escalate_to_user]──► USER_GATE
                             USER_GATE ──[user_approve]──► next Phase/DRAFT
                                       ──[user_feedback]──► orchestrator → REVISE
+                                      ──[escape_hatch_triggered]──► ESCAPE_HATCH
+                            ESCAPE_HATCH ──[user_feedback]──► REVISE
+                                         (user_approve NOT valid — SM rejects it)
                             REVISE ──[revision_complete]──► REVIEW
 ```
 
@@ -235,24 +241,20 @@ The orchestrator (assess, diverge, route) and execution engine (task scheduling,
 
 Artifacts are the outputs of each phase. When the orchestrator receives user feedback, it identifies the affected artifact, walks this graph forward, and builds a cascade of downstream artifacts needing re-validation.
 
-```
-Conventions ──► Plan ──► Interfaces ──► Tests ──► Impl Plan ──► Implementation
-     │               │                    │           │               ▲
-     │               │                    │           └───────────────┤
-     │               │                    └─────────────────────────────┤
-     │               └──────────────────────────────────────────────────┤
-     └──────────────────────────────────────────────────────────────────┘
-```
+The dependency graph is dense (12 direct edges across 7 artifacts). The authoritative representation is the list below — `getAllDependents()` walks transitive dependencies for cascade routing (e.g., revising Conventions touches all 5 downstream artifacts).
 
 Implemented in `artifacts.ts` as:
 ```
+design → []                                          (conditional — only if design doc detected)
 conventions → []
-plan → [conventions]
+plan → [conventions]   (+design if design doc exists)
 interfaces → [conventions, plan]
 tests → [interfaces]
 impl_plan → [plan, interfaces, tests]
 implementation → [plan, impl_plan, interfaces, tests]
 ```
+
+The `design → plan` edge is injected at runtime by `createArtifactGraph(hasDesignDoc)`. See Section 14.6.1.
 
 **Cascade examples:**
 - Revising **Conventions** → 5 downstream (everything). Triggers escape hatch (cascade depth >= 3).
@@ -268,6 +270,13 @@ In greenfield mode, the Conventions artifact does not exist and the graph starts
 When the orchestrator routes a cascade to a phase where no changes are needed (e.g., revising the plan doesn't actually affect interfaces), the system deterministically auto-skips that step at cascade ENTRY using `cascadeAutoSkip()`. This prevents the agent from entering no-op REVISE phases where tool guards would block it from doing anything useful.
 
 Auto-skip uses the revision baseline (see Section 10.3) to detect whether an artifact has changed between the cascade entry point and the current state. If unchanged, the step is skipped and the cascade advances to the next downstream phase.
+
+**Implementation details** (`cascadeAutoSkip()` in `index.ts`):
+- Loops up to 10 iterations (safety bound) advancing through pending revision steps
+- For mid-cascade steps: advances to the next step's target phase in REVISE state
+- For the final cascade step: fast-forwards to USER_GATE (the cascade is complete, ready for review)
+- Standalone REVISE (non-cascade, `pendingRevisionSteps` is null or empty) is NOT auto-skipped — only cascade steps are eligible
+- Baseline is re-captured at each step transition
 
 ---
 
@@ -295,13 +304,13 @@ diverge(assessment, state) → "tactical" | "strategic"                 [LLM cal
 ### 7.2 Assess
 
 The `assess` function (LLM call via `createAssessFn` in `orchestrator/llm-calls.ts`) receives the feedback text, current state summary, and approved artifact hashes. It returns:
-- `rootArtifact`: the artifact directly affected by the feedback
+- `rootCauseArtifact`: the artifact directly affected by the feedback
 - `affectedArtifacts`: all downstream artifacts (via dependency graph walk)
 - `reasoning`: explanation of the scoping decision
 
 ### 7.3 Diverge
 
-The `diverge` function (LLM call via `createDivergeFn`) classifies the change as tactical or strategic. **Hard rule:** if `affectedArtifacts.length >= 3`, the classification is forced to `"strategic"` regardless of the LLM output.
+The `diverge` function (LLM call via `createDivergeFn`) classifies the change as tactical or strategic. **Hard rule:** if 3 or more *materially affected* artifacts exist (i.e., artifacts that have been approved or are currently in progress — not just theoretical downstream nodes), the classification is forced to `"strategic"` regardless of the LLM output.
 
 ### 7.4 Revision Plan
 
@@ -333,6 +342,8 @@ The user chooses from four options:
 
 Classification of the user's response is done by keyword matching in `isEscapeHatchAbort()` and `handleEscapeHatch()` in `tools/submit-feedback-handlers.ts`.
 
+**Ambiguity handling:** Short responses (≤ `MAX_AMBIGUOUS_RESPONSE_LENGTH` chars) that don't match any keyword are classified as ambiguous by `isEscapeHatchAmbiguous()` in `orchestrator/escape-hatch.ts`. The agent is prompted to re-present the options more clearly.
+
 ---
 
 ## 9. Divergence Detection
@@ -354,45 +365,50 @@ The cascade depth >= 3 criterion is the only deterministic trigger. The other th
 
 ### 10.1 Schema Versioning
 
-Workflow state is persisted as JSON in OpenCode's data directory. The schema version (currently v13) is stamped on every state object. On load, states with mismatched versions are migrated forward using `??=` defaulting for new fields. States with future versions are discarded.
+Workflow state is persisted as JSON in OpenCode's data directory. The schema version (currently v15) is stamped on every state object. On load, states with mismatched versions are migrated forward using `??=` defaulting for new fields. States with future versions are discarded.
 
-### 10.2 WorkflowState Fields (Schema v13)
+### 10.2 WorkflowState Fields (Schema v15)
 
-| Field | Type | Purpose |
-|-------|------|---------|
-| `schemaVersion` | `13` | Forward-compatibility guard |
-| `sessionId` | `string` | OpenCode session ID |
-| `mode` | `WorkflowMode \| null` | GREENFIELD / REFACTOR / INCREMENTAL |
-| `phase` | `Phase` | Current high-level phase |
-| `phaseState` | `PhaseState` | Sub-state within the phase |
-| `iterationCount` | `number` | Self-review iterations in current phase |
-| `retryCount` | `number` | Idle re-prompt retries |
-| `approvedArtifacts` | `Record<ArtifactKey, string>` | SHA-256 hashes of approved artifact content |
-| `conventions` | `string \| null` | Full conventions document text |
-| `fileAllowlist` | `string[]` | INCREMENTAL mode write-allowed paths |
-| `lastCheckpointTag` | `string \| null` | Git tag of last approved checkpoint |
-| `approvalCount` | `number` | Total user approvals (monotonic) |
-| `orchestratorSessionId` | `string \| null` | Dedicated orchestrator session |
-| `intentBaseline` | `string \| null` | User's original intent statement |
-| `modeDetectionNote` | `string \| null` | Auto-detection advisory |
-| `discoveryReport` | `string \| null` | Combined discovery scanner output |
-| `currentTaskId` | `string \| null` | Active DAG task pointer |
-| `feedbackHistory` | `Array<{phase, feedback, timestamp}>` | Accumulated drift tracking |
-| `implDag` | `TaskNode[] \| null` | Serialized implementation DAG |
-| `phaseApprovalCounts` | `Record<Phase, number>` | Per-phase approval counter for tags |
-| `escapePending` | `boolean` | Escape hatch in progress |
-| `pendingRevisionSteps` | `RevisionStep[] \| null` | Cascade plan awaiting resolution |
-| `userGateMessageReceived` | `boolean` | Anti-self-approval guard |
-| `artifactDiskPaths` | `Record<ArtifactKey, string>` | Absolute paths of artifacts on disk |
-| `featureName` | `string \| null` | Subdirectory under `.openartisan/` |
-| `revisionBaseline` | `{type, hash\|sha} \| null` | Diff gate snapshot at REVISE entry |
-| `activeAgent` | `string \| null` | Agent file driving this session |
+| Field | Type | Added | Purpose |
+|-------|------|-------|---------|
+| `schemaVersion` | `15` | v1 | Forward-compatibility guard |
+| `sessionId` | `string` | v1 | OpenCode session ID |
+| `mode` | `WorkflowMode \| null` | v1 | GREENFIELD / REFACTOR / INCREMENTAL |
+| `phase` | `Phase` | v1 | Current high-level phase |
+| `phaseState` | `PhaseState` | v1 | Sub-state within the phase |
+| `iterationCount` | `number` | v1 | Self-review iterations in current phase |
+| `retryCount` | `number` | v1 | Idle re-prompt retries |
+| `approvedArtifacts` | `Partial<Record<ArtifactKey, string>>` | v1 | SHA-256 hashes of approved artifact content |
+| `conventions` | `string \| null` | v1 | Full conventions document text |
+| `fileAllowlist` | `string[]` | v1 | INCREMENTAL mode write-allowed paths |
+| `lastCheckpointTag` | `string \| null` | v1 | Git tag of last approved checkpoint |
+| `approvalCount` | `number` | v1 | Total user approvals (monotonic) |
+| `orchestratorSessionId` | `string \| null` | v2 | Dedicated orchestrator session |
+| `intentBaseline` | `string \| null` | v2 | User's original intent statement |
+| `escapePending` | `boolean` | v2 | Escape hatch in progress |
+| `pendingRevisionSteps` | `RevisionStep[] \| null` | v2 | Cascade plan awaiting resolution |
+| `modeDetectionNote` | `string \| null` | v3 | Auto-detection advisory |
+| `discoveryReport` | `string \| null` | v4 | Combined discovery scanner output |
+| `implDag` | `TaskNode[] \| null` | v5 | Serialized implementation DAG |
+| `currentTaskId` | `string \| null` | v6 | Active DAG task pointer |
+| `feedbackHistory` | `Array<{phase, feedback, timestamp}>` | v6 | Accumulated drift tracking |
+| `phaseApprovalCounts` | `Partial<Record<Phase, number>>` | v7 | Per-phase approval counter for tags |
+| `userGateMessageReceived` | `boolean` | v8 | Anti-self-approval guard |
+| `artifactDiskPaths` | `Partial<Record<ArtifactKey, string>>` | v9 | Absolute paths of artifacts on disk |
+| `featureName` | `string \| null` | v10 | Subdirectory under `.openartisan/` |
+| `revisionBaseline` | `{type, hash\|sha} \| null` | v11 | Diff gate snapshot at REVISE entry |
+| `activeAgent` | `string \| null` | v13 | Agent file driving this session |
+| `taskCompletionInProgress` | `string \| null` | v14 | Re-entry guard for `mark_task_complete` |
+| `taskReviewCount` | `number` | v15 | Per-task review iteration counter |
+| `pendingFeedback` | `string \| null` | v15 | Crash-safe feedback persistence |
 
 ### 10.3 Revision Baseline (Diff Gate)
 
 At REVISE entry, `captureRevisionBaseline()` snapshots the artifact state:
-- **In-memory phases** (PLANNING, DISCOVERY, IMPL_PLAN): SHA-256 content hash of the artifact file on disk
-- **File-based phases** (INTERFACES, TESTS, IMPLEMENTATION): Git commit SHA of HEAD
+- **In-memory phases** (PLANNING, DISCOVERY, IMPL_PLAN): SHA-256 content hash of the artifact file on disk (`type: "content-hash"`)
+- **File-based phases** (INTERFACES, TESTS, IMPLEMENTATION): SHA-256 hash of `git diff` output (`type: "git-sha"` — note: the type name is legacy; the value is a content hash of the diff, not a commit SHA)
+
+The implementation uses `git diff` output hashing rather than commit SHAs to prevent false positives during cascades. When the orchestrator routes a cascade through multiple phases, the agent may not have committed yet — storing HEAD SHA would show "changed" even when the relevant artifact files are untouched.
 
 At `request_review` time, `hasArtifactChanged()` compares the current state against the baseline. If unchanged, the agent is blocked from transitioning to REVIEW — it must actually make changes. This prevents lazy no-op revisions where the agent calls `request_review` without addressing the feedback.
 
@@ -413,9 +429,10 @@ Tag format: `workflow/<phase>-v<N>` where `N` comes from `phaseApprovalCounts[ph
 
 ## 12. Per-Phase Acceptance Criteria
 
-Each phase has structured acceptance criteria evaluated by the isolated reviewer subagent. Criteria come in three types:
+Each phase has structured acceptance criteria evaluated by the isolated reviewer subagent. Criteria come in four types:
 
 - **Blocking criteria** (numbered) — must all pass to advance
+- **[D] Design-invariant criteria** — blocking AND non-rebuttable (see Section 14.6.2). Only injected when a design document is tracked.
 - **[Q] Quality criteria** — scored 1-10, minimum 9/10 to pass (7 dimensions)
 - **[S] Suggestion criteria** — non-blocking, advisory only
 
@@ -448,6 +465,8 @@ The full criteria are defined in `getAcceptanceCriteria()` in `hooks/system-tran
 
 When a review fails and the agent is one iteration from the escalation cap (`MAX_REVIEW_ITERATIONS - 1`), the system dispatches a rebuttal. Criteria scoring 7-8 (close to threshold) where the agent disagrees are sent to a fresh reviewer session. If the reviewer concedes, the review passes without escalation. This reduces unnecessary user interruptions over scope disagreements.
 
+**`[D]` criteria are excluded from rebuttal.** Design-invariant criteria cannot be rationalized away by either the agent or the reviewer. They are binary structural requirements from the design document.
+
 ### 12.4 Review Escalation
 
 After `MAX_REVIEW_ITERATIONS` (10) consecutive review failures, the system escalates to USER_GATE with a structured verdict table showing each unresolved criterion, its score, and the reviewer's evidence. The user can then approve as-is or provide specific revision guidance.
@@ -475,12 +494,29 @@ The `tool.execute.before` hook intercepts every tool call and applies phase-spec
 
 **Passthrough tools** (`PASSTHROUGH_TOOL_NAMES`): Always allowed regardless of phase. Includes `todowrite`, `todoread`, `task`, `glob`, `grep`, `read`, `webfetch`, `google_search`, `skill`, `question`. These are checked by exact match BEFORE the substring match on blocked categories, preventing false positives (e.g., `"todowrite".includes("write")` → true).
 
-**Blocked categories** per phase: The `getPhaseToolPolicy()` function returns category-level blocks:
-- **DISCOVERY (SCAN/ANALYZE/CONVENTIONS):** `write`, `edit`, `bash` blocked (read-only exploration)
-- **PLANNING/INTERFACES/TESTS/IMPL_PLAN (DRAFT/REVIEW):** `write`, `edit`, `bash` blocked (thinking phases)
-- **IMPLEMENTATION (DRAFT/REVISE):** No blocks (full tool access)
-- ***/REVISE (non-IMPLEMENTATION):** `bash` allowed for read-only verification; `write`/`edit` allowed
-- ***/USER_GATE:** All writes blocked (waiting for user)
+**Blocked categories** per phase: The `getPhaseToolPolicy()` function returns category-level blocks. When a `writePathPredicate` is present, writes matching the predicate are allowed even though `write`/`edit` may not appear in the blocked array — the predicate acts as an allowlist and all non-matching writes are rejected.
+
+| Phase | Sub-State | Blocked | Writes Allowed To | Bash |
+|-------|-----------|---------|-------------------|------|
+| MODE_SELECT, DONE | * | `write`, `edit` | nothing | allowed |
+| DISCOVERY | SCAN, ANALYZE | `write`, `edit`, `bash` | nothing | blocked |
+| DISCOVERY | CONVENTIONS | `bash` | `.openartisan/` only | blocked |
+| DISCOVERY | REVIEW | (none) | `.openartisan/` only | allowed |
+| DISCOVERY | REVISE | (none) | `.openartisan/` only | allowed |
+| DISCOVERY | USER_GATE, ESCAPE_HATCH | `write`, `edit` | nothing | allowed |
+| PLANNING, IMPL_PLAN | DRAFT | `write`, `edit`, `bash` | nothing | blocked |
+| PLANNING, IMPL_PLAN | REVIEW | (none) | `.openartisan/` only | allowed |
+| PLANNING, IMPL_PLAN | REVISE | (none) | `.openartisan/` only | allowed |
+| PLANNING, IMPL_PLAN | USER_GATE, ESCAPE_HATCH | `write`, `edit` | nothing | allowed |
+| INTERFACES | DRAFT | `bash` | interface/type/schema files | blocked |
+| INTERFACES | REVIEW, REVISE, USER_GATE, ESCAPE_HATCH | (none) | interface/type/schema files | allowed |
+| TESTS | DRAFT | `bash` | test files | blocked |
+| TESTS | REVIEW, REVISE, USER_GATE, ESCAPE_HATCH | (none) | test files | allowed |
+| IMPLEMENTATION | * (GREENFIELD/REFACTOR) | (none) | any file (except `.env`) | allowed |
+| IMPLEMENTATION | * (INCREMENTAL, with allowlist) | (none) | allowlisted files only | allowed (write operators blocked) |
+| IMPLEMENTATION | * (INCREMENTAL, no allowlist) | `write`, `edit` | nothing | allowed |
+
+**Security:** `.env` and `.env.*` files are blocked from writes in ALL phases including IMPLEMENTATION (enforced via `isEnvFile()` in `tool-guard.ts`). INCREMENTAL mode additionally blocks bash write operators (`>`, `>>`, `tee`, `sed -i`).
 
 **Child session guard:** Child sessions (subagents) inherit the parent's tool policy but additionally block all workflow tool names. This prevents state mutation races.
 
@@ -491,12 +527,11 @@ The `tool.execute.before` hook intercepts every tool call and applies phase-spec
 The `system.transform` hook prepends a workflow context block to every LLM call:
 
 1. **State header** — current phase, sub-state, mode, feature name, progress indicator
-2. **Mode constraints** — INCREMENTAL allowlist, REFACTOR conventions
-3. **Conventions document** — injected or referenced by file path
-4. **Phase-specific instructions** — loaded from `prompts/*.txt`
-5. **Sub-state context** — specific instructions for what to do next (call which tool)
-6. **Blocked tools list** — which tool categories are blocked in this state
-7. **Acceptance criteria** — at REVIEW state, the full criteria checklist
+2. **Phase-specific instructions** — loaded from `prompts/*.txt`
+3. **Design document constraint** — if a design doc is tracked, a mandatory constraint block instructs the agent to read it before drafting (PLANNING, IMPL_PLAN, IMPLEMENTATION only)
+4. **Sub-state context** — specific instructions for what to do next (call which tool)
+5. **Blocked tools list** — which tool categories are blocked in this state
+6. **Acceptance criteria** — at REVIEW state, the full criteria checklist (includes `[D]` criteria when design doc is tracked)
 
 At USER_GATE, a routing hint is appended as an additional system block instructing the agent to route the user's message through `submit_feedback`.
 
@@ -505,14 +540,14 @@ At USER_GATE, a routing hint is appended as an additional system block instructi
 ### 13.4 Idle Handler
 
 When the agent goes idle without completing a tool call, the `session.idle` event fires. The handler:
-1. Checks if the current state expects activity (DRAFT, SCAN, ANALYZE, CONVENTIONS, REVISE — all should have the agent working)
+1. Checks if the current state expects activity (DRAFT, REVIEW, SCAN, ANALYZE, CONVENTIONS, REVISE — all should have the agent working). USER_GATE, ESCAPE_HATCH, MODE_SELECT, and DONE are expected idle states.
 2. Re-prompts the agent with a state-specific nudge (e.g., "You are in DRAFT state. Call request_review when done.")
-3. Tracks retries via `retryCount` — after `MAX_IDLE_RETRIES` (3), escalates to USER_GATE
+3. Tracks retries via `retryCount` — after `MAX_IDLE_RETRIES` (3), hard-escalates: shows a toast notification AND sends an in-session prompt telling the agent to stop and ask the user for help. Retry count resets so the agent gets fresh attempts after user input.
 4. Uses a 10-second cooldown (`IDLE_COOLDOWN_MS`) to prevent cascading re-prompts
 
 ### 13.5 Compaction Hook
 
-When OpenCode compacts the conversation, the `summary.transform` hook injects the current workflow state as structured context. This ensures the agent retains its workflow position after compaction.
+When OpenCode compacts the conversation, the `experimental.session.compacting` hook injects the current workflow state as structured context. This ensures the agent retains its workflow position after compaction.
 
 ---
 
@@ -548,7 +583,7 @@ These gaps were identified by comparing the simplified state machine against the
 
 #### 14.6.1 Design Document as Tracked Artifact (Item 3)
 
-`"design"` is a new `ArtifactKey`. The artifact graph conditionally includes a `design → plan` dependency edge when a design document is detected. Detection checks multiple conventional paths (`.openartisan/<feature>/design.md`, `.openartisan/design.md`, `docs/design.md`, `DESIGN.md`) at plugin init and again at `select_mode` time when the feature name is known.
+`"design"` is a new `ArtifactKey`. The artifact graph conditionally includes a `design → plan` dependency edge when a design document is detected. Detection checks these paths in order: `.openartisan/<feature>/design.md` (if feature name set), `.openartisan/design.md`, `docs/design.md`, `DESIGN.md`, `design.md`, `docs/DESIGN.md`. Detection runs at plugin init and again at `select_mode` time when the feature name is known.
 
 The design doc has no owning phase (it's user-authored). `getOwningPhase("design")` throws. `getReviseTarget("design")` routes to PLANNING as the nearest agent-controlled artifact.
 
@@ -570,7 +605,7 @@ A "Design Document — Mandatory Constraint" block is injected into the system p
 
 #### 14.6.4 Architectural Alignment at IMPLEMENTATION Review (Item 4)
 
-The `[D]` criteria for the IMPLEMENTATION phase (injected by `getDesignInvariantCriteria()`) include checks that the accumulated implementation matches the approved deviation register and that structural invariants from the design doc are enforced structurally (in code), not just procedurally (via prompts). This is folded into the same mechanism as Item 1.
+The `[D]` criteria for the IMPLEMENTATION phase (injected by `getDesignInvariantCriteria()`) include checks that the accumulated implementation matches the approved deviation register and that structural invariants from the design doc are enforced by mechanisms that cannot be bypassed in a single code change (transition tables, type constraints, required parameters) rather than procedural guards (boolean flags, if-statements, comments). The prompt gives concrete examples of each category to help the reviewer make consistent judgments. This is folded into the same mechanism as Item 1.
 
 **Design principle:** The design doc is optional but incentivized. When present, structural guarantees activate automatically. When absent, the `[D]` criteria are not injected and the workflow proceeds normally.
 
@@ -595,10 +630,10 @@ The original v6 design specified a full parallel execution engine with worktree 
 ### 15.2 What's Already Built (Sequential)
 
 The DAG infrastructure exists and is ready for parallel execution:
-- `dag.ts` — `ImplDAG` with `getReadyTasks()`, `getReadyHumanGates()`, `getDependents()`, `isComplete()`
+- `dag.ts` — `ImplDAG` with `getReady()`, `getReadyHumanGates()`, `getDependents()`, `isComplete()`
 - `scheduler.ts` — `nextSchedulerDecision()` with dispatch/complete/blocked/awaiting-human actions
 - `TaskNode` has `worktreeBranch` and `worktreePath` fields (defined, unused, reserved)
-- `markTaskInFlight()` and `markTaskAborted()` exist with cascading abort logic
+- `markTaskInFlight()` exists; cascading abort logic is inline in `index.ts` (sets task status to `"aborted"` and walks `dag.getDependents()`)
 
 The current implementation dispatches one task at a time via the tool response from `mark_task_complete`. No worktrees, no merge gates.
 
@@ -624,31 +659,42 @@ These must hold true at all times. Items marked *(procedural)* are enforced by c
 7. **Parallel abort on dependency invalidation** *(deferred)*. Sequential execution eliminates the need.
 8. **Git checkpoint on every user approval.** Tagged commits at every gate.
 9. **Human gates and escape hatch are the only unplanned user touchpoints** (in artisan mode). Robot-artisan mode replaces user gates with auto-approval.
-10. **Self-review uses isolated subagent sessions.** Hidden `workflow-reviewer` agent with `tools: { write: false, edit: false }`.
+10. **Self-review uses isolated subagent sessions.** Hidden `workflow-reviewer` agent with `tools: { write: false, edit: false }` and `disallowedTools` list that explicitly blocks all workflow tool names plus `patch`, `create`, `overwrite`.
 11. **Discovery constrains all subsequent phases.** Conventions document is a first-class artifact in the dependency graph.
 12. **Incremental mode enforces a file allowlist.** Tool guard blocks writes to unlisted files.
 13. **The plugin is dormant for non-artisan agents.** Agent-aware activation prevents interference with standard OpenCode usage.
+14. **`.env` files are never writable.** The tool guard blocks writes to `.env` and `.env.*` in all phases, including IMPLEMENTATION.
 
 ---
 
 ## 17. Constants Reference
 
-| Constant | Value | Purpose |
-|----------|-------|---------|
-| `SCHEMA_VERSION` | 13 | Schema forward-compatibility |
-| `MAX_REVIEW_ITERATIONS` | 10 | Self-review loop cap before escalation |
-| `MAX_IDLE_RETRIES` | 3 | Idle re-prompt retries before escalation |
-| `IDLE_COOLDOWN_MS` | 10,000 | Debounce between idle re-prompts |
-| `SELF_REVIEW_TIMEOUT_MS` | 300,000 (5 min) | Self-review subagent timeout |
-| `TASK_REVIEW_TIMEOUT_MS` | 180,000 (3 min) | Per-task review subagent timeout |
-| `SCANNER_TIMEOUT_MS` | 180,000 (3 min) | Discovery scanner subagent timeout |
-| `AUTO_APPROVE_TIMEOUT_MS` | 120,000 (2 min) | Auto-approver subagent timeout |
-| `AUTO_APPROVE_CONFIDENCE_THRESHOLD` | 0.7 | Minimum confidence for auto-approval |
-| `MIN_SCANNERS_THRESHOLD` | 3 | Minimum successful scanners for discovery |
-| `MAX_ARTIFACT_PATHS` | 20 | Cap on artifact file paths sent to reviewer |
-| `MAX_CONVENTIONS_CHARS` | 12,000 | Conventions truncation in system prompt |
-| `MAX_REPORT_CHARS` | 16,000 | Discovery report truncation in system prompt |
-| `MAX_ARTIFACT_CONTENT_CHARS` | 10,000 | Inline artifact content truncation |
+| Constant | Value | Location | Purpose |
+|----------|-------|----------|---------|
+| `SCHEMA_VERSION` | 15 | `types.ts` | Schema forward-compatibility |
+| `MAX_REVIEW_ITERATIONS` | 10 | `constants.ts` | Self-review loop cap before escalation |
+| `MAX_TASK_REVIEW_ITERATIONS` | 10 | `constants.ts` | Per-task review iteration cap |
+| `MAX_IDLE_RETRIES` | 3 | `constants.ts` | Idle re-prompt retries before escalation |
+| `IDLE_COOLDOWN_MS` | 10,000 | `constants.ts` | Debounce between idle re-prompts |
+| `SELF_REVIEW_TIMEOUT_MS` | 300,000 (5 min) | `constants.ts` | Self-review subagent timeout |
+| `TASK_REVIEW_TIMEOUT_MS` | 180,000 (3 min) | `constants.ts` | Per-task review subagent timeout |
+| `SCANNER_TIMEOUT_MS` | 180,000 (3 min) | `constants.ts` | Discovery scanner subagent timeout |
+| `ORCHESTRATOR_TIMEOUT_MS` | 60,000 (1 min) | `llm-calls.ts` | Orchestrator LLM call timeout |
+| `DRIFT_CHECK_TIMEOUT_MS` | 30,000 (30 sec) | `task-drift.ts` | Per-task drift check timeout |
+| `AUTO_APPROVE_TIMEOUT_MS` | 120,000 (2 min) | `auto-approve.ts` | Auto-approver subagent timeout |
+| `AUTO_APPROVE_CONFIDENCE_THRESHOLD` | 0.7 | `auto-approve.ts` | Minimum confidence for auto-approval |
+| `MIN_SCANNERS_THRESHOLD` | 3 | `constants.ts` | Minimum successful scanners for discovery |
+| `MAX_ARTIFACT_PATHS` | 20 | `constants.ts` | Cap on artifact file paths sent to reviewer |
+| `MAX_CONVENTIONS_CHARS` | 12,000 | `constants.ts` | Conventions truncation in system prompt |
+| `MAX_REPORT_CHARS` | 16,000 | `constants.ts` | Discovery report truncation in system prompt |
+| `MAX_ARTIFACT_CONTENT_CHARS` | 10,000 | `constants.ts` | Inline artifact content truncation |
+| `MAX_INTENT_BASELINE_CHARS` | 2,000 | `constants.ts` | Intent baseline text cap |
+| `MAX_FEEDBACK_CHARS` | 2,000 | `constants.ts` | Feedback text cap |
+| `MAX_SUMMARY_CHARS` | 500 | `constants.ts` | Summary text cap |
+| `MAX_ESCAPE_FEEDBACK_CHARS` | 500 | `constants.ts` | Escape hatch feedback text cap |
+| `MAX_TASK_DESCRIPTION_CHARS` | 100 | `constants.ts` | Task description text cap |
+| `MAX_STEP_INSTRUCTION_CHARS` | 100 | `constants.ts` | Revision step instruction cap |
+| `MAX_AMBIGUOUS_RESPONSE_LENGTH` | 15 | `constants.ts` | Escape hatch ambiguity detection threshold |
 
 ---
 
@@ -682,6 +728,7 @@ These must hold true at all times. Items marked *(procedural)* are enforced by c
         ├── self-review.ts          # Isolated self-review dispatch
         ├── task-review.ts          # Per-task review dispatch
         ├── auto-approve.ts         # Robot-artisan auto-approval dispatch
+        ├── task-drift.ts           # Per-task alignment check after review
         ├── revision-baseline.ts    # Diff gate (REVISE entry snapshot)
         ├── hooks/
         │   ├── system-transform.ts # System prompt injection
@@ -753,7 +800,7 @@ tests/
 └── utils.test.ts
 ```
 
-**Test count:** 924 tests across 35 files (schema v13).
+**Test count:** 989 tests across 35 files (schema v15).
 
 ---
 
@@ -762,7 +809,7 @@ tests/
 | Dimension | Ralph Wiggum | Oh My OpenCode | Weave | Open Artisan |
 |-----------|-------------|----------------|-------|-------------|
 | Core pattern | `while(true)` loop | Multi-agent orchestration | Plan → Review → Execute | Phased state machine with dependency DAG |
-| State tracking | None (infers from git) | Session-level | Plan file with checkboxes | ~30-state machine persisted to JSON (schema v13) |
+| State tracking | None (infers from git) | Session-level | Plan file with checkboxes | 34-state machine persisted to JSON (schema v15) |
 | Quality control | None structural | Approval-biased review | Single review pass | Iterative isolated self-review per phase with 7-dimension quality scoring (9/10 threshold) + per-task review |
 | User involvement | Fire-and-forget | Interview mode at start | Plan approval | Up to 6 phase gates + escape hatch. Robot-artisan mode: fully autonomous with AI gates |
 | Dependency tracking | None | None | None | Full artifact dependency graph with cascade |

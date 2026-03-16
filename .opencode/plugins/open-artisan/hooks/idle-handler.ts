@@ -3,15 +3,19 @@
  *
  * When the agent goes idle while NOT at a user gate, it has stopped prematurely.
  * This handler re-prompts the agent with a continuation message, up to 3 times.
- * On the 4th retry, it escalates to the user via a toast notification.
+ * On the 4th retry, it escalates: toast notification + in-session prompt telling
+ * the agent to stop and ask the user for help. Retry count resets so the agent
+ * gets fresh attempts after the user provides guidance.
  *
  * When the agent is at a user gate (USER_GATE), idle is expected — the agent
  * should be waiting for user input. No re-prompt in that case.
  */
 import type { WorkflowState, Phase, PhaseState } from "../types"
 import { getNextActionForState } from "../utils"
+import { MAX_IDLE_RETRIES } from "../constants"
 
-export const MAX_RETRIES = 3
+/** @deprecated Use MAX_IDLE_RETRIES from constants.ts. Re-exported for test compatibility. */
+export const MAX_RETRIES = MAX_IDLE_RETRIES
 
 // ---------------------------------------------------------------------------
 // Idle decision

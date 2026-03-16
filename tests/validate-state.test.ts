@@ -501,3 +501,48 @@ describe("validateWorkflowState — userGateMessageReceived validation", () => {
     expect(err).toContain("userGateMessageReceived")
   })
 })
+
+// ---------------------------------------------------------------------------
+// ESCAPE_HATCH cross-field invariant (M2)
+// ---------------------------------------------------------------------------
+
+describe("validateWorkflowState — ESCAPE_HATCH invariant", () => {
+  it("accepts escapePending=true with phaseState=ESCAPE_HATCH (valid)", () => {
+    const state = makeValidState({
+      escapePending: true,
+      phaseState: "ESCAPE_HATCH",
+      pendingRevisionSteps: [
+        { artifact: "plan", phase: "PLANNING", phaseState: "REVISE", instructions: "revise plan" },
+      ],
+    })
+    expect(validateWorkflowState(state)).toBeNull()
+  })
+
+  it("rejects escapePending=true with phaseState=USER_GATE (cross-field invariant violated)", () => {
+    const state = makeValidState({
+      escapePending: true,
+      phaseState: "USER_GATE",
+      pendingRevisionSteps: [
+        { artifact: "plan", phase: "PLANNING", phaseState: "REVISE", instructions: "revise plan" },
+      ],
+    })
+    const err = validateWorkflowState(state)
+    expect(err).not.toBeNull()
+    expect(err).toContain("escapePending")
+    expect(err).toContain("ESCAPE_HATCH")
+  })
+
+  it("rejects escapePending=true with phaseState=DRAFT (cross-field invariant violated)", () => {
+    const state = makeValidState({
+      escapePending: true,
+      phaseState: "DRAFT",
+      pendingRevisionSteps: [
+        { artifact: "plan", phase: "PLANNING", phaseState: "REVISE", instructions: "revise plan" },
+      ],
+    })
+    const err = validateWorkflowState(state)
+    expect(err).not.toBeNull()
+    expect(err).toContain("escapePending")
+    expect(err).toContain("ESCAPE_HATCH")
+  })
+})

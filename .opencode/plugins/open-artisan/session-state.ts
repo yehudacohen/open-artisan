@@ -201,13 +201,20 @@ export function createSessionStateStore(dir: string): SessionStateStore {
           migrated["artifactDiskPaths"] ??= {}
           // v9 → v10: add featureName
           migrated["featureName"] ??= null
+          // v10 → v11: add revisionBaseline
+          migrated["revisionBaseline"] ??= null
+          // v11 → v12: add TaskCategory/HumanGateInfo on implDag nodes (no top-level field — node fields are optional)
           // v12 → v13: add activeAgent
           migrated["activeAgent"] ??= null
-          // v13 → v14: add taskCompletionInProgress
-          migrated["taskCompletionInProgress"] ??= null
+          // v13 → v14: add taskCompletionInProgress (transient lock — always clear on load)
+          migrated["taskCompletionInProgress"] = null
           // v14 → v15: add taskReviewCount, pendingFeedback
           migrated["taskReviewCount"] ??= 0
-          migrated["pendingFeedback"] ??= null
+          // pendingFeedback is transient (crash-safe store for in-flight orchestrator calls).
+          // Always clear on load — if the process crashed mid-orchestrator, the feedback is
+          // lost and the user will need to re-submit. This is preferable to silently replaying
+          // a stale feedback text through a potentially different orchestrator classification.
+          migrated["pendingFeedback"] = null
           // Always stamp with current schema version after migration
           migrated["schemaVersion"] = SCHEMA_VERSION
           // Second gate: full invariant validation (phase/phaseState combos, counts, etc.)

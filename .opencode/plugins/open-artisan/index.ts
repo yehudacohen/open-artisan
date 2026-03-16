@@ -532,12 +532,29 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
         if (decision.action === "ignore") return
 
         if (decision.action === "escalate") {
-          // Best-effort toast notification; ignore if client API differs
+          // Hard escalation: toast + in-session prompt telling the agent to
+          // stop and ask the user for help. The agent's response will be
+          // visible in the conversation, making the stall impossible to miss.
           try {
             await client.tui?.showToast?.({
               body: { title: "Workflow Stalled", message: decision.message, variant: "warning" },
             })
           } catch { /* ignore */ }
+          // Reset retry count so the agent gets fresh attempts after user input
+          await store.update(sessionId, (draft) => { draft.retryCount = 0 })
+          try {
+            await client.session?.prompt({
+              path: { id: sessionId },
+              body: {
+                noReply: false,
+                parts: [{ type: "text", text:
+                  `WORKFLOW STALLED: You have stopped ${state.retryCount} times during ${state.phase}/${state.phaseState} ` +
+                  `without completing the current step. Stop what you are doing and ask the user for guidance. ` +
+                  `Explain what you were trying to do and where you got stuck.`,
+                }],
+              },
+            })
+          } catch { /* ignore if API shape differs */ }
           return
         }
 

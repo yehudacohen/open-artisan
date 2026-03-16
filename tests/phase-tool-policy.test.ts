@@ -474,6 +474,126 @@ describe("Tool policy — MODE_SELECT and DONE block everything except workflow 
   })
 })
 
+// ---------------------------------------------------------------------------
+// ESCAPE_HATCH sub-state — same gating as USER_GATE for each phase
+// ---------------------------------------------------------------------------
+
+describe("Tool policy — DISCOVERY/ESCAPE_HATCH blocks write and edit", () => {
+  it("DISCOVERY/ESCAPE_HATCH blocks write", () => {
+    const policy = getPhaseToolPolicy("DISCOVERY", "ESCAPE_HATCH", "REFACTOR", [])
+    expect(policy.blocked).toContain("write")
+  })
+
+  it("DISCOVERY/ESCAPE_HATCH blocks edit", () => {
+    const policy = getPhaseToolPolicy("DISCOVERY", "ESCAPE_HATCH", "REFACTOR", [])
+    expect(policy.blocked).toContain("edit")
+  })
+
+  it("DISCOVERY/ESCAPE_HATCH does not block bash", () => {
+    const policy = getPhaseToolPolicy("DISCOVERY", "ESCAPE_HATCH", "REFACTOR", [])
+    expect(policy.blocked).not.toContain("bash")
+  })
+})
+
+describe("Tool policy — PLANNING/ESCAPE_HATCH blocks write and edit", () => {
+  it("PLANNING/ESCAPE_HATCH blocks write", () => {
+    const policy = getPhaseToolPolicy("PLANNING", "ESCAPE_HATCH", "GREENFIELD", [])
+    expect(policy.blocked).toContain("write")
+  })
+
+  it("PLANNING/ESCAPE_HATCH blocks edit", () => {
+    const policy = getPhaseToolPolicy("PLANNING", "ESCAPE_HATCH", "GREENFIELD", [])
+    expect(policy.blocked).toContain("edit")
+  })
+
+  it("PLANNING/ESCAPE_HATCH does not block bash", () => {
+    const policy = getPhaseToolPolicy("PLANNING", "ESCAPE_HATCH", "GREENFIELD", [])
+    expect(policy.blocked).not.toContain("bash")
+  })
+
+  it("IMPL_PLAN/ESCAPE_HATCH blocks write and edit", () => {
+    const policy = getPhaseToolPolicy("IMPL_PLAN", "ESCAPE_HATCH", "GREENFIELD", [])
+    expect(policy.blocked).toContain("write")
+    expect(policy.blocked).toContain("edit")
+    expect(policy.blocked).not.toContain("bash")
+  })
+})
+
+describe("Tool policy — INTERFACES/ESCAPE_HATCH allows interface writes and bash", () => {
+  it("INTERFACES/ESCAPE_HATCH does not block bash", () => {
+    const policy = getPhaseToolPolicy("INTERFACES", "ESCAPE_HATCH", "GREENFIELD", [])
+    expect(policy.blocked).not.toContain("bash")
+  })
+
+  it("INTERFACES/ESCAPE_HATCH allows writes to interface files via predicate", () => {
+    const policy = getPhaseToolPolicy("INTERFACES", "ESCAPE_HATCH", "GREENFIELD", [])
+    expect(policy.writePathPredicate).toBeDefined()
+    expect(policy.writePathPredicate?.("/project/src/types.ts")).toBe(true)
+    expect(policy.writePathPredicate?.("/project/src/foo.d.ts")).toBe(true)
+    expect(policy.writePathPredicate?.("/project/schema.proto")).toBe(true)
+  })
+
+  it("INTERFACES/ESCAPE_HATCH blocks writes to non-interface files", () => {
+    const policy = getPhaseToolPolicy("INTERFACES", "ESCAPE_HATCH", "GREENFIELD", [])
+    expect(policy.writePathPredicate?.("/project/src/server.ts")).toBe(false)
+    expect(policy.writePathPredicate?.("/project/src/index.ts")).toBe(false)
+  })
+
+  it("INTERFACES/ESCAPE_HATCH blocks .env writes", () => {
+    const policy = getPhaseToolPolicy("INTERFACES", "ESCAPE_HATCH", "GREENFIELD", [])
+    expect(policy.writePathPredicate?.("/project/.env")).toBe(false)
+  })
+})
+
+describe("Tool policy — TESTS/ESCAPE_HATCH allows test file writes and bash", () => {
+  it("TESTS/ESCAPE_HATCH does not block bash", () => {
+    const policy = getPhaseToolPolicy("TESTS", "ESCAPE_HATCH", "GREENFIELD", [])
+    expect(policy.blocked).not.toContain("bash")
+  })
+
+  it("TESTS/ESCAPE_HATCH allows writes to test files via predicate", () => {
+    const policy = getPhaseToolPolicy("TESTS", "ESCAPE_HATCH", "GREENFIELD", [])
+    expect(policy.writePathPredicate).toBeDefined()
+    expect(policy.writePathPredicate?.("/project/tests/foo.test.ts")).toBe(true)
+    expect(policy.writePathPredicate?.("/project/src/foo.spec.ts")).toBe(true)
+  })
+
+  it("TESTS/ESCAPE_HATCH blocks writes to non-test files", () => {
+    const policy = getPhaseToolPolicy("TESTS", "ESCAPE_HATCH", "GREENFIELD", [])
+    expect(policy.writePathPredicate?.("/project/src/index.ts")).toBe(false)
+    expect(policy.writePathPredicate?.("/project/src/Component.tsx")).toBe(false)
+  })
+
+  it("TESTS/ESCAPE_HATCH blocks .env writes", () => {
+    const policy = getPhaseToolPolicy("TESTS", "ESCAPE_HATCH", "GREENFIELD", [])
+    expect(policy.writePathPredicate?.("/project/.env")).toBe(false)
+  })
+})
+
+describe("Tool policy — IMPLEMENTATION/ESCAPE_HATCH has full write access (GREENFIELD/REFACTOR)", () => {
+  it("IMPLEMENTATION/ESCAPE_HATCH (GREENFIELD) allows any non-env file", () => {
+    const policy = getPhaseToolPolicy("IMPLEMENTATION", "ESCAPE_HATCH", "GREENFIELD", [])
+    expect(policy.blocked).not.toContain("write")
+    expect(policy.blocked).not.toContain("edit")
+    expect(policy.blocked).not.toContain("bash")
+    expect(policy.writePathPredicate?.("/project/src/anything.ts")).toBe(true)
+    expect(policy.writePathPredicate?.("/project/README.md")).toBe(true)
+  })
+
+  it("IMPLEMENTATION/ESCAPE_HATCH (REFACTOR) allows any non-env file", () => {
+    const policy = getPhaseToolPolicy("IMPLEMENTATION", "ESCAPE_HATCH", "REFACTOR", [])
+    expect(policy.blocked).not.toContain("write")
+    expect(policy.blocked).not.toContain("edit")
+    expect(policy.writePathPredicate?.("/project/src/service.ts")).toBe(true)
+  })
+
+  it("IMPLEMENTATION/ESCAPE_HATCH still blocks .env", () => {
+    const policy = getPhaseToolPolicy("IMPLEMENTATION", "ESCAPE_HATCH", "GREENFIELD", [])
+    expect(policy.writePathPredicate?.("/project/.env")).toBe(false)
+    expect(policy.writePathPredicate?.("/project/.env.local")).toBe(false)
+  })
+})
+
 describe("Tool policy — exhaustive default case (H5)", () => {
   it("unknown phase returns blocked=[write,edit,bash] as safety fallback", () => {
     // Cast an invalid string to Phase to exercise the runtime default branch.

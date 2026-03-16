@@ -398,3 +398,74 @@ describe("escalate_to_user event (M12)", () => {
     expect(result.success).toBe(false)
   })
 })
+
+// ---------------------------------------------------------------------------
+// ESCAPE_HATCH state machine transitions
+// ---------------------------------------------------------------------------
+describe("StateMachine — ESCAPE_HATCH transitions", () => {
+  const standardPhases = ["PLANNING", "INTERFACES", "TESTS", "IMPL_PLAN", "IMPLEMENTATION"] as const
+
+  for (const phase of standardPhases) {
+    it(`${phase}/USER_GATE + escape_hatch_triggered → ${phase}/ESCAPE_HATCH`, () => {
+      const result = sm.transition(phase, "USER_GATE", "escape_hatch_triggered", "GREENFIELD")
+      expect(result.success).toBe(true)
+      if (!result.success) return
+      expect(result.nextPhase).toBe(phase)
+      expect(result.nextPhaseState).toBe("ESCAPE_HATCH")
+    })
+
+    it(`${phase}/ESCAPE_HATCH + user_feedback → ${phase}/REVISE`, () => {
+      const result = sm.transition(phase, "ESCAPE_HATCH", "user_feedback", "GREENFIELD")
+      expect(result.success).toBe(true)
+      if (!result.success) return
+      expect(result.nextPhase).toBe(phase)
+      expect(result.nextPhaseState).toBe("REVISE")
+    })
+
+    it(`${phase}/ESCAPE_HATCH + user_approve → rejected (structural guarantee)`, () => {
+      const result = sm.transition(phase, "ESCAPE_HATCH", "user_approve", "GREENFIELD")
+      expect(result.success).toBe(false)
+    })
+  }
+
+  // DISCOVERY phase
+  it("DISCOVERY/USER_GATE + escape_hatch_triggered → DISCOVERY/ESCAPE_HATCH", () => {
+    const result = sm.transition("DISCOVERY", "USER_GATE", "escape_hatch_triggered", "REFACTOR")
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    expect(result.nextPhase).toBe("DISCOVERY")
+    expect(result.nextPhaseState).toBe("ESCAPE_HATCH")
+  })
+
+  it("DISCOVERY/ESCAPE_HATCH + user_feedback → DISCOVERY/REVISE", () => {
+    const result = sm.transition("DISCOVERY", "ESCAPE_HATCH", "user_feedback", "REFACTOR")
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    expect(result.nextPhase).toBe("DISCOVERY")
+    expect(result.nextPhaseState).toBe("REVISE")
+  })
+
+  it("DISCOVERY/ESCAPE_HATCH + user_approve → rejected (structural guarantee)", () => {
+    const result = sm.transition("DISCOVERY", "ESCAPE_HATCH", "user_approve", "REFACTOR")
+    expect(result.success).toBe(false)
+  })
+
+  // Helper checks
+  it("ESCAPE_HATCH is in isUserGate() — returns true", () => {
+    expect(sm.isUserGate("PLANNING", "ESCAPE_HATCH")).toBe(true)
+    expect(sm.isUserGate("INTERFACES", "ESCAPE_HATCH")).toBe(true)
+    expect(sm.isUserGate("DISCOVERY", "ESCAPE_HATCH")).toBe(true)
+  })
+
+  it("ESCAPE_HATCH is NOT in isAgentActive() — returns false", () => {
+    expect(sm.isAgentActive("PLANNING", "ESCAPE_HATCH")).toBe(false)
+    expect(sm.isAgentActive("INTERFACES", "ESCAPE_HATCH")).toBe(false)
+    expect(sm.isAgentActive("DISCOVERY", "ESCAPE_HATCH")).toBe(false)
+  })
+
+  it("validEvents from ESCAPE_HATCH includes user_feedback but NOT user_approve", () => {
+    const events = sm.validEvents("PLANNING", "ESCAPE_HATCH")
+    expect(events).toContain("user_feedback")
+    expect(events).not.toContain("user_approve")
+  })
+})

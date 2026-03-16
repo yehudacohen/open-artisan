@@ -697,3 +697,84 @@ describe("dispatchRebuttal — session lifecycle", () => {
     expect((client.session.delete as ReturnType<typeof mock>).mock.calls).toHaveLength(1)
   })
 })
+
+// ---------------------------------------------------------------------------
+// Design-invariant ([D]) criterion parsing and blocking behavior
+// ---------------------------------------------------------------------------
+
+describe("dispatchSelfReview — design-invariant criteria", () => {
+  it("parses [D] criterion with severity 'design-invariant' in criteriaResults", async () => {
+    const resp = makeReviewResponse({
+      satisfied: true,
+      criteria: [
+        { criterion: "[D] No circular dependencies", met: true, evidence: "dep graph verified", severity: "blocking" },
+        { criterion: "Code compiles", met: true, evidence: "tsc clean", severity: "blocking" },
+      ],
+    })
+    const client = makeClient(resp)
+    const result = await dispatchSelfReview(client, BASE_REQ)
+
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    const diCriterion = result.criteriaResults.find((c) => c.criterion.startsWith("[D]"))
+    expect(diCriterion).toBeDefined()
+    expect(diCriterion!.severity).toBe("design-invariant")
+  })
+
+  it("returns satisfied=false when a design-invariant criterion is not met", async () => {
+    const resp = makeReviewResponse({
+      satisfied: false,
+      criteria: [
+        { criterion: "[D] No circular dependencies", met: false, evidence: "cycle detected: A→B→A", severity: "blocking" },
+        { criterion: "Code compiles", met: true, evidence: "tsc clean", severity: "blocking" },
+      ],
+    })
+    const client = makeClient(resp)
+    const result = await dispatchSelfReview(client, BASE_REQ)
+
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    expect(result.satisfied).toBe(false)
+    const failing = result.criteriaResults.filter((c) => !c.met)
+    expect(failing).toHaveLength(1)
+    expect(failing[0]!.severity).toBe("design-invariant")
+  })
+
+  it("returns satisfied=true when all design-invariant and blocking criteria are met", async () => {
+    const resp = makeReviewResponse({
+      satisfied: true,
+      criteria: [
+        { criterion: "[D] No circular dependencies", met: true, evidence: "dep graph clean", severity: "blocking" },
+        { criterion: "[D] Single responsibility", met: true, evidence: "each module has one purpose", severity: "blocking" },
+        { criterion: "Code compiles", met: true, evidence: "tsc clean", severity: "blocking" },
+      ],
+    })
+    const client = makeClient(resp)
+    const result = await dispatchSelfReview(client, BASE_REQ)
+
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    expect(result.satisfied).toBe(true)
+    // Verify all [D] criteria were parsed as design-invariant
+    const diCriteria = result.criteriaResults.filter((c) => c.severity === "design-invariant")
+    expect(diCriteria).toHaveLength(2)
+    expect(diCriteria.every((c) => c.met)).toBe(true)
+  })
+
+  it("overrides satisfied=true to false when a design-invariant criterion is unmet (inconsistency guard)", async () => {
+    const resp = makeReviewResponse({
+      satisfied: true, // LLM incorrectly says satisfied
+      criteria: [
+        { criterion: "[D] No circular dependencies", met: false, evidence: "cycle: A→B→A", severity: "blocking" },
+        { criterion: "Code compiles", met: true, evidence: "tsc clean", severity: "blocking" },
+      ],
+    })
+    const client = makeClient(resp)
+    const result = await dispatchSelfReview(client, BASE_REQ)
+
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    // Inconsistency guard must fire: design-invariant unmet → satisfied=false
+    expect(result.satisfied).toBe(false)
+  })
+})

@@ -4,6 +4,7 @@
  */
 import { describe, expect, it } from "bun:test"
 import { handleIdle, MAX_RETRIES } from "#plugin/hooks/idle-handler"
+import { MAX_IDLE_RETRIES } from "#plugin/constants"
 import type { WorkflowState } from "#plugin/types"
 import { SCHEMA_VERSION } from "#plugin/types"
 
@@ -51,6 +52,11 @@ describe("handleIdle — ignore at expected idle states", () => {
   it("ignores at USER_GATE (agent should be waiting)", () => {
     const state = makeState({ phaseState: "USER_GATE" })
     expect(handleIdle(state).action).toBe("ignore")
+  })
+
+  it("ignores at ESCAPE_HATCH (expected idle — user breakout pending)", () => {
+    const state = makeState({ phaseState: "ESCAPE_HATCH" })
+    expect(handleIdle(state)).toEqual({ action: "ignore" })
   })
 
   it("ignores at DONE phase", () => {
@@ -153,5 +159,15 @@ describe("handleIdle — pure function", () => {
     const retryBefore = state.retryCount
     handleIdle(state)
     expect(state.retryCount).toBe(retryBefore)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Re-export invariant
+// ---------------------------------------------------------------------------
+
+describe("MAX_RETRIES re-export", () => {
+  it("MAX_RETRIES equals MAX_IDLE_RETRIES from constants (re-export fix)", () => {
+    expect(MAX_RETRIES).toBe(MAX_IDLE_RETRIES)
   })
 })

@@ -323,6 +323,63 @@ describe("SessionStateStore — global write lock (M4)", () => {
   })
 })
 
+describe("SessionStateStore — transient field cleanup on load", () => {
+  it("clears taskCompletionInProgress on reload (transient lock)", async () => {
+    await store.create("session-transient-1")
+    await store.update("session-transient-1", (d) => {
+      d.taskCompletionInProgress = "task-3"
+    })
+    // Verify it was set
+    expect(store.get("session-transient-1")?.taskCompletionInProgress).toBe("task-3")
+    // Reload from disk
+    const store2 = createSessionStateStore(tmpDir)
+    await store2.load()
+    const loaded = store2.get("session-transient-1")
+    expect(loaded).not.toBeNull()
+    expect(loaded?.taskCompletionInProgress).toBeNull()
+  })
+
+  it("clears pendingFeedback on reload (transient state)", async () => {
+    await store.create("session-transient-2")
+    await store.update("session-transient-2", (d) => {
+      d.pendingFeedback = "some feedback text"
+    })
+    // Verify it was set
+    expect(store.get("session-transient-2")?.pendingFeedback).toBe("some feedback text")
+    // Reload from disk
+    const store2 = createSessionStateStore(tmpDir)
+    await store2.load()
+    const loaded = store2.get("session-transient-2")
+    expect(loaded).not.toBeNull()
+    expect(loaded?.pendingFeedback).toBeNull()
+  })
+
+  it("preserves taskReviewCount on reload (NOT transient)", async () => {
+    await store.create("session-transient-3")
+    await store.update("session-transient-3", (d) => {
+      d.taskReviewCount = 5
+    })
+    // Reload from disk
+    const store2 = createSessionStateStore(tmpDir)
+    await store2.load()
+    const loaded = store2.get("session-transient-3")
+    expect(loaded).not.toBeNull()
+    expect(loaded?.taskReviewCount).toBe(5)
+  })
+
+  it("fresh state defaults: taskCompletionInProgress=null, pendingFeedback=null, taskReviewCount=0 after reload", async () => {
+    await store.create("session-transient-4")
+    // Persist with defaults, reload
+    const store2 = createSessionStateStore(tmpDir)
+    await store2.load()
+    const loaded = store2.get("session-transient-4")
+    expect(loaded).not.toBeNull()
+    expect(loaded?.taskCompletionInProgress).toBeNull()
+    expect(loaded?.pendingFeedback).toBeNull()
+    expect(loaded?.taskReviewCount).toBe(0)
+  })
+})
+
 describe("SessionStateStore — load", () => {
   it("discards states with wrong schemaVersion", async () => {
     // Manually write a bad state file

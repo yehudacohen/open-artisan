@@ -1,9 +1,13 @@
 /**
  * Tests for the artifact dependency graph.
  */
-import { describe, expect, it, beforeEach } from "bun:test"
+import { describe, expect, it, beforeEach, afterEach } from "bun:test"
+import { join } from "node:path"
+import { mkdtemp, rm, mkdir, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
 
 import { createArtifactGraph } from "#plugin/artifacts"
+import { detectDesignDoc } from "#plugin/artifact-store"
 import type { ArtifactGraph } from "#plugin/types"
 
 let graph: ArtifactGraph
@@ -142,5 +146,103 @@ describe("ArtifactGraph — revise target", () => {
     const t = graph.getReviseTarget("plan")
     expect(t.phase).toBe("PLANNING")
     expect(t.phaseState).toBe("REVISE")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Design artifact graph edges
+// ---------------------------------------------------------------------------
+describe("ArtifactGraph — design artifact edges", () => {
+  it("createArtifactGraph(false): plan does NOT depend on design", () => {
+    const g = createArtifactGraph(false)
+    const deps = g.getDependencies("plan", "GREENFIELD")
+    expect(deps).not.toContain("design")
+  })
+
+  it("createArtifactGraph(true): plan depends on design", () => {
+    const g = createArtifactGraph(true)
+    const deps = g.getDependencies("plan", "GREENFIELD")
+    expect(deps).toContain("design")
+  })
+
+  it("createArtifactGraph(true): design has no dependencies (empty array)", () => {
+    const g = createArtifactGraph(true)
+    const deps = g.getDependencies("design", "GREENFIELD")
+    expect(deps).toHaveLength(0)
+  })
+
+  it("createArtifactGraph(true): changing design cascades to plan and all downstream", () => {
+    const g = createArtifactGraph(true)
+    const dependents = g.getDependents("design", "GREENFIELD")
+    expect(dependents).toContain("plan")
+    expect(dependents).toContain("interfaces")
+    expect(dependents).toContain("tests")
+    expect(dependents).toContain("impl_plan")
+    expect(dependents).toContain("implementation")
+  })
+
+  it("createArtifactGraph(true): design is NOT in getDependents('plan', ...) — design is upstream, not downstream", () => {
+    const g = createArtifactGraph(true)
+    const dependents = g.getDependents("plan", "GREENFIELD")
+    expect(dependents).not.toContain("design")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// detectDesignDoc
+// ---------------------------------------------------------------------------
+
+describe("detectDesignDoc", () => {
+  let tmpDir: string
+
+  beforeEach(async () => {
+    tmpDir = await mkdtemp(join(tmpdir(), "dd-test-"))
+  })
+
+  afterEach(async () => {
+    await rm(tmpDir, { recursive: true, force: true })
+  })
+
+  it("returns null when no design doc exists", () => {
+    expect(detectDesignDoc(tmpDir)).toBeNull()
+  })
+
+  it("returns path when docs/design.md exists", async () => {
+    const docsDir = join(tmpDir, "docs")
+    await mkdir(docsDir, { recursive: true })
+    await writeFile(join(docsDir, "design.md"), "# Design")
+    const result = detectDesignDoc(tmpDir)
+    expect(result).not.toBeNull()
+    expect(result).toBe(join(docsDir, "design.md"))
+  })
+
+  it("returns feature-scoped path when .openartisan/<feature>/design.md exists", async () => {
+    const featureDir = join(tmpDir, ".openartisan", "my-feature")
+    await mkdir(featureDir, { recursive: true })
+    await writeFile(join(featureDir, "design.md"), "# Feature Design")
+    const result = detectDesignDoc(tmpDir, "my-feature")
+    expect(result).not.toBeNull()
+    expect(result).toBe(join(featureDir, "design.md"))
+  })
+
+  it("prefers feature-scoped path over docs/design.md", async () => {
+    // Create both paths
+    const docsDir = join(tmpDir, "docs")
+    await mkdir(docsDir, { recursive: true })
+    await writeFile(join(docsDir, "design.md"), "# Docs Design")
+
+    const featureDir = join(tmpDir, ".openartisan", "my-feature")
+    await mkdir(featureDir, { recursive: true })
+    await writeFile(join(featureDir, "design.md"), "# Feature Design")
+
+    const result = detectDesignDoc(tmpDir, "my-feature")
+    expect(result).toBe(join(featureDir, "design.md"))
+  })
+
+  it("returns path for DESIGN.md at root", async () => {
+    await writeFile(join(tmpDir, "DESIGN.md"), "# Root Design")
+    const result = detectDesignDoc(tmpDir)
+    expect(result).not.toBeNull()
+    expect(result).toBe(join(tmpDir, "DESIGN.md"))
   })
 })

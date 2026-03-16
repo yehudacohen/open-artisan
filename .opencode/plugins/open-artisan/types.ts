@@ -263,8 +263,9 @@ export interface WorkflowState {
    *
    * For in-memory phases (PLANNING, DISCOVERY, IMPL_PLAN): stores a SHA-256 content hash
    * of the artifact file on disk (from artifactDiskPaths).
-   * For file-based phases (INTERFACES, TESTS, IMPLEMENTATION): stores the git commit SHA
-   * at REVISE entry (the working tree is diffed against this to detect changes).
+   * For file-based phases (INTERFACES, TESTS, IMPLEMENTATION): stores a SHA-256 content hash
+   * of `git diff` output (NOT a commit SHA — the type name "git-sha" is legacy). This prevents
+   * false positives during cascades where the agent hasn't committed yet.
    *
    * null when not in REVISE state or when the baseline could not be captured.
    */

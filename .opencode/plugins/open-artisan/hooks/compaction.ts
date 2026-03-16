@@ -147,6 +147,7 @@ export function buildCompactionContext(state: WorkflowState): string {
   lines.push("- `request_review` — submit draft for self-review")
   lines.push("- `mark_satisfied` — report self-review results")
   lines.push("- `mark_task_complete` — complete a DAG implementation task")
+  lines.push("- `resolve_human_gate` — activate a human gate for a DAG task")
   lines.push("- `submit_feedback` — record user approval or revision request")
   lines.push("")
 

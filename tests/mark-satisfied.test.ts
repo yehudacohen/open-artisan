@@ -242,3 +242,55 @@ describe("evaluateMarkSatisfied — cross-validation", () => {
     expect(result.passed).toBe(true)
   })
 })
+
+// ---------------------------------------------------------------------------
+// Design-invariant ([D]) criteria in mark_satisfied
+// ---------------------------------------------------------------------------
+
+describe("evaluateMarkSatisfied — design-invariant [D] criteria", () => {
+  it("parses [D] prefix as severity 'design-invariant'", () => {
+    const result = evaluateMarkSatisfied({
+      criteria_met: [
+        { criterion: "[D] No circular dependencies", met: true, evidence: "dep graph clean" },
+      ],
+    })
+    expect(result.passed).toBe(true)
+    // Even though it passed, verify the internal parsing via a failing case
+    const failResult = evaluateMarkSatisfied({
+      criteria_met: [
+        { criterion: "[D] No circular dependencies", met: false, evidence: "cycle detected" },
+      ],
+    })
+    expect(failResult.passed).toBe(false)
+    expect(failResult.unmetCriteria).toHaveLength(1)
+    expect(failResult.unmetCriteria[0]!.severity).toBe("design-invariant")
+  })
+
+  it("counts design-invariant criteria as blocking for submittedBlockingCount check", () => {
+    // expectedBlockingCount = 3, submit 2 blocking + 1 design-invariant = 3 total blocking-class
+    const result = evaluateMarkSatisfied(
+      {
+        criteria_met: [
+          { criterion: "A", met: true, evidence: "ok" },
+          { criterion: "B", met: true, evidence: "ok" },
+          { criterion: "[D] No cycles", met: true, evidence: "clean" },
+        ],
+      },
+      3,
+    )
+    expect(result.passed).toBe(true)
+  })
+
+  it("unmet design-invariant criteria prevent the review from passing", () => {
+    const result = evaluateMarkSatisfied({
+      criteria_met: [
+        { criterion: "Code compiles", met: true, evidence: "tsc clean" },
+        { criterion: "[D] Single responsibility", met: false, evidence: "module handles 3 concerns" },
+      ],
+    })
+    expect(result.passed).toBe(false)
+    expect(result.unmetCriteria).toHaveLength(1)
+    expect(result.unmetCriteria[0]!.criterion).toBe("[D] Single responsibility")
+    expect(result.unmetCriteria[0]!.severity).toBe("design-invariant")
+  })
+})

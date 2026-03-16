@@ -668,3 +668,287 @@ describe("resolveSessionId — exported from index.ts", () => {
     expect(resolveSessionId({})).toBeNull()
   })
 })
+
+// ---------------------------------------------------------------------------
+// DONE → MODE_SELECT auto-reset on user message
+// ---------------------------------------------------------------------------
+
+describe("DONE → MODE_SELECT auto-reset", () => {
+  it("resets phase to MODE_SELECT when chat.message arrives at DONE", async () => {
+    const sid = `int-test-${Date.now()}-done-reset`
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: sid } } },
+    })
+    const ctx = { directory: tempDir, sessionId: sid }
+
+    // Get out of MODE_SELECT so we can force to DONE
+    await plugin.tool.select_mode.execute(
+      { mode: "GREENFIELD", feature_name: "done-reset-test" },
+      ctx,
+    )
+
+    // Force session to DONE via _testStore
+    const store = plugin._testStore
+    await store.update(sid, (draft: any) => {
+      draft.phase = "DONE"
+      draft.phaseState = "DRAFT"
+    })
+
+    // Verify we're at DONE
+    expect(store.get(sid).phase).toBe("DONE")
+
+    // Send a user message via chat.message hook — should trigger auto-reset
+    await plugin["chat.message"](
+      { sessionID: sid },
+      { message: { sessionID: sid }, parts: [{ type: "text", text: "Build me a new feature" }] },
+    )
+
+    // State should now be MODE_SELECT
+    const state = store.get(sid)
+    expect(state.phase).toBe("MODE_SELECT")
+    expect(state.phaseState).toBe("DRAFT")
+  })
+
+  it("captures user message text as new intentBaseline on reset", async () => {
+    const sid = `int-test-${Date.now()}-done-intent`
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: sid } } },
+    })
+    const ctx = { directory: tempDir, sessionId: sid }
+
+    await plugin.tool.select_mode.execute(
+      { mode: "GREENFIELD", feature_name: "done-intent-test" },
+      ctx,
+    )
+
+    const store = plugin._testStore
+    await store.update(sid, (draft: any) => {
+      draft.phase = "DONE"
+      draft.phaseState = "DRAFT"
+      draft.intentBaseline = "old intent from previous cycle"
+    })
+
+    await plugin["chat.message"](
+      { sessionID: sid },
+      { message: { sessionID: sid }, parts: [{ type: "text", text: "Now build the export feature" }] },
+    )
+
+    const state = store.get(sid)
+    expect(state.phase).toBe("MODE_SELECT")
+    expect(state.intentBaseline).toBe("Now build the export feature")
+  })
+
+  it("clears transient fields on reset", async () => {
+    const sid = `int-test-${Date.now()}-done-clear`
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: sid } } },
+    })
+    const ctx = { directory: tempDir, sessionId: sid }
+
+    await plugin.tool.select_mode.execute(
+      { mode: "GREENFIELD", feature_name: "done-clear-test" },
+      ctx,
+    )
+
+    const store = plugin._testStore
+    await store.update(sid, (draft: any) => {
+      draft.phase = "DONE"
+      draft.phaseState = "DRAFT"
+      draft.iterationCount = 5
+      draft.retryCount = 3
+      draft.currentTaskId = "T7"
+      draft.feedbackHistory = [{ phase: "PLANNING", feedback: "old feedback", timestamp: Date.now() }]
+      // escapePending cannot be true at DONE (validator requires ESCAPE_HATCH phaseState)
+      // so we set it to false and verify it stays false after reset
+      draft.escapePending = false
+      draft.taskCompletionInProgress = "T7"
+      draft.taskReviewCount = 4
+      draft.pendingFeedback = "stale feedback"
+      draft.revisionBaseline = { type: "content-hash", hash: "abc123" }
+      draft.userGateMessageReceived = true
+    })
+
+    await plugin["chat.message"](
+      { sessionID: sid },
+      { message: { sessionID: sid }, parts: [{ type: "text", text: "Next task please" }] },
+    )
+
+    const state = store.get(sid)
+    expect(state.phase).toBe("MODE_SELECT")
+    expect(state.iterationCount).toBe(0)
+    expect(state.retryCount).toBe(0)
+    expect(state.currentTaskId).toBeNull()
+    expect(state.feedbackHistory).toEqual([])
+    expect(state.escapePending).toBe(false)
+    expect(state.taskCompletionInProgress).toBeNull()
+    expect(state.taskReviewCount).toBe(0)
+    expect(state.pendingFeedback).toBeNull()
+    expect(state.revisionBaseline).toBeNull()
+    expect(state.userGateMessageReceived).toBe(false)
+    expect(state.implDag).toBeNull()
+    expect(state.pendingRevisionSteps).toBeNull()
+  })
+
+  it("preserves cross-cycle context fields on reset", async () => {
+    const sid = `int-test-${Date.now()}-done-preserve`
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: sid } } },
+    })
+    const ctx = { directory: tempDir, sessionId: sid }
+
+    await plugin.tool.select_mode.execute(
+      { mode: "GREENFIELD", feature_name: "done-preserve-test" },
+      ctx,
+    )
+
+    const store = plugin._testStore
+    await store.update(sid, (draft: any) => {
+      draft.phase = "DONE"
+      draft.phaseState = "DRAFT"
+      draft.mode = "GREENFIELD"
+      draft.featureName = "done-preserve-test"
+      draft.approvedArtifacts = { plan: "abc123", interfaces: "def456" }
+      draft.conventions = "Use camelCase"
+      draft.fileAllowlist = ["/project/src/foo.ts"]
+      draft.activeAgent = "artisan"
+      draft.lastCheckpointTag = "checkpoint-1"
+      draft.approvalCount = 5
+      draft.phaseApprovalCounts = { PLANNING: 1, INTERFACES: 1 }
+      draft.artifactDiskPaths = { plan: "/project/.openartisan/plan.md" }
+    })
+
+    await plugin["chat.message"](
+      { sessionID: sid },
+      { message: { sessionID: sid }, parts: [{ type: "text", text: "Another task" }] },
+    )
+
+    const state = store.get(sid)
+    expect(state.phase).toBe("MODE_SELECT")
+    // These should be preserved from previous cycle
+    expect(state.mode).toBe("GREENFIELD")
+    expect(state.featureName).toBe("done-preserve-test")
+    expect(state.approvedArtifacts).toEqual({ plan: "abc123", interfaces: "def456" })
+    expect(state.conventions).toBe("Use camelCase")
+    expect(state.activeAgent).toBe("artisan")
+    expect(state.lastCheckpointTag).toBe("checkpoint-1")
+    expect(state.approvalCount).toBe(5)
+    expect(state.artifactDiskPaths).toEqual({ plan: "/project/.openartisan/plan.md" })
+  })
+
+  it("after reset, select_mode succeeds again (new workflow cycle)", async () => {
+    const sid = `int-test-${Date.now()}-done-newcycle`
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: sid } } },
+    })
+    const ctx = { directory: tempDir, sessionId: sid }
+
+    await plugin.tool.select_mode.execute(
+      { mode: "GREENFIELD", feature_name: "cycle-1" },
+      ctx,
+    )
+
+    const store = plugin._testStore
+    await store.update(sid, (draft: any) => {
+      draft.phase = "DONE"
+      draft.phaseState = "DRAFT"
+    })
+
+    // Reset via chat.message
+    await plugin["chat.message"](
+      { sessionID: sid },
+      { message: { sessionID: sid }, parts: [{ type: "text", text: "New work" }] },
+    )
+
+    // Now select_mode should work for a new cycle
+    const result = await plugin.tool.select_mode.execute(
+      { mode: "REFACTOR", feature_name: "cycle-2" },
+      ctx,
+    )
+    expect(result).toContain("REFACTOR")
+    expect(result).toContain("DISCOVERY")
+  })
+
+  it("dormant agent sessions do NOT auto-reset (non-artisan agent)", async () => {
+    const sid = `int-test-${Date.now()}-done-dormant`
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: sid } } },
+    })
+    const ctx = { directory: tempDir, sessionId: sid }
+
+    const store = plugin._testStore
+    // Force state directly — set activeAgent to a non-artisan agent
+    await store.update(sid, (draft: any) => {
+      draft.phase = "DONE"
+      draft.phaseState = "DRAFT"
+      draft.activeAgent = "Build"
+    })
+
+    // Send a user message — should NOT reset because agent is non-artisan
+    await plugin["chat.message"](
+      { sessionID: sid },
+      { message: { sessionID: sid }, parts: [{ type: "text", text: "New work" }] },
+    )
+
+    // State should still be DONE — plugin was dormant
+    const state = store.get(sid)
+    expect(state.phase).toBe("DONE")
+  })
+
+  it("truncates intentBaseline to 2000 chars on reset", async () => {
+    const sid = `int-test-${Date.now()}-done-truncate`
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: sid } } },
+    })
+    const ctx = { directory: tempDir, sessionId: sid }
+
+    await plugin.tool.select_mode.execute(
+      { mode: "GREENFIELD", feature_name: "truncate-test" },
+      ctx,
+    )
+
+    const store = plugin._testStore
+    await store.update(sid, (draft: any) => {
+      draft.phase = "DONE"
+      draft.phaseState = "DRAFT"
+    })
+
+    const longMessage = "x".repeat(3000)
+    await plugin["chat.message"](
+      { sessionID: sid },
+      { message: { sessionID: sid }, parts: [{ type: "text", text: longMessage }] },
+    )
+
+    const state = store.get(sid)
+    expect(state.phase).toBe("MODE_SELECT")
+    expect(state.intentBaseline).toHaveLength(2000)
+  })
+
+  it("sets intentBaseline to null when user message is empty", async () => {
+    const sid = `int-test-${Date.now()}-done-empty`
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: sid } } },
+    })
+    const ctx = { directory: tempDir, sessionId: sid }
+
+    await plugin.tool.select_mode.execute(
+      { mode: "GREENFIELD", feature_name: "empty-test" },
+      ctx,
+    )
+
+    const store = plugin._testStore
+    await store.update(sid, (draft: any) => {
+      draft.phase = "DONE"
+      draft.phaseState = "DRAFT"
+    })
+
+    // Send empty parts
+    await plugin["chat.message"](
+      { sessionID: sid },
+      { message: { sessionID: sid }, parts: [{ type: "image", text: undefined }] },
+    )
+
+    const state = store.get(sid)
+    expect(state.phase).toBe("MODE_SELECT")
+    expect(state.intentBaseline).toBeNull()
+  })
+})

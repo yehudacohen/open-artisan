@@ -134,8 +134,8 @@ export function getPhaseToolPolicy(
     case "MODE_SELECT":
     case "DONE":
       return {
-        blocked: ["write", "edit"],
-        allowedDescription: "Only workflow control tools are allowed.",
+        blocked: ["write", "edit", "bash"],
+        allowedDescription: "Only workflow control tools and read-only exploration are allowed. Start a new workflow with select_mode.",
       }
 
     // -----------------------------------------------------------------------

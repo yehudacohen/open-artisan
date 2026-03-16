@@ -224,8 +224,15 @@ MODE_SELECT
                                                                                                                                ↓
                                                                                                                             IMPL_PLAN ──[approve]──► IMPLEMENTATION/DRAFT
                                                                                                                                                           ↓
-                                                                                                                                                       IMPLEMENTATION ──[approve]──► DONE
+                                                                                                                                                        IMPLEMENTATION ──[approve]──► DONE
+                                                                                                                                                                                              ↓
+                                                                                                                                                                                           DONE ──[user message]──► MODE_SELECT (auto-reset)
 ```
+
+**DONE → MODE_SELECT auto-reset:** When a user sends a new message after a completed workflow (phase = DONE), the `chat.message` hook automatically resets the session to MODE_SELECT so a new workflow cycle can begin. This prevents the agent from working outside the workflow framework after the first workflow completes. The reset:
+- **Clears** transient fields: `iterationCount`, `retryCount`, `currentTaskId`, `feedbackHistory`, `implDag`, `pendingRevisionSteps`, `escapePending`, `taskCompletionInProgress`, `taskReviewCount`, `pendingFeedback`, `revisionBaseline`, `userGateMessageReceived`.
+- **Preserves** cross-cycle context: `mode`, `approvedArtifacts`, `conventions`, `fileAllowlist`, `featureName`, `artifactDiskPaths`, `activeAgent`, `phaseApprovalCounts`, `lastCheckpointTag`, `approvalCount`.
+- **Sets** `intentBaseline` to the user's new message text (truncated to 2000 chars).
 
 ### 5.5 Design Invariant: Revise, Never Rewrite
 
@@ -498,7 +505,7 @@ The `tool.execute.before` hook intercepts every tool call and applies phase-spec
 
 | Phase | Sub-State | Blocked | Writes Allowed To | Bash |
 |-------|-----------|---------|-------------------|------|
-| MODE_SELECT, DONE | * | `write`, `edit` | nothing | allowed |
+| MODE_SELECT, DONE | * | `write`, `edit`, `bash` | nothing | blocked |
 | DISCOVERY | SCAN, ANALYZE | `write`, `edit`, `bash` | nothing | blocked |
 | DISCOVERY | CONVENTIONS | `bash` | `.openartisan/` only | blocked |
 | DISCOVERY | REVIEW | (none) | `.openartisan/` only | allowed |

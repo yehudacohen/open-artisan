@@ -460,17 +460,19 @@ describe("Tool policy — IMPLEMENTATION/INCREMENTAL bashCommandPredicate", () =
   })
 })
 
-describe("Tool policy — MODE_SELECT and DONE block everything except workflow tools", () => {
-  it("MODE_SELECT blocks write", () => {
+describe("Tool policy — MODE_SELECT and DONE block write, edit, AND bash", () => {
+  it("MODE_SELECT blocks write, edit, and bash", () => {
     const policy = getPhaseToolPolicy("MODE_SELECT", "DRAFT", null, [])
     expect(policy.blocked).toContain("write")
     expect(policy.blocked).toContain("edit")
+    expect(policy.blocked).toContain("bash")
   })
 
-  it("DONE blocks write and edit", () => {
+  it("DONE blocks write, edit, and bash", () => {
     const policy = getPhaseToolPolicy("DONE", "DRAFT", "GREENFIELD", [])
     expect(policy.blocked).toContain("write")
     expect(policy.blocked).toContain("edit")
+    expect(policy.blocked).toContain("bash")
   })
 })
 

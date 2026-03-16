@@ -179,6 +179,29 @@ describe("processUserMessage — injected parts structure", () => {
 })
 
 // ---------------------------------------------------------------------------
+// processUserMessage — DONE state is a no-op (reset handled in index.ts)
+// ---------------------------------------------------------------------------
+
+describe("processUserMessage — at DONE phase", () => {
+  it("does not intercept when phase is DONE (phaseState DRAFT)", () => {
+    const state = makeState({ phase: "DONE", phaseState: "DRAFT" })
+    const parts = [{ type: "text", text: "Build me a new feature" }]
+    const result = processUserMessage(state, parts)
+    expect(result.intercepted).toBe(false)
+    expect(result.feedbackType).toBeNull()
+    expect(result.parts).toBe(parts) // same reference — not mutated
+  })
+
+  it("does not intercept at MODE_SELECT either", () => {
+    const state = makeState({ phase: "MODE_SELECT", phaseState: "DRAFT" })
+    const parts = [{ type: "text", text: "Start a new task" }]
+    const result = processUserMessage(state, parts)
+    expect(result.intercepted).toBe(false)
+    expect(result.feedbackType).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
 // buildUserGateHint — system prompt injection (G6 replacement for chat.message)
 // ---------------------------------------------------------------------------
 

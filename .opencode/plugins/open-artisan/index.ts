@@ -604,6 +604,46 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
       // Agent-aware dormancy: skip chat.message processing for non-artisan agents
       if (state.activeAgent !== null && !ARTISAN_AGENT_NAMES.has(state.activeAgent)) return
 
+      // DONE → MODE_SELECT auto-reset: when a user sends a new message after a
+      // completed workflow, reset the state so a fresh workflow cycle can begin.
+      // This prevents the agent from working outside the workflow framework after
+      // the first workflow completes. The user's message becomes the new intent.
+      if (state.phase === "DONE") {
+        const textContent = (output.parts as Array<{ type: string; text?: string }>)
+          .filter((p) => p.type === "text" && p.text)
+          .map((p) => p.text!)
+          .join(" ")
+          .trim()
+        await store.update(sessionId, (draft) => {
+          draft.phase = "MODE_SELECT"
+          draft.phaseState = "DRAFT"
+          draft.iterationCount = 0
+          draft.retryCount = 0
+          draft.intentBaseline = textContent ? textContent.slice(0, 2000) : null
+          draft.userGateMessageReceived = false
+          draft.currentTaskId = null
+          draft.implDag = null
+          draft.feedbackHistory = []
+          draft.pendingRevisionSteps = null
+          draft.escapePending = false
+          draft.taskCompletionInProgress = null
+          draft.taskReviewCount = 0
+          draft.pendingFeedback = null
+          draft.revisionBaseline = null
+          // Preserve: mode, approvedArtifacts, conventions, fileAllowlist,
+          // featureName, artifactDiskPaths, activeAgent, phaseApprovalCounts,
+          // lastCheckpointTag, approvalCount — these carry forward from the
+          // previous workflow cycle for context.
+        })
+        logTransition(
+          { phase: "DONE", phaseState: "DRAFT" },
+          { phase: "MODE_SELECT", phaseState: "DRAFT" },
+          "new workflow cycle — user sent new work",
+          client,
+        )
+        return // Don't inject USER_GATE routing hints — we're now at MODE_SELECT
+      }
+
       // Resolve messageID from input — required for v2 Part objects
       const messageId = (input.messageID as string | undefined) ?? (output.message?.id as string | undefined) ?? ""
 
@@ -2517,6 +2557,11 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
         },
       }),
     },
+
+    // Test-only: exposes the internal store for integration tests that need to
+    // force state (e.g. setting phase to DONE without traversing all 8 phases).
+    // Prefixed with underscore to signal internal-only use.
+    _testStore: store,
   }
 }
 

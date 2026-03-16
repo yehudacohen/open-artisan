@@ -290,6 +290,17 @@ describe("buildWorkflowSystemPrompt — acceptance criteria at REVIEW", () => {
     expect(prompt).toContain("Every interface method is covered")
   })
 
+  it("includes deployment and integration seam criteria in IMPL_PLAN/REVIEW", () => {
+    const prompt = buildWorkflowSystemPrompt(makeState({ phase: "IMPL_PLAN", phaseState: "REVIEW" }))
+    expect(prompt).toContain("Deployment tasks present")
+    expect(prompt).toContain("Integration seams covered")
+  })
+
+  it("includes deployment criterion in PLANNING/REVIEW", () => {
+    const prompt = buildWorkflowSystemPrompt(makeState({ phase: "PLANNING", phaseState: "REVIEW" }))
+    expect(prompt).toContain("Deployment & infrastructure addressed")
+  })
+
   it("injects Implementation acceptance criteria at IMPLEMENTATION/REVIEW", () => {
     const prompt = buildWorkflowSystemPrompt(makeState({ phase: "IMPLEMENTATION", phaseState: "REVIEW" }))
     expect(prompt).toContain("Acceptance Criteria")

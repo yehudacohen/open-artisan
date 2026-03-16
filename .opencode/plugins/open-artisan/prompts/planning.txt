@@ -14,6 +14,12 @@ subsequent phases (interfaces, tests, implementation) can proceed without ambigu
 5. **Data model** — key entities, their relationships, constraints, and lifecycle
 6. **Non-functional requirements** — performance targets, security requirements, scalability considerations
 7. **Decisions made** — anywhere there were multiple valid approaches, document which was chosen and why
+8. **Deployment & infrastructure** — how the feature will be deployed to production, what infrastructure
+   is needed (databases, queues, cloud services, DNS, certificates, secrets), who provisions it,
+   and what credentials or environment variables are required. If the project already has deployment
+   infrastructure, describe how the new feature integrates with it. If infrastructure must be created
+   or configured, list every required step explicitly — these become human-gate tasks in the
+   implementation plan. A plan that produces working code but ignores deployment is incomplete.
 
 ### Sub-states
 

@@ -59,7 +59,7 @@ import { createImplDAG, type TaskCategory, type HumanGateInfo } from "./dag"
 import { nextSchedulerDecision, resolveHumanGate } from "./scheduler"
 import { resolveArtifactPaths } from "./tools/artifact-paths"
 import { writeArtifact, detectDesignDoc } from "./artifact-store"
-import { dispatchTaskReview } from "./task-review"
+import { dispatchTaskReview, type AdjacentTask } from "./task-review"
 import { dispatchDriftCheck } from "./task-drift"
 import { captureRevisionBaseline, hasArtifactChanged } from "./revision-baseline"
 import { dispatchAutoApproval } from "./auto-approve"
@@ -1590,6 +1590,36 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             const reviewCapped = state.taskReviewCount + 1 >= MAX_TASK_REVIEW_ITERATIONS
             const taskNode = state.implDag?.find((t) => t.id === args.task_id)
             if (taskNode && !reviewCapped) {
+              // Compute adjacent tasks for integration seam checking
+              const adjacentTasks: AdjacentTask[] = []
+              if (state.implDag) {
+                // Upstream: tasks this task depends on (direct dependencies only)
+                for (const depId of taskNode.dependencies) {
+                  const dep = state.implDag.find((t) => t.id === depId)
+                  if (dep) {
+                    adjacentTasks.push({
+                      id: dep.id,
+                      description: dep.description,
+                      category: dep.category,
+                      status: dep.status,
+                      direction: "upstream",
+                    })
+                  }
+                }
+                // Downstream: tasks that directly depend on this task
+                for (const t of state.implDag) {
+                  if (t.dependencies.includes(taskNode.id)) {
+                    adjacentTasks.push({
+                      id: t.id,
+                      description: t.description,
+                      category: t.category,
+                      status: t.status,
+                      direction: "downstream",
+                    })
+                  }
+                }
+              }
+
               let taskReviewResult: Awaited<ReturnType<typeof dispatchTaskReview>> | null = null
               try {
                 taskReviewResult = await dispatchTaskReview(client, {
@@ -1601,6 +1631,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                   featureName: state.featureName,
                   conventions: state.conventions,
                   artifactDiskPaths: state.artifactDiskPaths,
+                  adjacentTasks: adjacentTasks.length > 0 ? adjacentTasks : undefined,
                 })
               } catch (reviewErr) {
                 // dispatchTaskReview should never throw (returns TaskReviewError),

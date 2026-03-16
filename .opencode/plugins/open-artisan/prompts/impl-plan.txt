@@ -50,6 +50,21 @@ Every task must be categorized as one of:
 - The critical path analysis must account for human-gate delays
 - Tasks that are pure business logic with no external dependencies should be `standalone`
 
+### Deployment & infrastructure tasks
+
+If the approved plan includes a "Deployment & infrastructure" section, the DAG MUST include
+corresponding tasks. Common deployment concerns that require explicit tasks:
+
+- **Infrastructure provisioning** (databases, queues, storage buckets, cloud services) → `human-gate`
+- **Credential/secret setup** (API keys, connection strings, certificates) → `human-gate`
+- **Environment configuration** (env vars, config files, feature flags) → `scaffold` + `human-gate`
+- **Deployment pipeline changes** (CI/CD config, Dockerfiles, IaC templates) → `standalone` or `integration`
+- **DNS / routing / certificates** → `human-gate`
+- **Verification / smoke tests** → `integration` (depends on all deployment human-gates)
+
+A DAG that implements all code but omits deployment tasks is incomplete. The final task in
+the critical path should verify the feature works in the target environment, not just locally.
+
 ### DAG validity requirements
 
 - No cycles (task cannot depend on itself, directly or transitively)

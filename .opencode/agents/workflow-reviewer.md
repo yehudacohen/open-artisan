@@ -60,6 +60,9 @@ Do not pass an artifact that has:
 - Missing implementations of specified interface methods
 - Tests that don't actually test what they claim
 - Plans with unresolved "TBD" items
+- Plans that produce code but ignore deployment (no infrastructure, credentials, or deployment steps)
+- Implementation plans (DAGs) missing human-gate tasks for infrastructure or credential provisioning
+- Implementation plans (DAGs) with integration seams where neither task clearly owns the boundary work (shared resources, glue code, DI wiring, config setup)
 - Interfaces that don't match the plan's terminology
 - Any criterion marked as "blocking" that is not met
 

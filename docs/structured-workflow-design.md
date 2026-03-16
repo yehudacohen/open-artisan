@@ -1,6 +1,6 @@
 # Structured Coding Workflow — Design Document
 
-**Version:** v11 (reflects implementation as of schema v15, March 2026)
+**Version:** v12 (reflects implementation as of schema v15, March 2026)
 **Status:** This document describes the **current implemented system**, not aspirational design. Section 14 documents structural gaps that have all been resolved. Section 14.6 documents meta-structural improvements that prevent agents from silently downgrading structural guarantees. Section 15 documents deferred features.
 
 ---
@@ -107,6 +107,8 @@ The plugin uses 5 agent files. Only `artisan` and `robot-artisan` appear in the 
 | `auto-approver.md` | `subagent` | yes | hidden | Robot-artisan USER_GATE evaluation |
 
 The Tab switcher shows: **Plan** | **Build** | **Artisan** | **Robot Artisan**
+
+The `workflow-reviewer.md` agent file includes explicit evaluation standards that act as hard-fail rules: plans that ignore deployment, DAGs missing human-gate tasks for infrastructure/credentials, and DAGs with unowned integration seams at task boundaries. These standards complement the acceptance criteria in `getAcceptanceCriteria()`.
 
 ### 4.2 Agent Detection and Dormancy
 
@@ -464,11 +466,11 @@ Each dimension has phase-specific descriptions. A score below 9 means the criter
 The full criteria are defined in `getAcceptanceCriteria()` in `hooks/system-transform.ts`. Key highlights:
 
 - **DISCOVERY:** Conventions document must be actionable and complete — not a raw dump of observations
-- **PLANNING:** No "TBD" items — every ambiguity must be resolved with an explicit decision
+- **PLANNING:** No "TBD" items — every ambiguity must be resolved with an explicit decision. Deployment & infrastructure must be explicitly addressed (provisioning, credentials, CI/CD, DNS) — plans that produce working code but ignore deployment are incomplete.
 - **INTERFACES:** Every function must have input types, output types, and error types — no `any`
 - **TESTS:** Tests must fail — no implementation leakage
-- **IMPL_PLAN:** DAG must be acyclic with correct dependencies. Task categories (scaffold/human-gate/integration/standalone) must be correctly assigned.
-- **IMPLEMENTATION:** Critical stub check — scans for hardcoded returns, TODO/FIXME, placeholder credentials, empty catch blocks. Exception: scaffold tasks may contain stubs for methods implemented by later integration tasks.
+- **IMPL_PLAN:** DAG must be acyclic with correct dependencies. Task categories (scaffold/human-gate/integration/standalone) must be correctly assigned. If the approved plan includes deployment/infrastructure requirements, the DAG must include corresponding human-gate and integration tasks. Integration seams between tasks must be explicitly owned — no "not my responsibility" gaps at task boundaries.
+- **IMPLEMENTATION:** Critical stub check — scans for hardcoded returns, TODO/FIXME, placeholder credentials, empty catch blocks. Exception: scaffold tasks may contain stubs for methods implemented by later integration tasks. Per-task review includes integration seam check against adjacent tasks in the DAG (shared resources configured, data contracts match, error propagation handled). Issues are prefixed `INTEGRATION_GAP:` for structured identification (e.g., `INTEGRATION_GAP: T1→T2: queue config not created`).
 
 ### 12.3 Agent Rebuttal Loop
 
@@ -824,7 +826,7 @@ tests/
 └── utils.test.ts
 ```
 
-**Test count:** 1023 tests across 36 files (schema v15).
+**Test count:** 1035 tests across 36 files (schema v15).
 
 **Runtime artifacts** (in target project's `.opencode/` directory):
 - `workflow-state.json` — persisted session state (all sessions, JSON object keyed by session ID)

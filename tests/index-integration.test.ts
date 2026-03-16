@@ -37,7 +37,7 @@ function makeMockClient() {
         // Return a v2 shape that satisfies both orchestrator (assess/diverge) and
         // self-review (satisfied/criteria_results) parsers.
         // Include enough blocking criteria to pass cross-validation for any phase.
-        // PLANNING has 7 standard blocking + 7 [Q] quality = 14 total blocking.
+        // PLANNING has 8 standard blocking + 7 [Q] quality = 15 total blocking.
         const response = {
           classification: "tactical",
           reasoning: "mock",
@@ -50,6 +50,7 @@ function makeMockClient() {
             { criterion: "No TBD items", met: true, evidence: "mock", severity: "blocking" },
             { criterion: "Data model described", met: true, evidence: "mock", severity: "blocking" },
             { criterion: "Integration points identified", met: true, evidence: "mock", severity: "blocking" },
+            { criterion: "Deployment & infrastructure addressed", met: true, evidence: "mock", severity: "blocking" },
             // [Q] Quality dimensions (scored 9/10 to pass threshold)
             { criterion: "[Q] Design excellence", met: true, evidence: "mock", severity: "blocking", score: 9 },
             { criterion: "[Q] Architectural cohesion", met: true, evidence: "mock", severity: "blocking", score: 9 },
@@ -405,8 +406,8 @@ describe("End-to-end: GREENFIELD happy path through PLANNING", () => {
     expect(rrResult).not.toContain("Error")
     // Should now be in REVIEW
 
-    // 3. Call mark_satisfied with all 14 blocking criteria for PLANNING phase met
-    //    (7 standard blocking + 7 [Q] quality dimensions)
+    // 3. Call mark_satisfied with all 15 blocking criteria for PLANNING phase met
+    //    (8 standard blocking + 7 [Q] quality dimensions)
     const msResult = await plugin.tool.mark_satisfied.execute(
       {
         criteria_met: [
@@ -417,6 +418,7 @@ describe("End-to-end: GREENFIELD happy path through PLANNING", () => {
           { criterion: "No TBD items", met: true, evidence: "All decisions resolved", severity: "blocking" },
           { criterion: "Data model described", met: true, evidence: "Section 5 has ERD", severity: "blocking" },
           { criterion: "Integration points identified", met: true, evidence: "Section 6 lists APIs", severity: "blocking" },
+          { criterion: "Deployment & infrastructure addressed", met: true, evidence: "Section 8 covers deployment pipeline and infra", severity: "blocking" },
           // [Q] Quality dimensions — scored as strings (tool.schema has no .number())
           { criterion: "[Q] Design excellence", met: true, evidence: "Well-reasoned approach", severity: "blocking", score: "9" },
           { criterion: "[Q] Architectural cohesion", met: true, evidence: "All components fit together", severity: "blocking", score: "9" },

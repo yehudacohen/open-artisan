@@ -420,6 +420,7 @@ ${designDocPath ? "For [D] design-invariant criteria, these are BINARY (met/not 
 5. No "TBD" items — every ambiguity has been resolved with an explicit decision
 6. Data model described — key entities, relationships, constraints, lifecycle
 7. Integration points identified — external systems, APIs, databases, filesystem interactions
+8. Deployment & infrastructure addressed — how the feature reaches production (infrastructure provisioning, credentials/secrets, environment configuration, CI/CD changes, DNS/routing). If no deployment is needed, this must be explicitly stated with justification. Plans that produce working code but ignore deployment are incomplete.
 
 ${qualityBlock}
 ${designBlock}
@@ -486,6 +487,8 @@ ${designDocPath ? "For [D] design-invariant criteria, these are BINARY (met/not 
 3. Parallelizable tasks have no shared mutable state (no shared files, no shared DB rows)
 4. Merge points explicitly identified where parallel branches converge
 5. Expected test outcomes specified per task (which tests become green)
+6. Deployment tasks present — if the approved plan includes deployment/infrastructure requirements, the DAG must include corresponding human-gate tasks for provisioning and credentials, and integration tasks that verify deployment. A DAG that implements all code but omits deployment is incomplete.
+7. Integration seams covered — for every pair of tasks with a dependency edge, the handoff is explicitly owned. Check: who creates/configures the shared resource (queue, table, DI binding, config entry)? Who writes the glue code that connects producer to consumer? If the answer is ambiguous or "the other task," add an explicit integration task or expand one of the existing tasks to own it. No task should assume adjacent tasks handle boundary wiring.
 
 ${qualityBlock}
 ${designBlock}

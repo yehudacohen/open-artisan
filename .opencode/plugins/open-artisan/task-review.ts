@@ -10,11 +10,14 @@
  *   2. Does the implementation match the approved interfaces?
  *   3. Are there any regressions in previously-passing tests?
  *   4. Does the code align with the conventions and plan?
+ *   5. Stub/placeholder detection (category-aware: stubs OK for scaffold, not others)
+ *   6. Integration seam check (conditional: only when adjacent tasks are provided)
+ *      — verifies shared resources, data contracts, error propagation at task boundaries
  *
  * Unlike the full phase review (mark_satisfied + dispatchSelfReview), the task
  * review is:
  *   - Scoped to a single DAG task (not the whole implementation)
- *   - Has a shorter, focused criteria list (4 items, not 12+)
+ *   - Has a shorter, focused criteria list (5-6 items, not 12+)
  *   - Does NOT use quality scoring ([Q] criteria) — pass/fail only
  *   - Does NOT have a rebuttal loop
  *   - Returns a simple pass/fail with issues list
@@ -25,7 +28,7 @@
  * not a blocking dependency on subagent availability.
  */
 
-import type { TaskNode } from "./dag"
+import type { TaskNode, TaskCategory, TaskStatus } from "./dag"
 import type { WorkflowMode } from "./types"
 import type { PluginClient } from "./client-types"
 import { withTimeout, extractTextFromPromptResult, extractEphemeralSessionId, extractJsonFromText } from "./utils"
@@ -35,6 +38,15 @@ import { createLogger } from "./logger"
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
+
+export interface AdjacentTask {
+  id: string
+  description: string
+  category?: TaskCategory
+  status: TaskStatus
+  /** "upstream" = this task depends on the adjacent task; "downstream" = the adjacent task depends on this one */
+  direction: "upstream" | "downstream"
+}
 
 export interface TaskReviewRequest {
   /** The task being reviewed */
@@ -53,6 +65,8 @@ export interface TaskReviewRequest {
   conventions?: string | null
   /** Approved artifact disk paths for reference */
   artifactDiskPaths?: Partial<Record<string, string>>
+  /** Adjacent tasks (direct dependencies + direct dependents) for integration seam checking */
+  adjacentTasks?: AdjacentTask[]
 }
 
 export interface TaskReviewSuccess {
@@ -123,6 +137,31 @@ export function buildTaskReviewPrompt(req: TaskReviewRequest): string {
     }
   }
 
+  // Adjacent tasks — for integration seam checking
+  if (req.adjacentTasks && req.adjacentTasks.length > 0) {
+    lines.push("## Adjacent Tasks (for integration seam checking)")
+    lines.push("")
+    lines.push("These are the tasks directly connected to this task in the DAG.")
+    lines.push("Use them to verify that integration boundaries are properly handled.")
+    lines.push("")
+    const upstream = req.adjacentTasks.filter((t) => t.direction === "upstream")
+    const downstream = req.adjacentTasks.filter((t) => t.direction === "downstream")
+    if (upstream.length > 0) {
+      lines.push("**Upstream (this task depends on):**")
+      for (const t of upstream) {
+        lines.push(`  - \`${t.id}\` [${t.category ?? "standalone"}] (${t.status}): ${t.description}`)
+      }
+      lines.push("")
+    }
+    if (downstream.length > 0) {
+      lines.push("**Downstream (depends on this task):**")
+      for (const t of downstream) {
+        lines.push(`  - \`${t.id}\` [${t.category ?? "standalone"}] (${t.status}): ${t.description}`)
+      }
+      lines.push("")
+    }
+  }
+
   // Determine if stubs are acceptable based on task category
   const taskCategory = req.task.category ?? "standalone"
   const stubsAcceptable = taskCategory === "scaffold"
@@ -162,6 +201,28 @@ export function buildTaskReviewPrompt(req: TaskReviewRequest): string {
     lines.push("   The implementation must contain real, functional logic — not placeholders.")
   }
 
+  // Check #6: Integration seam verification (only when adjacent tasks are provided)
+  if (req.adjacentTasks && req.adjacentTasks.length > 0) {
+    lines.push("")
+    lines.push("6. **Integration seam check.** Review the boundaries between this task and its adjacent tasks")
+    lines.push("   (listed in the \"Adjacent Tasks\" section above). For each boundary, verify:")
+    lines.push("   - **Shared resources are configured:** If this task produces or consumes a shared resource")
+    lines.push("     (queue, database table, config entry, DI binding, environment variable), verify the resource")
+    lines.push("     is actually created/configured — not just assumed to exist.")
+    lines.push("   - **Data contracts match:** If this task passes data to/from an adjacent task, verify the")
+    lines.push("     data shape (types, field names, serialization format) matches on both sides.")
+    lines.push("   - **Error propagation is handled:** If an upstream task can fail, verify this task handles")
+    lines.push("     that failure (not just the happy path). If this task can fail, verify downstream tasks")
+    lines.push("     can detect and handle the failure.")
+    lines.push("   - **No \"not my responsibility\" gaps:** If something needs to happen at the boundary and")
+    lines.push("     neither this task nor the adjacent task clearly owns it, flag it as INTEGRATION_GAP.")
+    lines.push("")
+    lines.push("   Prefix integration issues with 'INTEGRATION_GAP:' and describe what is missing and which")
+    lines.push("   task boundary is affected (e.g., 'INTEGRATION_GAP: T1→T2: queue config not created').")
+  }
+
+  const totalChecks = (req.adjacentTasks && req.adjacentTasks.length > 0) ? "six" : "five"
+
   lines.push("")
   lines.push("## Response Format")
   lines.push("")
@@ -169,14 +230,15 @@ export function buildTaskReviewPrompt(req: TaskReviewRequest): string {
   lines.push("```json")
   lines.push(JSON.stringify({
     passed: false,
-    issues: ["Test xyz.test.ts fails with error: ...", "Method foo() missing from BarService implementation", "STUB: src/stager.ts:42 returns hardcoded { rowsCopied: 0 }"],
+    issues: ["Test xyz.test.ts fails with error: ...", "Method foo() missing from BarService implementation", "STUB: src/stager.ts:42 returns hardcoded { rowsCopied: 0 }", "INTEGRATION_GAP: T1→T2: DI binding for FooService not registered"],
     reasoning: "Tests pass but stub detection found hardcoded return values in integration task...",
   }, null, 2))
   lines.push("```")
   lines.push("")
-  lines.push("Set `passed` to `true` ONLY if ALL five checks pass. List specific issues in the `issues` array.")
+  lines.push(`Set \`passed\` to \`true\` ONLY if ALL ${totalChecks} checks pass. List specific issues in the \`issues\` array.`)
   lines.push("If tests fail, include the actual error output. If interfaces don't match, cite the specific mismatch.")
   lines.push("For stubs, prefix the issue with 'STUB:' and include the file path and line number.")
+  lines.push("For integration gaps, prefix with 'INTEGRATION_GAP:' and identify the boundary.")
 
   return lines.join("\n")
 }

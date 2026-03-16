@@ -124,6 +124,99 @@ describe("buildTaskReviewPrompt", () => {
 })
 
 // ---------------------------------------------------------------------------
+// buildTaskReviewPrompt — adjacent tasks / integration seam check
+// ---------------------------------------------------------------------------
+
+describe("buildTaskReviewPrompt — integration seam check", () => {
+  it("includes adjacent tasks section when adjacentTasks provided", () => {
+    const prompt = buildTaskReviewPrompt(makeRequest({
+      adjacentTasks: [
+        { id: "T0", description: "Set up database", category: "scaffold", status: "complete", direction: "upstream" },
+        { id: "T2", description: "Build API layer", category: "standalone", status: "pending", direction: "downstream" },
+      ],
+    }))
+    expect(prompt).toContain("Adjacent Tasks")
+    expect(prompt).toContain("T0")
+    expect(prompt).toContain("Set up database")
+    expect(prompt).toContain("scaffold")
+    expect(prompt).toContain("Upstream")
+    expect(prompt).toContain("T2")
+    expect(prompt).toContain("Build API layer")
+    expect(prompt).toContain("Downstream")
+  })
+
+  it("omits adjacent tasks section when none provided", () => {
+    const prompt = buildTaskReviewPrompt(makeRequest())
+    expect(prompt).not.toContain("Adjacent Tasks")
+    expect(prompt).not.toContain("integration seam")
+  })
+
+  it("omits adjacent tasks section when empty array", () => {
+    const prompt = buildTaskReviewPrompt(makeRequest({ adjacentTasks: [] }))
+    expect(prompt).not.toContain("Adjacent Tasks")
+  })
+
+  it("includes integration seam check (#6) when adjacent tasks exist", () => {
+    const prompt = buildTaskReviewPrompt(makeRequest({
+      adjacentTasks: [
+        { id: "T0", description: "Set up database", status: "complete", direction: "upstream" },
+      ],
+    }))
+    expect(prompt).toContain("Integration seam check")
+    expect(prompt).toContain("INTEGRATION_GAP")
+    expect(prompt).toContain("not my responsibility")
+    expect(prompt).toContain("six checks")
+  })
+
+  it("says five checks when no adjacent tasks", () => {
+    const prompt = buildTaskReviewPrompt(makeRequest())
+    expect(prompt).toContain("five checks")
+    expect(prompt).not.toContain("six checks")
+  })
+
+  it("separates upstream and downstream tasks", () => {
+    const prompt = buildTaskReviewPrompt(makeRequest({
+      adjacentTasks: [
+        { id: "T0", description: "Upstream task", status: "complete", direction: "upstream" },
+        { id: "T2", description: "Downstream task", status: "pending", direction: "downstream" },
+      ],
+    }))
+    // Both sections present
+    expect(prompt).toContain("Upstream (this task depends on)")
+    expect(prompt).toContain("Downstream (depends on this task)")
+  })
+
+  it("shows only upstream when no downstream", () => {
+    const prompt = buildTaskReviewPrompt(makeRequest({
+      adjacentTasks: [
+        { id: "T0", description: "Upstream task", status: "complete", direction: "upstream" },
+      ],
+    }))
+    expect(prompt).toContain("Upstream")
+    expect(prompt).not.toContain("Downstream (depends on this task)")
+  })
+
+  it("shows only downstream when no upstream", () => {
+    const prompt = buildTaskReviewPrompt(makeRequest({
+      adjacentTasks: [
+        { id: "T2", description: "Downstream task", status: "pending", direction: "downstream" },
+      ],
+    }))
+    expect(prompt).toContain("Downstream")
+    expect(prompt).not.toContain("Upstream (this task depends on)")
+  })
+
+  it("includes INTEGRATION_GAP in example response format when adjacent tasks present", () => {
+    const prompt = buildTaskReviewPrompt(makeRequest({
+      adjacentTasks: [
+        { id: "T0", description: "DB setup", status: "complete", direction: "upstream" },
+      ],
+    }))
+    expect(prompt).toContain("INTEGRATION_GAP")
+  })
+})
+
+// ---------------------------------------------------------------------------
 // parseTaskReviewResult
 // ---------------------------------------------------------------------------
 

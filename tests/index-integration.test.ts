@@ -1156,4 +1156,42 @@ describe("fileAllowlist — relative paths are normalized to absolute", () => {
     // Already absolute path should be preserved as-is
     expect(state.fileAllowlist).toContain("/already/absolute.ts")
   })
+
+  it("normalizes preserved fileAllowlist from prior cycle at select_mode time", async () => {
+    const sid = `int-test-${Date.now()}-selectmode-normalize`
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: sid } } },
+    })
+    const ctx = { directory: tempDir, sessionId: sid }
+
+    const store = plugin._testStore
+
+    // Simulate a state from a prior cycle that has relative paths in fileAllowlist
+    // (would have been set before the normalization fix was deployed).
+    // The DONE→MODE_SELECT reset preserves fileAllowlist.
+    await store.update(sid, (draft: any) => {
+      draft.phase = "MODE_SELECT"
+      draft.phaseState = "DRAFT"
+      draft.fileAllowlist = ["src/foo.ts", "/already/absolute.ts", "packages/bar/index.ts"]
+    })
+
+    // select_mode sets mode to INCREMENTAL — should normalize the preserved paths
+    const result = await plugin.tool.select_mode.execute(
+      { mode: "INCREMENTAL", feature_name: "normalize-test" },
+      ctx,
+    )
+
+    // Should succeed without validation error
+    expect(result).not.toContain("Error")
+    expect(result).not.toContain("must be an absolute path")
+
+    // Verify the stored paths are all absolute
+    const state = store.get(sid)
+    for (const path of state.fileAllowlist) {
+      expect(path.startsWith("/")).toBe(true)
+    }
+    expect(state.fileAllowlist).toContain(`${tempDir}/src/foo.ts`)
+    expect(state.fileAllowlist).toContain("/already/absolute.ts")
+    expect(state.fileAllowlist).toContain(`${tempDir}/packages/bar/index.ts`)
+  })
 })

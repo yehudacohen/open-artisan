@@ -853,7 +853,7 @@ tests/
 └── utils.test.ts
 ```
 
-**Test count:** 1097 tests across 38 files (schema v15).
+**Test count:** 1100 tests across 38 files (schema v15).
 
 **Runtime artifacts** (in target project's `.opencode/` directory):
 - `workflow-state.json` — persisted session state (all sessions, JSON object keyed by session ID)

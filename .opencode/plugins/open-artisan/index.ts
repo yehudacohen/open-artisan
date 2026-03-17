@@ -926,6 +926,14 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             if (featureDesignDocPath) {
               draft.artifactDiskPaths = { ...draft.artifactDiskPaths, design: featureDesignDocPath }
             }
+            // Normalize fileAllowlist: if preserved from a prior cycle (pre-normalization-fix),
+            // it may contain relative paths that fail validation when mode is INCREMENTAL.
+            // Resolve them against the project directory now that cwd is available.
+            if (draft.fileAllowlist.length > 0) {
+              draft.fileAllowlist = draft.fileAllowlist.map((p) =>
+                p.startsWith("/") ? p : resolve(cwd, p),
+              )
+            }
           })
 
           const designDocNote = featureDesignDocPath

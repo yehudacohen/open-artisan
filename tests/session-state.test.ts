@@ -484,4 +484,98 @@ describe("SessionStateStore — load", () => {
     if (!result.success) return
     expect(result.count).toBe(2)
   })
+
+  it("strips relative paths from fileAllowlist at load time (pre-fix migration)", async () => {
+    // Simulate a state from a pre-normalization-fix session where fileAllowlist
+    // had relative paths. The load-time migration should strip them because at
+    // load time we don't have the project directory to resolve them.
+    const staleState: WorkflowState = {
+      schemaVersion: SCHEMA_VERSION,
+      sessionId: "stale-allowlist",
+      mode: "INCREMENTAL",
+      phase: "INTERFACES",
+      phaseState: "DRAFT",
+      iterationCount: 0,
+      retryCount: 0,
+      approvedArtifacts: {},
+      conventions: null,
+      fileAllowlist: ["/absolute/path/ok.ts", "relative/path/bad.ts", "also/bad.ts"],
+      lastCheckpointTag: null,
+      approvalCount: 1,
+      orchestratorSessionId: null,
+      intentBaseline: null,
+      modeDetectionNote: null,
+      discoveryReport: null,
+      implDag: null,
+      phaseApprovalCounts: {},
+      escapePending: false,
+      pendingRevisionSteps: null,
+      currentTaskId: null,
+      feedbackHistory: [],
+      userGateMessageReceived: false,
+      artifactDiskPaths: {},
+      featureName: "test-feature",
+      revisionBaseline: null,
+      activeAgent: null,
+      taskCompletionInProgress: null,
+      taskReviewCount: 0,
+      pendingFeedback: null,
+    }
+    await Bun.write(
+      join(tmpDir, "workflow-state.json"),
+      JSON.stringify({ "stale-allowlist": staleState }),
+    )
+    const store2 = createSessionStateStore(tmpDir)
+    const result = await store2.load()
+    expect(result.success).toBe(true)
+    const loaded = store2.get("stale-allowlist")
+    expect(loaded).not.toBeNull()
+    // Only the absolute path should survive
+    expect(loaded!.fileAllowlist).toEqual(["/absolute/path/ok.ts"])
+  })
+
+  it("preserves all absolute paths in fileAllowlist at load time", async () => {
+    const goodState: WorkflowState = {
+      schemaVersion: SCHEMA_VERSION,
+      sessionId: "good-allowlist",
+      mode: "INCREMENTAL",
+      phase: "IMPLEMENTATION",
+      phaseState: "DRAFT",
+      iterationCount: 0,
+      retryCount: 0,
+      approvedArtifacts: {},
+      conventions: null,
+      fileAllowlist: ["/project/src/foo.ts", "/project/src/bar.ts"],
+      lastCheckpointTag: null,
+      approvalCount: 2,
+      orchestratorSessionId: null,
+      intentBaseline: null,
+      modeDetectionNote: null,
+      discoveryReport: null,
+      implDag: null,
+      phaseApprovalCounts: {},
+      escapePending: false,
+      pendingRevisionSteps: null,
+      currentTaskId: null,
+      feedbackHistory: [],
+      userGateMessageReceived: false,
+      artifactDiskPaths: {},
+      featureName: "test-feature",
+      revisionBaseline: null,
+      activeAgent: null,
+      taskCompletionInProgress: null,
+      taskReviewCount: 0,
+      pendingFeedback: null,
+    }
+    await Bun.write(
+      join(tmpDir, "workflow-state.json"),
+      JSON.stringify({ "good-allowlist": goodState }),
+    )
+    const store2 = createSessionStateStore(tmpDir)
+    const result = await store2.load()
+    expect(result.success).toBe(true)
+    const loaded = store2.get("good-allowlist")
+    expect(loaded).not.toBeNull()
+    expect(loaded!.fileAllowlist).toEqual(["/project/src/foo.ts", "/project/src/bar.ts"])
+  })
 })

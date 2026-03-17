@@ -215,6 +215,14 @@ export function createSessionStateStore(dir: string): SessionStateStore {
           // lost and the user will need to re-submit. This is preferable to silently replaying
           // a stale feedback text through a potentially different orchestrator classification.
           migrated["pendingFeedback"] = null
+          // Defensive: strip relative paths from fileAllowlist. Pre-normalization-fix
+          // sessions may have persisted relative paths. At load time we don't have the
+          // project directory to resolve them, so we remove them. The `select_mode`
+          // handler will re-normalize with the correct cwd if needed.
+          const fa = migrated["fileAllowlist"]
+          if (Array.isArray(fa)) {
+            migrated["fileAllowlist"] = fa.filter((p: unknown) => typeof p === "string" && p.startsWith("/"))
+          }
           // Always stamp with current schema version after migration
           migrated["schemaVersion"] = SCHEMA_VERSION
           // Second gate: full invariant validation (phase/phaseState combos, counts, etc.)

@@ -114,9 +114,13 @@ The plugin activates automatically when an artisan agent is selected and is dorm
 
 ## Usage
 
-Once the artisan agent is active, the workflow begins automatically:
+When you've installed the plugin, you will gain access to two more agents in addition to your regular OpenCode BUILD and PLAN agents: "artisan", and "robot-artisan".
 
-1. **Describe your task** -- The agent will prompt you to select a mode (Greenfield, Refactor, or Incremental) based on auto-detection of your project.
+Once the artisan agent is active, the workflow should begin automatically (although it occasionally doesn't in which case you can just tell it to use the open artisan plugin). 
+
+When using the plugin, simply:
+
+1. **Describe your task** -- The agent will select a mode (Greenfield, Refactor, or Incremental) based on auto-detection of your project.
 2. **Discovery** (Refactor/Incremental) -- Six scanners analyze your codebase. Review and approve the discovery report.
 3. **Planning** -- The agent creates a plan artifact. An isolated reviewer evaluates it. You approve or request revisions.
 4. **Interfaces** -- Interface definitions are drafted, reviewed, and approved.

@@ -78,6 +78,7 @@ import {
   MAX_INTENT_BASELINE_CHARS,
   MAX_FEEDBACK_CHARS,
   IDLE_COOLDOWN_MS,
+  MAX_IDLE_RETRIES,
 } from "./constants"
 
 /** Returns a 16-char SHA-256 hex fingerprint of the given text. */
@@ -458,6 +459,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
           // Hard escalation: toast + in-session prompt telling the agent to
           // stop and ask the user for help. The agent's response will be
           // visible in the conversation, making the stall impossible to miss.
+          log.warn(`Idle escalation: agent stopped ${state.retryCount} times at ${state.phase}/${state.phaseState}`, { sessionId })
           try {
             await client.tui?.showToast?.({
               body: { title: "Workflow Stalled", message: decision.message, variant: "warning" },
@@ -487,6 +489,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
 
         // Reprompt — only increment retry count AFTER the prompt succeeds,
         // so failed prompts don't consume retry budget.
+        log.warn(`Idle reprompt ${decision.retryCount}/${MAX_IDLE_RETRIES} at ${state.phase}/${state.phaseState}`, { sessionId })
         try {
           lastRepromptTimestamps.set(sessionId, Date.now())
           await client.session?.prompt({

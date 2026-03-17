@@ -29,7 +29,45 @@ export type IdleDecision =
  */
 export function handleIdle(state: WorkflowState): IdleDecision {
   // Expected idle states: USER_GATE, ESCAPE_HATCH, and DONE
-  if (state.phaseState === "USER_GATE" || state.phaseState === "ESCAPE_HATCH" || state.phase === "DONE") {
+  //
+  // Special case for robot-artisan at USER_GATE: after the inline auto-approver
+  // executes and returns, the agent should immediately proceed to the next phase.
+  // If the agent goes idle at USER_GATE in robot-artisan mode, it means something
+  // went wrong (e.g. the auto-approver result message wasn't acted on, or the
+  // inline path fell through to the normal USER_GATE message due to an error).
+  // Re-prompt so the workflow doesn't silently stall.
+  //
+  // We check userGateMessageReceived as a secondary signal: the old code path
+  // (pre-Fix 3) set this to true before instructing the agent to call submit_feedback.
+  // If it's true and the agent is still at USER_GATE, the agent failed to act.
+  if (state.phaseState === "USER_GATE") {
+    const isRobotArtisan = state.activeAgent === "robot-artisan"
+    if (!isRobotArtisan) {
+      // Human session — idle at USER_GATE is expected (waiting for user input)
+      return { action: "ignore" }
+    }
+    // Robot-artisan at USER_GATE: re-prompt so the workflow doesn't stall.
+    // The reprompt message tells the agent to call submit_feedback to proceed.
+    if (state.retryCount >= MAX_IDLE_RETRIES) {
+      return {
+        action: "escalate",
+        message: buildEscalationMessage(state.phase, state.phaseState, state.retryCount),
+      }
+    }
+    const nextRetry = state.retryCount + 1
+    return {
+      action: "reprompt",
+      retryCount: nextRetry,
+      message:
+        `Robot-artisan stalled at ${state.phase}/USER_GATE. ` +
+        `The auto-approver result was not acted on. ` +
+        `Call \`submit_feedback\` with \`feedback_type: "approve"\` and ` +
+        `\`feedback_text: "Auto-approved by robot-artisan"\` to proceed. ` +
+        `(Retry ${nextRetry}/${MAX_IDLE_RETRIES})`,
+    }
+  }
+
+  if (state.phaseState === "ESCAPE_HATCH" || state.phase === "DONE") {
     return { action: "ignore" }
   }
 

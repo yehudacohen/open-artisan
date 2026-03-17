@@ -823,6 +823,21 @@ function buildSubStateContext(state: WorkflowState): string {
       lines.push(`You are drafting the ${state.phase} artifact.`)
       lines.push("When the draft is complete, call `request_review`.")
       // Layer 4: Inject next task from DAG when in IMPLEMENTATION/DRAFT
+      if (state.phase === "IMPLEMENTATION" && !state.implDag) {
+        // No DAG available — point the agent to the plan artifacts for context.
+        // This happens when IMPL_PLAN was approved without artifact_content
+        // (e.g. pass-through in INCREMENTAL mode).
+        lines.push("")
+        lines.push("**No task DAG available** — implement according to the approved plan.")
+        const planPath = state.artifactDiskPaths?.["plan"]
+        const implPlanPath = state.artifactDiskPaths?.["impl_plan"]
+        if (implPlanPath && existsSync(implPlanPath)) {
+          lines.push(`Read the implementation plan at \`${implPlanPath}\` for task details.`)
+        } else if (planPath && existsSync(planPath)) {
+          lines.push(`Read the plan at \`${planPath}\` for implementation details.`)
+        }
+        lines.push("Implement all tasks described in the plan, then call `request_review`.")
+      }
       if (state.phase === "IMPLEMENTATION" && state.implDag) {
         try {
           const dag = createImplDAG(Array.from(state.implDag))

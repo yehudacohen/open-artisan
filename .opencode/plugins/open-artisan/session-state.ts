@@ -215,6 +215,9 @@ export function createSessionStateStore(dir: string): SessionStateStore {
           // lost and the user will need to re-submit. This is preferable to silently replaying
           // a stale feedback text through a potentially different orchestrator classification.
           migrated["pendingFeedback"] = null
+          // retryCount is transient — reset on load so the idle handler starts fresh.
+          // If the agent was stuck before a restart, it deserves a clean retry budget.
+          migrated["retryCount"] = 0
           // Defensive: strip relative paths from fileAllowlist. Pre-normalization-fix
           // sessions may have persisted relative paths. At load time we don't have the
           // project directory to resolve them, so we remove them. The `select_mode`

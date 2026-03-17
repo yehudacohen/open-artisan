@@ -1,6 +1,6 @@
 # Structured Coding Workflow — Design Document
 
-**Version:** v13 (reflects implementation as of schema v15, March 2026)
+**Version:** v14 (reflects implementation as of schema v15, March 2026)
 **Status:** This document describes the **current implemented system**, not aspirational design. Section 14 documents structural gaps that have all been resolved. Section 14.6 documents meta-structural improvements that prevent agents from silently downgrading structural guarantees. Section 15 documents deferred features.
 
 ---
@@ -260,6 +260,21 @@ After `select_mode` completes, if `approvedArtifacts` has entries (carried over 
 **Time-sentinel handling:** File-based phases (INTERFACES, TESTS, IMPLEMENTATION) sometimes store `"approved-at-<timestamp>"` instead of a content hash (when `artifact_content` wasn't provided at approval). For these, the fast-forward verifies the file exists on disk but does not verify content (there is no reference hash to compare against). This is a deliberate trade-off — the file existing at all is sufficient evidence for time-sentinel approvals.
 
 **Implementation:** `fast-forward.ts` exports `computeFastForward()` — a pure function with no side effects. The `select_mode` tool handler calls it after the initial state transition and applies the result to the session state.
+
+### 5.5.1 Forward-Pass Skip (INCREMENTAL Mode)
+
+During the initial forward pass (not just returning projects), INCREMENTAL mode can auto-skip phases when the `fileAllowlist` proves no relevant files will change. This eliminates ceremony gates for phases where no work is needed.
+
+**Skip criteria per phase:**
+- **INTERFACES**: skip if no files in `fileAllowlist` match `isInterfaceFile()` (no `.d.ts`, no `types`/`interface`/`schema` keyword files)
+- **TESTS**: skip if no files in `fileAllowlist` match `isTestFile()` (no `*.test.*`, `*.spec.*`, etc.)
+- **IMPL_PLAN**: skip if both INTERFACES and TESTS were skipped (change is scoped enough that a task DAG adds no value)
+
+**Trigger:** In the `submit_feedback(approve)` handler, after the state machine computes `outcome.nextPhase`, `computeForwardSkip()` checks whether consecutive phases starting from `nextPhase` can be auto-skipped. If so, the handler advances directly past them.
+
+**Example:** INCREMENTAL mode with `fileAllowlist = ["/project/src/foo.impl.ts", "/project/src/bar.impl.ts"]`. After PLANNING approval, `nextPhase` would be INTERFACES. Since no files match `isInterfaceFile`, INTERFACES is skipped. No files match `isTestFile`, so TESTS is skipped. Both were skipped, so IMPL_PLAN is skipped. The agent lands at IMPLEMENTATION/DRAFT — saving 3 approval gates (9+ tool calls).
+
+**Implementation:** `fast-forward.ts` exports `computeForwardSkip()` — a pure function that returns `ForwardSkipResult | null`. The `submit_feedback` approve handler calls it after the SM transition.
 
 ### 5.6 Design Invariant: Revise, Never Rewrite
 
@@ -853,7 +868,7 @@ tests/
 └── utils.test.ts
 ```
 
-**Test count:** 1100 tests across 38 files (schema v15).
+**Test count:** 1121 tests across 38 files (schema v15).
 
 **Runtime artifacts** (in target project's `.opencode/` directory):
 - `workflow-state.json` — persisted session state (all sessions, JSON object keyed by session ID)

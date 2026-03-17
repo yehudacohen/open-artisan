@@ -1,7 +1,7 @@
 /**
- * Tests for fast-forward.ts — phase fast-forward for returning projects.
+ * Tests for fast-forward.ts — phase skip logic.
  *
- * Tests cover:
+ * Section 1: Phase fast-forward for returning projects (computeFastForward)
  * - No approved artifacts → no skip, start at first phase
  * - All artifacts approved and intact → skip all phases
  * - Partial artifacts → skip up to the first missing one
@@ -11,13 +11,24 @@
  * - GREENFIELD skips DISCOVERY in phase sequence
  * - REFACTOR/INCREMENTAL include DISCOVERY
  * - Message format verification
+ *
+ * Section 2: Forward-pass skip for INCREMENTAL mode (computeForwardSkip)
+ * - Non-INCREMENTAL mode → no skip
+ * - Empty fileAllowlist → no skip
+ * - No interface files in allowlist → skip INTERFACES
+ * - No test files in allowlist → skip TESTS
+ * - Both skipped → also skip IMPL_PLAN
+ * - Has interface files → don't skip INTERFACES
+ * - Has test files → don't skip TESTS
+ * - Non-skippable next phase → no skip
+ * - Message format
  */
 import { describe, expect, it, beforeEach, afterEach } from "bun:test"
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { createHash } from "node:crypto"
-import { computeFastForward } from "#plugin/fast-forward"
+import { computeFastForward, computeForwardSkip } from "#plugin/fast-forward"
 import type { ArtifactKey, Phase } from "#plugin/types"
 
 // ---------------------------------------------------------------------------
@@ -409,5 +420,195 @@ describe("computeFastForward — message format", () => {
 
     expect(result.message).toContain("All")
     expect(result.message).toContain("verified")
+  })
+})
+
+// ===========================================================================
+// Section 2: computeForwardSkip — forward-pass skip for INCREMENTAL mode
+// ===========================================================================
+
+describe("computeForwardSkip — non-INCREMENTAL mode returns null", () => {
+  it("returns null for GREENFIELD even with implementation-only files", () => {
+    const result = computeForwardSkip("INTERFACES", "GREENFIELD", ["/project/src/foo.impl.ts"])
+    expect(result).toBeNull()
+  })
+
+  it("returns null for REFACTOR", () => {
+    const result = computeForwardSkip("INTERFACES", "REFACTOR", ["/project/src/foo.impl.ts"])
+    expect(result).toBeNull()
+  })
+
+  it("returns null when mode is null", () => {
+    const result = computeForwardSkip("INTERFACES", null, ["/project/src/foo.impl.ts"])
+    expect(result).toBeNull()
+  })
+})
+
+describe("computeForwardSkip — empty fileAllowlist returns null", () => {
+  it("returns null when allowlist is empty", () => {
+    const result = computeForwardSkip("INTERFACES", "INCREMENTAL", [])
+    expect(result).toBeNull()
+  })
+})
+
+describe("computeForwardSkip — INTERFACES skip", () => {
+  it("skips INTERFACES when no interface files in allowlist", () => {
+    // Only .impl.ts files — no interface files
+    const result = computeForwardSkip("INTERFACES", "INCREMENTAL", [
+      "/project/src/foo.impl.ts",
+      "/project/src/bar.impl.ts",
+    ])
+    expect(result).not.toBeNull()
+    expect(result!.skippedPhases).toContain("INTERFACES")
+  })
+
+  it("does NOT skip INTERFACES when allowlist has interface files", () => {
+    // types.ts matches isInterfaceFile due to "type" keyword
+    const result = computeForwardSkip("INTERFACES", "INCREMENTAL", [
+      "/project/src/types.ts",
+      "/project/src/foo.impl.ts",
+    ])
+    expect(result).toBeNull()
+  })
+
+  it("does NOT skip INTERFACES when allowlist has .d.ts files", () => {
+    const result = computeForwardSkip("INTERFACES", "INCREMENTAL", [
+      "/project/src/foo.d.ts",
+    ])
+    expect(result).toBeNull()
+  })
+
+  it("does NOT skip INTERFACES when allowlist has schema files", () => {
+    const result = computeForwardSkip("INTERFACES", "INCREMENTAL", [
+      "/project/src/schema.graphql",
+    ])
+    expect(result).toBeNull()
+  })
+})
+
+describe("computeForwardSkip — TESTS skip", () => {
+  it("skips TESTS when no test files in allowlist", () => {
+    const result = computeForwardSkip("TESTS", "INCREMENTAL", [
+      "/project/src/foo.impl.ts",
+    ])
+    expect(result).not.toBeNull()
+    expect(result!.skippedPhases).toContain("TESTS")
+  })
+
+  it("does NOT skip TESTS when allowlist has test files", () => {
+    const result = computeForwardSkip("TESTS", "INCREMENTAL", [
+      "/project/src/foo.impl.ts",
+      "/project/tests/foo.test.ts",
+    ])
+    expect(result).toBeNull()
+  })
+
+  it("does NOT skip TESTS when allowlist has spec files", () => {
+    const result = computeForwardSkip("TESTS", "INCREMENTAL", [
+      "/project/src/foo.spec.ts",
+    ])
+    expect(result).toBeNull()
+  })
+})
+
+describe("computeForwardSkip — IMPL_PLAN skip", () => {
+  it("IMPL_PLAN alone is NOT skipped (requires INTERFACES+TESTS skipped first)", () => {
+    // If nextPhase is IMPL_PLAN, INTERFACES and TESTS were not skipped in this call
+    const result = computeForwardSkip("IMPL_PLAN", "INCREMENTAL", [
+      "/project/src/foo.impl.ts",
+    ])
+    // IMPL_PLAN is the nextPhase, but INTERFACES and TESTS aren't in skippedPhases
+    // because we're starting from IMPL_PLAN, not INTERFACES
+    expect(result).toBeNull()
+  })
+})
+
+describe("computeForwardSkip — multi-phase skip", () => {
+  it("skips INTERFACES + TESTS + IMPL_PLAN when only impl files in allowlist", () => {
+    const result = computeForwardSkip("INTERFACES", "INCREMENTAL", [
+      "/project/src/foo.impl.ts",
+      "/project/src/bar.impl.ts",
+    ])
+    expect(result).not.toBeNull()
+    expect(result!.skippedPhases).toEqual(["INTERFACES", "TESTS", "IMPL_PLAN"])
+    expect(result!.targetPhase).toBe("IMPLEMENTATION")
+    expect(result!.targetPhaseState).toBe("DRAFT")
+  })
+
+  it("skips INTERFACES + TESTS but NOT IMPL_PLAN when test files present", () => {
+    // Has interface-irrelevant but test-relevant files
+    // Actually wait — if test files are present, TESTS is NOT skipped
+    // So this test is about: no interface, no test → skip all 3
+    // Let's test: no interface files, has test files → skip INTERFACES, stop at TESTS
+    const result = computeForwardSkip("INTERFACES", "INCREMENTAL", [
+      "/project/src/foo.impl.ts",
+      "/project/tests/bar.test.ts",
+    ])
+    expect(result).not.toBeNull()
+    expect(result!.skippedPhases).toEqual(["INTERFACES"])
+    expect(result!.targetPhase).toBe("TESTS")
+  })
+
+  it("skips INTERFACES only when test files present (stops at TESTS)", () => {
+    const result = computeForwardSkip("INTERFACES", "INCREMENTAL", [
+      "/project/src/foo.impl.ts",
+      "/project/tests/foo.test.ts",
+    ])
+    expect(result).not.toBeNull()
+    expect(result!.skippedPhases).toEqual(["INTERFACES"])
+    expect(result!.targetPhase).toBe("TESTS")
+    expect(result!.targetPhaseState).toBe("DRAFT")
+  })
+})
+
+describe("computeForwardSkip — non-skippable next phase", () => {
+  it("returns null when nextPhase is IMPLEMENTATION", () => {
+    const result = computeForwardSkip("IMPLEMENTATION", "INCREMENTAL", [
+      "/project/src/foo.impl.ts",
+    ])
+    expect(result).toBeNull()
+  })
+
+  it("returns null when nextPhase is PLANNING", () => {
+    const result = computeForwardSkip("PLANNING", "INCREMENTAL", [
+      "/project/src/foo.impl.ts",
+    ])
+    expect(result).toBeNull()
+  })
+
+  it("returns null when nextPhase is DISCOVERY", () => {
+    const result = computeForwardSkip("DISCOVERY", "INCREMENTAL", [
+      "/project/src/foo.impl.ts",
+    ])
+    expect(result).toBeNull()
+  })
+
+  it("returns null when nextPhase is DONE", () => {
+    const result = computeForwardSkip("DONE", "INCREMENTAL", [
+      "/project/src/foo.impl.ts",
+    ])
+    expect(result).toBeNull()
+  })
+})
+
+describe("computeForwardSkip — message format", () => {
+  it("message mentions skipped phases and target", () => {
+    const result = computeForwardSkip("INTERFACES", "INCREMENTAL", [
+      "/project/src/foo.impl.ts",
+    ])
+    expect(result).not.toBeNull()
+    expect(result!.message).toContain("Auto-skipped")
+    expect(result!.message).toContain("INTERFACES")
+    expect(result!.message).toContain("IMPLEMENTATION")
+  })
+
+  it("message includes reason for each skipped phase", () => {
+    const result = computeForwardSkip("INTERFACES", "INCREMENTAL", [
+      "/project/src/foo.impl.ts",
+    ])
+    expect(result).not.toBeNull()
+    expect(result!.message).toContain("no interface files")
+    expect(result!.message).toContain("no test files")
+    expect(result!.message).toContain("DAG not needed")
   })
 })

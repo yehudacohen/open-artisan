@@ -62,7 +62,7 @@ import { writeArtifact, detectDesignDoc } from "./artifact-store"
 import { dispatchTaskReview, type AdjacentTask } from "./task-review"
 import { dispatchDriftCheck } from "./task-drift"
 import { captureRevisionBaseline, hasArtifactChanged } from "./revision-baseline"
-import { computeFastForward } from "./fast-forward"
+import { computeFastForward, computeForwardSkip } from "./fast-forward"
 import { cascadeAutoSkip, type CascadeAutoSkipDeps } from "./cascade-auto-skip"
 import { dispatchAutoApproval } from "./auto-approve"
 import { createLogger, type Logger } from "./logger"
@@ -2355,6 +2355,19 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             }
 
             logTransition(state, outcome, "submit_feedback/approve", client)
+
+            // Forward-pass skip: in INCREMENTAL mode, if the fileAllowlist proves
+            // the next phase has no relevant files (e.g. no interface files for
+            // INTERFACES), skip directly past it. This avoids forcing the agent
+            // through ceremony gates for phases where no work is needed.
+            const forwardSkip = computeForwardSkip(
+              outcome.nextPhase,
+              state.mode,
+              state.fileAllowlist,
+            )
+            const effectiveNextPhase = forwardSkip?.targetPhase ?? outcome.nextPhase
+            const effectiveNextPhaseState = forwardSkip?.targetPhaseState ?? outcome.nextPhaseState
+
             // Git checkpoint — use per-phase approval count for tag versioning (M11)
             const phaseCount = (state.phaseApprovalCounts[state.phase] ?? 0) + 1
             const newApprovalCount = state.approvalCount + 1
@@ -2384,8 +2397,8 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             }
 
             await store.update(sessionId, (draft) => {
-              draft.phase = outcome.nextPhase
-              draft.phaseState = outcome.nextPhaseState
+              draft.phase = effectiveNextPhase
+              draft.phaseState = effectiveNextPhaseState
               draft.approvalCount = newApprovalCount
               draft.phaseApprovalCounts[state.phase] = phaseCount
               draft.iterationCount = 0
@@ -2481,7 +2494,14 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
               }
             }
 
-            return result.responseMessage + checkpointMsg + discoveryWarning + implPlanWarning + approvalWarning
+            const forwardSkipMsg = forwardSkip
+              ? `\n\n${forwardSkip.message}`
+              : ""
+            if (forwardSkip) {
+              log.info("Forward-pass skip", { detail: `Skipped ${forwardSkip.skippedPhases.length} phase(s): ${forwardSkip.skippedPhases.join(", ")} → ${forwardSkip.targetPhase}` })
+            }
+
+            return result.responseMessage + checkpointMsg + discoveryWarning + implPlanWarning + forwardSkipMsg + approvalWarning
 
           } else {
             // N3 fix: mode must be set before revision routing

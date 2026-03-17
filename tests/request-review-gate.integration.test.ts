@@ -664,15 +664,16 @@ describe("Child session handling — Task subagents", () => {
       output,
     )
 
-    // Should have subagent context prepended + original base prompt
+    // Should have original base prompt first + subagent context appended
+    // (appended to preserve OpenCode's system block positions for applyCaching)
     expect(output.system.length).toBe(2)
-    expect(output.system[1]).toBe("base system prompt")
+    expect(output.system[0]).toBe("base system prompt")
     // The subagent context should contain the subagent marker, not the full workflow prompt
-    expect(output.system[0]).toContain("SUBAGENT SESSION")
-    expect(output.system[0]).toContain("Subagent Tool Restrictions")
+    expect(output.system[1]).toContain("SUBAGENT SESSION")
+    expect(output.system[1]).toContain("Subagent Tool Restrictions")
     // Should NOT contain full workflow instructions (like MODE_SELECT prompts)
-    expect(output.system[0]).not.toContain("STRUCTURED WORKFLOW — ACTIVE")
+    expect(output.system[1]).not.toContain("STRUCTURED WORKFLOW — ACTIVE")
     // Should NOT contain the MODE_SELECT action prompt (Call `select_mode` with the chosen mode)
-    expect(output.system[0]).not.toContain("Call `select_mode` with the chosen mode")
+    expect(output.system[1]).not.toContain("Call `select_mode` with the chosen mode")
   }, 15000)
 })

@@ -368,10 +368,13 @@ describe("experimental.chat.system.transform — injects workflow prompt", () =>
     )
     const output = { system: ["existing system prompt"] }
     await plugin["experimental.chat.system.transform"]({ sessionID: sid }, output)
-    // Workflow block should be prepended (first element)
+    // Workflow block should be appended (last element) to preserve
+    // OpenCode's own system block positions for applyCaching.
     expect(output.system.length).toBeGreaterThanOrEqual(2)
-    expect(output.system[0]).toContain("STRUCTURED WORKFLOW")
-    expect(output.system[0]).toContain("PLANNING")
+    expect(output.system[0]).toBe("existing system prompt")
+    const last = output.system[output.system.length - 1]
+    expect(last).toContain("STRUCTURED WORKFLOW")
+    expect(last).toContain("PLANNING")
   })
 
   it("unknown session does not modify system array", async () => {

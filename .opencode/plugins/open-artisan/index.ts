@@ -654,7 +654,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
       if (parentSessionId) {
         const parentState = store.get(parentSessionId)
         if (parentState) {
-          output.system.unshift(buildSubagentContext(parentState))
+          output.system.push(buildSubagentContext(parentState))
         }
         return
       }
@@ -671,8 +671,10 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
       }
 
       const promptBlock = buildWorkflowSystemPrompt(state)
-      // Prepend the workflow block before existing system parts
-      output.system.unshift(promptBlock)
+      // Append the workflow block after existing system parts to preserve
+      // OpenCode's own system block positions (applyCaching expects its
+      // blocks at index 0-1 for cache_control breakpoints).
+      output.system.push(promptBlock)
 
       // At USER_GATE, append a routing hint as an additional system block
       if (state.phaseState === "USER_GATE") {

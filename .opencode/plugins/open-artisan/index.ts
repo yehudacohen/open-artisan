@@ -904,6 +904,32 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
           const state = await ensureState(store, sessionId, client)
           await detectAgent(store, sessionId, context)
 
+          // If at DONE, reset to MODE_SELECT to allow starting a fresh workflow.
+          // This handles the case where the user wants to start a new workflow
+          // after a prior one completed, without needing to send a chat message first.
+          if (state.phase === "DONE") {
+            await store.update(sessionId, (draft) => {
+              draft.phase = "MODE_SELECT"
+              draft.phaseState = "DRAFT"
+              draft.iterationCount = 0
+              draft.retryCount = 0
+              draft.intentBaseline = null
+              draft.userGateMessageReceived = false
+              draft.currentTaskId = null
+              draft.implDag = null
+              draft.feedbackHistory = []
+              draft.pendingRevisionSteps = null
+              draft.escapePending = false
+              draft.taskCompletionInProgress = null
+              draft.taskReviewCount = 0
+              draft.pendingFeedback = null
+              draft.revisionBaseline = null
+            })
+            log.info("Auto-reset DONE -> MODE_SELECT for fresh workflow", { sessionId })
+            state.phase = "MODE_SELECT"
+            state.phaseState = "DRAFT"
+          }
+
           if (state.phase !== "MODE_SELECT") {
             return `Error: Mode already selected (current phase: ${state.phase}).`
           }

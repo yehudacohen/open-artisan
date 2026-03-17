@@ -65,7 +65,7 @@ import { captureRevisionBaseline, hasArtifactChanged } from "./revision-baseline
 import { computeFastForward, computeForwardSkip } from "./fast-forward"
 import { cascadeAutoSkip, type CascadeAutoSkipDeps } from "./cascade-auto-skip"
 import { dispatchAutoApproval } from "./auto-approve"
-import { createLogger, type Logger } from "./logger"
+import { createLogger, setDefaultStateDir, type Logger } from "./logger"
 
 import { createHash } from "node:crypto"
 import type { WorkflowMode, WorkflowState, SessionStateStore, ArtifactKey, RevisionStep, MarkSatisfiedArgs } from "./types"
@@ -295,6 +295,11 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
     : join(import.meta.dirname, "..", "..")  // .opencode/ fallback
   const store = createSessionStateStore(stateDir)
   const sm = createStateMachine()
+  // Set the module-level default stateDir so all createLogger(client) calls
+  // (without explicit stateDir) still persist errors to disk. This fixes the
+  // bug where self-review, orchestrator, auto-approve, and discovery errors
+  // were silently lost because they called createLogger(client) without stateDir.
+  setDefaultStateDir(stateDir)
   const log = createLogger(client, stateDir)
 
   // Layer 2: Orchestrator — wires LLM-backed assess + diverge into the routing logic.

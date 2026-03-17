@@ -46,14 +46,33 @@ const DEBUG_ENABLED = !!process.env["OPENARTISAN_DEBUG"]
 const PREFIX = "[open-artisan]"
 
 /**
+ * Module-level default stateDir for error log persistence.
+ * Set once at plugin init via `setDefaultStateDir()`. This allows
+ * callsites that don't have direct access to stateDir (e.g. self-review,
+ * auto-approve, orchestrator) to still persist errors to disk.
+ */
+let defaultStateDir: string | null = null
+
+/**
+ * Sets the module-level default stateDir. Call once at plugin init.
+ * After this, any `createLogger(client)` call (without explicit stateDir)
+ * will persist errors to `<stateDir>/openartisan-errors.log`.
+ */
+export function setDefaultStateDir(dir: string): void {
+  defaultStateDir = dir
+}
+
+/**
  * Creates a logger bound to the plugin client's TUI toast API.
  * Safe to call even if `client.tui` is undefined (graceful no-op).
  *
  * @param client   Plugin client for TUI toast access
- * @param stateDir Directory for the persistent error log file (.opencode/)
+ * @param stateDir Directory for the persistent error log file (.opencode/).
+ *                 Falls back to the module-level default set via `setDefaultStateDir()`.
  */
 export function createLogger(client: PluginClient, stateDir?: string): Logger {
-  const errorLogPath = stateDir ? join(stateDir, "openartisan-errors.log") : null
+  const effectiveStateDir = stateDir ?? defaultStateDir
+  const errorLogPath = effectiveStateDir ? join(effectiveStateDir, "openartisan-errors.log") : null
 
   function toast(
     title: string,

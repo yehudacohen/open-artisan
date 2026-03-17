@@ -266,8 +266,15 @@ export function computeForwardSkip(
   mode: WorkflowMode | null,
   fileAllowlist: string[],
 ): ForwardSkipResult | null {
-  // Only INCREMENTAL with a non-empty allowlist can skip phases
-  if (mode !== "INCREMENTAL" || fileAllowlist.length === 0) return null
+  // Only INCREMENTAL mode triggers forward-pass skip.
+  // An empty allowlist is valid here: it means "no source files will be changed"
+  // (a purely operational task), which implies hasInterfaceFiles=false and
+  // hasTestFiles=false — all three ceremony phases (INTERFACES, TESTS, IMPL_PLAN)
+  // will be skipped and the workflow lands directly at IMPLEMENTATION.
+  // Do NOT short-circuit on length === 0: that conflates "allowlist not yet set"
+  // with "allowlist explicitly empty". The allowlist is always populated from
+  // args.approved_files before computeForwardSkip is called (see index.ts).
+  if (mode !== "INCREMENTAL") return null
 
   // Only skip from a skippable phase
   if (!FORWARD_SKIPPABLE.has(nextPhase)) return null

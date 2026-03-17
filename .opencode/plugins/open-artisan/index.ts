@@ -1338,7 +1338,16 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
           // Robot-artisan auto-approval: when the active agent is "robot-artisan"
           // and we've entered USER_GATE, dispatch an auto-approver instead of
           // waiting for human input. The auto-approver evaluates the artifact
-          // and returns either an approval or specific revision feedback.
+          // and either approves (executing the phase transition inline) or returns
+          // revision feedback for the agent to address.
+          //
+          // Fix: when the auto-approver approves, execute the approval state
+          // transition HERE (inline), rather than returning an instruction for
+          // the agent to call submit_feedback in a follow-up turn. The old
+          // approach left the session at USER_GATE with no re-prompt mechanism:
+          // the idle handler ignores USER_GATE (Fix 4 adds robot-artisan awareness
+          // as a belt-and-suspenders safety net), so the session stalled silently
+          // until the user poked it.
           const currentState = store.get(sessionId)
           if (
             outcome.nextPhaseState === "USER_GATE" &&
@@ -1357,17 +1366,69 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
 
               if (autoResult.success) {
                 if (autoResult.approve) {
-                  // Auto-approved: set userGateMessageReceived so submit_feedback(approve)
-                  // won't warn about missing user input, then instruct the agent to approve.
-                  await store.update(sessionId, (draft) => {
-                    draft.userGateMessageReceived = true
-                  })
-                  log.info("Robot-artisan: auto-approved", { detail: `confidence: ${autoResult.confidence.toFixed(2)}` })
-                  return (
-                    `**Auto-approved** (robot-artisan mode, confidence: ${autoResult.confidence.toFixed(2)}).\n\n` +
-                    `${autoResult.reasoning}\n\n` +
-                    `Call \`submit_feedback\` with \`feedback_type: "approve"\` and \`feedback_text: "Auto-approved by robot-artisan"\` to proceed.`
-                  )
+                  // Auto-approved: execute the phase transition inline so no follow-up
+                  // submit_feedback call is needed. This eliminates the gap where the
+                  // session would sit silently at USER_GATE waiting for the agent to act.
+                  log.info("Robot-artisan: auto-approved inline", { detail: `confidence: ${autoResult.confidence.toFixed(2)}` })
+
+                  const approveOutcome = sm.transition(state.phase, outcome.nextPhaseState, "user_approve", state.mode)
+                  if (!approveOutcome.success) {
+                    // SM rejected the transition — fall through to normal USER_GATE behavior
+                    log.warn("Robot-artisan: inline approval SM transition failed", { detail: approveOutcome.message })
+                  } else {
+                    logTransition({ phase: state.phase, phaseState: outcome.nextPhaseState }, approveOutcome, "auto-approve/inline", client)
+
+                    // Forward-pass skip for the auto-approve path
+                    const autoForwardSkip = computeForwardSkip(
+                      approveOutcome.nextPhase,
+                      state.mode,
+                      state.fileAllowlist,
+                    )
+                    const autoEffectiveNextPhase = autoForwardSkip?.targetPhase ?? approveOutcome.nextPhase
+                    const autoEffectiveNextPhaseState = autoForwardSkip?.targetPhaseState ?? approveOutcome.nextPhaseState
+
+                    // Git checkpoint
+                    const autoPhaseCount = (state.phaseApprovalCounts[state.phase] ?? 0) + 1
+                    const autoApprovalCount = state.approvalCount + 1
+                    const autoCheckpointOpts = state.mode === "INCREMENTAL"
+                      ? { phase: state.phase, approvalCount: autoPhaseCount, fileAllowlist: state.fileAllowlist }
+                      : { phase: state.phase, approvalCount: autoPhaseCount }
+                    const autoCheckpointResult = await createGitCheckpoint(
+                      { cwd: context.directory || process.cwd(), $ },
+                      autoCheckpointOpts,
+                    )
+
+                    // Record artifact hash for the approved phase
+                    const autoArtifactKey = PHASE_TO_ARTIFACT[state.phase]
+
+                    await store.update(sessionId, (draft) => {
+                      draft.phase = autoEffectiveNextPhase
+                      draft.phaseState = autoEffectiveNextPhaseState
+                      draft.approvalCount = autoApprovalCount
+                      draft.phaseApprovalCounts[state.phase] = autoPhaseCount
+                      draft.iterationCount = 0
+                      draft.retryCount = 0
+                      draft.userGateMessageReceived = false
+                      if (autoCheckpointResult.success) {
+                        draft.lastCheckpointTag = autoCheckpointResult.tag
+                      }
+                      if (autoArtifactKey) {
+                        draft.approvedArtifacts[autoArtifactKey] = `approved-at-${Date.now()}`
+                      }
+                    })
+
+                    const autoCheckpointMsg = autoCheckpointResult.success
+                      ? ` Git checkpoint: \`${autoCheckpointResult.tag}\`.`
+                      : ` (Git checkpoint failed: ${autoCheckpointResult.error})`
+                    const autoForwardSkipMsg = autoForwardSkip ? `\n\n${autoForwardSkip.message}` : ""
+
+                    return (
+                      `**Auto-approved** (robot-artisan mode, confidence: ${autoResult.confidence.toFixed(2)}).${autoCheckpointMsg}\n\n` +
+                      `${autoResult.reasoning}\n\n` +
+                      `Advanced to **${autoEffectiveNextPhase}/${autoEffectiveNextPhaseState}**.` +
+                      autoForwardSkipMsg
+                    )
+                  }
                 } else {
                   // Auto-approve rejected: return revision feedback for the agent to address.
                   // Stay at USER_GATE — the agent must revise and re-submit.
@@ -2370,10 +2431,25 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             // the next phase has no relevant files (e.g. no interface files for
             // INTERFACES), skip directly past it. This avoids forcing the agent
             // through ceremony gates for phases where no work is needed.
+            //
+            // Fix: compute effectiveAllowlist from args.approved_files BEFORE calling
+            // computeForwardSkip. The store.update() that persists fileAllowlist from
+            // args.approved_files runs below this point (S2), so state.fileAllowlist
+            // still holds the pre-approval value (an empty array) at this call site.
+            // Using the stale value caused computeForwardSkip to always return null
+            // at PLANNING approval time, forcing the agent through INTERFACES/TESTS/IMPL_PLAN
+            // even when approved_files was intentionally empty (operational-only tasks).
+            const effectiveAllowlist: string[] = (() => {
+              if (state.phase === "PLANNING" && state.mode === "INCREMENTAL" && args.approved_files) {
+                const cwd = context.directory || process.cwd()
+                return args.approved_files.map((p) => p.startsWith("/") ? p : resolve(cwd, p))
+              }
+              return state.fileAllowlist
+            })()
             const forwardSkip = computeForwardSkip(
               outcome.nextPhase,
               state.mode,
-              state.fileAllowlist,
+              effectiveAllowlist,
             )
             const effectiveNextPhase = forwardSkip?.targetPhase ?? outcome.nextPhase
             const effectiveNextPhaseState = forwardSkip?.targetPhaseState ?? outcome.nextPhaseState

@@ -1,6 +1,6 @@
 # Open Artisan
 
-**A structured workflow plugin for [OpenCode](https://opencode.ai) that enforces phased, quality-gated software development on AI coding agents.**
+**Like Ralph Wiggums but smart: A structured workflow plugin for [OpenCode](https://opencode.ai) that enforces phased, quality-gated software development on AI coding agents.**
 
 Open Artisan mirrors how experienced engineers build software: understand what exists, plan, define interfaces, write tests, plan the implementation, then implement one task at a time -- verifying alignment at every step. If the agent can bypass a quality gate through rationalization, the gate is enforced in code, not prompts.
 

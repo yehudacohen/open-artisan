@@ -537,12 +537,86 @@ describe("validateWorkflowState — ESCAPE_HATCH invariant", () => {
       escapePending: true,
       phaseState: "DRAFT",
       pendingRevisionSteps: [
-        { artifact: "plan", phase: "PLANNING", phaseState: "REVISE", instructions: "revise plan" },
+         { artifact: "plan", phase: "PLANNING", phaseState: "REVISE", instructions: "revise plan" },
       ],
     })
     const err = validateWorkflowState(state)
     expect(err).not.toBeNull()
     expect(err).toContain("escapePending")
     expect(err).toContain("ESCAPE_HATCH")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// featureName security validation (path traversal prevention)
+// ---------------------------------------------------------------------------
+
+describe("validateWorkflowState — featureName path traversal prevention", () => {
+  it("rejects featureName containing '..'", () => {
+    const err = validateWorkflowState(makeValidState({ featureName: "../../../etc" }))
+    expect(err).not.toBeNull()
+    expect(err).toContain("..")
+    expect(err).toContain("path traversal")
+  })
+
+  it("rejects featureName containing '/'", () => {
+    const err = validateWorkflowState(makeValidState({ featureName: "foo/bar" }))
+    expect(err).not.toBeNull()
+    expect(err).toContain("path separator")
+  })
+
+  it("rejects featureName containing '\\'", () => {
+    const err = validateWorkflowState(makeValidState({ featureName: "foo\\bar" }))
+    expect(err).not.toBeNull()
+    expect(err).toContain("path separator")
+  })
+
+  it("rejects featureName starting with a dot", () => {
+    const err = validateWorkflowState(makeValidState({ featureName: ".hidden" }))
+    expect(err).not.toBeNull()
+    expect(err).toContain("alphanumeric")
+  })
+
+  it("rejects featureName starting with a hyphen", () => {
+    const err = validateWorkflowState(makeValidState({ featureName: "-bad-name" }))
+    expect(err).not.toBeNull()
+    expect(err).toContain("alphanumeric")
+  })
+
+  it("rejects featureName with special characters", () => {
+    const err = validateWorkflowState(makeValidState({ featureName: "feat$name" }))
+    expect(err).not.toBeNull()
+    expect(err).toContain("alphanumeric")
+  })
+
+  it("rejects featureName with spaces", () => {
+    const err = validateWorkflowState(makeValidState({ featureName: "feat name" }))
+    expect(err).not.toBeNull()
+    expect(err).toContain("alphanumeric")
+  })
+
+  it("accepts valid featureName (alphanumeric with hyphens)", () => {
+    const err = validateWorkflowState(makeValidState({ featureName: "my-feature-123" }))
+    expect(err).toBeNull()
+  })
+
+  it("accepts valid featureName (alphanumeric with underscores)", () => {
+    const err = validateWorkflowState(makeValidState({ featureName: "my_feature_v2" }))
+    expect(err).toBeNull()
+  })
+
+  it("accepts valid featureName (alphanumeric with dots)", () => {
+    const err = validateWorkflowState(makeValidState({ featureName: "feature.v1.2" }))
+    expect(err).toBeNull()
+  })
+
+  it("accepts single character featureName", () => {
+    const err = validateWorkflowState(makeValidState({ featureName: "x" }))
+    expect(err).toBeNull()
+  })
+
+  it("accepts null featureName", () => {
+    const err = validateWorkflowState(makeValidState({ featureName: null }))
+    expect(err).toBeNull()
   })
 })

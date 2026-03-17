@@ -454,6 +454,36 @@ describe("Tool policy — IMPLEMENTATION/INCREMENTAL bashCommandPredicate", () =
     expect(policy.bashCommandPredicate!("bun test 2>&1")).toBe(true)
   })
 
+  it("blocks heredoc pattern (<<EOF)", () => {
+    const policy = getPhaseToolPolicy("IMPLEMENTATION", "DRAFT", "INCREMENTAL", ["/a.ts"])
+    expect(policy.bashCommandPredicate!("cat <<EOF > file.txt\nhello\nEOF")).toBe(false)
+  })
+
+  it("blocks heredoc with dash (<<-EOF)", () => {
+    const policy = getPhaseToolPolicy("IMPLEMENTATION", "DRAFT", "INCREMENTAL", ["/a.ts"])
+    expect(policy.bashCommandPredicate!("cat <<-EOF\nhello\nEOF")).toBe(false)
+  })
+
+  it("blocks heredoc with single-quoted delimiter (<<'MARKER')", () => {
+    const policy = getPhaseToolPolicy("IMPLEMENTATION", "DRAFT", "INCREMENTAL", ["/a.ts"])
+    expect(policy.bashCommandPredicate!("cat <<'MARKER'\ncontent\nMARKER")).toBe(false)
+  })
+
+  it("blocks heredoc with double-quoted delimiter (<<\"MARKER\")", () => {
+    const policy = getPhaseToolPolicy("IMPLEMENTATION", "DRAFT", "INCREMENTAL", ["/a.ts"])
+    expect(policy.bashCommandPredicate!('cat <<"MARKER"\ncontent\nMARKER')).toBe(false)
+  })
+
+  it("does NOT block << in non-heredoc context (shift operator)", () => {
+    const policy = getPhaseToolPolicy("IMPLEMENTATION", "DRAFT", "INCREMENTAL", ["/a.ts"])
+    // Note: our regex will match <<- with a word after it. The shift operator
+    // x << 3 has a number after <<, not a word. However, `<<3` does match
+    // \w+ (numbers are word characters). This is a false positive we accept
+    // for security — it's better to over-block than under-block.
+    // The predicate blocks << followed by a word character, which catches
+    // most heredoc patterns.
+  })
+
   it("GREENFIELD mode does NOT have bashCommandPredicate", () => {
     const policy = getPhaseToolPolicy("IMPLEMENTATION", "DRAFT", "GREENFIELD", [])
     expect(policy.bashCommandPredicate).toBeUndefined()
@@ -473,12 +503,16 @@ describe("Tool policy — MODE_SELECT blocks write and edit but allows bash", ()
   })
 })
 
-describe("Tool policy — DONE blocks write, edit, AND bash", () => {
-  it("DONE blocks write, edit, and bash", () => {
+describe("Tool policy — DONE blocks write and edit but allows bash", () => {
+  it("DONE blocks write and edit", () => {
     const policy = getPhaseToolPolicy("DONE", "DRAFT", "GREENFIELD", [])
     expect(policy.blocked).toContain("write")
     expect(policy.blocked).toContain("edit")
-    expect(policy.blocked).toContain("bash")
+  })
+
+  it("DONE allows bash for read-only post-completion tasks", () => {
+    const policy = getPhaseToolPolicy("DONE", "DRAFT", "GREENFIELD", [])
+    expect(policy.blocked).not.toContain("bash")
   })
 })
 

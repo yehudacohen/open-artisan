@@ -16,7 +16,8 @@
  */
 import { existsSync } from "node:fs"
 import type { WorkflowState } from "../types"
-import { MAX_CONVENTIONS_CHARS, MAX_REPORT_CHARS, getNextActionForState } from "../utils"
+import { MAX_CONVENTIONS_CHARS, MAX_REPORT_CHARS } from "../constants"
+import { getNextActionForState } from "../utils"
 
 // ---------------------------------------------------------------------------
 // Context block builder

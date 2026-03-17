@@ -1,6 +1,6 @@
 # Structured Coding Workflow — Design Document
 
-**Version:** v12 (reflects implementation as of schema v15, March 2026)
+**Version:** v13 (reflects implementation as of schema v15, March 2026)
 **Status:** This document describes the **current implemented system**, not aspirational design. Section 14 documents structural gaps that have all been resolved. Section 14.6 documents meta-structural improvements that prevent agents from silently downgrading structural guarantees. Section 15 documents deferred features.
 
 ---
@@ -238,11 +238,34 @@ MODE_SELECT
 - **Preserves** cross-cycle context: `mode`, `approvedArtifacts`, `conventions`, `fileAllowlist`, `featureName`, `artifactDiskPaths`, `activeAgent`, `phaseApprovalCounts`, `lastCheckpointTag`, `approvalCount`.
 - **Sets** `intentBaseline` to the user's new message text (truncated to 2000 chars).
 
-### 5.5 Design Invariant: Revise, Never Rewrite
+### 5.5 Phase Fast-Forward for Returning Projects
+
+When a user returns to a project with existing approved artifacts (preserved across DONE → MODE_SELECT resets), the plugin can skip phases whose artifacts are still intact on disk. This avoids re-running 6+ approval gates when the user's prior work is unchanged.
+
+**Algorithm (Option E — fast-forward with validation):**
+After `select_mode` completes, if `approvedArtifacts` has entries (carried over from a prior cycle):
+
+1. Get the phase sequence for the selected mode (GREENFIELD: PLANNING→...→IMPLEMENTATION; REFACTOR/INCREMENTAL: DISCOVERY→...→IMPLEMENTATION)
+2. For each phase in order:
+   a. Look up the artifact key (`PHASE_TO_ARTIFACT[phase]`)
+   b. Check if `approvedArtifacts` has an entry for that key
+   c. Check if `artifactDiskPaths` has a path for that key
+   d. Verify the file still exists on disk
+   e. If the approved hash is content-based (not a time-sentinel), verify the file content hash still matches
+3. First phase that fails any check → that's where work starts (DRAFT or SCAN)
+4. All phases pass → land at DONE (all artifacts still valid)
+
+**Structural guarantee:** We never skip a phase whose artifact is missing, changed, or was never approved. We only skip phases with verified-intact artifacts.
+
+**Time-sentinel handling:** File-based phases (INTERFACES, TESTS, IMPLEMENTATION) sometimes store `"approved-at-<timestamp>"` instead of a content hash (when `artifact_content` wasn't provided at approval). For these, the fast-forward verifies the file exists on disk but does not verify content (there is no reference hash to compare against). This is a deliberate trade-off — the file existing at all is sufficient evidence for time-sentinel approvals.
+
+**Implementation:** `fast-forward.ts` exports `computeFastForward()` — a pure function with no side effects. The `select_mode` tool handler calls it after the initial state transition and applies the result to the session state.
+
+### 5.6 Design Invariant: Revise, Never Rewrite
 
 The state machine enforces that `user_feedback` events produce REVISE states, never DRAFT states. This is checked structurally in `state-machine.ts` — the transition function rejects any event that would produce a DRAFT→DRAFT loop. Every iteration preserves prior work.
 
-### 5.6 What the State Machine Does NOT Model
+### 5.7 What the State Machine Does NOT Model
 
 The orchestrator (assess, diverge, route) and execution engine (task scheduling, per-task review, drift check) are **procedural code**, not state machine states. The original v6 design specified 40 states including X_* and O_* states for these subsystems. The implementation consolidates them into function calls within the tool handlers. The structural gaps identified in the original analysis (Section 14) have all been resolved.
 
@@ -755,6 +778,8 @@ These must hold true at all times. Items marked *(procedural)* are enforced by c
         ├── auto-approve.ts         # Robot-artisan auto-approval dispatch
         ├── task-drift.ts           # Per-task alignment check after review
         ├── revision-baseline.ts    # Diff gate (REVISE entry snapshot)
+        ├── cascade-auto-skip.ts    # Deterministic cascade step skipping
+        ├── fast-forward.ts         # Phase fast-forward for returning projects
         ├── hooks/
         │   ├── system-transform.ts # System prompt injection
         │   ├── chat-message.ts     # USER_GATE message detection
@@ -823,10 +848,12 @@ tests/
 ├── discovery-fleet.test.ts
 ├── artifact-graph.test.ts
 ├── artifact-paths.test.ts
+├── cascade-auto-skip.test.ts
+├── fast-forward.test.ts
 └── utils.test.ts
 ```
 
-**Test count:** 1035 tests across 36 files (schema v15).
+**Test count:** 1097 tests across 38 files (schema v15).
 
 **Runtime artifacts** (in target project's `.opencode/` directory):
 - `workflow-state.json` — persisted session state (all sessions, JSON object keyed by session ID)

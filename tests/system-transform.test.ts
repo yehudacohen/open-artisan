@@ -323,14 +323,76 @@ describe("buildWorkflowSystemPrompt — acceptance criteria at REVIEW", () => {
     expect(prompt).toContain("Naming conventions documented")
   })
 
-  it("does NOT inject acceptance criteria at DRAFT state", () => {
+  it("does NOT inject full acceptance criteria at DRAFT state (preview only)", () => {
     const prompt = buildWorkflowSystemPrompt(makeState({ phase: "PLANNING", phaseState: "DRAFT" }))
-    expect(prompt).not.toContain("Acceptance Criteria")
+    // Full criteria header should not appear
+    expect(prompt).not.toContain("### Acceptance Criteria —")
+    // But the preview header should appear
+    expect(prompt).toContain("Acceptance Criteria Preview")
+    expect(prompt).toContain("What the Reviewer Will Evaluate")
   })
 
   it("does NOT inject acceptance criteria at USER_GATE state", () => {
     const prompt = buildWorkflowSystemPrompt(makeState({ phase: "PLANNING", phaseState: "USER_GATE" }))
-    expect(prompt).not.toContain("Acceptance Criteria")
+    expect(prompt).not.toContain("Acceptance Criteria Preview")
+    // The full criteria header also should not appear
+    expect(prompt).not.toContain("### Acceptance Criteria —")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Acceptance criteria preview at DRAFT/CONVENTIONS/REVISE
+// ---------------------------------------------------------------------------
+
+describe("buildWorkflowSystemPrompt — acceptance criteria preview at authoring states", () => {
+  it("injects criteria preview at PLANNING/DRAFT", () => {
+    const prompt = buildWorkflowSystemPrompt(makeState({ phase: "PLANNING", phaseState: "DRAFT" }))
+    expect(prompt).toContain("Acceptance Criteria Preview")
+    expect(prompt).toContain("All user requirements explicitly addressed")
+  })
+
+  it("injects criteria preview at INTERFACES/DRAFT", () => {
+    const prompt = buildWorkflowSystemPrompt(makeState({ phase: "INTERFACES", phaseState: "DRAFT" }))
+    expect(prompt).toContain("Acceptance Criteria Preview")
+    expect(prompt).toContain("Every function/method has input types")
+  })
+
+  it("injects criteria preview at TESTS/REVISE", () => {
+    const prompt = buildWorkflowSystemPrompt(makeState({ phase: "TESTS", phaseState: "REVISE" }))
+    expect(prompt).toContain("Acceptance Criteria Preview")
+    expect(prompt).toContain("At least one test per interface method")
+  })
+
+  it("injects criteria preview at DISCOVERY/CONVENTIONS in REFACTOR mode", () => {
+    const prompt = buildWorkflowSystemPrompt(
+      makeState({ phase: "DISCOVERY", phaseState: "CONVENTIONS", mode: "REFACTOR" }),
+    )
+    expect(prompt).toContain("Acceptance Criteria Preview")
+    expect(prompt).toContain("Existing architecture accurately described")
+  })
+
+  it("does NOT inject criteria preview at USER_GATE", () => {
+    const prompt = buildWorkflowSystemPrompt(makeState({ phase: "PLANNING", phaseState: "USER_GATE" }))
+    expect(prompt).not.toContain("Acceptance Criteria Preview")
+  })
+
+  it("does NOT inject criteria preview at SCAN", () => {
+    const prompt = buildWorkflowSystemPrompt(
+      makeState({ phase: "DISCOVERY", phaseState: "SCAN", mode: "REFACTOR" }),
+    )
+    expect(prompt).not.toContain("Acceptance Criteria Preview")
+  })
+
+  it("does NOT inject criteria preview at ANALYZE", () => {
+    const prompt = buildWorkflowSystemPrompt(
+      makeState({ phase: "DISCOVERY", phaseState: "ANALYZE", mode: "REFACTOR" }),
+    )
+    expect(prompt).not.toContain("Acceptance Criteria Preview")
+  })
+
+  it("preview tells agent to satisfy criteria before calling request_review", () => {
+    const prompt = buildWorkflowSystemPrompt(makeState({ phase: "PLANNING", phaseState: "DRAFT" }))
+    expect(prompt).toContain("Ensure your artifact satisfies ALL blocking criteria before submitting for review")
   })
 })
 

@@ -4,10 +4,6 @@
  * (which requires @opencode-ai/plugin at runtime).
  */
 
-// Re-export from constants.ts for backward compatibility.
-// New code should import directly from constants.ts.
-export { MAX_CONVENTIONS_CHARS, MAX_REPORT_CHARS } from "./constants"
-
 /**
  * Wraps a promise with a timeout. Rejects with a descriptive error if the
  * promise does not settle within `ms` milliseconds.

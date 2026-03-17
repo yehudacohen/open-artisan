@@ -62,6 +62,8 @@ import { writeArtifact, detectDesignDoc } from "./artifact-store"
 import { dispatchTaskReview, type AdjacentTask } from "./task-review"
 import { dispatchDriftCheck } from "./task-drift"
 import { captureRevisionBaseline, hasArtifactChanged } from "./revision-baseline"
+import { computeFastForward } from "./fast-forward"
+import { cascadeAutoSkip, type CascadeAutoSkipDeps } from "./cascade-auto-skip"
 import { dispatchAutoApproval } from "./auto-approve"
 import { createLogger, type Logger } from "./logger"
 
@@ -164,8 +166,7 @@ function logTransition(
   from: { phase: string; phaseState: string },
   to: { nextPhase: string; nextPhaseState: string } | { phase: string; phaseState: string },
   trigger: string,
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  client?: any,
+  client?: PluginClient,
 ): void {
   const toPhase = "nextPhase" in to ? to.nextPhase : to.phase
   const toState = "nextPhaseState" in to ? to.nextPhaseState : to.phaseState
@@ -269,9 +270,7 @@ export const PASSTHROUGH_TOOL_NAMES = new Set([
   "question",        // User interaction (read-only)
 ])
 
-// MAX_REVIEW_ITERATIONS is imported from constants.ts
-// Re-export for backward compatibility with consumers that import from index.ts
-export { MAX_REVIEW_ITERATIONS } from "./constants"
+
 
 // ---------------------------------------------------------------------------
 // Plugin export — correct OpenCode plugin API shape
@@ -354,138 +353,9 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
   // workflow state — they inherit the parent's tool policy.
   const childSessionParents = new Map<string, string>()
 
-  // ---------------------------------------------------------------------------
-  // cascadeAutoSkip — deterministic auto-skip at cascade entry
-  //
-  // Called immediately after transitioning to a cascade step's REVISE. Checks
-  // whether the artifact actually needs changes. If not, loops through
-  // consecutive no-op steps until it finds one that needs work, or fast-
-  // forwards to USER_GATE if all remaining steps are no-ops.
-  //
-  // This runs at the STATE TRANSITION level — the agent never sees the skipped
-  // phases, preventing it from getting stuck in tool-blocked states (e.g., bash
-  // blocked in TESTS/REVISE) and rationalizing workarounds.
-  //
-  // Returns a message to return to the agent, or null if no skip was performed.
-  // ---------------------------------------------------------------------------
-  async function cascadeAutoSkip(
-    sessionId: string,
-    cwd: string,
-  ): Promise<string | null> {
-    const skippedPhases: string[] = []
-
-    // Loop: keep skipping no-op cascade steps
-    // Safety cap: max 10 iterations to prevent infinite loops
-    for (let i = 0; i < 10; i++) {
-      const current = store.get(sessionId)
-      if (!current) return null
-      if (current.phaseState !== "REVISE") return null
-      if (!current.revisionBaseline) return null // No baseline → can't detect, let agent proceed
-
-      let changed: boolean
-      try {
-        changed = await hasArtifactChanged(
-          current.revisionBaseline,
-          current.phase,
-          undefined, // No artifact_content at entry — check disk/git only
-          current,
-          cwd,
-          $,
-        )
-      } catch {
-        // Diff check failed → graceful degradation, let agent proceed
-        return null
-      }
-
-      if (changed) {
-        // This phase needs work — stop skipping
-        break
-      }
-
-      // No changes detected for this step.
-      // Guard: on the first iteration, only skip if this is part of a cascade
-      // (pendingRevisionSteps has items). If pendingRevisionSteps is empty/null
-      // on the first check, this is a standalone REVISE or single-step revise
-      // where the agent is expected to do work — return null so the caller
-      // applies the standalone hard block.
-      if (skippedPhases.length === 0 && (!current.pendingRevisionSteps || current.pendingRevisionSteps.length === 0)) {
-        return null
-      }
-
-      skippedPhases.push(current.phase)
-
-      if (current.pendingRevisionSteps && current.pendingRevisionSteps.length > 0) {
-        // More cascade steps → advance to next step's REVISE
-        const nextStep = current.pendingRevisionSteps[0]!
-        const remainingSteps = current.pendingRevisionSteps.slice(1)
-
-        let nextBaseline: WorkflowState["revisionBaseline"] = null
-        try {
-          nextBaseline = await captureRevisionBaseline(
-            nextStep.phase,
-            current,
-            cwd,
-            $,
-          )
-        } catch { /* non-fatal */ }
-
-        await store.update(sessionId, (draft) => {
-          draft.phase = nextStep.phase
-          draft.phaseState = "REVISE"
-          draft.pendingRevisionSteps = remainingSteps
-          draft.revisionBaseline = nextBaseline
-          draft.retryCount = 0
-        })
-
-        log.info("Auto-skipped cascade step at entry", { detail: `${current.phase}/REVISE → ${nextStep.phase}/REVISE` })
-
-        // Continue loop — check the NEXT step too
-        continue
-      }
-
-      // Last cascade step (or pendingRevisionSteps is empty) — fast-forward to USER_GATE
-      const skipOutcome = sm.transition(current.phase, "REVISE", "revision_complete", current.mode)
-      if (skipOutcome.success) {
-        const userGateOutcome = sm.transition(skipOutcome.nextPhase, skipOutcome.nextPhaseState, "self_review_pass", current.mode)
-        if (userGateOutcome.success && userGateOutcome.nextPhaseState === "USER_GATE") {
-          await store.update(sessionId, (draft) => {
-            draft.phase = userGateOutcome.nextPhase
-            draft.phaseState = userGateOutcome.nextPhaseState
-            draft.revisionBaseline = null
-            draft.pendingRevisionSteps = null
-            draft.retryCount = 0
-            draft.userGateMessageReceived = false
-          })
-
-          log.info("Auto-skipped all remaining cascade steps", { detail: `${skippedPhases.join(" → ")} → ${userGateOutcome.nextPhase}/USER_GATE` })
-
-          return (
-            `No changes needed for **${skippedPhases.join("**, **")}** — auto-skipped.\n\n` +
-            `All cascade revisions are complete. Present the results to the user ` +
-            `and wait for their approval or further feedback.`
-          )
-        }
-      }
-      // SM transitions failed — fall through (let agent proceed in current state)
-      break
-    }
-
-    if (skippedPhases.length === 0) return null
-
-    // We skipped some phases but landed on one that needs work
-    const current = store.get(sessionId)
-    if (!current) return null
-
-    return (
-      `No changes needed for **${skippedPhases.join("**, **")}** — auto-skipped.\n\n` +
-      `Advancing to **${current.phase}/REVISE**. ` +
-      `Apply the revision feedback to the ${current.phase.toLowerCase()} artifact, ` +
-      `then call \`request_review\` when done.` +
-      (current.pendingRevisionSteps && current.pendingRevisionSteps.length > 0
-        ? `\n\n**Cascade:** ${current.pendingRevisionSteps.length} more step(s) after this: ${current.pendingRevisionSteps.map((s: RevisionStep) => s.artifact).join(" → ")}.`
-        : "\n\n**Final cascade step.**")
-    )
-  }
+  // Cascade auto-skip dependencies — wired once at plugin init, passed to
+  // the extracted cascadeAutoSkip function for each invocation.
+  const cascadeDeps: CascadeAutoSkipDeps = { store, sm, log, shell: $ }
 
   return {
     // -------------------------------------------------------------------------
@@ -1062,6 +932,25 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             ? ` Design document detected at \`${featureDesignDocPath}\` — it will be used as a constraint for all subsequent phases.`
             : ""
 
+          // Phase fast-forward: if prior approved artifacts exist (preserved across
+          // DONE → MODE_SELECT resets), check which phases can be skipped because
+          // their artifacts are still intact on disk. This avoids re-running 6+
+          // approval gates when the user is returning to an existing project.
+          const updatedState = store.get(sessionId)
+          if (updatedState && Object.keys(updatedState.approvedArtifacts).length > 0) {
+            const ff = computeFastForward(mode, updatedState.approvedArtifacts, updatedState.artifactDiskPaths)
+            if (ff.skippedPhases.length > 0) {
+              await store.update(sessionId, (draft) => {
+                draft.phase = ff.targetPhase
+                draft.phaseState = ff.targetPhaseState
+                draft.iterationCount = 0
+                draft.retryCount = 0
+              })
+              log.info("Phase fast-forward", { detail: `Skipped ${ff.skippedPhases.length} phase(s): ${ff.skippedPhases.join(", ")} → ${ff.targetPhase}` })
+              return buildSelectModeResponse(mode) + ` Artifacts will be written to \`.openartisan/${featureName}/\`.` + designDocNote + `\n\n` + ff.message
+            }
+          }
+
           return buildSelectModeResponse(mode) + ` Artifacts will be written to \`.openartisan/${featureName}/\`.` + designDocNote
         },
       }),
@@ -1632,6 +1521,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                   conventions: state.conventions,
                   artifactDiskPaths: state.artifactDiskPaths,
                   adjacentTasks: adjacentTasks.length > 0 ? adjacentTasks : undefined,
+                  stateDir,
                 })
               } catch (reviewErr) {
                 // dispatchTaskReview should never throw (returns TaskReviewError),
@@ -2127,7 +2017,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                 // OR empty=last cascade step which cascadeAutoSkip handles).
                 // null means "no cascade context" (standalone REVISE) → hard block.
                 if (state.pendingRevisionSteps !== null) {
-                  const skipMsg = await cascadeAutoSkip(sessionId, context.directory || process.cwd())
+                  const skipMsg = await cascadeAutoSkip(cascadeDeps, sessionId, context.directory || process.cwd())
                   if (skipMsg) return skipMsg
                   // cascadeAutoSkip returned null → couldn't determine skip
                   // (e.g., pendingRevisionSteps was [] and SM transitions failed).
@@ -2439,7 +2329,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
 
               // Deterministic auto-skip: check if this step (and subsequent steps)
               // can be skipped because no artifact changes are needed.
-              const skipMsg = await cascadeAutoSkip(sessionId, context.directory || process.cwd())
+              const skipMsg = await cascadeAutoSkip(cascadeDeps, sessionId, context.directory || process.cwd())
               if (skipMsg) return skipMsg + approvalWarning
 
               // Next step needs work — tell the agent to proceed
@@ -2718,7 +2608,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             // This prevents the agent from ever seeing no-op cascade phases
             // where tool guards would block it.
             if (handlerOutcome.pendingRevisionSteps.length > 0 || revisionBaseline) {
-              const skipMsg = await cascadeAutoSkip(sessionId, context.directory || process.cwd())
+              const skipMsg = await cascadeAutoSkip(cascadeDeps, sessionId, context.directory || process.cwd())
               if (skipMsg) return skipMsg
             }
 

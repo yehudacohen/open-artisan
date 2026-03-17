@@ -59,7 +59,7 @@ function freshState(sessionId: string): WorkflowState {
 }
 
 function cloneState(s: WorkflowState): WorkflowState {
-  return JSON.parse(JSON.stringify(s)) as WorkflowState
+  return structuredClone(s)
 }
 
 /**

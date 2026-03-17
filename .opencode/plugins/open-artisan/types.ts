@@ -601,6 +601,21 @@ export function validateWorkflowState(state: WorkflowState): string | null {
   if (typeof state.featureName === "string" && state.featureName.length === 0) {
     return `featureName must not be an empty string (use null for no feature)`
   }
+  // Security: featureName is used to construct artifact directory paths
+  // (.openartisan/<featureName>/). Reject names containing path traversal
+  // sequences or characters unsafe for directory names to prevent writes
+  // outside the intended artifact directory.
+  if (typeof state.featureName === "string") {
+    if (/\.\./.test(state.featureName)) {
+      return `featureName must not contain ".." (path traversal), got "${state.featureName}"`
+    }
+    if (/[/\\]/.test(state.featureName)) {
+      return `featureName must not contain path separators ("/" or "\\"), got "${state.featureName}"`
+    }
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(state.featureName)) {
+      return `featureName must start with alphanumeric and contain only alphanumeric, dots, hyphens, and underscores, got "${state.featureName}"`
+    }
+  }
   // v13: activeAgent
   if (state.activeAgent !== null && state.activeAgent !== undefined) {
     if (typeof state.activeAgent !== "string") {

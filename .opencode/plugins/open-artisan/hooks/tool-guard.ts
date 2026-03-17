@@ -138,8 +138,8 @@ export function getPhaseToolPolicy(
       }
     case "DONE":
       return {
-        blocked: ["write", "edit", "bash"],
-        allowedDescription: "Workflow complete — no writes, edits, or bash. Send a new message to start a fresh workflow cycle.",
+        blocked: ["write", "edit"],
+        allowedDescription: "Workflow complete — no file writes or edits. Bash is allowed for read-only tasks (git log, test runs, etc.). Send a new message to start a fresh workflow cycle.",
       }
 
     // -----------------------------------------------------------------------
@@ -306,7 +306,9 @@ export function getPhaseToolPolicy(
             // Block bash commands that contain obvious file-write operators.
             // This is best-effort — cannot catch all obfuscation — but catches
             // the common case of `echo > file`, `cat > file`, `sed -i`, `tee`.
-            const WRITE_OPS = /(?:>>|>[^&]|\btee\b|\bsed\s+-i\b|\bdd\b.*\bof=)/
+            // Also blocks heredoc patterns (`<<EOF`, `<<-EOF`, `<<'EOF'`, `<<"EOF"`)
+            // which can be used to write file contents via `cat <<EOF > file`.
+            const WRITE_OPS = /(?:>>|>[^&]|\btee\b|\bsed\s+-i\b|\bdd\b.*\bof=|<<-?\s*['"]?\w+['"]?)/
             return !WRITE_OPS.test(command)
           },
           allowedDescription: `INCREMENTAL mode: only allowlisted files may be written (${fileAllowlist.length} files). .env always blocked. Bash write operators (>, >>, tee, sed -i) are blocked.`,

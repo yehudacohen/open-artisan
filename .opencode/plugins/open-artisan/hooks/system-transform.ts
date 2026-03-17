@@ -12,9 +12,9 @@
  * - What the agent should do next
  */
 import { join } from "node:path"
-import { existsSync } from "node:fs"
+import { existsSync, readFileSync } from "node:fs"
 import type { WorkflowState, Phase, PhaseState, WorkflowMode } from "../types"
-import { MAX_CONVENTIONS_CHARS, MAX_REPORT_CHARS } from "../utils"
+import { MAX_CONVENTIONS_CHARS, MAX_REPORT_CHARS } from "../constants"
 import { createImplDAG } from "../dag"
 import { nextSchedulerDecision } from "../scheduler"
 import { getPhaseToolPolicy } from "./tool-guard"
@@ -31,9 +31,8 @@ function loadPrompt(filename: string): string {
   if (promptCache.has(filename)) return promptCache.get(filename)!
   try {
     // Synchronous read — cached after first call so only runs once per prompt file.
-    // Uses node:fs readFileSync (Bun re-exports this) since Bun.file().text() is async
+    // Uses readFileSync (imported at module level) since Bun.file().text() is async
     // and this function is synchronous by design (called from buildWorkflowSystemPrompt).
-    const { readFileSync } = require("node:fs") as typeof import("node:fs")
     const content = readFileSync(join(PROMPTS_DIR, filename), "utf-8")
     promptCache.set(filename, content)
     return content
@@ -353,6 +352,30 @@ of whether Y is "simpler" or "equivalent."
  *   When set, [D] design-invariant criteria are appended to PLANNING, IMPL_PLAN,
  *   and IMPLEMENTATION phases.
  */
+/**
+ * Returns a preview of the acceptance criteria for authoring states (DRAFT, CONVENTIONS, REVISE).
+ * The agent sees these while drafting so it knows what the reviewer will evaluate.
+ * Returns null for states where criteria preview is not applicable.
+ */
+export function getAcceptanceCriteriaPreview(phase: Phase, phaseState: PhaseState, mode: WorkflowMode | null, designDocPath?: string | null): string | null {
+  // Only inject during authoring states — not REVIEW (which gets the full criteria),
+  // and not USER_GATE/ESCAPE_HATCH/SCAN/ANALYZE (where criteria aren't actionable).
+  if (phaseState !== "DRAFT" && phaseState !== "CONVENTIONS" && phaseState !== "REVISE") return null
+
+  // Get the full criteria text (pass "REVIEW" to get the content)
+  const fullCriteria = getAcceptanceCriteria(phase, "REVIEW", mode, designDocPath)
+  if (!fullCriteria) return null
+
+  // Re-frame: the authoring agent should use criteria as a checklist, not evaluate them
+  return `### Acceptance Criteria Preview — What the Reviewer Will Evaluate
+
+The following criteria will be used by the isolated reviewer when you call \`request_review\`.
+Ensure your artifact satisfies ALL blocking criteria before submitting for review.
+This reduces review iterations — the reviewer will reject the artifact if any blocking criterion fails.
+
+${fullCriteria.replace(/^### Acceptance Criteria/m, "### Criteria")}`
+}
+
 export function getAcceptanceCriteria(phase: Phase, phaseState: PhaseState, mode: WorkflowMode | null, designDocPath?: string | null): string | null {
   if (phaseState !== "REVIEW") return null
 
@@ -587,12 +610,17 @@ export function buildWorkflowSystemPrompt(state: WorkflowState): string {
     }
   }
 
-  // 5. At REVIEW state: inject structured acceptance criteria so the agent
-  //    knows exactly what to evaluate for mark_satisfied.
+  // 5. Acceptance criteria injection:
+  //    - At REVIEW: full structured criteria so the agent knows what to evaluate for mark_satisfied.
+  //    - At DRAFT/CONVENTIONS/REVISE: criteria preview so the agent knows what to satisfy before submitting.
   //    If a design doc is tracked, [D] criteria are injected for design compliance.
   const criteria = getAcceptanceCriteria(state.phase, state.phaseState, state.mode, designDocPath)
   if (criteria) {
     blocks.push(criteria)
+  }
+  const criteriaPreview = getAcceptanceCriteriaPreview(state.phase, state.phaseState, state.mode, designDocPath)
+  if (criteriaPreview) {
+    blocks.push(criteriaPreview)
   }
 
   return blocks.join("\n\n")

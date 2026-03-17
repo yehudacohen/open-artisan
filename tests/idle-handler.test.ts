@@ -3,7 +3,7 @@
  * Covers G12: ANALYZE sub-state handling, plus full coverage of all states.
  */
 import { describe, expect, it } from "bun:test"
-import { handleIdle, MAX_RETRIES } from "#plugin/hooks/idle-handler"
+import { handleIdle } from "#plugin/hooks/idle-handler"
 import { MAX_IDLE_RETRIES } from "#plugin/constants"
 import type { WorkflowState } from "#plugin/types"
 import { SCHEMA_VERSION } from "#plugin/types"
@@ -126,21 +126,21 @@ describe("handleIdle — reprompt for active states", () => {
 // Escalation
 // ---------------------------------------------------------------------------
 
-describe("handleIdle — escalate after MAX_RETRIES", () => {
-  it("escalates when retryCount >= MAX_RETRIES", () => {
-    const state = makeState({ phaseState: "DRAFT", retryCount: MAX_RETRIES })
+describe("handleIdle — escalate after MAX_IDLE_RETRIES", () => {
+  it("escalates when retryCount >= MAX_IDLE_RETRIES", () => {
+    const state = makeState({ phaseState: "DRAFT", retryCount: MAX_IDLE_RETRIES })
     const decision = handleIdle(state)
     expect(decision.action).toBe("escalate")
   })
 
-  it("still reprompts when retryCount === MAX_RETRIES - 1", () => {
-    const state = makeState({ phaseState: "DRAFT", retryCount: MAX_RETRIES - 1 })
+  it("still reprompts when retryCount === MAX_IDLE_RETRIES - 1", () => {
+    const state = makeState({ phaseState: "DRAFT", retryCount: MAX_IDLE_RETRIES - 1 })
     const decision = handleIdle(state)
     expect(decision.action).toBe("reprompt")
   })
 
   it("escalation message mentions the phase and sub-state", () => {
-    const state = makeState({ phase: "INTERFACES", phaseState: "REVIEW", retryCount: MAX_RETRIES })
+    const state = makeState({ phase: "INTERFACES", phaseState: "REVIEW", retryCount: MAX_IDLE_RETRIES })
     const decision = handleIdle(state)
     expect(decision.action).toBe("escalate")
     if (decision.action !== "escalate") return
@@ -162,12 +162,4 @@ describe("handleIdle — pure function", () => {
   })
 })
 
-// ---------------------------------------------------------------------------
-// Re-export invariant
-// ---------------------------------------------------------------------------
 
-describe("MAX_RETRIES re-export", () => {
-  it("MAX_RETRIES equals MAX_IDLE_RETRIES from constants (re-export fix)", () => {
-    expect(MAX_RETRIES).toBe(MAX_IDLE_RETRIES)
-  })
-})

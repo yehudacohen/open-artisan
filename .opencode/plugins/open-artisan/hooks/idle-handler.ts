@@ -14,9 +14,6 @@ import type { WorkflowState, Phase, PhaseState } from "../types"
 import { getNextActionForState } from "../utils"
 import { MAX_IDLE_RETRIES } from "../constants"
 
-/** @deprecated Use MAX_IDLE_RETRIES from constants.ts. Re-exported for test compatibility. */
-export const MAX_RETRIES = MAX_IDLE_RETRIES
-
 // ---------------------------------------------------------------------------
 // Idle decision
 // ---------------------------------------------------------------------------
@@ -42,7 +39,7 @@ export function handleIdle(state: WorkflowState): IdleDecision {
   }
 
   // Check retry limit
-  if (state.retryCount >= MAX_RETRIES) {
+  if (state.retryCount >= MAX_IDLE_RETRIES) {
     return {
       action: "escalate",
       message: buildEscalationMessage(state.phase, state.phaseState, state.retryCount),
@@ -66,7 +63,7 @@ function buildRepromptMessage(phase: Phase, phaseState: PhaseState, retryCount: 
   return (
     `You stopped, but the ${phaseState} sub-state of the ${phase} phase is not yet complete. ` +
     `${action} ` +
-    `(Retry ${retryCount}/${MAX_RETRIES})`
+    `(Retry ${retryCount}/${MAX_IDLE_RETRIES})`
   )
 }
 

@@ -67,6 +67,8 @@ export interface TaskReviewRequest {
   artifactDiskPaths?: Partial<Record<string, string>>
   /** Adjacent tasks (direct dependencies + direct dependents) for integration seam checking */
   adjacentTasks?: AdjacentTask[]
+  /** State directory for persistent error logging (passed through from plugin init) */
+  stateDir?: string
 }
 
 export interface TaskReviewSuccess {
@@ -335,7 +337,7 @@ export async function dispatchTaskReview(
     return parseTaskReviewResult(text)
   } catch (err) {
     const errorMsg = err instanceof Error ? err.message : String(err)
-    const log = createLogger(client)
+    const log = createLogger(client, req.stateDir)
     log.warn("Task review dispatch failed", { detail: errorMsg })
     return {
       success: false,

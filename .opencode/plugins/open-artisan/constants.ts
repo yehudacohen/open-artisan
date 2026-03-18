@@ -169,3 +169,35 @@ export const SOURCE_EXTENSIONS = new Set([
   // Elixir
   ".ex", ".exs",
 ])
+
+// ---------------------------------------------------------------------------
+// Intent comparison limits (for check_prior_workflow and select_mode)
+// ---------------------------------------------------------------------------
+
+/**
+ * Maximum characters for displaying user intent in tool responses.
+ * Truncated for readability in multi-line messages.
+ */
+export const MAX_INTENT_DISPLAY_CHARS = 200
+
+/**
+ * Maximum characters for prior intent sent to LLM comparison prompt.
+ * Balances context richness with prompt size.
+ */
+export const MAX_PRIOR_INTENT_CHARS = 500
+
+/**
+ * Maximum characters for displaying scope/plan content in tool responses.
+ */
+export const MAX_SCOPE_DISPLAY_CHARS = 1000
+
+/**
+ * Maximum characters for prior scope sent to LLM comparison prompt.
+ */
+export const MAX_SCOPE_CONTEXT_CHARS = 1500
+
+/**
+ * Minimum number of approved artifacts required to consider a workflow "complete".
+ * Represents: conventions, plan, interfaces, impl_plan, tests (or subset for GREENFIELD).
+ */
+export const MIN_COMPLETE_ARTIFACTS = 5

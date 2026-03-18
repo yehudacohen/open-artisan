@@ -105,7 +105,7 @@ export type ArtifactKey =
  *        added pendingFeedback (crash-safe feedback persistence — stores feedback
  *        text during orchestrator LLM calls so it survives process crashes)
  */
-export const SCHEMA_VERSION = 15
+export const SCHEMA_VERSION = 17
 
 export interface WorkflowState {
   /** Schema version for forward-compatibility. Must equal SCHEMA_VERSION. */
@@ -309,6 +309,20 @@ export interface WorkflowState {
    * null = no orchestrator call in flight.
    */
   pendingFeedback: string | null
+
+  /**
+   * Full conversation history of user messages.
+   * Captured from chat.message hook and passed to self-review subagent.
+   * Provides complete context beyond just intentBaseline.
+   */
+  userMessages: string[]
+
+  /**
+   * Cached result from check_prior_workflow to avoid redundant file reads in select_mode.
+   * Set by check_prior_workflow, consumed by select_mode, cleared after use.
+   * null = no cached result available.
+   */
+  cachedPriorState: { intentBaseline: string | null; phase: string; artifactDiskPaths: Record<string, string>; approvedArtifacts?: Record<string, string> } | null
 }
 
 // ---------------------------------------------------------------------------
@@ -405,6 +419,13 @@ export interface StoreLoadError {
 export interface SessionStateStore {
   /** Get state for a session, or null if not found */
   get(sessionId: string): WorkflowState | null
+
+  /**
+   * Find a workflow state by feature name.
+   * Searches all sessions for one with matching featureName.
+   * Returns the state if found, null otherwise.
+   */
+  findByFeatureName(featureName: string): WorkflowState | null
 
   /**
    * Create a fresh state for a new session and persist it.

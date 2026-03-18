@@ -444,10 +444,14 @@ describe("computeForwardSkip — non-INCREMENTAL mode returns null", () => {
   })
 })
 
-describe("computeForwardSkip — empty fileAllowlist returns null", () => {
-  it("returns null when allowlist is empty", () => {
+describe("computeForwardSkip — empty fileAllowlist behavior", () => {
+  it("skips ceremony phases when allowlist is empty (operational-only task)", () => {
+    // Empty allowlist means "no source files will be changed" (operational task)
+    // This should skip INTERFACES, TESTS, IMPL_PLAN and go to IMPLEMENTATION
     const result = computeForwardSkip("INTERFACES", "INCREMENTAL", [])
-    expect(result).toBeNull()
+    expect(result).not.toBeNull()
+    expect(result?.targetPhase).toBe("IMPLEMENTATION")
+    expect(result?.skippedPhases).toEqual(["INTERFACES", "TESTS", "IMPL_PLAN"])
   })
 })
 

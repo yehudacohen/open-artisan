@@ -55,6 +55,8 @@ function freshState(sessionId: string): WorkflowState {
     taskCompletionInProgress: null,
     taskReviewCount: 0,
     pendingFeedback: null,
+    userMessages: [],
+    cachedPriorState: null,
   }
 }
 
@@ -115,6 +117,15 @@ export function createSessionStateStore(dir: string): SessionStateStore {
   return {
     get(sessionId: string): WorkflowState | null {
       return memory.get(sessionId) ?? null
+    },
+
+    findByFeatureName(featureName: string): WorkflowState | null {
+      for (const state of memory.values()) {
+        if (state.featureName === featureName) {
+          return cloneState(state)
+        }
+      }
+      return null
     },
 
     async create(sessionId: string): Promise<WorkflowState> {
@@ -215,6 +226,10 @@ export function createSessionStateStore(dir: string): SessionStateStore {
           // lost and the user will need to re-submit. This is preferable to silently replaying
           // a stale feedback text through a potentially different orchestrator classification.
           migrated["pendingFeedback"] = null
+          // v15 → v16: add userMessages
+          migrated["userMessages"] ??= []
+          // v16 → v17: add cachedPriorState
+          migrated["cachedPriorState"] = null // Always clear on load - transient cache
           // retryCount is transient — reset on load so the idle handler starts fresh.
           // If the agent was stuck before a restart, it deserves a clean retry budget.
           migrated["retryCount"] = 0

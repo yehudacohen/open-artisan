@@ -37,6 +37,13 @@ import { handleIdle } from "./hooks/idle-handler"
 import { buildCompactionContext } from "./hooks/compaction"
 import { createGitCheckpoint } from "./hooks/git-checkpoint"
 import { detectMode } from "./mode-detect"
+import { compareIntentsWithLLM } from "./intent-comparison"
+import { validatePriorState } from "./type-validation"
+import { createLogger, setDefaultStateDir, type Logger } from "./logger"
+import { 
+  MAX_INTENT_DISPLAY_CHARS, 
+  MIN_COMPLETE_ARTIFACTS 
+} from "./constants"
 
 // Tool handlers
 import { parseSelectModeArgs, buildSelectModeResponse } from "./tools/select-mode"
@@ -88,33 +95,45 @@ function artifactHash(text: string): string {
 }
 
 /**
+ * Validate feature name format (kebab-case).
+ * Returns null if valid, error message if invalid.
+ */
+function validateFeatureName(featureName: string): string | null {
+  if (!featureName) {
+    return "feature_name is required"
+  }
+  if (!/^[a-z0-9]+(-[a-z0-9]+)*$/.test(featureName)) {
+    return "feature_name must be kebab-case (lowercase letters, numbers, hyphens only, e.g. 'my-feature-name')"
+  }
+  return null
+}
+
+/**
  * Find prior workflow state by feature name.
- * Reads directly from the persisted JSON file to find any session with matching featureName.
+ * Uses SessionStateStore abstraction instead of direct file reads.
  * Returns the state if found, null otherwise.
  */
-function findPriorWorkflowState(
+async function findPriorWorkflowState(
   store: ReturnType<typeof createSessionStateStore>,
   featureName: string,
-): { intentBaseline: string | null; phase: string; artifactDiskPaths: Record<string, string> } | null {
+  log?: Logger,
+): Promise<{ intentBaseline: string | null; phase: string; artifactDiskPaths: Record<string, string>; approvedArtifacts?: Record<string, string> } | null> {
   try {
-    const stateFile = join(process.cwd(), ".opencode", "workflow-state.json")
-    if (!existsSync(stateFile)) return null
-
-    const content = readFileSync(stateFile, "utf-8")
-    const allStates = JSON.parse(content) as Record<string, unknown>
-
-    for (const [, state] of Object.entries(allStates)) {
-      const s = state as { featureName?: string; intentBaseline?: string | null; phase?: string; artifactDiskPaths?: Record<string, string> }
-      if (s.featureName === featureName) {
-        return {
-          intentBaseline: s.intentBaseline ?? null,
-          phase: s.phase ?? "UNKNOWN",
-          artifactDiskPaths: s.artifactDiskPaths ?? {},
-        }
-      }
+    log?.info("findPriorWorkflowState", { featureName, action: "searching" })
+    
+    const state = store.findByFeatureName(featureName)
+    if (!state) {
+      log?.info("findPriorWorkflowState", { featureName, result: "not found" })
+      return null
     }
-    return null
-  } catch {
+
+    // Validate and extract state fields
+    const validated = validatePriorState(state)
+    log?.info("findPriorWorkflowState", { featureName, result: "found", phase: validated?.phase })
+    return validated
+  } catch (err) {
+    const errorMsg = err instanceof Error ? err.message : String(err)
+    log?.error("findPriorWorkflowState", { featureName, error: errorMsg })
     return null
   }
 }
@@ -271,6 +290,7 @@ function wrapToolMap<T extends Record<string, { execute: (...args: any[]) => Pro
  * Defined as a module constant so adding a new tool cannot be silently missed.
  */
 export const WORKFLOW_TOOL_NAMES = new Set([
+  "check_prior_workflow",
   "select_mode",
   "mark_scan_complete",
   "mark_analyze_complete",
@@ -588,7 +608,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
           draft.phaseState = "DRAFT"
           draft.iterationCount = 0
           draft.retryCount = 0
-          draft.intentBaseline = textContent ? textContent.slice(0, 2000) : null
+          draft.intentBaseline = textContent ? textContent.slice(0, MAX_INTENT_BASELINE_CHARS) : null
           draft.userGateMessageReceived = false
           draft.currentTaskId = null
           draft.implDag = null
@@ -599,6 +619,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
           draft.taskReviewCount = 0
           draft.pendingFeedback = null
           draft.revisionBaseline = null
+          draft.userMessages = textContent ? [textContent] : []
           // Preserve: mode, approvedArtifacts, conventions, fileAllowlist,
           // featureName, artifactDiskPaths, activeAgent, phaseApprovalCounts,
           // lastCheckpointTag, approvalCount — these carry forward from the
@@ -616,22 +637,25 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
       // Resolve messageID from input — required for v2 Part objects
       const messageId = (input.messageID as string | undefined) ?? (output.message?.id as string | undefined) ?? ""
 
-      // Capture first real user message as intent baseline (for O_DIVERGE later).
-      // intentBaseline is null until the first real user message arrives.
-      // After capture, only O_INTENT_UPDATE (in the escape hatch path) may update it.
-      if (!state.intentBaseline) {
-        const textContent = (output.parts as Array<{ type: string; text?: string }>)
-          .filter((p) => p.type === "text" && p.text)
-          .map((p) => p.text!)
-          .join(" ")
-          .trim()
-        if (textContent) {
-          await store.update(sessionId, (draft) => {
-            if (!draft.intentBaseline) {
-              draft.intentBaseline = textContent.slice(0, 2000)
-            }
-          })
-        }
+      // Collect all user messages for self-review context
+      const textContent = (output.parts as Array<{ type: string; text?: string }>)
+        .filter((p) => p.type === "text" && p.text)
+        .map((p) => p.text!)
+        .join(" ")
+        .trim()
+
+      if (textContent) {
+        await store.update(sessionId, (draft) => {
+          // Append to userMessages array
+          draft.userMessages.push(textContent)
+          
+          // Capture first real user message as intent baseline (for O_DIVERGE later).
+          // intentBaseline is null until the first real user message arrives.
+          // After capture, only O_INTENT_UPDATE (in the escape hatch path) may update it.
+          if (!draft.intentBaseline) {
+            draft.intentBaseline = textContent.slice(0, MAX_INTENT_BASELINE_CHARS)
+          }
+        })
       }
 
       // Only inject routing hint at USER_GATE
@@ -939,8 +963,23 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             return "Error: feature_name is required."
           }
 
+          // Validate feature name format
+          const validationError = validateFeatureName(featureName)
+          if (validationError) {
+            return `Error: ${validationError}`
+          }
+
+          // Check if feature directory exists
+          const featureDir = join(process.cwd(), ".openartisan", featureName)
+          if (!existsSync(featureDir)) {
+            return (
+              `No prior workflow found for "${featureName}". ` +
+              `Proceed with select_mode to start fresh.`
+            )
+          }
+
           const state = store.get(sessionId)
-          const priorState = findPriorWorkflowState(store, featureName)
+          const priorState = await findPriorWorkflowState(store, featureName, log)
 
           // No prior state found
           if (!priorState) {
@@ -954,81 +993,60 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
           const currentIntent = args.user_intent?.trim() || state?.intentBaseline || "unknown"
           const priorIntent = priorState.intentBaseline || "unknown"
 
-          // Read the prior plan to get scope
+          // Validate intents are not "unknown" before LLM call
+          if (currentIntent === "unknown" || priorIntent === "unknown") {
+            return (
+              `Error: Cannot compare intents - one or both intents are unknown.\n` +
+              `Current intent: ${currentIntent}\n` +
+              `Prior intent: ${priorIntent}\n\n` +
+              `Provide user_intent parameter or ensure intentBaseline is captured.`
+            )
+          }
+
           const priorPlanPath = priorState.artifactDiskPaths?.["plan"]
-          let priorScope = ""
-          if (priorPlanPath && existsSync(priorPlanPath)) {
-            try {
-              const planContent = readFileSync(priorPlanPath, "utf-8")
-              priorScope = planContent.slice(0, 1000)
-            } catch {
-              priorScope = "(plan file not readable)"
-            }
+
+          // Use shared LLM comparison function
+          const comparisonResult = await compareIntentsWithLLM({
+            currentIntent,
+            priorIntent,
+            priorPlanPath,
+            client,
+          })
+
+          const { classification, explanation } = comparisonResult
+
+          // Handle ERROR case first
+          if (classification === "ERROR") {
+            log.error("check_prior_workflow", { 
+              featureName, 
+              error: "LLM comparison failed", 
+              detail: explanation 
+            })
+            return (
+              `Error: Could not compare intents with prior workflow.\n` +
+              `Reason: ${explanation}\n\n` +
+              `Recommendation: Proceed with caution or use a different feature name.`
+            )
           }
 
-          // Use LLM for semantic comparison
-          const comparisonPrompt = `You are a workflow intent matcher. Your job is to determine if a prior workflow covers what the user is now asking for.
+          // Log successful comparison
+          log.info("check_prior_workflow", { 
+            featureName, 
+            classification, 
+            currentIntent: currentIntent.slice(0, 100),
+            priorIntent: priorIntent.slice(0, 100)
+          })
 
-Current user request:
-"${currentIntent.slice(0, 500)}"
+          // Cache the prior state for select_mode to avoid redundant file reads
+          await store.update(sessionId, (draft) => {
+            draft.cachedPriorState = priorState
+          })
 
-Prior workflow goal (from prior session):
-"${priorIntent.slice(0, 500)}"
-
-${priorScope ? `Prior plan scope (first 1500 chars):
-${priorScope.slice(0, 1500)}
-` : ""}
-
-First, determine if these are the SAME goal or a DIFFERENT goal.
-Second, if SAME, determine if the prior workflow FULLY covers the current request or only PARTIALLY covers it.
-
-Respond with exactly one line:
-- If DIFFERENT: "DIFFERENT: <one sentence explaining why>"
-- If SAME but PARTIAL: "PARTIAL: <one sentence explaining what the prior workflow covered and what's missing>"
-- If SAME and FULL: "FULL: <one sentence confirming the prior workflow covers everything>"
-
-Examples:
-- "DIFFERENT: One is about billing, the other is about user profiles"
-- "PARTIAL: Prior was authentication, but current also wants payment integration"
-- "FULL: Prior workflow added OAuth and the current request is just to add email login"
-
-Respond now:`
-
-          // Call LLM for semantic comparison
-          let llmResult = "ERROR: Could not compare intents"
-          try {
-            if (!client.session) {
-              return "Error: client.session not available for LLM comparison"
-            }
-            // Create a short-lived session for the comparison
-            const tempSession = await client.session.create({
-              body: { title: "intent-check", agent: "task" },
-            })
-            const tempSessionId = (tempSession as { id: string }).id
-            const result = await client.session.prompt({
-              path: { id: tempSessionId },
-              body: { parts: [{ type: "text", text: comparisonPrompt }] },
-            })
-            const text = ((result as Record<string, unknown>)?.data as Record<string, unknown>)?.text as string
-            llmResult = text || "ERROR: Empty response"
-            // Clean up temp session
-            try { await client.session.delete({ path: { id: tempSessionId } }) } catch { /* ignore */ }
-          } catch (llmErr) {
-            llmResult = `ERROR: ${llmErr instanceof Error ? llmErr.message : String(llmErr)}`
-          }
-
-          // Parse the LLM response
-          const response = llmResult.trim().toUpperCase()
-          const isDifferent = response.startsWith("DIFFERENT:")
-          const isPartial = response.startsWith("PARTIAL:")
-          const isFull = response.startsWith("FULL:")
-          const explanation = llmResult.replace(/^(DIFFERENT|PARTIAL|FULL):/i, "").trim()
-
-          if (isDifferent) {
+          if (classification === "DIFFERENT") {
             return (
               `Prior workflow found for "${featureName}" (last phase: ${priorState.phase}).\n\n` +
-              `Current intent: "${currentIntent.slice(0, 200)}"\n` +
-              `Prior intent: "${priorIntent.slice(0, 200)}"\n\n` +
+              `Current intent: "${currentIntent.slice(0, MAX_INTENT_DISPLAY_CHARS)}"\n` +
+              `Prior intent: "${priorIntent.slice(0, MAX_INTENT_DISPLAY_CHARS)}"\n\n` +
               `LLM assessment: DIFFERENT\n` +
               `Explanation: ${explanation}\n\n` +
               `appears DIFFERENT. The prior workflow was for a different goal.\n\n` +
@@ -1037,11 +1055,11 @@ Respond now:`
               `- A name that reflects the specific aspect you're working on\n\n` +
               `Or manually clear the prior state if you want to reuse this name.`
             )
-          } else if (isPartial) {
+          } else if (classification === "PARTIAL") {
             return (
               `Prior workflow found for "${featureName}" (last phase: ${priorState.phase}).\n\n` +
-              `Current intent: "${currentIntent.slice(0, 200)}"\n` +
-              `Prior intent: "${priorIntent.slice(0, 200)}"\n\n` +
+              `Current intent: "${currentIntent.slice(0, MAX_INTENT_DISPLAY_CHARS)}"\n` +
+              `Prior intent: "${priorIntent.slice(0, MAX_INTENT_DISPLAY_CHARS)}"\n\n` +
               `LLM assessment: PARTIAL\n` +
               `Explanation: ${explanation}\n\n` +
               `The prior workflow only PARTIALLY covers your current request. ` +
@@ -1055,8 +1073,8 @@ Respond now:`
             // FULL
             return (
               `Prior workflow found for "${featureName}" (last phase: ${priorState.phase}).\n\n` +
-              `Current intent: "${currentIntent.slice(0, 200)}"\n` +
-              `Prior intent: "${priorIntent.slice(0, 200)}"\n\n` +
+              `Current intent: "${currentIntent.slice(0, MAX_INTENT_DISPLAY_CHARS)}"\n` +
+              `Prior intent: "${priorIntent.slice(0, MAX_INTENT_DISPLAY_CHARS)}"\n\n` +
               `LLM assessment: FULL\n` +
               `Explanation: ${explanation}\n\n` +
               `appears RELEVANT and FULLY COVERS your request. ` +
@@ -1100,7 +1118,7 @@ Respond now:`
           // This handles the case where the user wants to start a new workflow
           // after a prior one completed, without needing to send a chat message first.
           if (state.phase === "DONE") {
-            await store.update(sessionId, (draft) => {
+            const updatedState = await store.update(sessionId, (draft) => {
               draft.phase = "MODE_SELECT"
               draft.phaseState = "DRAFT"
               draft.iterationCount = 0
@@ -1118,8 +1136,8 @@ Respond now:`
               draft.revisionBaseline = null
             })
             log.info("Auto-reset DONE -> MODE_SELECT for fresh workflow", { sessionId })
-            state.phase = "MODE_SELECT"
-            state.phaseState = "DRAFT"
+            // Use the returned state instead of mutating the stale reference
+            return await this.execute(args, context)
           }
 
           if (state.phase !== "MODE_SELECT") {
@@ -1135,80 +1153,126 @@ Respond now:`
             return "Error: feature_name is required. Provide a short kebab-case slug derived from the user's request (e.g. 'cloud-cost-platform')."
           }
 
+          // Validate feature name format
+          const validationError = validateFeatureName(featureName)
+          if (validationError) {
+            return `Error: ${validationError}`
+          }
+
+          // Check if feature directory exists - if it does, warn that check_prior_workflow should be called first
+          const featureDir = join(process.cwd(), ".openartisan", featureName)
+          if (existsSync(featureDir)) {
+            log.warn("select_mode called without check_prior_workflow", { 
+              featureName, 
+              detail: "Feature directory exists but check_prior_workflow was not called first" 
+            })
+            // Don't block - just log the warning. The tool description already says to call check_prior_workflow first.
+          }
+
           // STEP 1: Check if this is an existing workflow (FIRST THING)
-          // Read directly from disk to find prior state for this feature
-          const priorState = findPriorWorkflowState(store, featureName)
+          // Use cached result from check_prior_workflow if available, otherwise read from disk
+          let priorState = state.cachedPriorState
+          if (!priorState) {
+            priorState = await findPriorWorkflowState(store, featureName, log)
+          } else {
+            log.info("select_mode using cached prior state", { featureName })
+          }
+          
+          // Clear the cache after use
+          if (state.cachedPriorState) {
+            await store.update(sessionId, (draft) => {
+              draft.cachedPriorState = null
+            })
+          }
+          
           const currentIntent = state.intentBaseline || "unknown"
 
           if (priorState) {
             // Prior workflow exists for this feature - check if complete
             const hasAllArtifacts = priorState.approvedArtifacts && 
-              Object.keys(priorState.approvedArtifacts).length >= 5
+              Object.keys(priorState.approvedArtifacts).length >= MIN_COMPLETE_ARTIFACTS
 
             if (hasAllArtifacts) {
               // Prior workflow is complete - check if it covers current intent
-              // Use LLM to determine FULL/PARTIAL/DIFFERENT
+              // Use shared LLM comparison function
               const priorIntent = priorState.intentBaseline || ""
-
-              // Read prior plan for scope
-              let priorScope = ""
               const priorPlanPath = priorState.artifactDiskPaths?.["plan"]
-              if (priorPlanPath && existsSync(priorPlanPath)) {
-                try { priorScope = readFileSync(priorPlanPath, "utf-8").slice(0, 1000) } catch { /* ignore */ }
-              }
 
-              const comparisonPrompt = `You are a workflow intent matcher. Your job is to determine if a prior workflow covers what the user is now asking for.
+              const comparisonResult = await compareIntentsWithLLM({
+                currentIntent,
+                priorIntent,
+                priorPlanPath,
+                client,
+              })
 
-Current user request:
-"${currentIntent.slice(0, 500)}"
+              const { classification } = comparisonResult
 
-Prior workflow goal:
-"${priorIntent.slice(0, 500)}"
-
-${priorScope ? `Prior plan scope:
-${priorScope}
-` : ""}
-
-First, determine if these are the SAME goal or a DIFFERENT goal.
-Second, if SAME, determine if the prior workflow FULLY covers the current request or only PARTIALLY covers it.
-
-Respond with exactly one line:
-- If DIFFERENT: "DIFFERENT: <reason>"
-- If SAME but PARTIAL: "PARTIAL: <what's missing>"
-- If SAME and FULL: "FULL: <confirmation>"
-
-Respond now:`
-
-              let llmResult = "FULL: prior workflow complete" // default to full
-              try {
-                if (!client.session) throw new Error("no session")
-                const tempSession = await client.session.create({ body: { title: "intent-check", agent: "task" } })
-                const tempId = (tempSession as { id: string }).id
-                const result = await client.session.prompt({ path: { id: tempId }, body: { parts: [{ type: "text", text: comparisonPrompt }] } })
-                llmResult = ((result as Record<string, unknown>)?.data as Record<string, unknown>)?.text as string || llmResult
-                try { await client.session.delete({ path: { id: tempId } }) } catch { /* ignore */ }
-              } catch (e) {
-                // On error, default to FULL (allow resume)
-              }
-
-              const response = llmResult.trim().toUpperCase()
-              if (response.startsWith("DIFFERENT:") || response.startsWith("PARTIAL:")) {
+              if (classification === "DIFFERENT" || classification === "PARTIAL") {
                 return (
-                  `Prior workflow found for "${featureName}" but it ${response.startsWith("DIFFERENT") ? "is for a different goal" : "only partially covers your request"}.\n\n` +
-                  `Current: "${currentIntent.slice(0, 200)}"\n` +
-                  `Prior: "${priorIntent.slice(0, 200)}"\n\n` +
+                  `Prior workflow found for "${featureName}" but it ${classification === "DIFFERENT" ? "is for a different goal" : "only partially covers your request"}.\n\n` +
+                  `Current: "${currentIntent.slice(0, MAX_INTENT_DISPLAY_CHARS)}"\n` +
+                  `Prior: "${priorIntent.slice(0, MAX_INTENT_DISPLAY_CHARS)}"\n\n` +
                   `Use a different feature name to start fresh, e.g. "${featureName}-v2" or "${featureName}-continue".`
                 )
               }
-              // If FULL, continue to fast-forward below
+              
+              // If FULL, fast-forward to skip completed phases
+              if (classification === "FULL") {
+                const ffResult = computeFastForward(
+                  mode,
+                  priorState.approvedArtifacts || {},
+                  priorState.artifactDiskPaths
+                )
+
+                log.info("select_mode fast-forward", {
+                  featureName,
+                  targetPhase: ffResult.targetPhase,
+                  skippedPhases: ffResult.skippedPhases,
+                })
+
+                // Detect design doc
+                const cwd = context.directory || process.cwd()
+                const featureDesignDocPath = detectDesignDoc(cwd, featureName)
+
+                // Apply fast-forward result
+                const updatedState = await store.update(sessionId, (draft) => {
+                  draft.mode = mode
+                  draft.featureName = featureName
+                  draft.phase = ffResult.targetPhase
+                  draft.phaseState = ffResult.targetPhaseState
+                  draft.iterationCount = 0
+                  draft.retryCount = 0
+                  if (featureDesignDocPath) {
+                    draft.artifactDiskPaths = { ...draft.artifactDiskPaths, design: featureDesignDocPath }
+                  }
+                  if (draft.fileAllowlist.length > 0) {
+                    draft.fileAllowlist = draft.fileAllowlist.map((p) =>
+                      p.startsWith("/") ? p : resolve(cwd, p),
+                    )
+                  }
+                })
+
+                const designDocNote = featureDesignDocPath
+                  ? ` Design document detected at \`${featureDesignDocPath}\`.`
+                  : ""
+
+                return (
+                  `Mode: ${mode}\n` +
+                  `Feature: ${featureName}\n\n` +
+                  `${ffResult.message}\n\n` +
+                  `Resuming at ${updatedState.phase}/${updatedState.phaseState}.${designDocNote}`
+                )
+              }
             }
           }
 
           // STEP 2: Transition to the next phase (if not fast-forwarding)
-          const outcome = sm.transition(state.phase, state.phaseState, "mode_selected", mode)
+          // Refetch state after potential fast-forward update
+          const currentState = store.get(sessionId) || state
+          const outcome = sm.transition(currentState.phase, currentState.phaseState, "mode_selected", mode)
           if (!outcome.success) return `Error: ${outcome.message}`
 
-          logTransition(state, outcome, "select_mode", client)
+          logTransition(currentState, outcome, "select_mode", client)
 
           // Detect design doc now that feature name is known (enables feature-scoped detection)
           const cwd = context.directory || process.cwd()
@@ -1465,11 +1529,8 @@ Respond now:`
 
             let reviewResult: Awaited<ReturnType<typeof dispatchSelfReview>> | null = null
             try {
-              // Collect user messages for vision alignment evaluation
-              const userMessages: string[] = []
-              if (state.intentBaseline) {
-                userMessages.push(state.intentBaseline)
-              }
+              // Pass full user messages array for vision alignment evaluation
+              const userMessages = state.userMessages || []
 
               reviewResult = await dispatchSelfReview(client, {
                 phase: state.phase,
@@ -2315,11 +2376,13 @@ Respond now:`
                 if (artifactKey) draft.artifactDiskPaths[artifactKey] = artifactDiskPath
               }
             })
+            // Refetch state after update
+            const updatedState = store.get(sessionId) || state
             const diskMsg = artifactDiskPath
               ? `\nArtifact updated on disk at \`${artifactDiskPath}\`.`
               : ""
             return (
-              `Artifact re-submitted for ${state.phase} review. The on-disk version has been updated.${diskMsg}\n\n` +
+              `Artifact re-submitted for ${updatedState.phase} review. The on-disk version has been updated.${diskMsg}\n\n` +
               `Review cycle restarted (iteration count reset to 0). ` +
               `Now call \`mark_satisfied\` with your criteria evaluation to proceed with the review.`
             )
@@ -2988,7 +3051,7 @@ Respond now:`
               // Record feedback in history for accumulated-drift detection (design doc §9)
               draft.feedbackHistory.push({
                 phase: state.phase,
-                feedback: args.feedback_text.slice(0, 2000),
+                feedback: args.feedback_text.slice(0, MAX_FEEDBACK_CHARS),
                 timestamp: Date.now(),
               })
             })

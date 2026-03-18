@@ -967,7 +967,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
           }
 
           // Use LLM for semantic comparison
-          const comparisonPrompt = `You are a workflow intent matcher. Your job is to determine if two requests describe the SAME goal or a DIFFERENT goal.
+          const comparisonPrompt = `You are a workflow intent matcher. Your job is to determine if a prior workflow covers what the user is now asking for.
 
 Current user request:
 "${currentIntent.slice(0, 500)}"
@@ -975,19 +975,22 @@ Current user request:
 Prior workflow goal (from prior session):
 "${priorIntent.slice(0, 500)}"
 
-${priorScope ? `Prior plan scope (first 1000 chars):
-${priorScope}
+${priorScope ? `Prior plan scope (first 1500 chars):
+${priorScope.slice(0, 1500)}
 ` : ""}
 
-Are these describing the SAME goal or a DIFFERENT goal?
+First, determine if these are the SAME goal or a DIFFERENT goal.
+Second, if SAME, determine if the prior workflow FULLY covers the current request or only PARTIALLY covers it.
 
 Respond with exactly one line:
-- If SAME: "SAME: <one sentence explaining why>"
 - If DIFFERENT: "DIFFERENT: <one sentence explaining why>"
+- If SAME but PARTIAL: "PARTIAL: <one sentence explaining what the prior workflow covered and what's missing>"
+- If SAME and FULL: "FULL: <one sentence confirming the prior workflow covers everything>"
 
 Examples:
-- "SAME: Both are asking to add user authentication to the app"
 - "DIFFERENT: One is about billing, the other is about user profiles"
+- "PARTIAL: Prior was authentication, but current also wants payment integration"
+- "FULL: Prior workflow added OAuth and the current request is just to add email login"
 
 Respond now:`
 
@@ -1015,20 +1018,13 @@ Respond now:`
           }
 
           // Parse the LLM response
-          const isSame = llmResult.trim().toUpperCase().startsWith("SAME:")
-          const explanation = llmResult.replace(/^(SAME|DIFFERENT):/i, "").trim()
+          const response = llmResult.trim().toUpperCase()
+          const isDifferent = response.startsWith("DIFFERENT:")
+          const isPartial = response.startsWith("PARTIAL:")
+          const isFull = response.startsWith("FULL:")
+          const explanation = llmResult.replace(/^(DIFFERENT|PARTIAL|FULL):/i, "").trim()
 
-          if (isSame) {
-            return (
-              `Prior workflow found for "${featureName}" (last phase: ${priorState.phase}).\n\n` +
-              `Current intent: "${currentIntent.slice(0, 200)}"\n` +
-              `Prior intent: "${priorIntent.slice(0, 200)}"\n\n` +
-              `LLM assessment: SAME\n` +
-              `Explanation: ${explanation}\n\n` +
-              `appears RELEVANT. Safe to resume with select_mode. ` +
-              `The workflow will fast-forward to where it left off.`
-            )
-          } else {
+          if (isDifferent) {
             return (
               `Prior workflow found for "${featureName}" (last phase: ${priorState.phase}).\n\n` +
               `Current intent: "${currentIntent.slice(0, 200)}"\n` +
@@ -1041,6 +1037,31 @@ Respond now:`
               `- A name that reflects the specific aspect you're working on\n\n` +
               `Or manually clear the prior state if you want to reuse this name.`
             )
+          } else if (isPartial) {
+            return (
+              `Prior workflow found for "${featureName}" (last phase: ${priorState.phase}).\n\n` +
+              `Current intent: "${currentIntent.slice(0, 200)}"\n` +
+              `Prior intent: "${priorIntent.slice(0, 200)}"\n\n` +
+              `LLM assessment: PARTIAL\n` +
+              `Explanation: ${explanation}\n\n` +
+              `The prior workflow only PARTIALLY covers your current request. ` +
+              `You need to complete the remaining work.\n\n` +
+              `Recommendation: Use a new feature name to continue the work, for example:\n` +
+              `- "${featureName}-continue" to pick up where it left off\n` +
+              `- "${featureName}-additional" to add the missing parts\n\n` +
+              `The workflow will start fresh and you can reference the prior artifacts as needed.`
+            )
+          } else {
+            // FULL
+            return (
+              `Prior workflow found for "${featureName}" (last phase: ${priorState.phase}).\n\n` +
+              `Current intent: "${currentIntent.slice(0, 200)}"\n` +
+              `Prior intent: "${priorIntent.slice(0, 200)}"\n\n` +
+              `LLM assessment: FULL\n` +
+              `Explanation: ${explanation}\n\n` +
+              `appears RELEVANT and FULLY COVERS your request. ` +
+              `Safe to resume with select_mode. The workflow will fast-forward to where it left off.`
+            )
           }
         },
       }),
@@ -1050,7 +1071,7 @@ Respond now:`
           "REFACTOR (restructure existing project, runs discovery), " +
           "or INCREMENTAL (add/fix specific functionality, runs discovery, do-no-harm). " +
           "IMPORTANT: Call check_prior_workflow first to verify the feature name matches your intent. " +
-          "If check_prior_workflow returns 'DIFFERENT', use a more specific feature name. " +
+          "If check_prior_workflow returns 'DIFFERENT' or 'PARTIAL', use a different feature name. " +
           "All plan artifacts are written to .openartisan/<feature_name>/ so multiple features can coexist in the same repo. " +
           "Derive a short kebab-case slug from the user's request (e.g. 'cloud-cost-platform').",
         args: {

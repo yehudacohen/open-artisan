@@ -117,6 +117,17 @@ function buildReviewPrompt(req: SelfReviewRequest): string {
   lines.push(req.criteriaText)
   lines.push("")
 
+  // Add user's original request messages for context
+  if (req.userMessages && req.userMessages.length > 0) {
+    lines.push("## User's Original Request")
+    lines.push("The following is what the user originally asked for. Use this to evaluate Vision alignment:")
+    lines.push("")
+    for (const msg of req.userMessages.slice(0, 5)) { // Limit to 5 most recent
+      lines.push(`- ${msg.slice(0, 300)}${msg.length > 300 ? "..." : ""}`)
+    }
+    lines.push("")
+  }
+
   if (req.upstreamSummary) {
     lines.push("## Upstream Artifacts (for reference)")
     lines.push(req.upstreamSummary)

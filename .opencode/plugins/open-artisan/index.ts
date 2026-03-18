@@ -1465,6 +1465,12 @@ Respond now:`
 
             let reviewResult: Awaited<ReturnType<typeof dispatchSelfReview>> | null = null
             try {
+              // Collect user messages for vision alignment evaluation
+              const userMessages: string[] = []
+              if (state.intentBaseline) {
+                userMessages.push(state.intentBaseline)
+              }
+
               reviewResult = await dispatchSelfReview(client, {
                 phase: state.phase,
                 mode: state.mode,
@@ -1475,6 +1481,7 @@ Respond now:`
                 ...(artifactContent ? { artifactContent } : {}),
                 parentSessionId: sessionId ?? undefined,
                 featureName: state.featureName,
+                ...(userMessages.length > 0 ? { userMessages } : {}),
               })
             } catch (reviewErr) {
               // dispatchSelfReview should never throw (returns SelfReviewError),

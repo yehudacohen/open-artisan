@@ -24,7 +24,8 @@
 // @ts-ignore — @opencode-ai/plugin is provided by the OpenCode runtime, not installed as a dev dep
 import { tool, type Plugin } from "@opencode-ai/plugin"
 import { join, resolve } from "node:path"
-import { existsSync } from "node:fs"
+import { existsSync, readFileSync } from "node:fs"
+import { readFile } from "node:fs/promises"
 import { $ } from "bun"
 
 import { createSessionStateStore } from "./session-state"
@@ -84,6 +85,38 @@ import {
 /** Returns a 16-char SHA-256 hex fingerprint of the given text. */
 function artifactHash(text: string): string {
   return createHash("sha256").update(text).digest("hex").slice(0, 16)
+}
+
+/**
+ * Find prior workflow state by feature name.
+ * Reads directly from the persisted JSON file to find any session with matching featureName.
+ * Returns the state if found, null otherwise.
+ */
+function findPriorWorkflowState(
+  store: ReturnType<typeof createSessionStateStore>,
+  featureName: string,
+): { intentBaseline: string | null; phase: string; artifactDiskPaths: Record<string, string> } | null {
+  try {
+    const stateFile = join(process.cwd(), ".opencode", "workflow-state.json")
+    if (!existsSync(stateFile)) return null
+
+    const content = readFileSync(stateFile, "utf-8")
+    const allStates = JSON.parse(content) as Record<string, unknown>
+
+    for (const [, state] of Object.entries(allStates)) {
+      const s = state as { featureName?: string; intentBaseline?: string | null; phase?: string; artifactDiskPaths?: Record<string, string> }
+      if (s.featureName === featureName) {
+        return {
+          intentBaseline: s.intentBaseline ?? null,
+          phase: s.phase ?? "UNKNOWN",
+          artifactDiskPaths: s.artifactDiskPaths ?? {},
+        }
+      }
+    }
+    return null
+  } catch {
+    return null
+  }
 }
 
 /**
@@ -872,15 +905,111 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
 
     tool: wrapToolMap({
       // -----------------------------------------------------------------------
-      // select_mode — first call in every session
+      // check_prior_workflow — run before select_mode to validate intent alignment
+      // -----------------------------------------------------------------------
+      check_prior_workflow: tool({
+        description:
+          "Check if prior workflow artifacts match the user's current intent. " +
+          "Call this BEFORE select_mode when starting a new workflow to verify whether " +
+          "the existing artifacts are relevant to what the user is asking for. " +
+          "Returns either 'safe to resume' or 'suggest a different feature name'.",
+        args: {
+          feature_name: tool.schema
+            .string()
+            .describe(
+              "The feature name to check for prior workflow state. " +
+              "This should match what the user is asking to work on.",
+            ),
+          user_intent: tool.schema
+            .string()
+            .optional()
+            .describe(
+              "The user's current request/goal. If not provided, will be derived from the session context.",
+            ),
+        },
+        async execute(
+          args: { feature_name?: string; user_intent?: string },
+          context: ToolExecuteContext,
+        ) {
+          const sessionId = resolveSessionId(context)
+          if (!sessionId) return "Error: Could not determine session ID."
+
+          const featureName = args.feature_name?.trim()
+          if (!featureName) {
+            return "Error: feature_name is required."
+          }
+
+          const state = store.get(sessionId)
+          const priorState = findPriorWorkflowState(store, featureName)
+
+          // No prior state found
+          if (!priorState) {
+            return (
+              `No prior workflow found for "${featureName}". ` +
+              `Proceed with select_mode to start fresh.`
+            )
+          }
+
+          // Prior state exists — compare intents
+          const currentIntent = args.user_intent?.trim() || state?.intentBaseline || "unknown"
+          const priorIntent = priorState.intentBaseline || "unknown"
+
+          // Read the prior plan to get scope
+          const priorPlanPath = priorState.artifactDiskPaths?.["plan"]
+          let priorScope = ""
+          if (priorPlanPath && existsSync(priorPlanPath)) {
+            try {
+              const planContent = readFileSync(priorPlanPath, "utf-8")
+              // Extract scope section (first 500 chars as summary)
+              priorScope = planContent.slice(0, 500)
+            } catch {
+              priorScope = "(plan file not readable)"
+            }
+          }
+
+          // Simple comparison: check if key terms overlap
+          // In a full implementation, this would use an LLM
+          const currentTerms = currentIntent.toLowerCase().split(/\s+/).filter(Boolean)
+          const priorTerms = priorIntent.toLowerCase().split(/\s+/).filter(Boolean)
+          const overlap = currentTerms.filter((t) => priorTerms.includes(t)).length
+          const overlapRatio = currentTerms.length > 0 ? overlap / currentTerms.length : 0
+
+          if (overlapRatio >= 0.5) {
+            return (
+              `Prior workflow found for "${featureName}" (last phase: ${priorState.phase}).\n\n` +
+              `Current intent: "${currentIntent.slice(0, 200)}"\n` +
+              `Prior intent: "${priorIntent.slice(0, 200)}"\n\n` +
+              `Keywords overlap: ${overlap}/${currentTerms.length} (${Math.round(overlapRatio * 100)}%)\n\n` +
+              `appears RELEVANT. Safe to resume with select_mode. ` +
+              `The workflow will fast-forward to where it left off.`
+            )
+          } else {
+            return (
+              `Prior workflow found for "${featureName}" (last phase: ${priorState.phase}).\n\n` +
+              `Current intent: "${currentIntent.slice(0, 200)}"\n` +
+              `Prior intent: "${priorIntent.slice(0, 200)}"\n\n` +
+              `Keywords overlap: ${overlap}/${currentTerms.length} (${Math.round(overlapRatio * 100)}%)\n\n` +
+              `appears DIFFERENT. The prior workflow was for a different goal.\n\n` +
+              `Recommendation: Use a more specific feature name, for example:\n` +
+              `- "${featureName}-v2" to start fresh with a similar name\n` +
+              `- A name that reflects the specific aspect you're working on\n\n` +
+              `Or manually clear the prior state if you want to reuse this name.`
+            )
+          }
+        },
+      }),
+
+      // -----------------------------------------------------------------------
+      // select_mode — first call in every session (or after check_prior_workflow)
       // -----------------------------------------------------------------------
       select_mode: tool({
         description:
           "Select the workflow mode: GREENFIELD (new project, skips discovery), " +
           "REFACTOR (restructure existing project, runs discovery), " +
           "or INCREMENTAL (add/fix specific functionality, runs discovery, do-no-harm). " +
-          "You MUST provide a feature_name — all plan artifacts are written to " +
-          ".openartisan/<feature_name>/ so multiple features can coexist in the same repo. " +
+          "IMPORTANT: Call check_prior_workflow first to verify the feature name matches your intent. " +
+          "If check_prior_workflow returns 'DIFFERENT', use a more specific feature name. " +
+          "All plan artifacts are written to .openartisan/<feature_name>/ so multiple features can coexist in the same repo. " +
           "Derive a short kebab-case slug from the user's request (e.g. 'cloud-cost-platform').",
         args: {
           mode: tool.schema.enum(["GREENFIELD", "REFACTOR", "INCREMENTAL"]).describe(

@@ -55,6 +55,12 @@ export interface SelfReviewRequest {
   parentSessionId?: string
   /** Feature name for session title context (e.g. "cloud-cost-platform") */
   featureName?: string | null
+  /**
+   * User's original request messages for context.
+   * This helps the reviewer assess "Vision alignment" - whether the artifact
+   * actually addresses what the user asked for.
+   */
+  userMessages?: string[]
 }
 
 function buildReviewPrompt(req: SelfReviewRequest): string {

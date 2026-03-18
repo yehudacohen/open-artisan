@@ -1134,6 +1134,77 @@ Respond now:`
           if (!featureName) {
             return "Error: feature_name is required. Provide a short kebab-case slug derived from the user's request (e.g. 'cloud-cost-platform')."
           }
+
+          // STEP 1: Check if this is an existing workflow (FIRST THING)
+          // Read directly from disk to find prior state for this feature
+          const priorState = findPriorWorkflowState(store, featureName)
+          const currentIntent = state.intentBaseline || "unknown"
+
+          if (priorState) {
+            // Prior workflow exists for this feature - check if complete
+            const hasAllArtifacts = priorState.approvedArtifacts && 
+              Object.keys(priorState.approvedArtifacts).length >= 5
+
+            if (hasAllArtifacts) {
+              // Prior workflow is complete - check if it covers current intent
+              // Use LLM to determine FULL/PARTIAL/DIFFERENT
+              const priorIntent = priorState.intentBaseline || ""
+
+              // Read prior plan for scope
+              let priorScope = ""
+              const priorPlanPath = priorState.artifactDiskPaths?.["plan"]
+              if (priorPlanPath && existsSync(priorPlanPath)) {
+                try { priorScope = readFileSync(priorPlanPath, "utf-8").slice(0, 1000) } catch { /* ignore */ }
+              }
+
+              const comparisonPrompt = `You are a workflow intent matcher. Your job is to determine if a prior workflow covers what the user is now asking for.
+
+Current user request:
+"${currentIntent.slice(0, 500)}"
+
+Prior workflow goal:
+"${priorIntent.slice(0, 500)}"
+
+${priorScope ? `Prior plan scope:
+${priorScope}
+` : ""}
+
+First, determine if these are the SAME goal or a DIFFERENT goal.
+Second, if SAME, determine if the prior workflow FULLY covers the current request or only PARTIALLY covers it.
+
+Respond with exactly one line:
+- If DIFFERENT: "DIFFERENT: <reason>"
+- If SAME but PARTIAL: "PARTIAL: <what's missing>"
+- If SAME and FULL: "FULL: <confirmation>"
+
+Respond now:`
+
+              let llmResult = "FULL: prior workflow complete" // default to full
+              try {
+                if (!client.session) throw new Error("no session")
+                const tempSession = await client.session.create({ body: { title: "intent-check", agent: "task" } })
+                const tempId = (tempSession as { id: string }).id
+                const result = await client.session.prompt({ path: { id: tempId }, body: { parts: [{ type: "text", text: comparisonPrompt }] } })
+                llmResult = ((result as Record<string, unknown>)?.data as Record<string, unknown>)?.text as string || llmResult
+                try { await client.session.delete({ path: { id: tempId } }) } catch { /* ignore */ }
+              } catch (e) {
+                // On error, default to FULL (allow resume)
+              }
+
+              const response = llmResult.trim().toUpperCase()
+              if (response.startsWith("DIFFERENT:") || response.startsWith("PARTIAL:")) {
+                return (
+                  `Prior workflow found for "${featureName}" but it ${response.startsWith("DIFFERENT") ? "is for a different goal" : "only partially covers your request"}.\n\n` +
+                  `Current: "${currentIntent.slice(0, 200)}"\n` +
+                  `Prior: "${priorIntent.slice(0, 200)}"\n\n` +
+                  `Use a different feature name to start fresh, e.g. "${featureName}-v2" or "${featureName}-continue".`
+                )
+              }
+              // If FULL, continue to fast-forward below
+            }
+          }
+
+          // STEP 2: Transition to the next phase (if not fast-forwarding)
           const outcome = sm.transition(state.phase, state.phaseState, "mode_selected", mode)
           if (!outcome.success) return `Error: ${outcome.message}`
 
@@ -1167,25 +1238,6 @@ Respond now:`
           const designDocNote = featureDesignDocPath
             ? ` Design document detected at \`${featureDesignDocPath}\` — it will be used as a constraint for all subsequent phases.`
             : ""
-
-          // Phase fast-forward: if prior approved artifacts exist (preserved across
-          // DONE → MODE_SELECT resets), check which phases can be skipped because
-          // their artifacts are still intact on disk. This avoids re-running 6+
-          // approval gates when the user is returning to an existing project.
-          const updatedState = store.get(sessionId)
-          if (updatedState && Object.keys(updatedState.approvedArtifacts).length > 0) {
-            const ff = computeFastForward(mode, updatedState.approvedArtifacts, updatedState.artifactDiskPaths)
-            if (ff.skippedPhases.length > 0) {
-              await store.update(sessionId, (draft) => {
-                draft.phase = ff.targetPhase
-                draft.phaseState = ff.targetPhaseState
-                draft.iterationCount = 0
-                draft.retryCount = 0
-              })
-              log.info("Phase fast-forward", { detail: `Skipped ${ff.skippedPhases.length} phase(s): ${ff.skippedPhases.join(", ")} → ${ff.targetPhase}` })
-              return buildSelectModeResponse(mode) + ` Artifacts will be written to \`.openartisan/${featureName}/\`.` + designDocNote + `\n\n` + ff.message
-            }
-          }
 
           return buildSelectModeResponse(mode) + ` Artifacts will be written to \`.openartisan/${featureName}/\`.` + designDocNote
         },

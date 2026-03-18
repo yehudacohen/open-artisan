@@ -950,7 +950,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             )
           }
 
-          // Prior state exists — compare intents
+          // Prior state exists — use LLM to compare intents semantically
           const currentIntent = args.user_intent?.trim() || state?.intentBaseline || "unknown"
           const priorIntent = priorState.intentBaseline || "unknown"
 
@@ -960,26 +960,71 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
           if (priorPlanPath && existsSync(priorPlanPath)) {
             try {
               const planContent = readFileSync(priorPlanPath, "utf-8")
-              // Extract scope section (first 500 chars as summary)
-              priorScope = planContent.slice(0, 500)
+              priorScope = planContent.slice(0, 1000)
             } catch {
               priorScope = "(plan file not readable)"
             }
           }
 
-          // Simple comparison: check if key terms overlap
-          // In a full implementation, this would use an LLM
-          const currentTerms = currentIntent.toLowerCase().split(/\s+/).filter(Boolean)
-          const priorTerms = priorIntent.toLowerCase().split(/\s+/).filter(Boolean)
-          const overlap = currentTerms.filter((t) => priorTerms.includes(t)).length
-          const overlapRatio = currentTerms.length > 0 ? overlap / currentTerms.length : 0
+          // Use LLM for semantic comparison
+          const comparisonPrompt = `You are a workflow intent matcher. Your job is to determine if two requests describe the SAME goal or a DIFFERENT goal.
 
-          if (overlapRatio >= 0.5) {
+Current user request:
+"${currentIntent.slice(0, 500)}"
+
+Prior workflow goal (from prior session):
+"${priorIntent.slice(0, 500)}"
+
+${priorScope ? `Prior plan scope (first 1000 chars):
+${priorScope}
+` : ""}
+
+Are these describing the SAME goal or a DIFFERENT goal?
+
+Respond with exactly one line:
+- If SAME: "SAME: <one sentence explaining why>"
+- If DIFFERENT: "DIFFERENT: <one sentence explaining why>"
+
+Examples:
+- "SAME: Both are asking to add user authentication to the app"
+- "DIFFERENT: One is about billing, the other is about user profiles"
+
+Respond now:`
+
+          // Call LLM for semantic comparison
+          let llmResult = "ERROR: Could not compare intents"
+          try {
+            if (!client.session) {
+              return "Error: client.session not available for LLM comparison"
+            }
+            // Create a short-lived session for the comparison
+            const tempSession = await client.session.create({
+              body: { title: "intent-check", agent: "task" },
+            })
+            const tempSessionId = (tempSession as { id: string }).id
+            const result = await client.session.prompt({
+              path: { id: tempSessionId },
+              body: { parts: [{ type: "text", text: comparisonPrompt }] },
+            })
+            const text = ((result as Record<string, unknown>)?.data as Record<string, unknown>)?.text as string
+            llmResult = text || "ERROR: Empty response"
+            // Clean up temp session
+            try { await client.session.delete({ path: { id: tempSessionId } }) } catch { /* ignore */ }
+          } catch (llmErr) {
+            llmResult = `ERROR: ${llmErr instanceof Error ? llmErr.message : String(llmErr)}`
+          }
+
+          // Parse the LLM response
+          const isSame = llmResult.trim().toUpperCase().startsWith("SAME:")
+          const explanation = llmResult.replace(/^(SAME|DIFFERENT):/i, "").trim()
+
+          if (isSame) {
             return (
               `Prior workflow found for "${featureName}" (last phase: ${priorState.phase}).\n\n` +
               `Current intent: "${currentIntent.slice(0, 200)}"\n` +
               `Prior intent: "${priorIntent.slice(0, 200)}"\n\n` +
-              `Keywords overlap: ${overlap}/${currentTerms.length} (${Math.round(overlapRatio * 100)}%)\n\n` +
+              `LLM assessment: SAME\n` +
+              `Explanation: ${explanation}\n\n` +
               `appears RELEVANT. Safe to resume with select_mode. ` +
               `The workflow will fast-forward to where it left off.`
             )
@@ -988,7 +1033,8 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
               `Prior workflow found for "${featureName}" (last phase: ${priorState.phase}).\n\n` +
               `Current intent: "${currentIntent.slice(0, 200)}"\n` +
               `Prior intent: "${priorIntent.slice(0, 200)}"\n\n` +
-              `Keywords overlap: ${overlap}/${currentTerms.length} (${Math.round(overlapRatio * 100)}%)\n\n` +
+              `LLM assessment: DIFFERENT\n` +
+              `Explanation: ${explanation}\n\n` +
               `appears DIFFERENT. The prior workflow was for a different goal.\n\n` +
               `Recommendation: Use a more specific feature name, for example:\n` +
               `- "${featureName}-v2" to start fresh with a similar name\n` +
@@ -998,10 +1044,6 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
           }
         },
       }),
-
-      // -----------------------------------------------------------------------
-      // select_mode — first call in every session (or after check_prior_workflow)
-      // -----------------------------------------------------------------------
       select_mode: tool({
         description:
           "Select the workflow mode: GREENFIELD (new project, skips discovery), " +

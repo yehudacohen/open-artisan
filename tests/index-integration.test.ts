@@ -128,8 +128,9 @@ describe("Plugin shape — returned object has all required keys", () => {
     expect(tools.submit_feedback).toBeDefined()
   })
 
-  it("WORKFLOW_TOOL_NAMES contains all 8 tool names", () => {
-    expect(WORKFLOW_TOOL_NAMES.size).toBe(8)
+  it("WORKFLOW_TOOL_NAMES contains all 9 tool names", () => {
+    expect(WORKFLOW_TOOL_NAMES.size).toBe(9)
+    expect(WORKFLOW_TOOL_NAMES.has("check_prior_workflow")).toBe(true)
     expect(WORKFLOW_TOOL_NAMES.has("select_mode")).toBe(true)
     expect(WORKFLOW_TOOL_NAMES.has("mark_task_complete")).toBe(true)
     expect(WORKFLOW_TOOL_NAMES.has("submit_feedback")).toBe(true)

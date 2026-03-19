@@ -61,6 +61,8 @@ export interface TaskReviewRequest {
   parentSessionId?: string
   /** Feature name for session title context */
   featureName?: string | null
+  /** Parent model identifier (if available) for subagent session creation */
+  parentModel?: string
   /** Conventions text for alignment checking (optional) */
   conventions?: string | null
   /** Approved artifact disk paths for reference */
@@ -280,6 +282,7 @@ async function ephemeralTaskReviewSession(
   client: PluginClient,
   prompt: string,
   parentSessionId?: string,
+  parentModel?: string,
   title = "task-review",
 ): Promise<unknown> {
   if (!client.session) throw new Error("client.session is not available — cannot dispatch task review")
@@ -288,6 +291,7 @@ async function ephemeralTaskReviewSession(
       title,
       agent: "workflow-reviewer",
       ...(parentSessionId ? { parentID: parentSessionId } : {}),
+      ...(parentModel ? { model: parentModel } : {}),
     },
   })
 
@@ -329,7 +333,7 @@ export async function dispatchTaskReview(
     const featureSlug = req.featureName ? ` (${req.featureName})` : ""
     const title = `Task Review: ${req.task.id}${featureSlug}`
     const raw = await withTimeout(
-      ephemeralTaskReviewSession(client, prompt, req.parentSessionId, title),
+      ephemeralTaskReviewSession(client, prompt, req.parentSessionId, req.parentModel, title),
       TASK_REVIEW_TIMEOUT_MS,
       "task-review",
     )

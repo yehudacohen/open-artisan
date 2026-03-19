@@ -428,6 +428,9 @@ ${qualityBlock}
 
     case "PLANNING": {
       const designBlock = designDocPath ? getDesignInvariantCriteria("PLANNING", designDocPath) : ""
+      const allowlistBlock = mode === "INCREMENTAL"
+        ? "9. [INCREMENTAL] Allowlist adequacy reviewed — fileAllowlist covers all remaining phases (or explicitly justified)"
+        : ""
       return `### Acceptance Criteria — Plan
 
 Evaluate each criterion independently. For each, state whether it is met (true/false),
@@ -444,6 +447,7 @@ ${designDocPath ? "For [D] design-invariant criteria, these are BINARY (met/not 
 6. Data model described — key entities, relationships, constraints, lifecycle
 7. Integration points identified — external systems, APIs, databases, filesystem interactions
 8. Deployment & infrastructure addressed — how the feature reaches production (infrastructure provisioning, credentials/secrets, environment configuration, CI/CD changes, DNS/routing). If no deployment is needed, this must be explicitly stated with justification. Plans that produce working code but ignore deployment are incomplete.
+${allowlistBlock}
 
 ${qualityBlock}
 ${designBlock}

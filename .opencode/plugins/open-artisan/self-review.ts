@@ -19,6 +19,7 @@
  */
 
 import type {
+  ArtifactKey,
   Phase,
   WorkflowMode,
   SelfReviewResult,
@@ -55,6 +56,20 @@ export interface SelfReviewRequest {
   parentSessionId?: string
   /** Feature name for session title context (e.g. "cloud-cost-platform") */
   featureName?: string | null
+  /** Parent model identifier (if available) for subagent session creation */
+  parentModel?: string
+  /** Absolute file allowlist (INCREMENTAL mode) for phase gating */
+  fileAllowlist?: string[]
+  /** Approved artifact hashes for state-aware allowlist review */
+  approvedArtifacts?: Partial<Record<ArtifactKey, string>>
+  /** Disk paths for approved artifacts (if available) */
+  artifactDiskPaths?: Partial<Record<ArtifactKey, string>>
+  /**
+   * User's original request messages for context.
+   * This helps the reviewer assess "Vision alignment" - whether the artifact
+   * actually addresses what the user asked for.
+   */
+  userMessages?: string[]
 }
 
 function buildReviewPrompt(req: SelfReviewRequest): string {
@@ -111,9 +126,49 @@ function buildReviewPrompt(req: SelfReviewRequest): string {
   lines.push(req.criteriaText)
   lines.push("")
 
+  // Add user's original request messages for context
+  if (req.userMessages && req.userMessages.length > 0) {
+    lines.push("## User's Original Request")
+    lines.push("The following is what the user originally asked for. Use this to evaluate Vision alignment:")
+    lines.push("")
+    for (const msg of req.userMessages.slice(0, 5)) { // Limit to 5 most recent
+      lines.push(`- ${msg.slice(0, 300)}${msg.length > 300 ? "..." : ""}`)
+    }
+    lines.push("")
+  }
+
   if (req.upstreamSummary) {
     lines.push("## Upstream Artifacts (for reference)")
     lines.push(req.upstreamSummary)
+    lines.push("")
+  }
+
+  if (req.fileAllowlist && req.fileAllowlist.length > 0) {
+    lines.push("## Allowlist Review (State-Aware)")
+    lines.push("The file allowlist governs which phases can be executed in INCREMENTAL mode.")
+    lines.push("Verify it includes all files needed for unfinished phases, considering what is already approved.")
+    lines.push("")
+    lines.push("**Allowlist:**")
+    for (const p of req.fileAllowlist) {
+      lines.push(`- ${p}`)
+    }
+    if (req.approvedArtifacts && Object.keys(req.approvedArtifacts).length > 0) {
+      lines.push("")
+      lines.push("**Approved artifacts (already complete):**")
+      for (const [key, value] of Object.entries(req.approvedArtifacts)) {
+        if (value) lines.push(`- ${key}`)
+      }
+    }
+    if (req.artifactDiskPaths && Object.keys(req.artifactDiskPaths).length > 0) {
+      lines.push("")
+      lines.push("**Artifact disk paths (for reference):**")
+      for (const [key, value] of Object.entries(req.artifactDiskPaths)) {
+        if (value) lines.push(`- ${key}: ${value}`)
+      }
+    }
+    lines.push("")
+    lines.push("Allowlist adequacy rule (blocking): If the allowlist omits files needed for unfinished phases (e.g. TESTS or IMPL_PLAN), add a blocking criterion named `Allowlist adequacy` and mark it unmet with evidence.")
+    lines.push("If the relevant phases are already complete and unchanged, you may mark allowlist adequacy as met.")
     lines.push("")
   }
 
@@ -148,6 +203,7 @@ async function ephemeralReviewSession(
   client: PluginClient,
   prompt: string,
   parentSessionId?: string,
+  parentModel?: string,
   title = "workflow-review",
 ): Promise<unknown> {
   if (!client.session) throw new Error("client.session is not available — cannot dispatch review")
@@ -156,6 +212,7 @@ async function ephemeralReviewSession(
       title,
       agent: "workflow-reviewer",
       ...(parentSessionId ? { parentID: parentSessionId } : {}),
+      ...(parentModel ? { model: parentModel } : {}),
     },
   })
 
@@ -252,7 +309,7 @@ export async function dispatchSelfReview(
     const featureSlug = req.featureName ? ` (${req.featureName})` : ""
     const title = `Review: ${req.phase}${featureSlug}`
     const raw = await withTimeout(
-      ephemeralReviewSession(client, prompt, req.parentSessionId, title),
+      ephemeralReviewSession(client, prompt, req.parentSessionId, req.parentModel, title),
       SELF_REVIEW_TIMEOUT_MS,
       "self-review",
     )
@@ -362,7 +419,7 @@ export async function dispatchRebuttal(
     const featureSlug = req.featureName ? ` (${req.featureName})` : ""
     const title = `Rebuttal: ${req.phase}${featureSlug}`
     const raw = await withTimeout(
-      ephemeralReviewSession(client, prompt, req.parentSessionId, title),
+      ephemeralReviewSession(client, prompt, req.parentSessionId, req.parentModel, title),
       SELF_REVIEW_TIMEOUT_MS,
       "rebuttal",
     )

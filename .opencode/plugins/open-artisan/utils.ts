@@ -5,6 +5,29 @@
  */
 
 /**
+ * Smart truncation at word boundaries with ellipsis.
+ * Avoids cutting mid-sentence by finding the last space before maxChars.
+ * 
+ * @param text - Text to truncate
+ * @param maxChars - Maximum character limit
+ * @returns Truncated text with "..." if truncated
+ */
+export function smartTruncate(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text
+  
+  // Find last space before maxChars
+  const truncated = text.slice(0, maxChars)
+  const lastSpace = truncated.lastIndexOf(" ")
+  
+  if (lastSpace > 0) {
+    return truncated.slice(0, lastSpace) + "..."
+  }
+  
+  // No space found - truncate at maxChars
+  return truncated + "..."
+}
+
+/**
  * Wraps a promise with a timeout. Rejects with a descriptive error if the
  * promise does not settle within `ms` milliseconds.
  *

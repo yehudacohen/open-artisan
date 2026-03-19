@@ -74,6 +74,10 @@ function makeState(overrides: Partial<WorkflowState> = {}): WorkflowState {
     taskCompletionInProgress: null,
     taskReviewCount: 0,
     pendingFeedback: null,
+    userMessages: [],
+    cachedPriorState: null,
+    priorWorkflowChecked: false,
+    sessionModel: null,
     ...overrides,
   }
 }

@@ -21,7 +21,8 @@
  * The caller applies the result.
  */
 
-import { existsSync, readFileSync } from "node:fs"
+import { existsSync } from "node:fs"
+import { readFile } from "node:fs/promises"
 import { createHash } from "node:crypto"
 import type { Phase, WorkflowMode, ArtifactKey } from "./types"
 import { PHASE_TO_ARTIFACT } from "./artifacts"
@@ -80,7 +81,7 @@ function isTimeSentinel(hash: string): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// Main function
+// Main function (async)
 // ---------------------------------------------------------------------------
 
 /**
@@ -92,11 +93,11 @@ function isTimeSentinel(hash: string): boolean {
  * @param artifactDiskPaths Map of artifact key → absolute file path from prior cycle
  * @returns FastForwardResult describing where to land and what was skipped
  */
-export function computeFastForward(
+export async function computeFastForward(
   mode: WorkflowMode,
   approvedArtifacts: Partial<Record<ArtifactKey, string>>,
   artifactDiskPaths: Partial<Record<ArtifactKey, string>>,
-): FastForwardResult {
+): Promise<FastForwardResult> {
   const phases = PHASE_SEQUENCES[mode]
   const skippedPhases: Phase[] = []
 
@@ -148,7 +149,7 @@ export function computeFastForward(
     // Content verification: if the approval hash is content-based, verify it
     if (!isTimeSentinel(approvedHash)) {
       try {
-        const content = readFileSync(diskPath, "utf-8")
+        const content = await readFile(diskPath, "utf-8")
         const currentHash = artifactHash(content)
         if (currentHash !== approvedHash) {
           // Content changed since approval → must start here
@@ -178,6 +179,98 @@ export function computeFastForward(
   // Land at DONE — nothing needs redoing.
   // In practice this is rare (IMPLEMENTATION artifact is usually time-sentinel),
   // but structurally valid.
+  return {
+    targetPhase: "DONE",
+    targetPhaseState: "DRAFT",
+    skippedPhases,
+    message: buildAllSkippedMessage(skippedPhases),
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Sync variant (no file reads; caller provides content)
+// ---------------------------------------------------------------------------
+
+/**
+ * Synchronous fast-forward variant that avoids disk reads.
+ *
+ * If a content-based approval hash is present, the caller must provide
+ * the corresponding artifact content via `artifactContents`. If content
+ * is missing, the function conservatively stops at that phase.
+ */
+export function computeFastForwardSync(
+  mode: WorkflowMode,
+  approvedArtifacts: Partial<Record<ArtifactKey, string>>,
+  artifactDiskPaths: Partial<Record<ArtifactKey, string>>,
+  artifactContents: Partial<Record<ArtifactKey, string>> = {},
+): FastForwardResult {
+  const phases = PHASE_SEQUENCES[mode]
+  const skippedPhases: Phase[] = []
+
+  for (const phase of phases) {
+    const artifactKey = PHASE_TO_ARTIFACT[phase]
+    if (!artifactKey) {
+      return {
+        targetPhase: phase,
+        targetPhaseState: getInitialPhaseState(phase),
+        skippedPhases,
+        message: buildMessage(skippedPhases, phase),
+      }
+    }
+
+    const approvedHash = approvedArtifacts[artifactKey]
+    if (!approvedHash) {
+      return {
+        targetPhase: phase,
+        targetPhaseState: getInitialPhaseState(phase),
+        skippedPhases,
+        message: buildMessage(skippedPhases, phase),
+      }
+    }
+
+    const diskPath = artifactDiskPaths[artifactKey]
+    if (!diskPath) {
+      return {
+        targetPhase: phase,
+        targetPhaseState: getInitialPhaseState(phase),
+        skippedPhases,
+        message: buildMessage(skippedPhases, phase),
+      }
+    }
+
+    if (!existsSync(diskPath)) {
+      return {
+        targetPhase: phase,
+        targetPhaseState: getInitialPhaseState(phase),
+        skippedPhases,
+        message: buildMessage(skippedPhases, phase),
+      }
+    }
+
+    if (!isTimeSentinel(approvedHash)) {
+      const content = artifactContents[artifactKey]
+      if (typeof content !== "string") {
+        return {
+          targetPhase: phase,
+          targetPhaseState: getInitialPhaseState(phase),
+          skippedPhases,
+          message: buildMessage(skippedPhases, phase, "artifact content not provided for sync verification"),
+        }
+      }
+      const currentHash = artifactHash(content)
+      if (currentHash !== approvedHash) {
+        return {
+          targetPhase: phase,
+          targetPhaseState: getInitialPhaseState(phase),
+          skippedPhases,
+          message: buildMessage(skippedPhases, phase, "artifact content changed since last approval"),
+        }
+      }
+    }
+
+    skippedPhases.push(phase)
+  }
+
   return {
     targetPhase: "DONE",
     targetPhaseState: "DRAFT",

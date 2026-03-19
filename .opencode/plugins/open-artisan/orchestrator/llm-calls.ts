@@ -94,7 +94,11 @@ Valid artifact keys: design, conventions, plan, interfaces, tests, impl_plan, im
  * @param getParentSessionId Optional getter that returns the current parent session ID.
  *   Called at dispatch time so the orchestrator session appears as a child of the active session.
  */
-export function createAssessFn(client: PluginClient, getParentSessionId?: () => string | undefined): (
+export function createAssessFn(
+  client: PluginClient,
+  getParentSessionId?: () => string | undefined,
+  getParentModel?: () => string | undefined,
+): (
   feedback: string,
   currentArtifact: ArtifactKey,
 ) => Promise<OrchestratorAssessResult> {
@@ -110,10 +114,16 @@ export function createAssessFn(client: PluginClient, getParentSessionId?: () => 
       ].join("\n")
 
       const result = await withTimeout(
-        ephemeralPrompt(client, {
-          parts: [{ type: "text", text: prompt }],
-          system: ASSESS_SYSTEM_PROMPT,
-        }, "Orchestrator: assess feedback", getParentSessionId?.()),
+        ephemeralPrompt(
+          client,
+          {
+            parts: [{ type: "text", text: prompt }],
+            system: ASSESS_SYSTEM_PROMPT,
+          },
+          "Orchestrator: assess feedback",
+          getParentSessionId?.(),
+          getParentModel?.(),
+        ),
         ORCHESTRATOR_TIMEOUT_MS,
         "orchestrator-assess",
       )
@@ -187,7 +197,11 @@ The JSON must have exactly these fields:
  *
  * @param getParentSessionId Optional getter for parent session ID (see createAssessFn).
  */
-export function createDivergeFn(client: PluginClient, getParentSessionId?: () => string | undefined): (
+export function createDivergeFn(
+  client: PluginClient,
+  getParentSessionId?: () => string | undefined,
+  getParentModel?: () => string | undefined,
+): (
   assessResult: OrchestratorAssessResult,
   approvedArtifacts: Partial<Record<ArtifactKey, string>>,
 ) => Promise<OrchestratorDivergeResult> {
@@ -226,10 +240,16 @@ export function createDivergeFn(client: PluginClient, getParentSessionId?: () =>
       ].join("\n")
 
       const result = await withTimeout(
-        ephemeralPrompt(client, {
-          parts: [{ type: "text", text: prompt }],
-          system: DIVERGE_SYSTEM_PROMPT,
-        }, "Orchestrator: diverge classification", getParentSessionId?.()),
+        ephemeralPrompt(
+          client,
+          {
+            parts: [{ type: "text", text: prompt }],
+            system: DIVERGE_SYSTEM_PROMPT,
+          },
+          "Orchestrator: diverge classification",
+          getParentSessionId?.(),
+          getParentModel?.(),
+        ),
         ORCHESTRATOR_TIMEOUT_MS,
         "orchestrator-diverge",
       )
@@ -293,6 +313,7 @@ async function ephemeralPrompt(
   params: { parts: Array<{ type: string; text: string }>; system?: string },
   title = "Orchestrator: classify feedback",
   parentSessionId?: string,
+  parentModel?: string,
 ): Promise<unknown> {
   if (!client.session) throw new Error("client.session is not available — cannot dispatch orchestrator call")
   const sessionResult = await client.session.create({
@@ -300,6 +321,7 @@ async function ephemeralPrompt(
       title,
       agent: "workflow-orchestrator",
       ...(parentSessionId ? { parentID: parentSessionId } : {}),
+      ...(parentModel ? { model: parentModel } : {}),
     },
   })
 

@@ -57,6 +57,8 @@ function freshState(sessionId: string): WorkflowState {
     pendingFeedback: null,
     userMessages: [],
     cachedPriorState: null,
+    priorWorkflowChecked: false,
+    sessionModel: null,
   }
 }
 
@@ -230,6 +232,9 @@ export function createSessionStateStore(dir: string): SessionStateStore {
           migrated["userMessages"] ??= []
           // v16 → v17: add cachedPriorState
           migrated["cachedPriorState"] = null // Always clear on load - transient cache
+          // v17 → v18: add priorWorkflowChecked + sessionModel
+          migrated["priorWorkflowChecked"] = false
+          migrated["sessionModel"] ??= null
           // retryCount is transient — reset on load so the idle handler starts fresh.
           // If the agent was stuck before a restart, it deserves a clean retry budget.
           migrated["retryCount"] = 0

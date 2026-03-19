@@ -104,8 +104,12 @@ export type ArtifactKey =
  *        review loops when a task repeatedly fails per-task review),
  *        added pendingFeedback (crash-safe feedback persistence — stores feedback
  *        text during orchestrator LLM calls so it survives process crashes)
+ *   v16: added userMessages (full user message history for self-review alignment)
+ *   v17: added cachedPriorState (cache for check_prior_workflow → select_mode)
+ *   v18: added priorWorkflowChecked and sessionModel (enforce tool ordering and
+ *        propagate parent model to subagents)
  */
-export const SCHEMA_VERSION = 17
+export const SCHEMA_VERSION = 18
 
 export interface WorkflowState {
   /** Schema version for forward-compatibility. Must equal SCHEMA_VERSION. */
@@ -323,6 +327,19 @@ export interface WorkflowState {
    * null = no cached result available.
    */
   cachedPriorState: { intentBaseline: string | null; phase: string; artifactDiskPaths: Record<string, string>; approvedArtifacts?: Record<string, string> } | null
+
+  /**
+   * Flag indicating check_prior_workflow was called for this session.
+   * Used to enforce check_prior_workflow → select_mode dependency when
+   * prior state exists. Cleared after select_mode consumes it.
+   */
+  priorWorkflowChecked: boolean
+
+  /**
+   * The active model identifier for the parent session (if provided by OpenCode).
+   * Propagated to subagent sessions when available.
+   */
+  sessionModel: string | null
 }
 
 // ---------------------------------------------------------------------------
@@ -503,6 +520,12 @@ export function validateWorkflowState(state: WorkflowState): string | null {
   }
   if (state.conventions !== null && typeof state.conventions !== "string") {
     return `conventions must be null or a string, got ${typeof state.conventions}`
+  }
+  if (typeof state.priorWorkflowChecked !== "boolean") {
+    return `priorWorkflowChecked must be a boolean, got ${typeof state.priorWorkflowChecked}`
+  }
+  if (state.sessionModel !== null && typeof state.sessionModel !== "string") {
+    return `sessionModel must be null or a string, got ${typeof state.sessionModel}`
   }
   if (state.currentTaskId !== null && typeof state.currentTaskId !== "string") {
     return `currentTaskId must be null or a string, got ${typeof state.currentTaskId}`
@@ -867,6 +890,8 @@ export interface RebuttalRequest {
   parentSessionId?: string
   /** Feature name for session title context */
   featureName?: string | null
+  /** Parent model identifier (if available) for subagent session creation */
+  parentModel?: string
 }
 
 export interface RebuttalSuccess {

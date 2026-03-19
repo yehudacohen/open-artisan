@@ -76,7 +76,7 @@ import { dispatchAutoApproval } from "./auto-approve"
 import { createLogger, setDefaultStateDir, type Logger } from "./logger"
 
 import { createHash } from "node:crypto"
-import type { WorkflowMode, WorkflowState, SessionStateStore, ArtifactKey, RevisionStep, MarkSatisfiedArgs } from "./types"
+import type { WorkflowMode, WorkflowState, SessionStateStore, ArtifactKey, RevisionStep, MarkSatisfiedArgs, CriterionResult } from "./types"
 import { VALID_PHASE_STATES } from "./types"
 import type { PluginClient } from "./client-types"
 import { resolveSessionId } from "./utils"
@@ -136,6 +136,43 @@ async function findPriorWorkflowState(
     log?.error("findPriorWorkflowState", { featureName, error: errorMsg })
     return null
   }
+}
+
+function extractModelName(model: unknown): string | null {
+  if (!model) return null
+  if (typeof model === "string") return model
+  if (typeof model === "object" && !Array.isArray(model)) {
+    const obj = model as Record<string, unknown>
+    const id = obj["id"]
+    if (typeof id === "string" && id.trim()) return id
+    const name = obj["name"]
+    if (typeof name === "string" && name.trim()) return name
+  }
+  return null
+}
+
+const ALLOWLIST_CRITERION = "Allowlist adequacy"
+
+function requiresAllowlistCriterion(state: WorkflowState): boolean {
+  return state.mode === "INCREMENTAL" && state.phase === "PLANNING" && state.fileAllowlist.length > 0
+}
+
+function ensureAllowlistCriterion(
+  criteria: Array<{ criterion: string; met: boolean; evidence: string; severity?: "blocking" | "suggestion"; score?: number }>,
+  state: WorkflowState,
+): Array<{ criterion: string; met: boolean; evidence: string; severity?: "blocking" | "suggestion"; score?: number }> {
+  if (!requiresAllowlistCriterion(state)) return criteria
+  const hasAllowlist = criteria.some((c) => c.criterion.toLowerCase().includes("allowlist adequacy"))
+  if (hasAllowlist) return criteria
+  return [
+    ...criteria,
+    {
+      criterion: ALLOWLIST_CRITERION,
+      met: false,
+      evidence: "Allowlist adequacy was not assessed. Review whether the allowlist covers remaining phases before approval.",
+      severity: "blocking",
+    },
+  ]
 }
 
 /**
@@ -368,9 +405,14 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
   }
   const graph = createArtifactGraph(hasDesignDoc)
   const getActiveSessionId = () => activeSessionId
+  const getActiveSessionModel = () => {
+    if (!activeSessionId) return undefined
+    const state = store.get(activeSessionId)
+    return state?.sessionModel ?? undefined
+  }
   const orchestrator = createOrchestrator({
-    assess: createAssessFn(client, getActiveSessionId),
-    diverge: createDivergeFn(client, getActiveSessionId),
+    assess: createAssessFn(client, getActiveSessionId, getActiveSessionModel),
+    diverge: createDivergeFn(client, getActiveSessionId, getActiveSessionModel),
     graph,
   })
 
@@ -719,6 +761,13 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
       const state = store.get(sessionId)
       if (!state) return
 
+      const modelName = extractModelName(input.model)
+      if (modelName && state.sessionModel !== modelName) {
+        await store.update(sessionId, (draft) => {
+          draft.sessionModel = modelName
+        })
+      }
+
       // Agent-aware dormancy: if the active agent is NOT an artisan agent,
       // skip workflow prompt injection entirely. The plugin should be invisible
       // to non-artisan agents (Plan, Build). activeAgent === null means "not yet
@@ -978,6 +1027,11 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             )
           }
 
+          // Mark that check_prior_workflow was called for this feature
+          await store.update(sessionId, (draft) => {
+            draft.priorWorkflowChecked = true
+          })
+
           const state = store.get(sessionId)
           const priorState = await findPriorWorkflowState(store, featureName, log)
 
@@ -1011,6 +1065,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             priorIntent,
             priorPlanPath,
             client,
+            parentModel: state?.sessionModel ?? undefined,
           })
 
           const { classification, explanation } = comparisonResult
@@ -1040,6 +1095,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
           // Cache the prior state for select_mode to avoid redundant file reads
           await store.update(sessionId, (draft) => {
             draft.cachedPriorState = priorState
+            draft.priorWorkflowChecked = true
           })
 
           if (classification === "DIFFERENT") {
@@ -1159,14 +1215,17 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             return `Error: ${validationError}`
           }
 
-          // Check if feature directory exists - if it does, warn that check_prior_workflow should be called first
+          // Check if feature directory exists - enforce check_prior_workflow before proceeding
           const featureDir = join(process.cwd(), ".openartisan", featureName)
-          if (existsSync(featureDir)) {
-            log.warn("select_mode called without check_prior_workflow", { 
-              featureName, 
-              detail: "Feature directory exists but check_prior_workflow was not called first" 
+          if (existsSync(featureDir) && !state.priorWorkflowChecked) {
+            log.warn("select_mode blocked without check_prior_workflow", {
+              featureName,
+              detail: "Feature directory exists but check_prior_workflow was not called first",
             })
-            // Don't block - just log the warning. The tool description already says to call check_prior_workflow first.
+            return (
+              `Error: Prior workflow artifacts detected for "${featureName}". ` +
+              `Call check_prior_workflow first to verify intent alignment before select_mode.`
+            )
           }
 
           // STEP 1: Check if this is an existing workflow (FIRST THING)
@@ -1178,10 +1237,11 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             log.info("select_mode using cached prior state", { featureName })
           }
           
-          // Clear the cache after use
-          if (state.cachedPriorState) {
+          // Clear cached prior state and consume the check_prior_workflow flag
+          if (state.cachedPriorState || state.priorWorkflowChecked) {
             await store.update(sessionId, (draft) => {
               draft.cachedPriorState = null
+              draft.priorWorkflowChecked = false
             })
           }
           
@@ -1203,6 +1263,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                 priorIntent,
                 priorPlanPath,
                 client,
+                parentModel: state.sessionModel ?? undefined,
               })
 
               const { classification } = comparisonResult
@@ -1218,7 +1279,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
               
               // If FULL, fast-forward to skip completed phases
               if (classification === "FULL") {
-                const ffResult = computeFastForward(
+                const ffResult = await computeFastForward(
                   mode,
                   priorState.approvedArtifacts || {},
                   priorState.artifactDiskPaths
@@ -1380,10 +1441,20 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
           if (state.mode === "REFACTOR" || state.mode === "INCREMENTAL") {
             try {
               const cwd = context.directory || process.cwd()
-              const report = await runDiscoveryFleet(client, cwd, state.mode, sessionId ?? undefined, state.featureName)
+              const report = await runDiscoveryFleet(
+                client,
+                cwd,
+                state.mode,
+                sessionId ?? undefined,
+                state.featureName,
+                state.sessionModel ?? undefined,
+              )
               fleetReport = report.combinedReport
               const successCount = report.scanners.filter((s) => s.success).length
               fleetMsg = `\n\n**Discovery fleet:** ${successCount}/${report.scanners.length} scanners completed.`
+              if (successCount === 0) {
+                fleetMsg += "\nManual fallback: draft conventions from README/CONTRIBUTING and direct code inspection, or re-run discovery after fixing the prompt/template error."
+              }
             } catch (fleetErr) {
               // Non-fatal — fleet failure does not block conventions drafting
               const errMsg = fleetErr instanceof Error ? fleetErr.message : String(fleetErr)
@@ -1488,13 +1559,16 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
           // Parse string scores to numbers — tool.schema has no .number() so
           // the schema declares score as string, but MarkSatisfiedArgs expects number.
           const parsedArgs: MarkSatisfiedArgs = {
-            criteria_met: args.criteria_met.map((c) => ({
-              criterion: c.criterion,
-              met: c.met,
-              evidence: c.evidence,
-              ...(c.severity ? { severity: c.severity } : {}),
-              ...(c.score ? { score: parseInt(c.score, 10) } : {}),
-            })),
+            criteria_met: ensureAllowlistCriterion(
+              args.criteria_met.map((c) => ({
+                criterion: c.criterion,
+                met: c.met,
+                evidence: c.evidence,
+                ...(c.severity ? { severity: c.severity } : {}),
+                ...(c.score ? { score: parseInt(c.score, 10) } : {}),
+              })),
+              state,
+            ),
           }
           // Iteration info for display in fail messages: "Review iteration X of Y"
           const iterationInfo = { current: state.iterationCount + 1, max: MAX_REVIEW_ITERATIONS }
@@ -1543,6 +1617,10 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                 parentSessionId: sessionId ?? undefined,
                 featureName: state.featureName,
                 ...(userMessages.length > 0 ? { userMessages } : {}),
+                ...(state.sessionModel ? { parentModel: state.sessionModel } : {}),
+                ...(state.fileAllowlist.length > 0 ? { fileAllowlist: state.fileAllowlist } : {}),
+                ...(Object.keys(state.approvedArtifacts).length > 0 ? { approvedArtifacts: state.approvedArtifacts } : {}),
+                ...(Object.keys(state.artifactDiskPaths).length > 0 ? { artifactDiskPaths: state.artifactDiskPaths } : {}),
               })
             } catch (reviewErr) {
               // dispatchSelfReview should never throw (returns SelfReviewError),
@@ -1557,11 +1635,19 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             }
 
             if (reviewResult?.success) {
+              const reviewerCriteria = ensureAllowlistCriterion(reviewResult.criteriaResults, state) as CriterionResult[]
+              if (reviewerCriteria.length !== reviewResult.criteriaResults.length) {
+                reviewResult = {
+                  ...reviewResult,
+                  satisfied: false,
+                  criteriaResults: reviewerCriteria,
+                }
+              }
               // Isolated reviewer succeeded — use its verdict as authoritative truth.
               // Re-evaluate using the reviewer's criteria_results (same logic as agent path).
               // Pass expectedBlocking for cross-validation (same anti-gaming check as agent path).
               result = evaluateMarkSatisfied({
-                criteria_met: reviewResult.criteriaResults.map((c) => ({
+                criteria_met: reviewerCriteria.map((c) => ({
                   criterion: c.criterion,
                   met: c.met,
                   evidence: c.evidence,
@@ -1610,6 +1696,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                       criteriaText,
                       parentSessionId: sessionId ?? undefined,
                       featureName: state.featureName,
+                      parentModel: state.sessionModel ?? undefined,
                     })
                     if (rebuttalResult.success) {
                       // Merge revised results: replace the disputed criteria in the
@@ -1699,6 +1786,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                 featureName: state.featureName,
                 conventionsPath: state.artifactDiskPaths["conventions"] ?? null,
                 parentSessionId: sessionId ?? undefined,
+                parentModel: state.sessionModel ?? undefined,
                 isEscalation: hitIterationCap,
               })
 
@@ -1935,6 +2023,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                   cwd: context.directory || process.cwd(),
                   parentSessionId: sessionId ?? undefined,
                   featureName: state.featureName,
+                  parentModel: state.sessionModel ?? undefined,
                   conventions: state.conventions,
                   artifactDiskPaths: state.artifactDiskPaths,
                   adjacentTasks: adjacentTasks.length > 0 ? adjacentTasks : undefined,
@@ -1981,6 +2070,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                   implementationSummary: args.implementation_summary,
                   dagTasks: state.implDag,
                   parentSessionId: sessionId ?? undefined,
+                  parentModel: state.sessionModel ?? undefined,
                 })
                 if (driftResult.success && driftResult.driftDetected) {
                   // Patch downstream task descriptions in the result nodes

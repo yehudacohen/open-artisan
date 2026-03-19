@@ -56,6 +56,8 @@ export interface AutoApproveRequest {
   conventionsPath?: string | null
   /** Parent session ID for TUI session tree */
   parentSessionId?: string
+  /** Parent model identifier (if available) for subagent session creation */
+  parentModel?: string
   /** Whether this is an escalation (review cap hit) — approver should be more lenient */
   isEscalation?: boolean
 }
@@ -166,6 +168,7 @@ async function ephemeralAutoApproveSession(
   client: PluginClient,
   prompt: string,
   parentSessionId?: string,
+  parentModel?: string,
 ): Promise<unknown> {
   if (!client.session) throw new Error("client.session is not available — cannot dispatch auto-approver")
 
@@ -174,6 +177,7 @@ async function ephemeralAutoApproveSession(
       title: "auto-approve",
       agent: "auto-approver",
       ...(parentSessionId ? { parentID: parentSessionId } : {}),
+      ...(parentModel ? { model: parentModel } : {}),
     },
   })
 
@@ -247,7 +251,7 @@ export async function dispatchAutoApproval(
     const prompt = buildAutoApprovePrompt(req)
 
     // Dispatch with timeout
-    const resultPromise = ephemeralAutoApproveSession(client, prompt, req.parentSessionId)
+    const resultPromise = ephemeralAutoApproveSession(client, prompt, req.parentSessionId, req.parentModel)
     const rawResult = await Promise.race([
       resultPromise,
       new Promise<never>((_, reject) =>

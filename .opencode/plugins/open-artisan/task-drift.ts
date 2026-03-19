@@ -48,6 +48,8 @@ export interface DriftCheckRequest {
   dagTasks: TaskNode[]
   /** Parent session ID for TUI hierarchy */
   parentSessionId?: string
+  /** Parent model identifier (if available) for subagent session creation */
+  parentModel?: string
 }
 
 export interface DriftCheckResult {
@@ -151,6 +153,7 @@ export async function dispatchDriftCheck(
         title: `Drift check: ${request.task.id}`,
         agent: "workflow-orchestrator",
         ...(request.parentSessionId ? { parentID: request.parentSessionId } : {}),
+        ...(request.parentModel ? { model: request.parentModel } : {}),
       },
     })
 

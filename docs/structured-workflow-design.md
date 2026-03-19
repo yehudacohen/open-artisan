@@ -1,6 +1,6 @@
 # Structured Coding Workflow — Design Document
 
-**Version:** v14 (reflects implementation as of schema v15, March 2026)
+**Version:** v15 (reflects implementation as of schema v18, March 2026)
 **Status:** This document describes the **current implemented system**, not aspirational design. Section 14 documents structural gaps that have all been resolved. Section 14.6 documents meta-structural improvements that prevent agents from silently downgrading structural guarantees. Section 15 documents deferred features.
 
 ---
@@ -145,14 +145,14 @@ All `session.create()` calls pass:
 - `agent:` — the appropriate agent name for auditability in the TUI session tree
 - `parentID:` — the parent session ID (when available) for session tree hierarchy
 
-| Dispatch Site | Agent | parentID Source |
-|--------------|-------|-----------------|
-| Discovery scanners (`discovery/index.ts`) | `workflow-reviewer` | parent session |
-| Self-review (`self-review.ts`) | `workflow-reviewer` | parent session |
-| Task review (`task-review.ts`) | `workflow-reviewer` | parent session |
-| Orchestrator assess/diverge (`orchestrator/llm-calls.ts`) | `workflow-orchestrator` | `activeSessionId` getter |
-| Auto-approval (`auto-approve.ts`) | `auto-approver` | parent session |
-| Per-task drift check (`task-drift.ts`) | `workflow-orchestrator` | parent session |
+| Dispatch Site | Agent | parentID Source | model |
+|--------------|-------|-----------------|-------|
+| Discovery scanners (`discovery/index.ts`) | `workflow-reviewer` | parent session | `state.sessionModel` |
+| Self-review (`self-review.ts`) | `workflow-reviewer` | parent session | `state.sessionModel` |
+| Task review (`task-review.ts`) | `workflow-reviewer` | parent session | `state.sessionModel` |
+| Orchestrator assess/diverge (`orchestrator/llm-calls.ts`) | `workflow-orchestrator` | `activeSessionId` getter | `state.sessionModel` |
+| Auto-approval (`auto-approve.ts`) | `auto-approver` | parent session | `state.sessionModel` |
+| Per-task drift check (`task-drift.ts`) | `workflow-orchestrator` | parent session | `state.sessionModel` |
 
 ---
 
@@ -259,11 +259,13 @@ After `select_mode` completes, if `approvedArtifacts` has entries (carried over 
 
 **Time-sentinel handling:** File-based phases (INTERFACES, TESTS, IMPLEMENTATION) sometimes store `"approved-at-<timestamp>"` instead of a content hash (when `artifact_content` wasn't provided at approval). For these, the fast-forward verifies the file exists on disk but does not verify content (there is no reference hash to compare against). This is a deliberate trade-off — the file existing at all is sufficient evidence for time-sentinel approvals.
 
-**Implementation:** `fast-forward.ts` exports `computeFastForward()` — a pure function with no side effects. The `select_mode` tool handler calls it after the initial state transition and applies the result to the session state.
+**Implementation:** `fast-forward.ts` exports `computeFastForward()` — an async function with no side effects used internally by `select_mode`. A synchronous variant, `computeFastForwardSync()`, is also exported for consumers that require a synchronous API (e.g., external integrations, test harnesses that cannot await).
 
 ### 5.5.1 Forward-Pass Skip (INCREMENTAL Mode)
 
 During the initial forward pass (not just returning projects), INCREMENTAL mode can auto-skip phases when the `fileAllowlist` proves no relevant files will change. This eliminates ceremony gates for phases where no work is needed.
+
+**The skip is driven by the file allowlist, not the state machine.** The plugin's tool guard enforces the allowlist boundaries; the allowlist content determines which phases are relevant. This creates a natural forward-skip: when no files in the allowlist match a phase's file-type criteria (e.g., no interface files for INTERFACES, no test files for TESTS), that phase is effectively a no-op and is auto-skipped.
 
 **Skip criteria per phase:**
 - **INTERFACES**: skip if no files in `fileAllowlist` match `isInterfaceFile()` (no `.d.ts`, no `types`/`interface`/`schema` keyword files)
@@ -416,11 +418,11 @@ The cascade depth >= 3 criterion is the only deterministic trigger. The other th
 
 Workflow state is persisted as JSON in OpenCode's data directory. The schema version (currently v15) is stamped on every state object. On load, states with mismatched versions are migrated forward using `??=` defaulting for new fields. States with future versions are discarded.
 
-### 10.2 WorkflowState Fields (Schema v15)
+### 10.2 WorkflowState Fields (Schema v18)
 
 | Field | Type | Added | Purpose |
 |-------|------|-------|---------|
-| `schemaVersion` | `15` | v1 | Forward-compatibility guard |
+| `schemaVersion` | `18` | v1 | Forward-compatibility guard |
 | `sessionId` | `string` | v1 | OpenCode session ID |
 | `mode` | `WorkflowMode \| null` | v1 | GREENFIELD / REFACTOR / INCREMENTAL |
 | `phase` | `Phase` | v1 | Current high-level phase |
@@ -450,6 +452,10 @@ Workflow state is persisted as JSON in OpenCode's data directory. The schema ver
 | `taskCompletionInProgress` | `string \| null` | v14 | Re-entry guard for `mark_task_complete` |
 | `taskReviewCount` | `number` | v15 | Per-task review iteration counter |
 | `pendingFeedback` | `string \| null` | v15 | Crash-safe feedback persistence |
+| `userMessages` | `Array<{role: string, content: string}>` | v16 | Session message history for intent recovery |
+| `cachedPriorState` | `WorkflowState \| null` | v17 | Cached prior workflow state for `check_prior_workflow` |
+| `priorWorkflowChecked` | `boolean` | v18 | Whether `check_prior_workflow` was called in this session |
+| `sessionModel` | `string \| null` | v18 | Model name captured at session creation for subagent propagation |
 
 ### 10.3 Revision Baseline (Diff Gate)
 
@@ -504,7 +510,7 @@ Each dimension has phase-specific descriptions. A score below 9 means the criter
 The full criteria are defined in `getAcceptanceCriteria()` in `hooks/system-transform.ts`. Key highlights:
 
 - **DISCOVERY:** Conventions document must be actionable and complete — not a raw dump of observations
-- **PLANNING:** No "TBD" items — every ambiguity must be resolved with an explicit decision. Deployment & infrastructure must be explicitly addressed (provisioning, credentials, CI/CD, DNS) — plans that produce working code but ignore deployment are incomplete.
+- **PLANNING:** No "TBD" items — every ambiguity must be resolved with an explicit decision. Deployment & infrastructure must be explicitly addressed (provisioning, credentials, CI/CD, DNS) — plans that produce working code but ignore deployment are incomplete. **INCREMENTAL mode only:** File allowlist adequate for remaining phases — reviewer validates that the approved file list covers all planned phases; forward-skip decisions must be consistent with the allowlist.
 - **INTERFACES:** Every function must have input types, output types, and error types — no `any`
 - **TESTS:** Tests must fail — no implementation leakage
 - **IMPL_PLAN:** DAG must be acyclic with correct dependencies. Task categories (scaffold/human-gate/integration/standalone) must be correctly assigned. If the approved plan includes deployment/infrastructure requirements, the DAG must include corresponding human-gate and integration tasks. Integration seams between tasks must be explicitly owned — no "not my responsibility" gaps at task boundaries.
@@ -519,6 +525,14 @@ When a review fails and the agent is one iteration from the escalation cap (`MAX
 ### 12.4 Review Escalation
 
 After `MAX_REVIEW_ITERATIONS` (10) consecutive review failures, the system escalates to USER_GATE with a structured verdict table showing each unresolved criterion, its score, and the reviewer's evidence. The user can then approve as-is or provide specific revision guidance.
+
+### 12.5 Allowlist Adequacy (PLANNING/INCREMENTAL)
+
+In INCREMENTAL mode, the reviewer must validate that the file allowlist covers all remaining phases. The skip criteria are computed from the allowlist (`computeFastForward` logic): if no files in the allowlist match a phase's file-type criteria (e.g., no `.d.ts`/interface files for INTERFACES, no test files for TESTS), that phase is effectively a no-op and can be forward-skipped — but the reviewer must explicitly verify this is consistent with the plan's intent.
+
+**Blocking criterion:** For each phase with expected work (INTERFACES, TESTS, IMPL_PLAN, IMPLEMENTATION), the allowlist must contain at least one relevant file path, OR the plan must explicitly state the phase will be skipped. The reviewer receives `workflowState` context (including `fileAllowlist`) so it can compute forward-skip decisions from the actual allowlist.
+
+---
 
 ---
 
@@ -536,6 +550,7 @@ After `MAX_REVIEW_ITERATIONS` (10) consecutive review failures, the system escal
 | `submit_feedback` | */USER_GATE, */ESCAPE_HATCH | Route user feedback (approve or revise). At ESCAPE_HATCH: accept drift, provide alternative direction, start new direction, or abort. |
 | `mark_task_complete` | IMPLEMENTATION/DRAFT, IMPLEMENTATION/REVISE | Complete a DAG task (triggers per-task review) |
 | `resolve_human_gate` | IMPLEMENTATION/* | Activate a human gate for a DAG task |
+| `check_prior_workflow` | MODE_SELECT | Check if prior workflow artifacts are relevant to current intent; blocks `select_mode` if mismatch detected unless user overrides |
 
 ### 13.2 Tool Guard
 
@@ -734,7 +749,7 @@ These must hold true at all times. Items marked *(procedural)* are enforced by c
 
 | Constant | Value | Location | Purpose |
 |----------|-------|----------|---------|
-| `SCHEMA_VERSION` | 15 | `types.ts` | Schema forward-compatibility |
+| `SCHEMA_VERSION` | 18 | `types.ts` | Schema forward-compatibility |
 | `MAX_REVIEW_ITERATIONS` | 10 | `constants.ts` | Self-review loop cap before escalation |
 | `MAX_TASK_REVIEW_ITERATIONS` | 10 | `constants.ts` | Per-task review iteration cap |
 | `MAX_IDLE_RETRIES` | 3 | `constants.ts` | Idle re-prompt retries before escalation |
@@ -788,6 +803,8 @@ These must hold true at all times. Items marked *(procedural)* are enforced by c
         ├── dag.ts                  # DAG data structures + ImplDAG
         ├── impl-plan-parser.ts     # Markdown DAG parser
         ├── scheduler.ts            # Sequential task scheduler
+        │   ├── intent-comparison.ts  # Shared LLM intent comparison (check_prior_workflow + rebuttal)
+        │   └── type-validation.ts   # WorkflowState type guard helpers
         ├── self-review.ts          # Isolated self-review dispatch
         ├── task-review.ts          # Per-task review dispatch
         ├── auto-approve.ts         # Robot-artisan auto-approval dispatch
@@ -865,10 +882,11 @@ tests/
 ├── artifact-paths.test.ts
 ├── cascade-auto-skip.test.ts
 ├── fast-forward.test.ts
+├── type-validation.test.ts
 └── utils.test.ts
 ```
 
-**Test count:** 1121 tests across 38 files (schema v15).
+**Test count:** 1130 tests across 39 files (schema v18).
 
 **Runtime artifacts** (in target project's `.opencode/` directory):
 - `workflow-state.json` — persisted session state (all sessions, JSON object keyed by session ID)

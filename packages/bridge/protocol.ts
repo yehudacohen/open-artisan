@@ -1,0 +1,111 @@
+/**
+ * protocol.ts — Application-level types for bridge JSON-RPC methods.
+ *
+ * JSON-RPC 2.0 protocol handling is provided by the `json-rpc-2.0` library.
+ * This file defines only the method-specific parameter and result types.
+ */
+import type { Phase, PhaseState, WorkflowMode } from "../core/types"
+
+// ---------------------------------------------------------------------------
+// Application error codes (used with JSONRPCErrorException)
+// ---------------------------------------------------------------------------
+
+export const NOT_INITIALIZED = -32000
+export const SESSION_NOT_FOUND = -32001
+export const INVALID_STATE = -32002
+export const SUBAGENT_UNAVAILABLE = -32003
+
+/** Standard JSON-RPC 2.0 "Invalid params" error code. */
+export const INVALID_PARAMS = -32602
+
+// ---------------------------------------------------------------------------
+// Method parameter types
+// ---------------------------------------------------------------------------
+
+export interface LifecycleInitParams {
+  projectDir: string
+  stateDir?: string
+  traceId?: string
+}
+
+export interface LifecycleSessionParams {
+  sessionId: string
+  parentId?: string
+  traceId?: string
+}
+
+export interface StateGetParams {
+  sessionId: string
+  traceId?: string
+}
+
+export interface GuardCheckParams {
+  toolName: string
+  args: Record<string, unknown>
+  sessionId: string
+  traceId?: string
+}
+
+export interface GuardPolicyParams {
+  phase: Phase
+  phaseState: PhaseState
+  mode: WorkflowMode | null
+  allowlist: string[]
+  traceId?: string
+}
+
+export interface PromptBuildParams {
+  sessionId: string
+  traceId?: string
+}
+
+export interface IdleCheckParams {
+  sessionId: string
+  traceId?: string
+}
+
+export interface MessageProcessParams {
+  sessionId: string
+  parts: Array<{ type: string; text?: string }>
+  traceId?: string
+}
+
+export interface ToolExecuteParams {
+  name: string
+  args: Record<string, unknown>
+  context: {
+    sessionId: string
+    directory: string
+    agent?: string
+  }
+  traceId?: string
+}
+
+// ---------------------------------------------------------------------------
+// Method result types
+// ---------------------------------------------------------------------------
+
+export interface GuardCheckResult {
+  allowed: boolean
+  reason?: string
+  policyVersion: number
+}
+
+export interface GuardPolicyResult {
+  blocked: string[]
+  allowedDescription: string
+  hasWritePathPredicate: boolean
+  hasBashCommandPredicate: boolean
+  policyVersion: number
+}
+
+export interface IdleCheckResult {
+  action: "reprompt" | "escalate" | "ignore"
+  message?: string
+  retryCount?: number
+}
+
+export interface MessageProcessResult {
+  parts: Array<{ type: string; text?: string }>
+  intercepted: boolean
+}

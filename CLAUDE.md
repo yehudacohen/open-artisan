@@ -12,7 +12,7 @@ Open Artisan is an OpenCode plugin that enforces a phased, quality-gated workflo
 # Install dependencies (both root and plugin)
 bun install && cd .opencode && bun install && cd ..
 
-# Run all tests (~1,333 tests across 49 files)
+# Run all tests (~1,430 tests across 58 files)
 bun test
 
 # Run a single test file
@@ -78,6 +78,10 @@ The IMPL_PLAN artifact is parsed from Markdown into a task DAG. Sequential sched
 
 `spawn_sub_workflow` delegates a DAG task to an independent child session that runs its own MODE_SELECT → DONE cycle. Child state nests under parent on disk (`.openartisan/<parent>/sub/<child>/`). Parent tracks children via `childWorkflows` array; child links back via `parentWorkflow` field. `query_parent_workflow` / `query_child_workflow` provide read-only cross-workflow inspection. Child completion automatically propagates to parent (delegated → complete). Timeout and cascade-abort sync children when parent's plan changes.
 
+### Bridge Server (`packages/bridge/`)
+
+JSON-RPC 2.0 server over stdio using the `json-rpc-2.0` library. Wraps the core engine for out-of-process adapters (Claude Code, Hermes). 13 methods: lifecycle (init/ping/shutdown/sessionCreated/sessionDeleted), state.get, guard (check/policy), prompt (build/compaction), message.process, idle.check, tool.execute. PID file at `.openartisan/.bridge-pid` with stale detection. Structured logging via pino with traceId correlation. Entry point: `packages/bridge/cli.ts`.
+
 ### Self-Review (`self-review.ts`)
 
 Dispatches an ephemeral `workflow-reviewer` subagent in a fresh session that sees only the artifact and acceptance criteria — never the authoring conversation. 5-minute timeout, escalates to USER_GATE after 10 iterations.
@@ -90,7 +94,7 @@ Dispatches an ephemeral `workflow-reviewer` subagent in a fresh session that see
 
 ## Key Conventions
 
-- **Import alias**: `#plugin/*` maps to `.opencode/plugins/open-artisan/*`, `#core/*` maps to `packages/core/*` (configured in bunfig.toml)
+- **Import alias**: `#plugin/*` maps to `.opencode/plugins/open-artisan/*`, `#core/*` maps to `packages/core/*`, `#bridge/*` maps to `packages/bridge/*` (configured in package.json imports + bunfig.toml)
 - **TypeScript strict mode** with `noUncheckedIndexedAccess` and `exactOptionalPropertyTypes`
 - **All constants** live in `constants.ts` — no magic numbers/strings in other files
 - **Result types** use discriminated unions: `{ success: true; data: T } | { success: false; error: string }`

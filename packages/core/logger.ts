@@ -42,6 +42,12 @@ export interface Logger {
 
   /** Internal debug — suppressed unless OPENARTISAN_DEBUG env var is set. Never shown in TUI. */
   debug(message: string, opts?: { detail?: string }): void
+
+  /**
+   * Create a child logger with additional context fields bound to all entries.
+   * Used for request-scoped logging (e.g., traceId correlation in the bridge).
+   */
+  child(bindings: Record<string, unknown>): Logger
 }
 
 // ---------------------------------------------------------------------------
@@ -124,6 +130,20 @@ export function createLogger(notify: NotificationSink, stateDir?: string): Logge
       const detail = opts?.detail ? ` ${opts.detail}` : ""
       persistError("debug", message, opts?.detail)
       console.error(`${PREFIX} [debug] ${message}${detail}`)
+    },
+
+    child(bindings: Record<string, unknown>): Logger {
+      // The core logger doesn't have structured fields, so child bindings
+      // are prepended as a string prefix to the detail field.
+      const prefix = Object.entries(bindings).map(([k, v]) => `${k}=${v}`).join(" ")
+      const parentLogger = this
+      return {
+        error(message, opts) { parentLogger.error(message, { ...opts, detail: opts?.detail ? `[${prefix}] ${opts.detail}` : `[${prefix}]` }) },
+        warn(message, opts) { parentLogger.warn(message, { ...opts, detail: opts?.detail ? `[${prefix}] ${opts.detail}` : `[${prefix}]` }) },
+        info(message, opts) { parentLogger.info(message, { ...opts, detail: opts?.detail ? `[${prefix}] ${opts.detail}` : `[${prefix}]` }) },
+        debug(message, opts) { parentLogger.debug(message, { ...opts, detail: opts?.detail ? `[${prefix}] ${opts.detail}` : `[${prefix}]` }) },
+        child(childBindings) { return parentLogger.child({ ...bindings, ...childBindings }) },
+      }
     },
   }
 }

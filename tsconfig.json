@@ -8,12 +8,14 @@
     "exactOptionalPropertyTypes": true,
     "paths": {
       "#plugin/*": ["./.opencode/plugins/open-artisan/*"],
-      "#core/*": ["./packages/core/*"]
+      "#core/*": ["./packages/core/*"],
+      "#bridge/*": ["./packages/bridge/*"]
     }
   },
   "include": [
     ".opencode/plugins/open-artisan/**/*.ts",
     "packages/core/**/*.ts",
+    "packages/bridge/**/*.ts",
     "tests/**/*.ts"
   ]
 }

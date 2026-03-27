@@ -928,7 +928,7 @@ tests/
 └── utils.test.ts
 ```
 
-**Test count:** 1333 tests across 49 files (schema v21).
+**Test count:** 1430 tests across 58 files (schema v21).
 
 **Runtime artifacts** (in target project directory):
 - `.openartisan/<featureName>/workflow-state.json` — per-feature persisted session state (JSON object keyed by session ID). Sub-workflows nest further: `.openartisan/<parentFeature>/<childFeature>/workflow-state.json`. Legacy single-file format (`.opencode/workflow-state.json`) is auto-migrated on load (schema v20).

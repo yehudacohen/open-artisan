@@ -8,7 +8,7 @@
  *   <baseDir>/<featureName>/.lock  (O_CREAT|O_EXCL, stale-PID detection)
  */
 import { join } from "node:path"
-import { existsSync, readdirSync, statSync } from "node:fs"
+import { existsSync, readdirSync, lstatSync } from "node:fs"
 import { open, writeFile, readFile, mkdir, unlink } from "node:fs/promises"
 import type { StateBackend } from "./types"
 import { LOCK_TIMEOUT_MS, LOCK_POLL_MS } from "./constants"
@@ -130,20 +130,25 @@ export function createFileSystemStateBackend(baseDir: string): StateBackend {
       const features: string[] = []
       // Recursive scan — finds state files at any depth (supports nested sub-workflows
       // stored at <parent>/sub/<child>/workflow-state.json).
-      function scan(dir: string, prefix: string): void {
+      // Uses lstatSync (not statSync) to avoid following symlinks (prevents cycles).
+      // Max depth guard prevents runaway recursion from pathological directory trees.
+      const MAX_SCAN_DEPTH = 10
+      function scan(dir: string, prefix: string, depth: number): void {
+        if (depth > MAX_SCAN_DEPTH) return
         let entries: string[]
         try { entries = readdirSync(dir) } catch { return }
         for (const entry of entries) {
+          if (entry.startsWith(".")) continue // skip hidden dirs (.lock, .git, etc.)
           const fullPath = join(dir, entry)
-          try { if (!statSync(fullPath).isDirectory()) continue } catch { continue }
+          try { if (!lstatSync(fullPath).isDirectory()) continue } catch { continue }
           const featurePath = prefix ? `${prefix}/${entry}` : entry
           if (existsSync(join(fullPath, STATE_FILE))) {
             features.push(featurePath)
           }
-          scan(fullPath, featurePath)
+          scan(fullPath, featurePath, depth + 1)
         }
       }
-      scan(baseDir, "")
+      scan(baseDir, "", 0)
       return features
     },
 

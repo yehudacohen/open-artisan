@@ -4,7 +4,8 @@
   "type": "module",
   "imports": {
     "#plugin/*": "./.opencode/plugins/open-artisan/*",
-    "#core/*": "./packages/core/*"
+    "#core/*": "./packages/core/*",
+    "#bridge/*": "./packages/bridge/*"
   },
   "scripts": {
     "test": "bun test",
@@ -13,5 +14,9 @@
   "devDependencies": {
     "@types/bun": "latest",
     "typescript": "^5.4.0"
+  },
+  "dependencies": {
+    "json-rpc-2.0": "^1.7.1",
+    "pino": "^10.3.1"
   }
 }

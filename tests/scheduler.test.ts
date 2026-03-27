@@ -113,6 +113,17 @@ describe("nextSchedulerDecision — dispatch", () => {
     if (decision.action !== "dispatch") throw new Error("Expected dispatch")
     expect(decision.progress.complete).toBe(1)
   })
+
+  it("progress.delegated counts delegated tasks", () => {
+    const dag = createImplDAG([
+      makeTask({ id: "T1", status: "delegated" }),
+      makeTask({ id: "T2" }), // pending, no deps — dispatched
+    ])
+    const decision = nextSchedulerDecision(dag)
+    if (decision.action !== "dispatch") throw new Error("Expected dispatch")
+    expect(decision.progress.delegated).toBe(1)
+    expect(decision.progress.pending).toBe(1)
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -174,6 +185,18 @@ describe("nextSchedulerDecision — blocked", () => {
     if (decision.action !== "blocked") throw new Error("Expected blocked")
     // In-flight tasks cause a "waiting" blocked state, not a DAG inconsistency
     expect(decision.message).toContain("in-flight")
+    expect(decision.blockedTasks).toHaveLength(0)
+  })
+
+  it("blocked decision with delegated tasks reports waiting for sub-workflows", () => {
+    const dag = createImplDAG([
+      makeTask({ id: "T1", status: "delegated" }),
+      makeTask({ id: "T2", dependencies: ["T1"] }),
+    ])
+    const decision = nextSchedulerDecision(dag)
+    if (decision.action !== "blocked") throw new Error("Expected blocked")
+    expect(decision.message).toContain("delegated")
+    expect(decision.message).toContain("sub-workflow")
     expect(decision.blockedTasks).toHaveLength(0)
   })
 
@@ -307,5 +330,16 @@ describe("markTaskAborted", () => {
     const aborted = markTaskAborted(dag, "T1")
     expect(aborted.length).toBe(2) // T1 + T3, not T2
     expect(Array.from(dag.tasks).find((t) => t.id === "T2")!.status).toBe("complete")
+  })
+
+  it("cascades abort through delegated downstream tasks", () => {
+    const dag = createImplDAG([
+      makeTask({ id: "T1", status: "in-flight" }),
+      makeTask({ id: "T2", dependencies: ["T1"], status: "delegated" }),
+      makeTask({ id: "T3", dependencies: ["T2"], status: "pending" }),
+    ])
+    const aborted = markTaskAborted(dag, "T1")
+    expect(aborted.length).toBe(3) // T1 + T2 (delegated) + T3
+    expect(Array.from(dag.tasks).every((t) => t.status === "aborted")).toBe(true)
   })
 })

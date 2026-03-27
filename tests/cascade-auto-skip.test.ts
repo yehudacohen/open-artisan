@@ -54,6 +54,15 @@ function freshState(overrides: Partial<WorkflowState> = {}): WorkflowState {
     taskCompletionInProgress: null,
     taskReviewCount: 0,
     pendingFeedback: null,
+    userMessages: [],
+    cachedPriorState: null,
+    priorWorkflowChecked: false,
+    sessionModel: null,
+    reviewArtifactHash: null,
+    latestReviewResults: null,
+    parentWorkflow: null,
+    childWorkflows: [],
+    concurrency: { maxParallelTasks: 1 },
     ...overrides,
   }
 }
@@ -88,6 +97,12 @@ function createMockStore(initialStates?: Map<string, WorkflowState>): SessionSta
     async load() {
       return { success: true as const, count: memory.size }
     },
+    findByFeatureName(featureName: string) {
+      for (const state of memory.values()) {
+        if (state.featureName === featureName) return structuredClone(state)
+      }
+      return null
+    },
   }
 }
 
@@ -99,10 +114,6 @@ function createMockLogger(): Logger {
     debug: mock(() => {}),
   }
 }
-
-// Default mock shell (unused in most tests since hasArtifactChanged is effectively
-// tested via the module's import — we control whether artifacts changed via state)
-const mockShell = {}
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -120,7 +131,7 @@ describe("cascadeAutoSkip", () => {
   })
 
   function makeDeps(store: SessionStateStore): CascadeAutoSkipDeps {
-    return { store, sm, log, shell: mockShell }
+    return { store, sm, log }
   }
 
   // ---------------------------------------------------------------------------

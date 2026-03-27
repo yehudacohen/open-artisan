@@ -64,6 +64,9 @@ function freshState(sessionId: string): WorkflowState {
     cachedPriorState: null,
     priorWorkflowChecked: false,
     sessionModel: null,
+    parentWorkflow: null,
+    childWorkflows: [],
+    concurrency: { maxParallelTasks: 1 },
   }
 }
 
@@ -135,6 +138,22 @@ function migrateState(migrated: Record<string, unknown>): void {
   // v18 → v19: add reviewArtifactHash + latestReviewResults
   migrated["reviewArtifactHash"] ??= null
   migrated["latestReviewResults"] ??= null
+  // v19 → v20: storage format change only (per-feature files). No new fields to migrate.
+  // v20 → v21: add parentWorkflow, childWorkflows, concurrency (sub-workflows)
+  migrated["parentWorkflow"] ??= null
+  migrated["childWorkflows"] ??= []
+  // Backfill delegatedAt on childWorkflows entries that lack it (pre-3d states)
+  const cws = migrated["childWorkflows"]
+  if (Array.isArray(cws)) {
+    for (const cw of cws) {
+      if (cw && typeof cw === "object" && !("delegatedAt" in cw)) {
+        (cw as Record<string, unknown>)["delegatedAt"] = new Date().toISOString()
+      }
+    }
+  }
+  if (!migrated["concurrency"] || typeof migrated["concurrency"] !== "object") {
+    migrated["concurrency"] = { maxParallelTasks: 1 }
+  }
   // retryCount is transient — reset on load so the idle handler starts fresh.
   // If the agent was stuck before a restart, it deserves a clean retry budget.
   migrated["retryCount"] = 0

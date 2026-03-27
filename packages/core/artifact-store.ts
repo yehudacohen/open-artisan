@@ -55,13 +55,19 @@ const ARTIFACT_FILENAMES: Record<ArtifactKey | "discovery_report", string> = {
 /**
  * Returns the artifact subdirectory path under `cwd`.
  * When `featureName` is set, returns `.openartisan/<featureName>/`.
+ * Sub-workflow featureNames may contain "/" for nesting (e.g., "parent/sub/child").
  * Otherwise returns `.openartisan/` (flat legacy layout).
+ *
+ * Safety: featureName is validated by validateWorkflowState() which rejects
+ * ".." (path traversal) and "\\" (backslashes), and validates each path segment.
  */
 export function getArtifactDir(cwd: string, featureName: string | null | undefined): string {
   if (featureName) {
-    // Sanitize: strip path separators and dots to prevent directory traversal
-    const safe = featureName.replace(/[/\\]/g, "-").replace(/^\.+/, "")
-    return join(cwd, ARTIFACT_DIR, safe)
+    // Reject path traversal (defense in depth — validateWorkflowState also checks this)
+    if (/\.\./.test(featureName)) {
+      throw new Error(`featureName contains path traversal: "${featureName}"`)
+    }
+    return join(cwd, ARTIFACT_DIR, featureName)
   }
   return join(cwd, ARTIFACT_DIR)
 }

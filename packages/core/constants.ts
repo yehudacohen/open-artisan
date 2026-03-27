@@ -216,3 +216,26 @@ export const LOCK_TIMEOUT_MS = 10_000
  * Polling interval while waiting for a file lock to be released (ms).
  */
 export const LOCK_POLL_MS = 50
+
+// ---------------------------------------------------------------------------
+// Sub-workflows
+// ---------------------------------------------------------------------------
+
+/**
+ * Maximum number of active child sub-workflows per parent.
+ * Prevents sub-workflow explosion at a single level.
+ */
+export const MAX_SUB_WORKFLOWS = 2
+
+/**
+ * Maximum nesting depth for sub-workflows.
+ * A top-level workflow has depth 0. Its children are depth 1. Grandchildren are depth 2.
+ * Prevents unbounded recursive delegation.
+ */
+export const MAX_SUB_WORKFLOW_DEPTH = 3
+
+/**
+ * Timeout for a delegated sub-workflow before it's considered stuck (ms).
+ * 30 minutes — long enough for substantial work, short enough to detect stalls.
+ */
+export const SUB_WORKFLOW_TIMEOUT_MS = 1_800_000

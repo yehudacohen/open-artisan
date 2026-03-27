@@ -12,7 +12,7 @@ Open Artisan is an OpenCode plugin that enforces a phased, quality-gated workflo
 # Install dependencies (both root and plugin)
 bun install && cd .opencode && bun install && cd ..
 
-# Run all tests (~1,100+ tests across 38 files)
+# Run all tests (~1,333 tests across 49 files)
 bun test
 
 # Run a single test file
@@ -39,7 +39,7 @@ Pure, side-effect-free table-driven FSM. 34 valid (Phase, PhaseState) combinatio
 
 ### Session State (`session-state.ts`, `state-backend-fs.ts`)
 
-Pluggable persistence via `StateBackend` interface (read/write/remove/list/lock). Built-in `FileSystemStateBackend` stores per-feature state at `.openartisan/<featureName>/workflow-state.json` (schema version 20, with migrations for all prior versions). Sessions without a featureName (pre-MODE_SELECT) are memory-only. Legacy single-file `.opencode/workflow-state.json` is migrated at startup via `migrateLegacyStateFile()`. Two-layer locking: per-feature promise chains for in-process serialization, plus backend locks (lockfiles with O_CREAT|O_EXCL for the FS backend) for cross-process safety. `validateWorkflowState()` runs before every persist.
+Pluggable persistence via `StateBackend` interface (read/write/remove/list/lock). Built-in `FileSystemStateBackend` stores per-feature state at `.openartisan/<featureName>/workflow-state.json` (schema version 21, with migrations for all prior versions). Sub-workflow state nests under parent: `.openartisan/<parent>/sub/<child>/workflow-state.json`. Sessions without a featureName (pre-MODE_SELECT) are memory-only. Legacy single-file `.opencode/workflow-state.json` is migrated at startup via `migrateLegacyStateFile()`. Two-layer locking: per-feature promise chains for in-process serialization, plus backend locks (lockfiles with O_CREAT|O_EXCL for the FS backend) for cross-process safety. `validateWorkflowState()` runs before every persist.
 
 ### Session Registry (`session-registry.ts`)
 
@@ -56,7 +56,7 @@ Pluggable persistence via `StateBackend` interface (read/write/remove/list/lock)
 
 ### Tools (`tools/`)
 
-Each tool validates state, calls `transition()`, and updates session state. Key tools: `select_mode`, `mark_scan_complete`, `mark_analyze_complete`, `mark_satisfied`, `request_review`, `submit_feedback`, `mark_task_complete`. Tool names must be added to `WORKFLOW_TOOL_NAMES` in `index.ts` so the tool guard allows them.
+Each tool validates state, calls `transition()`, and updates session state. Key tools: `select_mode`, `mark_scan_complete`, `mark_analyze_complete`, `mark_satisfied`, `request_review`, `submit_feedback`, `mark_task_complete`, `spawn_sub_workflow`, `query_parent_workflow`, `query_child_workflow`. Tool names must be added to `WORKFLOW_TOOL_NAMES` in `index.ts` so the tool guard allows them (currently 13 tools).
 
 ### Artifact Dependency Graph (`artifacts.ts`)
 
@@ -72,7 +72,11 @@ Six parallel scanner subagents analyze the existing codebase (structure, convent
 
 ### Implementation DAG (`dag.ts`, `impl-plan-parser.ts`, `scheduler.ts`)
 
-The IMPL_PLAN artifact is parsed from Markdown into a task DAG. Sequential scheduler executes tasks with per-task review (`task-review.ts`) and drift detection (`task-drift.ts`).
+The IMPL_PLAN artifact is parsed from Markdown into a task DAG. Sequential scheduler executes tasks with per-task review (`task-review.ts`) and drift detection (`task-drift.ts`). TaskStatus values: `pending`, `in-flight`, `complete`, `aborted`, `human-gated`, `delegated`. Delegated tasks are handled by child sub-workflows — downstream tasks block until the delegation completes or times out (`SUB_WORKFLOW_TIMEOUT_MS` = 30 min).
+
+### Sub-Workflows (`tools/spawn-sub-workflow.ts`, `tools/query-workflow.ts`, `tools/complete-sub-workflow.ts`)
+
+`spawn_sub_workflow` delegates a DAG task to an independent child session that runs its own MODE_SELECT → DONE cycle. Child state nests under parent on disk (`.openartisan/<parent>/sub/<child>/`). Parent tracks children via `childWorkflows` array; child links back via `parentWorkflow` field. `query_parent_workflow` / `query_child_workflow` provide read-only cross-workflow inspection. Child completion automatically propagates to parent (delegated → complete). Timeout and cascade-abort sync children when parent's plan changes.
 
 ### Self-Review (`self-review.ts`)
 
@@ -86,7 +90,7 @@ Dispatches an ephemeral `workflow-reviewer` subagent in a fresh session that see
 
 ## Key Conventions
 
-- **Import alias**: `#plugin/*` maps to `.opencode/plugins/open-artisan/*` (configured in package.json, tsconfig.json, bunfig.toml)
+- **Import alias**: `#plugin/*` maps to `.opencode/plugins/open-artisan/*`, `#core/*` maps to `packages/core/*` (configured in bunfig.toml)
 - **TypeScript strict mode** with `noUncheckedIndexedAccess` and `exactOptionalPropertyTypes`
 - **All constants** live in `constants.ts` — no magic numbers/strings in other files
 - **Result types** use discriminated unions: `{ success: true; data: T } | { success: false; error: string }`

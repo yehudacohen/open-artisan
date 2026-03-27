@@ -46,9 +46,11 @@ export interface SchedulerComplete {
 export interface SchedulerBlocked {
   action: "blocked"
   /**
-   * Every remaining pending task has at least one incomplete dependency.
-   * This should not happen in a valid acyclic DAG — indicates a state
-   * inconsistency that requires user intervention.
+   * No tasks are ready to dispatch. Three causes:
+   * 1. In-flight tasks — work is happening, wait for completion. blockedTasks is [].
+   * 2. Delegated sub-workflows — child workflows are running. blockedTasks is [].
+   * 3. DAG inconsistency — unresolvable deps. blockedTasks lists the stuck tasks.
+   * Callers should check blockedTasks.length to distinguish waiting (1,2) from error (3).
    */
   message: string
   blockedTasks: Array<{ id: string; waitingFor: string[] }>
@@ -83,6 +85,7 @@ export interface TaskProgress {
   pending: number
   aborted: number
   humanGated: number
+  delegated: number
 }
 
 // ---------------------------------------------------------------------------
@@ -98,6 +101,7 @@ function computeProgress(dag: ImplDAG): TaskProgress {
     pending: tasks.filter((t) => t.status === "pending").length,
     aborted: tasks.filter((t) => t.status === "aborted").length,
     humanGated: tasks.filter((t) => t.status === "human-gated").length,
+    delegated: tasks.filter((t) => t.status === "delegated").length,
   }
 }
 
@@ -218,6 +222,18 @@ export function nextSchedulerDecision(dag: ImplDAG): SchedulerDecision {
     }
   }
 
+  // Check if the blockage is due to delegated tasks (sub-workflows in progress)
+  if (progress.delegated > 0) {
+    return {
+      action: "blocked",
+      message:
+        `Scheduler is waiting: ${progress.delegated} task(s) are delegated to sub-workflows. ` +
+        `Use \`query_child_workflow\` to check their progress. ` +
+        `Downstream tasks will unblock when delegated tasks complete.`,
+      blockedTasks: [],
+    }
+  }
+
   // Check if the blockage is due to unresolved human gates.
   // If all remaining work is blocked behind human-gated tasks, the system
   // should auto-advance to USER_GATE so the human can resolve them.
@@ -309,7 +325,7 @@ export function markTaskAborted(dag: ImplDAG, taskId: string): TaskNode[] {
   // Cascade: abort all downstream dependents (including human-gated tasks)
   const dependents = dag.getDependents(taskId)
   for (const dep of dependents) {
-    if (dep.status === "pending" || dep.status === "in-flight" || dep.status === "human-gated") {
+    if (dep.status === "pending" || dep.status === "in-flight" || dep.status === "human-gated" || dep.status === "delegated") {
       dep.status = "aborted"
       delete dep.worktreeBranch
       delete dep.worktreePath
@@ -337,5 +353,21 @@ export function resolveHumanGate(dag: ImplDAG, taskId: string): TaskNode | null 
     task.humanGate.resolved = true
     task.humanGate.resolvedAt = new Date().toISOString()
   }
+  return task
+}
+
+/**
+ * Marks a delegated task as complete in the DAG (mutates in place).
+ * Called when a child sub-workflow reaches DONE and the parent needs to
+ * mark the delegated task as finished so downstream tasks can proceed.
+ *
+ * Returns the task node if successfully transitioned, null if not found
+ * or not in "delegated" status.
+ */
+export function markDelegatedComplete(dag: ImplDAG, taskId: string): TaskNode | null {
+  const task = Array.from(dag.tasks).find((t) => t.id === taskId)
+  if (!task) return null
+  if (task.status !== "delegated") return null
+  task.status = "complete"
   return task
 }

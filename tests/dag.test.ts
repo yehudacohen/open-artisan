@@ -155,6 +155,21 @@ describe("ImplDAG.getReady()", () => {
     expect(dag.getReady()).toHaveLength(0)
   })
 
+  it("does NOT return delegated tasks", () => {
+    const dag = createImplDAG([
+      makeTask({ id: "T1", status: "delegated" }),
+    ])
+    expect(dag.getReady()).toHaveLength(0)
+  })
+
+  it("delegated dependency blocks downstream tasks (like in-flight)", () => {
+    const dag = createImplDAG([
+      makeTask({ id: "T1", status: "delegated" }),
+      makeTask({ id: "T2", dependencies: ["T1"] }),
+    ])
+    expect(dag.getReady()).toHaveLength(0)
+  })
+
   it("does NOT return complete tasks", () => {
     const dag = createImplDAG([
       makeTask({ id: "T1", status: "complete" }),
@@ -215,6 +230,14 @@ describe("ImplDAG.isComplete()", () => {
   it("returns false when any task is in-flight", () => {
     const dag = createImplDAG([
       makeTask({ id: "T1", status: "in-flight" }),
+    ])
+    expect(dag.isComplete()).toBe(false)
+  })
+
+  it("returns false when any task is delegated", () => {
+    const dag = createImplDAG([
+      makeTask({ id: "T1", status: "complete" }),
+      makeTask({ id: "T2", status: "delegated" }),
     ])
     expect(dag.isComplete()).toBe(false)
   })

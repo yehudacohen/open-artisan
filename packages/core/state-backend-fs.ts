@@ -127,24 +127,23 @@ export function createFileSystemStateBackend(baseDir: string): StateBackend {
 
     async list(): Promise<string[]> {
       if (!existsSync(baseDir)) return []
-      let entries: string[]
-      try {
-        entries = readdirSync(baseDir)
-      } catch {
-        return []
-      }
       const features: string[] = []
-      for (const entry of entries) {
-        const featureDir = join(baseDir, entry)
-        try {
-          if (!statSync(featureDir).isDirectory()) continue
-        } catch {
-          continue
-        }
-        if (existsSync(join(featureDir, STATE_FILE))) {
-          features.push(entry)
+      // Recursive scan — finds state files at any depth (supports nested sub-workflows
+      // stored at <parent>/sub/<child>/workflow-state.json).
+      function scan(dir: string, prefix: string): void {
+        let entries: string[]
+        try { entries = readdirSync(dir) } catch { return }
+        for (const entry of entries) {
+          const fullPath = join(dir, entry)
+          try { if (!statSync(fullPath).isDirectory()) continue } catch { continue }
+          const featurePath = prefix ? `${prefix}/${entry}` : entry
+          if (existsSync(join(fullPath, STATE_FILE))) {
+            features.push(featurePath)
+          }
+          scan(fullPath, featurePath)
         }
       }
+      scan(baseDir, "")
       return features
     },
 

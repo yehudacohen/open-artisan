@@ -40,6 +40,15 @@ function makeState(overrides: Partial<WorkflowState> = {}): WorkflowState {
     taskCompletionInProgress: null,
     taskReviewCount: 0,
     pendingFeedback: null,
+    userMessages: [],
+    cachedPriorState: null,
+    priorWorkflowChecked: false,
+    sessionModel: null,
+    reviewArtifactHash: null,
+    latestReviewResults: null,
+    parentWorkflow: null,
+    childWorkflows: [],
+    concurrency: { maxParallelTasks: 1 },
     ...overrides,
   }
 }

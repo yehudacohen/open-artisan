@@ -732,7 +732,13 @@ export function buildSubagentContext(parentState: WorkflowState): string {
     lines.push("| Task | Status | Description | Expected Tests |")
     lines.push("|------|--------|-------------|----------------|")
     for (const t of tasks) {
-      const statusIcon = t.status === "complete" ? "DONE" : t.status === "in-flight" ? "IN-FLIGHT" : t.status === "aborted" ? "ABORTED" : "PENDING"
+      const statusIcon =
+        t.status === "complete" ? "DONE" :
+        t.status === "in-flight" ? "IN-FLIGHT" :
+        t.status === "aborted" ? "ABORTED" :
+        t.status === "delegated" ? "DELEGATED" :
+        t.status === "human-gated" ? "HUMAN-GATED" :
+        "PENDING"
       const tests = t.expectedTests.length > 0 ? t.expectedTests.join(", ") : "—"
       const desc = t.description.length > 80 ? t.description.slice(0, 77) + "..." : t.description
       lines.push(`| ${t.id} | ${statusIcon} | ${desc} | ${tests} |`)
@@ -865,8 +871,14 @@ function buildSubStateContext(state: WorkflowState): string {
             lines.push("Call `request_review` now to submit the completed implementation for review.")
           } else if (decision.action === "blocked") {
             lines.push("")
-            lines.push("**DAG BLOCKED:** All remaining tasks have incomplete dependencies.")
-            lines.push("Call `submit_feedback` to alert the user of the scheduling conflict.")
+            if (decision.blockedTasks.length > 0) {
+              // DAG state inconsistency — tasks have unresolvable dependencies
+              lines.push("**DAG BLOCKED:** All remaining tasks have incomplete dependencies.")
+              lines.push("Call `submit_feedback` to alert the user of the scheduling conflict.")
+            } else {
+              // Waiting for active work (in-flight tasks or delegated sub-workflows)
+              lines.push(`**Waiting:** ${decision.message}`)
+            }
           }
         } catch (err) {
           // Non-fatal — scheduler failure should not block the DRAFT phase

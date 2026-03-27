@@ -113,8 +113,10 @@ export type ArtifactKey =
  *   v20: storage format change — per-feature files (.openartisan/<featureName>/
  *        workflow-state.json) instead of single-file (.opencode/workflow-state.json).
  *        No new WorkflowState fields. Legacy single-file migrated on load().
+ *   v21: added parentWorkflow, childWorkflows, concurrency for nested sub-workflows.
+ *        Added "delegated" TaskStatus (treated like "in-flight" for dependencies).
  */
-export const SCHEMA_VERSION = 20
+export const SCHEMA_VERSION = 21
 
 export interface WorkflowState {
   /** Schema version for forward-compatibility. Must equal SCHEMA_VERSION. */
@@ -360,6 +362,41 @@ export interface WorkflowState {
    * Can be a string (model ID) or an object with modelID and providerID.
    */
   sessionModel: string | { modelID: string; providerID?: string } | null
+
+  // ── Sub-workflow fields (Phase 3) ──────────────────────────────────
+
+  /**
+   * Link to the parent workflow that spawned this sub-workflow.
+   * null for top-level workflows. Set by spawn_sub_workflow.
+   * - sessionId: the parent's session ID
+   * - featureName: the parent's feature name (for state lookup)
+   * - taskId: which task in the parent's DAG was delegated to this child
+   */
+  parentWorkflow: { sessionId: string; featureName: string; taskId: string } | null
+
+  /**
+   * Child workflows spawned from this workflow's DAG tasks.
+   * Each entry tracks a delegated task → child workflow mapping.
+   * - taskId: the task in THIS workflow's DAG that was delegated
+   * - featureName: the child's feature name (for state lookup)
+   * - sessionId: the child's session ID (null if not yet started)
+   * - status: lifecycle state of the child workflow
+   */
+  childWorkflows: Array<{
+    taskId: string
+    featureName: string
+    sessionId: string | null
+    status: "pending" | "running" | "complete" | "failed"
+    /** ISO timestamp of when this task was delegated. Used for timeout detection. */
+    delegatedAt: string
+  }>
+
+  /**
+   * Concurrency configuration for this workflow.
+   * - maxParallelTasks: how many DAG tasks can run simultaneously (Phase 6)
+   * Set at select_mode time. Defaults to sequential (1).
+   */
+  concurrency: { maxParallelTasks: number }
 }
 
 // ---------------------------------------------------------------------------
@@ -673,7 +710,7 @@ export function validateWorkflowState(state: WorkflowState): string | null {
       if (!Array.isArray(node.dependencies)) {
         return `implDag task "${node.id}" missing required "dependencies" array`
       }
-      const validStatuses = ["pending", "in-flight", "complete", "aborted", "human-gated"]
+      const validStatuses = ["pending", "in-flight", "complete", "aborted", "human-gated", "delegated"]
       if (typeof node.status !== "string" || !validStatuses.includes(node.status)) {
         return `implDag task "${node.id}" has invalid status "${node.status}"`
       }
@@ -764,17 +801,32 @@ export function validateWorkflowState(state: WorkflowState): string | null {
   }
   // Security: featureName is used to construct artifact directory paths
   // (.openartisan/<featureName>/). Reject names containing path traversal
-  // sequences or characters unsafe for directory names to prevent writes
-  // outside the intended artifact directory.
+  // sequences or characters unsafe for directory names.
+  // Sub-workflow feature names may contain "/" for nesting (e.g. "parent/sub/child").
+  // Each segment is validated individually.
   if (typeof state.featureName === "string") {
     if (/\.\./.test(state.featureName)) {
       return `featureName must not contain ".." (path traversal), got "${state.featureName}"`
     }
-    if (/[/\\]/.test(state.featureName)) {
-      return `featureName must not contain path separators ("/" or "\\"), got "${state.featureName}"`
+    if (/\\/.test(state.featureName)) {
+      return `featureName must not contain backslashes, got "${state.featureName}"`
     }
-    if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(state.featureName)) {
-      return `featureName must start with alphanumeric and contain only alphanumeric, dots, hyphens, and underscores, got "${state.featureName}"`
+    if (state.featureName.startsWith("/") || state.featureName.endsWith("/")) {
+      return `featureName must not start or end with "/", got "${state.featureName}"`
+    }
+    if (/\/\//.test(state.featureName)) {
+      return `featureName must not contain consecutive slashes, got "${state.featureName}"`
+    }
+    const segments = state.featureName.split("/")
+    for (let i = 0; i < segments.length; i++) {
+      if (segments[i] === "sub" && i === 0) {
+        // "sub" is reserved for nesting but only rejected as the TOP-LEVEL name.
+        // It's allowed as an interior segment (e.g., "parent/sub/child").
+        return `featureName "sub" is reserved (used for sub-workflow directory nesting). Choose a different name.`
+      }
+      if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(segments[i]!)) {
+        return `featureName segment "${segments[i]}" must start with alphanumeric and contain only alphanumeric, dots, hyphens, and underscores, got "${state.featureName}"`
+      }
     }
   }
   // v13: activeAgent
@@ -819,6 +871,67 @@ export function validateWorkflowState(state: WorkflowState): string | null {
     }
     if (rb.type === "git-sha" && typeof rb.sha !== "string") {
       return `revisionBaseline of type "git-sha" must have a string "sha" field`
+    }
+  }
+  // v21: parentWorkflow
+  if (state.parentWorkflow !== null && state.parentWorkflow !== undefined) {
+    const pw = state.parentWorkflow as Record<string, unknown>
+    if (typeof pw !== "object" || Array.isArray(pw)) {
+      return `parentWorkflow must be null or an object, got ${typeof pw}`
+    }
+    if (typeof pw.sessionId !== "string" || !pw.sessionId) {
+      return `parentWorkflow.sessionId must be a non-empty string`
+    }
+    if (typeof pw.featureName !== "string" || !pw.featureName) {
+      return `parentWorkflow.featureName must be a non-empty string`
+    }
+    if (typeof pw.taskId !== "string" || !pw.taskId) {
+      return `parentWorkflow.taskId must be a non-empty string`
+    }
+  }
+  // v21: childWorkflows
+  if (!Array.isArray(state.childWorkflows)) {
+    return `childWorkflows must be an array, got ${typeof state.childWorkflows}`
+  }
+  const validChildStatuses = ["pending", "running", "complete", "failed"]
+  for (let i = 0; i < state.childWorkflows.length; i++) {
+    const cw = state.childWorkflows[i]
+    if (!cw || typeof cw !== "object") {
+      return `childWorkflows[${i}] must be an object`
+    }
+    if (typeof cw.taskId !== "string" || !cw.taskId) {
+      return `childWorkflows[${i}].taskId must be a non-empty string`
+    }
+    if (typeof cw.featureName !== "string" || !cw.featureName) {
+      return `childWorkflows[${i}].featureName must be a non-empty string`
+    }
+    if (cw.sessionId !== null && (typeof cw.sessionId !== "string" || !cw.sessionId)) {
+      return `childWorkflows[${i}].sessionId must be null or a non-empty string`
+    }
+    if (typeof cw.status !== "string" || !validChildStatuses.includes(cw.status)) {
+      return `childWorkflows[${i}].status must be one of ${validChildStatuses.join(", ")}, got "${cw.status}"`
+    }
+    if (typeof cw.delegatedAt !== "string" || !cw.delegatedAt) {
+      return `childWorkflows[${i}].delegatedAt must be a non-empty ISO timestamp string`
+    }
+  }
+  // v21: concurrency
+  if (!state.concurrency || typeof state.concurrency !== "object" || Array.isArray(state.concurrency)) {
+    return `concurrency must be an object, got ${typeof state.concurrency}`
+  }
+  if (typeof state.concurrency.maxParallelTasks !== "number" || !Number.isInteger(state.concurrency.maxParallelTasks) || state.concurrency.maxParallelTasks < 1) {
+    return `concurrency.maxParallelTasks must be a positive integer, got ${state.concurrency.maxParallelTasks}`
+  }
+  // v21 cross-field: running childWorkflows entries must reference a "delegated" DAG task
+  if (state.implDag && state.childWorkflows.length > 0) {
+    for (let i = 0; i < state.childWorkflows.length; i++) {
+      const cw = state.childWorkflows[i]!
+      if (cw.status === "running" || cw.status === "pending") {
+        const dagTask = state.implDag.find((t) => t.id === cw.taskId)
+        if (dagTask && dagTask.status !== "delegated") {
+          return `childWorkflows[${i}] (taskId="${cw.taskId}") has status "${cw.status}" but the DAG task has status "${dagTask.status}" — expected "delegated"`
+        }
+      }
     }
   }
   return null
@@ -1116,6 +1229,13 @@ export interface ResolveHumanGateArgs {
   why: string
   /** Steps the human can take to verify the gate is resolved */
   verification_steps: string
+}
+
+export interface SpawnSubWorkflowArgs {
+  /** The DAG task ID to delegate to a child sub-workflow */
+  task_id: string
+  /** Feature name for the child workflow (kebab-case, used as directory name) */
+  feature_name: string
 }
 
 // ---------------------------------------------------------------------------

@@ -15,7 +15,7 @@
 // Core types
 // ---------------------------------------------------------------------------
 
-export type TaskStatus = "pending" | "in-flight" | "complete" | "aborted" | "human-gated"
+export type TaskStatus = "pending" | "in-flight" | "complete" | "aborted" | "human-gated" | "delegated"
 
 export type TaskComplexity = "small" | "medium" | "large"
 
@@ -133,8 +133,9 @@ export interface ImplDAG {
 
   /**
    * Returns true iff all tasks are in "complete" or "aborted" status.
-   * Note: "human-gated" tasks are NOT considered complete — the DAG is
-   * not done until all human gates are resolved and downstream tasks finish.
+   * Note: "human-gated" and "delegated" tasks are NOT considered complete —
+   * the DAG is not done until all gates are resolved / sub-workflows finish
+   * and downstream tasks complete.
    */
   isComplete(): boolean
 

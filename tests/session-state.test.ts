@@ -51,6 +51,9 @@ function makeState(sessionId: string, featureName: string | null, overrides?: Pa
     cachedPriorState: null,
     priorWorkflowChecked: false,
     sessionModel: null,
+    parentWorkflow: null,
+    childWorkflows: [],
+    concurrency: { maxParallelTasks: 1 },
     ...overrides,
   }
 }
@@ -104,6 +107,13 @@ describe("SessionStateStore — create", () => {
     const state = await store.create("session-v6")
     expect(state.currentTaskId).toBeNull()
     expect(state.feedbackHistory).toEqual([])
+  })
+
+  it("creates state with v21 sub-workflow fields", async () => {
+    const state = await store.create("session-v21")
+    expect(state.parentWorkflow).toBeNull()
+    expect(state.childWorkflows).toEqual([])
+    expect(state.concurrency).toEqual({ maxParallelTasks: 1 })
   })
 
   it("throws if session already exists", async () => {
@@ -270,6 +280,91 @@ describe("SessionStateStore — invariant validation (G4)", () => {
       d.fileAllowlist = ["/project/src/foo.ts", "/project/src/bar.ts"]
     })
     expect(result.fileAllowlist).toHaveLength(2)
+  })
+
+  it("throws when parentWorkflow has empty sessionId", async () => {
+    await store.create("session-pw")
+    await expect(
+      store.update("session-pw", (d) => {
+        d.parentWorkflow = { sessionId: "", featureName: "x", taskId: "T1" } as any
+      }),
+    ).rejects.toThrow(/parentWorkflow\.sessionId/)
+  })
+
+  it("throws when childWorkflows entry has invalid status", async () => {
+    await store.create("session-cw")
+    await expect(
+      store.update("session-cw", (d) => {
+        d.childWorkflows = [{ taskId: "T1", featureName: "child", sessionId: null, status: "bogus" as any }]
+      }),
+    ).rejects.toThrow(/childWorkflows\[0\]\.status/)
+  })
+
+  it("throws when concurrency.maxParallelTasks is zero", async () => {
+    await store.create("session-conc")
+    await expect(
+      store.update("session-conc", (d) => {
+        d.concurrency = { maxParallelTasks: 0 }
+      }),
+    ).rejects.toThrow(/maxParallelTasks/)
+  })
+
+  it("throws when concurrency.maxParallelTasks is negative", async () => {
+    await store.create("session-conc-neg")
+    await expect(
+      store.update("session-conc-neg", (d) => {
+        d.concurrency = { maxParallelTasks: -1 }
+      }),
+    ).rejects.toThrow(/maxParallelTasks/)
+  })
+
+  it("throws when running childWorkflow references non-delegated DAG task", async () => {
+    await store.create("session-xfield")
+    // Set up IMPLEMENTATION with a DAG task that's "pending" (not "delegated")
+    // but a childWorkflows entry claims it's running
+    await expect(
+      store.update("session-xfield", (d) => {
+        d.phase = "IMPLEMENTATION"
+        d.phaseState = "DRAFT"
+        d.mode = "GREENFIELD"
+        d.implDag = [{ id: "T1", description: "task", dependencies: [], expectedTests: [], estimatedComplexity: "small", status: "pending" }]
+        d.childWorkflows = [{ taskId: "T1", featureName: "child", sessionId: "s1", status: "running", delegatedAt: "2026-01-01T00:00:00.000Z" }]
+      }),
+    ).rejects.toThrow(/childWorkflows.*delegated/)
+  })
+
+  it("throws when featureName is reserved 'sub'", async () => {
+    await store.create("session-sub")
+    await expect(
+      store.update("session-sub", (d) => {
+        d.featureName = "sub"
+      }),
+    ).rejects.toThrow(/reserved/)
+  })
+
+  it("accepts valid parentWorkflow", async () => {
+    await store.create("session-pw-ok")
+    const result = await store.update("session-pw-ok", (d) => {
+      d.parentWorkflow = { sessionId: "parent-1", featureName: "parent-feat", taskId: "T3" }
+    })
+    expect(result.parentWorkflow).toEqual({ sessionId: "parent-1", featureName: "parent-feat", taskId: "T3" })
+  })
+
+  it("accepts valid childWorkflows", async () => {
+    await store.create("session-cw-ok")
+    const result = await store.update("session-cw-ok", (d) => {
+      d.childWorkflows = [{ taskId: "T1", featureName: "child-feat", sessionId: "child-1", status: "running", delegatedAt: "2026-01-01T00:00:00.000Z" }]
+    })
+    expect(result.childWorkflows).toHaveLength(1)
+    expect(result.childWorkflows[0]?.status).toBe("running")
+  })
+
+  it("accepts valid concurrency", async () => {
+    await store.create("session-conc-ok")
+    const result = await store.update("session-conc-ok", (d) => {
+      d.concurrency = { maxParallelTasks: 4 }
+    })
+    expect(result.concurrency.maxParallelTasks).toBe(4)
   })
 })
 
@@ -530,6 +625,64 @@ describe("SessionStateStore — load", () => {
     expect(loaded?.feedbackHistory).toEqual([])
     expect(loaded?.userGateMessageReceived).toBe(false)
     expect(loaded?.featureName).toBe("v5-feature")
+  })
+
+  it("migrates v20 per-feature state (missing sub-workflow fields) to v21", async () => {
+    // Write a v20 state that lacks parentWorkflow, childWorkflows, concurrency
+    const dir = join(tmpDir, "v20-feature")
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(
+      join(dir, "workflow-state.json"),
+      JSON.stringify({
+        schemaVersion: 20,
+        sessionId: "v20-session",
+        mode: "GREENFIELD",
+        phase: "PLANNING",
+        phaseState: "DRAFT",
+        iterationCount: 0,
+        retryCount: 0,
+        approvedArtifacts: {},
+        conventions: null,
+        fileAllowlist: [],
+        lastCheckpointTag: null,
+        approvalCount: 1,
+        orchestratorSessionId: null,
+        intentBaseline: null,
+        modeDetectionNote: null,
+        discoveryReport: null,
+        implDag: null,
+        phaseApprovalCounts: {},
+        escapePending: false,
+        pendingRevisionSteps: null,
+        currentTaskId: null,
+        feedbackHistory: [],
+        userGateMessageReceived: false,
+        reviewArtifactHash: null,
+        latestReviewResults: null,
+        artifactDiskPaths: {},
+        featureName: "v20-feature",
+        revisionBaseline: null,
+        activeAgent: null,
+        taskCompletionInProgress: null,
+        taskReviewCount: 0,
+        pendingFeedback: null,
+        userMessages: [],
+        cachedPriorState: null,
+        priorWorkflowChecked: false,
+        sessionModel: null,
+        // Note: no parentWorkflow, childWorkflows, concurrency — v21 fields
+      }),
+    )
+    const store2 = createSessionStateStore(createFileSystemStateBackend(tmpDir))
+    const result = await store2.load()
+    expect(result.success).toBe(true)
+    const loaded = store2.get("v20-session")
+    expect(loaded).not.toBeNull()
+    expect(loaded?.schemaVersion).toBe(SCHEMA_VERSION)
+    expect(loaded?.parentWorkflow).toBeNull()
+    expect(loaded?.childWorkflows).toEqual([])
+    expect(loaded?.concurrency).toEqual({ maxParallelTasks: 1 })
+    expect(loaded?.approvalCount).toBe(1) // preserved from v20
   })
 
   it("reports count of successfully loaded sessions", async () => {

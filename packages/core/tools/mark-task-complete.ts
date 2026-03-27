@@ -119,6 +119,15 @@ export function processMarkTaskComplete(
     }
   }
 
+  if (task.status === "delegated") {
+    return {
+      error:
+        `Task "${args.task_id}" is delegated to a sub-workflow. ` +
+        `It will be marked complete when the sub-workflow finishes. ` +
+        `Use \`query_child_workflow\` to check its progress.`,
+    }
+  }
+
   // Mark complete using the canonical scheduler helper (validates valid source states)
   const marked = markTaskComplete(dag, args.task_id)
   if (!marked) {
@@ -156,9 +165,15 @@ export function processMarkTaskComplete(
       `The system will auto-advance to USER_GATE so the user can resolve these gates. ` +
       `Call \`request_review\` to proceed.`
   } else if (decision.action === "blocked") {
-    nextMsg =
-      `\n\n**DAG BLOCKED:** All remaining tasks have incomplete dependencies — ` +
-      `this indicates a DAG state inconsistency. Call \`submit_feedback\` to alert the user.`
+    if (decision.blockedTasks.length > 0) {
+      // DAG state inconsistency — tasks have unresolvable dependencies
+      nextMsg =
+        `\n\n**DAG BLOCKED:** All remaining tasks have incomplete dependencies — ` +
+        `this indicates a DAG state inconsistency. Call \`submit_feedback\` to alert the user.`
+    } else {
+      // Waiting for active work (in-flight tasks or delegated sub-workflows)
+      nextMsg = `\n\n**Waiting:** ${decision.message}`
+    }
   } else {
     nextMsg = `\n\nScheduler error: ${(decision as { message: string }).message}`
   }

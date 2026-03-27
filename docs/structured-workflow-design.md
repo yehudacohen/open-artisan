@@ -1,6 +1,6 @@
 # Structured Coding Workflow — Design Document
 
-**Version:** v16 (reflects implementation as of schema v20, March 2026)
+**Version:** v18 (reflects implementation as of schema v21, March 2026)
 **Status:** This document describes the **current implemented system**, not aspirational design. Section 14 documents structural gaps that have all been resolved. Section 14.6 documents meta-structural improvements that prevent agents from silently downgrading structural guarantees. Section 15 documents deferred features.
 
 ---
@@ -150,7 +150,7 @@ All `session.create()` calls pass:
 | Discovery scanners (`discovery/index.ts`) | `workflow-reviewer` | parent session | `state.sessionModel` |
 | Self-review (`self-review.ts`) | `workflow-reviewer` | parent session | `state.sessionModel` |
 | Task review (`task-review.ts`) | `workflow-reviewer` | parent session | `state.sessionModel` |
-| Orchestrator assess/diverge (`orchestrator/llm-calls.ts`) | `workflow-orchestrator` | `activeSessionId` getter | `state.sessionModel` |
+| Orchestrator assess/diverge (`orchestrator/llm-calls.ts`) | `workflow-orchestrator` | `SessionRegistry.getActiveId()` | `state.sessionModel` |
 | Auto-approval (`auto-approve.ts`) | `auto-approver` | parent session | `state.sessionModel` |
 | Per-task drift check (`task-drift.ts`) | `workflow-orchestrator` | parent session | `state.sessionModel` |
 
@@ -369,7 +369,7 @@ The `diverge` function (LLM call via `createDivergeFn`) classifies the change as
 
 ### 7.5 Orchestrator Sessions
 
-Orchestrator LLM calls use ephemeral sessions with `agent: "workflow-orchestrator"` and `parentID` set to the `activeSessionId` (tracked via a getter closure). Sessions are cleaned up after the call unless `parentID` was provided (child sessions are cleaned up with the parent).
+Orchestrator LLM calls use ephemeral sessions with `agent: "workflow-orchestrator"` and `parentID` set to `SessionRegistry.getActiveId()` (the most recently active primary session, tracked by the `SessionRegistry` in-memory registry). Sessions are cleaned up after the call unless `parentID` was provided (child sessions are cleaned up with the parent).
 
 ---
 
@@ -416,13 +416,13 @@ The cascade depth >= 3 criterion is the only deterministic trigger. The other th
 
 ### 10.1 Schema Versioning
 
-Workflow state is persisted as JSON in OpenCode's data directory. The schema version (currently v15) is stamped on every state object. On load, states with mismatched versions are migrated forward using `??=` defaulting for new fields. States with future versions are discarded.
+Workflow state is persisted as JSON at `.openartisan/<featureName>/workflow-state.json` (see Section 18). The schema version (currently v21) is stamped on every state object. On load, states with mismatched versions are migrated forward using `??=` defaulting for new fields. States with future versions are discarded.
 
-### 10.2 WorkflowState Fields (Schema v18)
+### 10.2 WorkflowState Fields (Schema v21)
 
 | Field | Type | Added | Purpose |
 |-------|------|-------|---------|
-| `schemaVersion` | `18` | v1 | Forward-compatibility guard |
+| `schemaVersion` | `21` | v1 | Forward-compatibility guard |
 | `sessionId` | `string` | v1 | OpenCode session ID |
 | `mode` | `WorkflowMode \| null` | v1 | GREENFIELD / REFACTOR / INCREMENTAL |
 | `phase` | `Phase` | v1 | Current high-level phase |
@@ -452,10 +452,16 @@ Workflow state is persisted as JSON in OpenCode's data directory. The schema ver
 | `taskCompletionInProgress` | `string \| null` | v14 | Re-entry guard for `mark_task_complete` |
 | `taskReviewCount` | `number` | v15 | Per-task review iteration counter |
 | `pendingFeedback` | `string \| null` | v15 | Crash-safe feedback persistence |
-| `userMessages` | `Array<{role: string, content: string}>` | v16 | Session message history for intent recovery |
-| `cachedPriorState` | `WorkflowState \| null` | v17 | Cached prior workflow state for `check_prior_workflow` |
+| `userMessages` | `string[]` | v16 | Full user message history for self-review alignment |
+| `cachedPriorState` | `{intentBaseline, phase, artifactDiskPaths, approvedArtifacts?} \| null` | v17 | Cached result from `check_prior_workflow` for `select_mode` |
 | `priorWorkflowChecked` | `boolean` | v18 | Whether `check_prior_workflow` was called in this session |
-| `sessionModel` | `string \| null` | v18 | Model name captured at session creation for subagent propagation |
+| `sessionModel` | `string \| {modelID, providerID?} \| null` | v18 | Active model for parent session, propagated to subagents |
+| `reviewArtifactHash` | `string \| null` | v19 | SHA-256 hash (16 hex chars) of artifact at `request_review` time; stale-artifact detection in `mark_satisfied` |
+| `latestReviewResults` | `Array<{criterion, met, evidence, score?}> \| null` | v19 | Latest self-review results for status file rendering |
+| *(v20: storage format change)* | — | v20 | Per-feature files (`.openartisan/<featureName>/workflow-state.json`) instead of single-file. No new fields. Legacy single-file migrated on load. |
+| `parentWorkflow` | `{sessionId, featureName, taskId} \| null` | v21 | Link to parent workflow that spawned this sub-workflow |
+| `childWorkflows` | `Array<{taskId, featureName, sessionId, status, delegatedAt}>` | v21 | Child workflows spawned from this workflow's DAG tasks |
+| `concurrency` | `{maxParallelTasks: number}` | v21 | Concurrency configuration (defaults to sequential: 1) |
 
 ### 10.3 Revision Baseline (Diff Gate)
 
@@ -551,6 +557,21 @@ In INCREMENTAL mode, the reviewer must validate that the file allowlist covers a
 | `mark_task_complete` | IMPLEMENTATION/DRAFT, IMPLEMENTATION/REVISE | Complete a DAG task (triggers per-task review) |
 | `resolve_human_gate` | IMPLEMENTATION/* | Activate a human gate for a DAG task |
 | `check_prior_workflow` | MODE_SELECT | Check if prior workflow artifacts are relevant to current intent; blocks `select_mode` if mismatch detected unless user overrides |
+| `spawn_sub_workflow` | IMPLEMENTATION/* | Delegate a DAG task to an independent child sub-workflow session |
+| `query_parent_workflow` | any (sub-workflow only) | Read-only inspection of the parent workflow's phase, conventions, and approved artifacts |
+| `query_child_workflow` | IMPLEMENTATION/* | Read-only inspection of a child sub-workflow's phase and progress |
+
+### 13.1.1 Sub-Workflow Tools
+
+Sub-workflows allow a parent workflow to delegate complex DAG tasks to independent child sessions that run their own full workflow cycle (MODE_SELECT through DONE).
+
+**`spawn_sub_workflow`** takes a `task_id` (must be "pending" or "in-flight" in the parent's DAG) and a `feature_name` (kebab-case) for the child. Constraints: maximum `MAX_SUB_WORKFLOWS` (2) active children per parent, maximum nesting depth `MAX_SUB_WORKFLOW_DEPTH` (3). The parent's DAG task is marked `"delegated"` and downstream tasks block until the child completes. The child's state is stored at `.openartisan/<parentFeature>/<childFeature>/workflow-state.json`.
+
+**`query_parent_workflow`** is callable only from a sub-workflow session (one with `parentWorkflow` set). Returns the parent's current phase, mode, conventions, approved artifacts, and artifact file paths. No arguments required.
+
+**`query_child_workflow`** takes an optional `task_id` to inspect a specific child. Returns the child's current phase, phaseState, mode, and the parent DAG task it was delegated from.
+
+**`complete_sub_workflow`** is not a user-facing tool — it runs automatically when a child sub-workflow's `submit_feedback(approve)` transitions to DONE. It updates the parent's DAG task from `"delegated"` to `"complete"` and the `childWorkflows` entry from `"running"` to `"complete"`. Timed-out children (`SUB_WORKFLOW_TIMEOUT_MS` = 30 min) are detected and their parent tasks can be aborted.
 
 ### 13.2 Tool Guard
 
@@ -712,8 +733,9 @@ The DAG infrastructure exists and is ready for parallel execution:
 - `scheduler.ts` — `nextSchedulerDecision()` with dispatch/complete/blocked/awaiting-human actions
 - `TaskNode` has `worktreeBranch` and `worktreePath` fields (defined, unused, reserved)
 - `markTaskInFlight()` exists; cascading abort logic is inline in `index.ts` (sets task status to `"aborted"` and walks `dag.getDependents()`)
+- `TaskStatus` includes `"delegated"` (schema v21) — set by `spawn_sub_workflow` when a task is handed off to a child sub-workflow. Treated like `"in-flight"` for dependency resolution: downstream tasks block until the delegated task completes. `markDelegatedComplete()` transitions delegated tasks to `"complete"` when the child workflow reaches DONE.
 
-The current implementation dispatches one task at a time via the tool response from `mark_task_complete`. No worktrees, no merge gates.
+The current implementation dispatches one task at a time via the tool response from `mark_task_complete`, with the option to delegate tasks to sub-workflow sessions via `spawn_sub_workflow`. No worktrees, no merge gates.
 
 ### 15.3 Upstream Contributions Needed
 
@@ -749,7 +771,7 @@ These must hold true at all times. Items marked *(procedural)* are enforced by c
 
 | Constant | Value | Location | Purpose |
 |----------|-------|----------|---------|
-| `SCHEMA_VERSION` | 18 | `types.ts` | Schema forward-compatibility |
+| `SCHEMA_VERSION` | 21 | `types.ts` | Schema forward-compatibility |
 | `MAX_REVIEW_ITERATIONS` | 10 | `constants.ts` | Self-review loop cap before escalation |
 | `MAX_TASK_REVIEW_ITERATIONS` | 10 | `constants.ts` | Per-task review iteration cap |
 | `MAX_IDLE_RETRIES` | 3 | `constants.ts` | Idle re-prompt retries before escalation |
@@ -773,6 +795,11 @@ These must hold true at all times. Items marked *(procedural)* are enforced by c
 | `MAX_TASK_DESCRIPTION_CHARS` | 100 | `constants.ts` | Task description text cap |
 | `MAX_STEP_INSTRUCTION_CHARS` | 100 | `constants.ts` | Revision step instruction cap |
 | `MAX_AMBIGUOUS_RESPONSE_LENGTH` | 15 | `constants.ts` | Escape hatch ambiguity detection threshold |
+| `MAX_SUB_WORKFLOWS` | 2 | `constants.ts` | Max active child sub-workflows per parent |
+| `MAX_SUB_WORKFLOW_DEPTH` | 3 | `constants.ts` | Max nesting depth for sub-workflows |
+| `SUB_WORKFLOW_TIMEOUT_MS` | 1,800,000 (30 min) | `constants.ts` | Delegated sub-workflow timeout |
+| `LOCK_TIMEOUT_MS` | 10,000 | `constants.ts` | File-level lock acquisition timeout |
+| `LOCK_POLL_MS` | 50 | `constants.ts` | Lock polling interval |
 
 ---
 
@@ -792,6 +819,8 @@ These must hold true at all times. Items marked *(procedural)* are enforced by c
         ├── types.ts                # All interfaces, enums, schema
         ├── state-machine.ts        # Pure transition function
         ├── session-state.ts        # State persistence (JSON file store)
+        ├── state-backend-fs.ts     # Filesystem StateBackend (per-feature JSON + lockfiles)
+        ├── session-registry.ts     # In-memory session lifecycle + parent-child tracking
         ├── constants.ts            # All magic numbers
         ├── client-types.ts         # Typed plugin client interface
         ├── utils.ts                # Shared utilities
@@ -828,6 +857,9 @@ These must hold true at all times. Items marked *(procedural)* are enforced by c
         │   ├── mark-scan-complete.ts
         │   ├── mark-analyze-complete.ts
         │   ├── mark-task-complete.ts
+        │   ├── spawn-sub-workflow.ts    # Delegate DAG task to child sub-workflow
+        │   ├── query-workflow.ts        # Read-only cross-workflow inspection (parent/child)
+        │   ├── complete-sub-workflow.ts  # Propagate child completion to parent DAG
         │   └── artifact-paths.ts   # Artifact path resolver
         ├── orchestrator/
         │   ├── route.ts            # Orchestrator routing logic
@@ -883,14 +915,24 @@ tests/
 ├── cascade-auto-skip.test.ts
 ├── fast-forward.test.ts
 ├── type-validation.test.ts
+├── auto-approve.test.ts
+├── intent-comparison.test.ts
+├── opencode-subagent-dispatcher.test.ts
+├── orchestrator-llm-calls.test.ts
+├── propose-backtrack.test.ts
+├── task-drift.test.ts
+├── session-registry.test.ts
+├── spawn-sub-workflow.test.ts
+├── query-workflow.test.ts
+├── complete-sub-workflow.test.ts
 └── utils.test.ts
 ```
 
-**Test count:** 1260 tests across 46 files (schema v20).
+**Test count:** 1333 tests across 49 files (schema v21).
 
-**Runtime artifacts** (in target project's `.opencode/` directory):
-- `workflow-state.json` — persisted session state (all sessions, JSON object keyed by session ID)
-- `openartisan-errors.log` — persistent error/warning log (JSON lines, append-only)
+**Runtime artifacts** (in target project directory):
+- `.openartisan/<featureName>/workflow-state.json` — per-feature persisted session state (JSON object keyed by session ID). Sub-workflows nest further: `.openartisan/<parentFeature>/<childFeature>/workflow-state.json`. Legacy single-file format (`.opencode/workflow-state.json`) is auto-migrated on load (schema v20).
+- `.opencode/openartisan-errors.log` — persistent error/warning log (JSON lines, append-only)
 
 ---
 
@@ -899,7 +941,7 @@ tests/
 | Dimension | Ralph Wiggum | Oh My OpenCode | Weave | Open Artisan |
 |-----------|-------------|----------------|-------|-------------|
 | Core pattern | `while(true)` loop | Multi-agent orchestration | Plan → Review → Execute | Phased state machine with dependency DAG |
-| State tracking | None (infers from git) | Session-level | Plan file with checkboxes | 34-state machine persisted to JSON (schema v15) |
+| State tracking | None (infers from git) | Session-level | Plan file with checkboxes | 34-state machine persisted to JSON (schema v21) |
 | Quality control | None structural | Approval-biased review | Single review pass | Iterative isolated self-review per phase with 7-dimension quality scoring (9/10 threshold) + per-task review |
 | User involvement | Fire-and-forget | Interview mode at start | Plan approval | Up to 6 phase gates + escape hatch. Robot-artisan mode: fully autonomous with AI gates |
 | Dependency tracking | None | None | None | Full artifact dependency graph with cascade |

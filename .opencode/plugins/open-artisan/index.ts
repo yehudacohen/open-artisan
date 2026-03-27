@@ -55,6 +55,9 @@ import { evaluateMarkSatisfied, countExpectedBlockingCriteria } from "../../../p
 import { processRequestReview } from "../../../packages/core/tools/request-review"
 import { processSubmitFeedback } from "../../../packages/core/tools/submit-feedback"
 import { processMarkTaskComplete } from "../../../packages/core/tools/mark-task-complete"
+import { processSpawnSubWorkflow, SPAWN_SUB_WORKFLOW_DESCRIPTION } from "../../../packages/core/tools/spawn-sub-workflow"
+import { processQueryParentWorkflow, processQueryChildWorkflow, QUERY_PARENT_WORKFLOW_DESCRIPTION, QUERY_CHILD_WORKFLOW_DESCRIPTION } from "../../../packages/core/tools/query-workflow"
+import { applyChildCompletion, findTimedOutChildren, applyDelegationTimeout, syncChildWorkflowsWithDag } from "../../../packages/core/tools/complete-sub-workflow"
 import { handleProposeBacktrack } from "../../../packages/core/tools/propose-backtrack"
 
 // Orchestrator (Layer 2)
@@ -385,6 +388,9 @@ export const WORKFLOW_TOOL_NAMES = new Set([
   "submit_feedback",
   "resolve_human_gate",
   "propose_backtrack",
+  "spawn_sub_workflow",
+  "query_parent_workflow",
+  "query_child_workflow",
 ])
 
 /**
@@ -645,6 +651,35 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
         const lastReprompt = lastRepromptTimestamps.get(sessionId) ?? 0
         if (now - lastReprompt < IDLE_COOLDOWN_MS) return
 
+        // Proactive timeout check: when the agent is idle and there are delegated
+        // sub-workflows, check for timeouts. This catches timeouts even when
+        // mark_task_complete hasn't been called (e.g., all work is delegated).
+        if (state.childWorkflows.length > 0 && state.phase === "IMPLEMENTATION") {
+          const timedOut = findTimedOutChildren(state)
+          if (timedOut.length > 0) {
+            try {
+              await store.update(sessionId, (draft) => {
+                for (const to of timedOut) {
+                  const aborted = applyDelegationTimeout(draft, to.taskId)
+                  log.warn("Idle timeout: sub-workflow timed out", {
+                    detail: `task=${to.taskId} feature=${to.featureName} elapsed=${Math.round(to.elapsedMs / 60000)}min aborted=[${aborted.join(",")}]`,
+                  })
+                }
+              })
+              const timeoutMsg = timedOut.map(
+                (to) => `Sub-workflow "${to.featureName}" for task "${to.taskId}" timed out after ${Math.round(to.elapsedMs / 60000)} minutes. The task and its dependents have been aborted.`,
+              ).join("\n")
+              await ctx.promptExistingSession(sessionId,
+                `**Sub-workflow timeout detected:**\n${timeoutMsg}\n\n` +
+                `Implement the timed-out task(s) directly or spawn a smaller sub-workflow.`,
+              )
+            } catch (err) {
+              log.warn("Failed to handle idle timeout", { detail: err instanceof Error ? err.message : String(err) })
+            }
+            return // Timeout message replaces normal idle reprompt
+          }
+        }
+
         const decision = handleIdle(state)
         if (decision.action === "ignore") return
 
@@ -830,17 +865,23 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
       const sessionId = (input.sessionID ?? input.sessionId ?? input.session_id) as string | undefined
       if (!sessionId) return
 
-      // Child sessions (Task subagents): inject subagent-specific context
-      // from the parent's workflow state. This gives the subagent structured
-      // knowledge of the DAG, artifact paths, conventions, and constraints
-      // without injecting workflow tool instructions or review criteria.
+      // Child session handling: two types, same as the tool guard (Phase 2d).
+      // 1. Ephemeral (self-review, orchestrator, discovery) — inject subagent context
+      //    from parent's state. No workflow prompt.
+      // 2. Sub-workflow (has its own WorkflowState) — skip subagent context, fall
+      //    through to inject its own workflow prompt so it can drive MODE_SELECT → DONE.
       const parentSessionId = sessions.getParent(sessionId)
       if (parentSessionId) {
-        const parentState = store.get(parentSessionId)
-        if (parentState) {
-          output.system.push(buildSubagentContext(parentState))
+        const childState = store.get(sessionId)
+        if (!childState) {
+          // Ephemeral child — inject subagent context from parent
+          const parentState = store.get(parentSessionId)
+          if (parentState) {
+            output.system.push(buildSubagentContext(parentState))
+          }
+          return
         }
-        return
+        // Sub-workflow child — fall through to inject its own workflow prompt below
       }
 
       const state = store.get(sessionId)
@@ -1176,7 +1217,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             priorIntent,
             priorPlanPath,
             dispatcher: subagentDispatcher,
-            parentModel: state?.sessionModel ?? undefined,
+            ...(state?.sessionModel != null ? { parentModel: state.sessionModel } : {}),
           })
 
           const { classification, explanation } = comparisonResult
@@ -1316,20 +1357,30 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
           if ("error" in parsed) return `Error: ${parsed.error}`
 
           const mode = parsed.mode as WorkflowMode
-          const featureName = args.feature_name?.trim() || null
-          if (!featureName) {
-            return "Error: feature_name is required. Provide a short kebab-case slug derived from the user's request (e.g. 'cloud-cost-platform')."
-          }
 
-          // Validate feature name format
-          const validationError = validateFeatureName(featureName)
-          if (validationError) {
-            return `Error: ${validationError}`
+          // Sub-workflow sessions already have featureName set by spawn_sub_workflow.
+          // Use the existing nested featureName and skip the prior workflow check.
+          const isSubWorkflow = state.parentWorkflow !== null
+          let featureName: string | null
+          if (isSubWorkflow && state.featureName) {
+            featureName = state.featureName
+          } else {
+            featureName = args.feature_name?.trim() || null
+            if (!featureName) {
+              return "Error: feature_name is required. Provide a short kebab-case slug derived from the user's request (e.g. 'cloud-cost-platform')."
+            }
+
+            // Validate feature name format
+            const validationError = validateFeatureName(featureName)
+            if (validationError) {
+              return `Error: ${validationError}`
+            }
           }
 
           // Check if feature directory exists - enforce check_prior_workflow before proceeding
+          // (skip for sub-workflows — they're new sessions, not continuations)
           const featureDir = join(context.directory || process.cwd(), ".openartisan", featureName)
-          if (existsSync(featureDir) && !state.priorWorkflowChecked) {
+          if (!isSubWorkflow && existsSync(featureDir) && !state.priorWorkflowChecked) {
             log.warn("select_mode blocked without check_prior_workflow", {
               featureName,
               detail: "Feature directory exists but check_prior_workflow was not called first",
@@ -1341,12 +1392,17 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
           }
 
           // STEP 1: Check if this is an existing workflow (FIRST THING)
-          // Use cached result from check_prior_workflow if available, otherwise read from disk
-          let priorState = state.cachedPriorState
-          if (!priorState) {
-            priorState = await findPriorWorkflowState(store, featureName, log)
-          } else {
-            log.info("select_mode using cached prior state", { featureName })
+          // Sub-workflows skip this — they're new sessions created by spawn_sub_workflow,
+          // not continuations of prior work. Their state was just created.
+          let priorState = null as typeof state.cachedPriorState
+          if (!isSubWorkflow) {
+            // Use cached result from check_prior_workflow if available, otherwise read from disk
+            priorState = state.cachedPriorState
+            if (!priorState) {
+              priorState = await findPriorWorkflowState(store, featureName, log)
+            } else {
+              log.info("select_mode using cached prior state", { featureName })
+            }
           }
           
           // Clear cached prior state and consume the check_prior_workflow flag
@@ -1375,7 +1431,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                 priorIntent,
                 priorPlanPath,
                 dispatcher: subagentDispatcher,
-                parentModel: state.sessionModel ?? undefined,
+                ...(state.sessionModel != null ? { parentModel: state.sessionModel } : {}),
               })
 
               const { classification } = comparisonResult
@@ -1750,7 +1806,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                 ...(upstreamSummary ? { upstreamSummary } : {}),
                 // Fallback: pass artifact content only if no disk path available
                 ...(artifactContent ? { artifactContent } : {}),
-                parentSessionId: sessionId ?? undefined,
+                ...(sessionId != null ? { parentSessionId: sessionId } : {}),
                 featureName: state.featureName,
                 ...(userMessages.length > 0 ? { userMessages } : {}),
                 ...(state.sessionModel ? { parentModel: state.sessionModel } : {}),
@@ -1846,9 +1902,9 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                       agentAssessment: agentCounterargs,
                       artifactPaths,
                       criteriaText,
-                      parentSessionId: sessionId ?? undefined,
+                      ...(sessionId != null ? { parentSessionId: sessionId } : {}),
                       featureName: state.featureName,
-                      parentModel: state.sessionModel ?? undefined,
+                      ...(state.sessionModel != null ? { parentModel: state.sessionModel } : {}),
                     })
                     if (rebuttalResult.success) {
                       // Merge revised results: replace the disputed criteria in the
@@ -1950,8 +2006,8 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                 artifactDiskPaths: state.artifactDiskPaths,
                 featureName: state.featureName,
                 conventionsPath: state.artifactDiskPaths["conventions"] ?? null,
-                parentSessionId: sessionId ?? undefined,
-                parentModel: state.sessionModel ?? undefined,
+                ...(sessionId != null ? { parentSessionId: sessionId } : {}),
+                ...(state.sessionModel != null ? { parentModel: state.sessionModel } : {}),
                 isEscalation: hitIterationCap,
               })
 
@@ -2192,9 +2248,9 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                   implementationSummary: args.implementation_summary,
                   mode: state.mode,
                   cwd: context.directory || process.cwd(),
-                  parentSessionId: sessionId ?? undefined,
+                  ...(sessionId != null ? { parentSessionId: sessionId } : {}),
                   featureName: state.featureName,
-                  parentModel: state.sessionModel ?? undefined,
+                  ...(state.sessionModel != null ? { parentModel: state.sessionModel } : {}),
                   conventions: state.conventions,
                   artifactDiskPaths: state.artifactDiskPaths,
                   adjacentTasks: adjacentTasks.length > 0 ? adjacentTasks : undefined,
@@ -2249,8 +2305,8 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                   task: taskNode,
                   implementationSummary: args.implementation_summary,
                   dagTasks: state.implDag,
-                  parentSessionId: sessionId ?? undefined,
-                  parentModel: state.sessionModel ?? undefined,
+                  ...(sessionId != null ? { parentSessionId: sessionId } : {}),
+                  ...(state.sessionModel != null ? { parentModel: state.sessionModel } : {}),
                 })
                 if (driftResult.success && driftResult.driftDetected) {
                   // Patch downstream task descriptions in the result nodes
@@ -2281,6 +2337,55 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                 draft.taskReviewCount = 0
               }
             })
+
+            // Check for timed-out sub-workflow delegations before evaluating next steps.
+            // If any delegated tasks have exceeded SUB_WORKFLOW_TIMEOUT_MS, abort them
+            // and their dependents so the agent can re-attempt or move on.
+            {
+              const currentForTimeout = store.get(sessionId)
+              if (currentForTimeout) {
+                const timedOut = findTimedOutChildren(currentForTimeout)
+                if (timedOut.length > 0) {
+                  await store.update(sessionId, (draft) => {
+                    for (const to of timedOut) {
+                      const aborted = applyDelegationTimeout(draft, to.taskId)
+                      log.warn("Sub-workflow timeout", {
+                        detail: `task=${to.taskId} feature=${to.featureName} elapsed=${Math.round(to.elapsedMs / 60000)}min aborted=[${aborted.join(",")}]`,
+                      })
+                    }
+                  })
+                  // Re-read state after timeout aborts and compute next action
+                  const refreshed = store.get(sessionId)
+                  if (refreshed?.implDag) {
+                    const dag = createImplDAG(Array.from(refreshed.implDag))
+                    const newDecision = nextSchedulerDecision(dag)
+                    const timeoutMsg = timedOut.map(
+                      (to) => `Sub-workflow "${to.featureName}" for task "${to.taskId}" timed out after ${Math.round(to.elapsedMs / 60000)} minutes.`,
+                    ).join("\n")
+
+                    let nextAction: string
+                    if (newDecision.action === "dispatch") {
+                      await store.update(sessionId, (draft) => {
+                        draft.currentTaskId = newDecision.task.id
+                      })
+                      nextAction = `**Next task ready:**\n${newDecision.prompt}`
+                    } else if (newDecision.action === "complete") {
+                      nextAction = `**All tasks complete.** ${newDecision.message}`
+                    } else {
+                      nextAction = `**${newDecision.message}**`
+                    }
+
+                    return (
+                      `${result.responseMessage}\n\n` +
+                      `**Sub-workflow timeout:**\n${timeoutMsg}\n\n` +
+                      `The timed-out task(s) and their dependents have been aborted. ` +
+                      `Implement them directly or spawn a smaller sub-workflow.\n\n` +
+                      nextAction
+                    )
+                  }
+                }
+              }
+            }
 
             // If all remaining tasks are blocked behind human gates, handle based on agent mode.
             if (result.awaitingHuman) {
@@ -3206,7 +3311,39 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                   draft.implDag = null
                 }
               }
+              // Sync child workflows with the (potentially replaced) DAG.
+              // If the DAG was regenerated at IMPL_PLAN, old children may reference
+              // tasks that no longer exist in the new DAG.
+              if (draft.childWorkflows.length > 0) {
+                syncChildWorkflowsWithDag(draft)
+              }
             })
+
+            // Sub-workflow completion propagation: if this session just reached DONE
+            // and has a parentWorkflow, update the parent's DAG task and childWorkflows.
+            if (effectiveNextPhase === "DONE" && state.parentWorkflow && state.featureName) {
+              try {
+                const parentState = store.findByFeatureName(state.parentWorkflow.featureName)
+                if (parentState) {
+                  await store.update(parentState.sessionId, (parentDraft) => {
+                    const completionMsg = applyChildCompletion(
+                      parentDraft,
+                      state.featureName!,
+                      state.parentWorkflow!.taskId,
+                    )
+                    if (completionMsg) {
+                      log.info("Sub-workflow completion propagated", { detail: completionMsg })
+                    }
+                  })
+                }
+              } catch (err) {
+                // Non-fatal — child reached DONE but parent update failed.
+                // Parent can still detect completion via query_child_workflow.
+                log.warn("Failed to propagate sub-workflow completion to parent", {
+                  detail: err instanceof Error ? err.message : String(err),
+                })
+              }
+            }
 
             let checkpointMsg: string
             if (checkpointResult.success) {
@@ -3406,6 +3543,24 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
               })
             })
 
+            // Cascade propagation: if the revision/backtrack invalidated any DAG tasks
+            // that have active child workflows, mark those children as failed.
+            if (state.childWorkflows.length > 0) {
+              const refreshedForSync = store.get(sessionId)
+              if (refreshedForSync && refreshedForSync.childWorkflows.some(
+                (c) => c.status === "running" || c.status === "pending",
+              )) {
+                await store.update(sessionId, (draft) => {
+                  const failedChildren = syncChildWorkflowsWithDag(draft)
+                  if (failedChildren.length > 0) {
+                    log.info("Cascade propagation: child workflows invalidated", {
+                      detail: failedChildren.join(", "),
+                    })
+                  }
+                })
+              }
+            }
+
             // Deterministic auto-skip at cascade entry: if this is a cascade
             // (pendingRevisionSteps exists), check whether the first step (and
             // subsequent steps) can be skipped because no changes are needed.
@@ -3514,6 +3669,13 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
               draft.currentTaskId = null
               draft.taskReviewCount = 0
               draft.taskCompletionInProgress = null
+              // Cascade to children: DAG is cleared, so all active children are orphaned
+              const failedChildren = syncChildWorkflowsWithDag(draft)
+              if (failedChildren.length > 0) {
+                log.info("Backtrack cascade: child workflows invalidated", {
+                  detail: failedChildren.join(", "),
+                })
+              }
             }
 
             // Record in feedbackHistory for drift detection
@@ -3531,6 +3693,229 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
           }
 
           return outcome.message
+        },
+      }),
+
+      // -----------------------------------------------------------------------
+      // spawn_sub_workflow — delegate a DAG task to an independent child workflow
+      // -----------------------------------------------------------------------
+      spawn_sub_workflow: tool({
+        description: SPAWN_SUB_WORKFLOW_DESCRIPTION,
+        args: {
+          task_id: tool.schema.string().describe(
+            "The DAG task ID to delegate to a child sub-workflow.",
+          ),
+          feature_name: tool.schema.string().describe(
+            "Name for the child workflow (kebab-case, e.g. 'billing-engine').",
+          ),
+        },
+        async execute(
+          args: { task_id: string; feature_name: string },
+          context: ToolExecuteContext,
+        ) {
+          const { store, log, notify, subagentDispatcher } = ctx
+          const sessionId = resolveSessionId(context)
+          if (!sessionId) return "Error: Could not determine session ID from tool context."
+
+          const state = await ensureState(store, sessionId, notify)
+          await detectAgent(store, sessionId, context)
+
+          // Core validation (pure — no side effects)
+          const result = processSpawnSubWorkflow(args, state)
+          if ("error" in result) return `Error: ${result.error}`
+
+          const { task, childFeatureName: nestedFeatureName, responseMessage } = result
+          const parentFeatureName = state.featureName ?? "unknown"
+
+          // 1. Create child session via SubagentDispatcher to get the platform session ID.
+          //    The session.created event handler will register this as a child session
+          //    (has parentID) but won't create a WorkflowState for it.
+          let childSessionId: string
+          let childSession: { id: string; prompt(text: string): Promise<string>; destroy(): Promise<void> }
+          try {
+            childSession = await subagentDispatcher.createSession({
+              title: `Sub-workflow: ${args.feature_name}`,
+              agent: "artisan",
+              parentId: sessionId,
+              ...(state.sessionModel != null ? { model: state.sessionModel } : {}),
+            })
+            childSessionId = childSession.id
+          } catch (err) {
+            log.error("spawn_sub_workflow: failed to create child session", {
+              detail: err instanceof Error ? err.message : String(err),
+            })
+            return `Error: Failed to spawn child session: ${err instanceof Error ? err.message : String(err)}`
+          }
+
+          // 2. Create child WorkflowState with parentWorkflow link.
+          //    nestedFeatureName is <parent>/sub/<child> (computed by core validation).
+          //    This places the child's state files within the parent's directory tree
+          //    (e.g., .openartisan/cloud-cost/sub/billing/workflow-state.json).
+          try {
+            await store.create(childSessionId)
+            await store.update(childSessionId, (draft) => {
+              draft.featureName = nestedFeatureName
+              draft.parentWorkflow = {
+                sessionId,
+                featureName: parentFeatureName,
+                taskId: task.id,
+              }
+            })
+          } catch (err) {
+            log.error("spawn_sub_workflow: failed to create child state", {
+              detail: err instanceof Error ? err.message : String(err),
+            })
+            try { await childSession.destroy() } catch { /* best-effort */ }
+            try { await store.delete(childSessionId) } catch { /* best-effort */ }
+            return `Error: Failed to create child workflow state: ${err instanceof Error ? err.message : String(err)}`
+          }
+
+          // 3. Update parent state: mark task delegated, add childWorkflows entry
+          try {
+            await store.update(sessionId, (draft) => {
+              // Mark task as delegated in the DAG
+              const dagTask = draft.implDag?.find((t) => t.id === task.id)
+              if (dagTask) dagTask.status = "delegated"
+
+              // Track the child workflow (featureName is the nested path)
+              draft.childWorkflows.push({
+                taskId: task.id,
+                featureName: nestedFeatureName,
+                sessionId: childSessionId,
+                status: "running",
+                delegatedAt: new Date().toISOString(),
+              })
+            })
+          } catch (err) {
+            log.error("spawn_sub_workflow: failed to update parent state", {
+              detail: err instanceof Error ? err.message : String(err),
+            })
+            // Clean up orphaned child state and session
+            try { await store.delete(childSessionId) } catch { /* best-effort */ }
+            try { await childSession.destroy() } catch { /* best-effort */ }
+            return `Error: Child session created but parent state update failed: ${err instanceof Error ? err.message : String(err)}`
+          }
+
+          // 4. Prompt the child with initial context (after all state is ready)
+          try {
+            await childSession.prompt(
+              `You are a sub-workflow implementing task "${task.id}" from the parent workflow "${parentFeatureName}".\n\n` +
+              `**Task description:** ${task.description}\n\n` +
+              `**Your feature name:** ${nestedFeatureName}\n\n` +
+              `Start by selecting a mode with \`select_mode\`. ` +
+              `Use \`query_parent_workflow\` to read parent artifacts if needed.`,
+            )
+          } catch (err) {
+            // Non-fatal — child state and parent delegation are already set up.
+            // The child session exists but may need manual prompting.
+            log.warn("spawn_sub_workflow: failed to prompt child session", {
+              detail: err instanceof Error ? err.message : String(err),
+            })
+          }
+
+          log.info("spawn_sub_workflow", {
+            detail: `task=${task.id} child=${nestedFeatureName} childSession=${childSessionId}`,
+          })
+
+          return responseMessage
+        },
+      }),
+
+      // -----------------------------------------------------------------------
+      // query_parent_workflow — child reads parent's artifacts and state
+      // -----------------------------------------------------------------------
+      query_parent_workflow: tool({
+        description: QUERY_PARENT_WORKFLOW_DESCRIPTION,
+        args: {},
+        async execute(
+          _args: Record<string, never>,
+          context: ToolExecuteContext,
+        ) {
+          const { store } = ctx
+          const sessionId = resolveSessionId(context)
+          if (!sessionId) return "Error: Could not determine session ID from tool context."
+
+          const state = store.get(sessionId)
+          if (!state) return "Error: No workflow state for this session."
+
+          const parentState = state.parentWorkflow
+            ? store.findByFeatureName(state.parentWorkflow.featureName)
+            : null
+          const result = processQueryParentWorkflow(state, parentState)
+          if (result.error) return `Error: ${result.error}`
+
+          const lines: string[] = [
+            `## Parent Workflow: ${result.parentFeatureName}`,
+            "",
+            `**Phase:** ${result.phase}/${result.phaseState}`,
+            `**Mode:** ${result.mode ?? "not set"}`,
+          ]
+          if (result.intentBaseline) {
+            lines.push(`**Intent:** ${result.intentBaseline}`)
+          }
+          if (result.conventions) {
+            lines.push("", "### Conventions", "", result.conventions)
+          }
+          if (result.artifactDiskPaths && Object.keys(result.artifactDiskPaths).length > 0) {
+            lines.push("", "### Artifact Paths")
+            for (const [key, path] of Object.entries(result.artifactDiskPaths)) {
+              lines.push(`- **${key}:** ${path}`)
+            }
+          }
+          return lines.join("\n")
+        },
+      }),
+
+      // -----------------------------------------------------------------------
+      // query_child_workflow — parent reads child's phase and progress
+      // -----------------------------------------------------------------------
+      query_child_workflow: tool({
+        description: QUERY_CHILD_WORKFLOW_DESCRIPTION,
+        args: {
+          task_id: tool.schema.string().describe(
+            "The DAG task ID that was delegated to the child sub-workflow.",
+          ),
+        },
+        async execute(
+          args: { task_id: string },
+          context: ToolExecuteContext,
+        ) {
+          const { store } = ctx
+          const sessionId = resolveSessionId(context)
+          if (!sessionId) return "Error: Could not determine session ID from tool context."
+
+          const state = store.get(sessionId)
+          if (!state) return "Error: No workflow state for this session."
+
+          const childEntry = state.childWorkflows.find((c) => c.taskId === args.task_id)
+          const childState = childEntry
+            ? store.findByFeatureName(childEntry.featureName)
+            : null
+          const result = processQueryChildWorkflow(state, args.task_id, childState)
+          if (result.error) return `Error: ${result.error}`
+
+          // Include task description from parent's DAG for context
+          const taskDesc = state.implDag?.find((t) => t.id === args.task_id)?.description
+          const lines: string[] = [
+            `## Child Workflow: ${result.childFeatureName}`,
+            "",
+            `**Delegated task:** ${result.taskId}${taskDesc ? ` — ${taskDesc}` : ""}`,
+            `**Child status:** ${result.childStatus}`,
+          ]
+          if (result.phase) {
+            lines.push(`**Phase:** ${result.phase}/${result.phaseState}`)
+            lines.push(`**Mode:** ${result.mode ?? "not set"}`)
+            if (result.currentTaskId) {
+              lines.push(`**Current task:** ${result.currentTaskId}`)
+            }
+            if (result.implDagProgress) {
+              const p = result.implDagProgress
+              lines.push(`**DAG progress:** ${p.complete}/${p.total} complete${p.delegated > 0 ? `, ${p.delegated} delegated` : ""}`)
+            }
+          } else {
+            lines.push("", "_Child workflow state not yet available (may not have started)._")
+          }
+          return lines.join("\n")
         },
       }),
     }, log),

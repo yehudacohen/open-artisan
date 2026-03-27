@@ -129,14 +129,17 @@ describe("Plugin shape — returned object has all required keys", () => {
     expect(tools.submit_feedback).toBeDefined()
   })
 
-  it("WORKFLOW_TOOL_NAMES contains all 10 tool names", () => {
-    expect(WORKFLOW_TOOL_NAMES.size).toBe(10)
+  it("WORKFLOW_TOOL_NAMES contains all 13 tool names", () => {
+    expect(WORKFLOW_TOOL_NAMES.size).toBe(13)
     expect(WORKFLOW_TOOL_NAMES.has("check_prior_workflow")).toBe(true)
     expect(WORKFLOW_TOOL_NAMES.has("select_mode")).toBe(true)
     expect(WORKFLOW_TOOL_NAMES.has("mark_task_complete")).toBe(true)
     expect(WORKFLOW_TOOL_NAMES.has("submit_feedback")).toBe(true)
     expect(WORKFLOW_TOOL_NAMES.has("resolve_human_gate")).toBe(true)
     expect(WORKFLOW_TOOL_NAMES.has("propose_backtrack")).toBe(true)
+    expect(WORKFLOW_TOOL_NAMES.has("spawn_sub_workflow")).toBe(true)
+    expect(WORKFLOW_TOOL_NAMES.has("query_parent_workflow")).toBe(true)
+    expect(WORKFLOW_TOOL_NAMES.has("query_child_workflow")).toBe(true)
   })
 })
 

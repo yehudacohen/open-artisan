@@ -131,12 +131,13 @@ export async function dispatchDriftCheck(
   request: DriftCheckRequest,
 ): Promise<DriftCheckResult | DriftCheckError> {
   try {
-    // Find direct dependents (tasks that list this task in their dependencies)
+    // Find direct dependents (tasks that list this task in their dependencies).
+    // Include "delegated" tasks — their sub-workflows may be building on stale assumptions.
     const dependents = request.dagTasks.filter(
-      (t) => t.dependencies.includes(request.task.id) && t.status === "pending",
+      (t) => t.dependencies.includes(request.task.id) && (t.status === "pending" || t.status === "delegated"),
     )
 
-    // No pending dependents -> no drift concern
+    // No affected dependents -> no drift concern
     if (dependents.length === 0) {
       return {
         success: true,

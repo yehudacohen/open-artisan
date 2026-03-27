@@ -45,6 +45,9 @@ function makeValidState(overrides: Partial<WorkflowState> = {}): WorkflowState {
     sessionModel: null,
     reviewArtifactHash: null,
     latestReviewResults: null,
+    parentWorkflow: null,
+    childWorkflows: [],
+    concurrency: { maxParallelTasks: 1 },
     ...overrides,
   }
 }
@@ -565,16 +568,33 @@ describe("validateWorkflowState — featureName path traversal prevention", () =
     expect(err).toContain("path traversal")
   })
 
-  it("rejects featureName containing '/'", () => {
-    const err = validateWorkflowState(makeValidState({ featureName: "foo/bar" }))
-    expect(err).not.toBeNull()
-    expect(err).toContain("path separator")
+  it("accepts nested featureName for sub-workflows (parent/sub/child)", () => {
+    const err = validateWorkflowState(makeValidState({ featureName: "parent-feat/sub/billing-engine" }))
+    expect(err).toBeNull()
   })
 
   it("rejects featureName containing '\\'", () => {
     const err = validateWorkflowState(makeValidState({ featureName: "foo\\bar" }))
     expect(err).not.toBeNull()
-    expect(err).toContain("path separator")
+    expect(err).toContain("backslash")
+  })
+
+  it("rejects featureName with invalid segment", () => {
+    const err = validateWorkflowState(makeValidState({ featureName: "parent/.bad/child" }))
+    expect(err).not.toBeNull()
+    expect(err).toContain("segment")
+  })
+
+  it("rejects featureName with leading slash", () => {
+    const err = validateWorkflowState(makeValidState({ featureName: "/parent/sub/child" }))
+    expect(err).not.toBeNull()
+    expect(err).toContain("start or end")
+  })
+
+  it("rejects featureName with consecutive slashes", () => {
+    const err = validateWorkflowState(makeValidState({ featureName: "parent//child" }))
+    expect(err).not.toBeNull()
+    expect(err).toContain("consecutive")
   })
 
   it("rejects featureName starting with a dot", () => {
@@ -623,6 +643,67 @@ describe("validateWorkflowState — featureName path traversal prevention", () =
 
   it("accepts null featureName", () => {
     const err = validateWorkflowState(makeValidState({ featureName: null }))
+    expect(err).toBeNull()
+  })
+
+  it("accepts nested featureName for sub-workflows", () => {
+    const err = validateWorkflowState(makeValidState({ featureName: "parent/sub/child" }))
+    expect(err).toBeNull()
+  })
+
+  it("rejects top-level featureName 'sub' (reserved)", () => {
+    const err = validateWorkflowState(makeValidState({ featureName: "sub" }))
+    expect(err).not.toBeNull()
+    expect(err).toContain("reserved")
+  })
+
+  it("allows 'sub' as interior segment in nested featureName", () => {
+    const err = validateWorkflowState(makeValidState({ featureName: "parent/sub/child" }))
+    expect(err).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// validateWorkflowState — v21 sub-workflow cross-field invariants
+// ---------------------------------------------------------------------------
+
+describe("validateWorkflowState — v21 sub-workflow invariants", () => {
+  it("rejects running childWorkflow when DAG task is not delegated", () => {
+    const err = validateWorkflowState(makeValidState({
+      phase: "IMPLEMENTATION",
+      phaseState: "DRAFT",
+      implDag: [{ id: "T1", description: "d", dependencies: [], expectedTests: [], estimatedComplexity: "small", status: "pending" }],
+      childWorkflows: [{ taskId: "T1", featureName: "child", sessionId: "s1", status: "running", delegatedAt: "2026-01-01T00:00:00.000Z" }],
+    }))
+    expect(err).not.toBeNull()
+    expect(err).toContain("delegated")
+  })
+
+  it("accepts running childWorkflow when DAG task IS delegated", () => {
+    const err = validateWorkflowState(makeValidState({
+      phase: "IMPLEMENTATION",
+      phaseState: "DRAFT",
+      implDag: [{ id: "T1", description: "d", dependencies: [], expectedTests: [], estimatedComplexity: "small", status: "delegated" }],
+      childWorkflows: [{ taskId: "T1", featureName: "child", sessionId: "s1", status: "running", delegatedAt: "2026-01-01T00:00:00.000Z" }],
+    }))
+    expect(err).toBeNull()
+  })
+
+  it("accepts complete childWorkflow regardless of DAG task status", () => {
+    const err = validateWorkflowState(makeValidState({
+      phase: "IMPLEMENTATION",
+      phaseState: "DRAFT",
+      implDag: [{ id: "T1", description: "d", dependencies: [], expectedTests: [], estimatedComplexity: "small", status: "complete" }],
+      childWorkflows: [{ taskId: "T1", featureName: "child", sessionId: "s1", status: "complete", delegatedAt: "2026-01-01T00:00:00.000Z" }],
+    }))
+    expect(err).toBeNull()
+  })
+
+  it("skips cross-field check when implDag is null", () => {
+    const err = validateWorkflowState(makeValidState({
+      implDag: null,
+      childWorkflows: [{ taskId: "T1", featureName: "child", sessionId: "s1", status: "running", delegatedAt: "2026-01-01T00:00:00.000Z" }],
+    }))
     expect(err).toBeNull()
   })
 })

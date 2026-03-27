@@ -80,6 +80,9 @@ function makeState(overrides: Partial<WorkflowState> = {}): WorkflowState {
     sessionModel: null,
     reviewArtifactHash: null,
     latestReviewResults: null,
+    parentWorkflow: null,
+    childWorkflows: [],
+    concurrency: { maxParallelTasks: 1 },
     ...overrides,
   }
 }

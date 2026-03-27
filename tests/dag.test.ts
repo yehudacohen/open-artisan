@@ -20,6 +20,7 @@ function makeTask(overrides: Partial<TaskNode> & { id: string }): TaskNode {
     description: `Task ${overrides.id}`,
     dependencies: [],
     expectedTests: [],
+    expectedFiles: [],
     estimatedComplexity: "medium",
     status: "pending",
     ...overrides,

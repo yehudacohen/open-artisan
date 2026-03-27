@@ -48,6 +48,7 @@ function makeValidState(overrides: Partial<WorkflowState> = {}): WorkflowState {
     parentWorkflow: null,
     childWorkflows: [],
     concurrency: { maxParallelTasks: 1 },
+    reviewArtifactFiles: [],
     ...overrides,
   }
 }
@@ -349,7 +350,7 @@ describe("validateWorkflowState — v6 fields", () => {
   it("accepts valid implDag", () => {
     const state = makeValidState({
       implDag: [
-        { id: "T1", description: "Build it", dependencies: [], expectedTests: [], estimatedComplexity: "small" as const, status: "pending" as const },
+        { id: "T1", description: "Build it", dependencies: [], expectedTests: [], expectedFiles: [], estimatedComplexity: "small" as const, status: "pending" as const },
       ],
     })
     expect(validateWorkflowState(state)).toBeNull()
@@ -392,10 +393,10 @@ describe("validateWorkflowState — v6 fields", () => {
   it("accepts implDag tasks with all valid statuses", () => {
     const state = makeValidState({
       implDag: [
-        { id: "T1", description: "a", dependencies: [], expectedTests: [], estimatedComplexity: "small" as const, status: "pending" as const },
-        { id: "T2", description: "b", dependencies: ["T1"], expectedTests: [], estimatedComplexity: "medium" as const, status: "in-flight" as const },
-        { id: "T3", description: "c", dependencies: [], expectedTests: [], estimatedComplexity: "large" as const, status: "complete" as const },
-        { id: "T4", description: "d", dependencies: [], expectedTests: [], estimatedComplexity: "small" as const, status: "aborted" as const },
+        { id: "T1", description: "a", dependencies: [], expectedTests: [], expectedFiles: [], estimatedComplexity: "small" as const, status: "pending" as const },
+        { id: "T2", description: "b", dependencies: ["T1"], expectedTests: [], expectedFiles: [], estimatedComplexity: "medium" as const, status: "in-flight" as const },
+        { id: "T3", description: "c", dependencies: [], expectedTests: [], expectedFiles: [], estimatedComplexity: "large" as const, status: "complete" as const },
+        { id: "T4", description: "d", dependencies: [], expectedTests: [], expectedFiles: [], estimatedComplexity: "small" as const, status: "aborted" as const },
       ],
     })
     expect(validateWorkflowState(state)).toBeNull()
@@ -672,7 +673,7 @@ describe("validateWorkflowState — v21 sub-workflow invariants", () => {
     const err = validateWorkflowState(makeValidState({
       phase: "IMPLEMENTATION",
       phaseState: "DRAFT",
-      implDag: [{ id: "T1", description: "d", dependencies: [], expectedTests: [], estimatedComplexity: "small", status: "pending" }],
+      implDag: [{ id: "T1", description: "d", dependencies: [], expectedTests: [], expectedFiles: [], estimatedComplexity: "small", status: "pending" }],
       childWorkflows: [{ taskId: "T1", featureName: "child", sessionId: "s1", status: "running", delegatedAt: "2026-01-01T00:00:00.000Z" }],
     }))
     expect(err).not.toBeNull()
@@ -683,7 +684,7 @@ describe("validateWorkflowState — v21 sub-workflow invariants", () => {
     const err = validateWorkflowState(makeValidState({
       phase: "IMPLEMENTATION",
       phaseState: "DRAFT",
-      implDag: [{ id: "T1", description: "d", dependencies: [], expectedTests: [], estimatedComplexity: "small", status: "delegated" }],
+      implDag: [{ id: "T1", description: "d", dependencies: [], expectedTests: [], expectedFiles: [], estimatedComplexity: "small", status: "delegated" }],
       childWorkflows: [{ taskId: "T1", featureName: "child", sessionId: "s1", status: "running", delegatedAt: "2026-01-01T00:00:00.000Z" }],
     }))
     expect(err).toBeNull()
@@ -693,7 +694,7 @@ describe("validateWorkflowState — v21 sub-workflow invariants", () => {
     const err = validateWorkflowState(makeValidState({
       phase: "IMPLEMENTATION",
       phaseState: "DRAFT",
-      implDag: [{ id: "T1", description: "d", dependencies: [], expectedTests: [], estimatedComplexity: "small", status: "complete" }],
+      implDag: [{ id: "T1", description: "d", dependencies: [], expectedTests: [], expectedFiles: [], estimatedComplexity: "small", status: "complete" }],
       childWorkflows: [{ taskId: "T1", featureName: "child", sessionId: "s1", status: "complete", delegatedAt: "2026-01-01T00:00:00.000Z" }],
     }))
     expect(err).toBeNull()
@@ -705,5 +706,97 @@ describe("validateWorkflowState — v21 sub-workflow invariants", () => {
       childWorkflows: [{ taskId: "T1", featureName: "child", sessionId: "s1", status: "running", delegatedAt: "2026-01-01T00:00:00.000Z" }],
     }))
     expect(err).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// v22: reviewArtifactFiles validation
+// ---------------------------------------------------------------------------
+
+describe("validateWorkflowState — v22 reviewArtifactFiles", () => {
+  it("accepts valid string array", () => {
+    const err = validateWorkflowState(makeValidState({
+      reviewArtifactFiles: ["src/foo.ts", "pages/01.html"],
+    }))
+    expect(err).toBeNull()
+  })
+
+  it("accepts empty array", () => {
+    const err = validateWorkflowState(makeValidState({
+      reviewArtifactFiles: [],
+    }))
+    expect(err).toBeNull()
+  })
+
+  it("rejects non-array reviewArtifactFiles", () => {
+    const err = validateWorkflowState(makeValidState({
+      reviewArtifactFiles: "not-an-array" as any,
+    }))
+    expect(err).toContain("reviewArtifactFiles must be an array")
+  })
+
+  it("rejects array with non-string elements", () => {
+    const err = validateWorkflowState(makeValidState({
+      reviewArtifactFiles: ["valid.ts", 42 as any],
+    }))
+    expect(err).toContain("reviewArtifactFiles[1] must be a string")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// v22: implDag expectedFiles validation
+// ---------------------------------------------------------------------------
+
+describe("validateWorkflowState — v22 implDag expectedFiles", () => {
+  it("accepts tasks with valid expectedFiles array", () => {
+    const err = validateWorkflowState(makeValidState({
+      phase: "IMPLEMENTATION",
+      phaseState: "DRAFT",
+      implDag: [{
+        id: "T1", description: "d", dependencies: [], expectedTests: [],
+        expectedFiles: ["src/foo.ts", "src/bar.ts"],
+        estimatedComplexity: "small", status: "pending",
+      }],
+    }))
+    expect(err).toBeNull()
+  })
+
+  it("accepts tasks without expectedFiles (backward compat)", () => {
+    const err = validateWorkflowState(makeValidState({
+      phase: "IMPLEMENTATION",
+      phaseState: "DRAFT",
+      implDag: [{
+        id: "T1", description: "d", dependencies: [], expectedTests: [],
+        estimatedComplexity: "small", status: "pending",
+        // No expectedFiles — should be valid (optional)
+      }],
+    }))
+    expect(err).toBeNull()
+  })
+
+  it("rejects non-array expectedFiles", () => {
+    const err = validateWorkflowState(makeValidState({
+      phase: "IMPLEMENTATION",
+      phaseState: "DRAFT",
+      implDag: [{
+        id: "T1", description: "d", dependencies: [], expectedTests: [],
+        expectedFiles: "not-an-array" as any,
+        estimatedComplexity: "small", status: "pending",
+      }],
+    }))
+    expect(err).toContain('expectedFiles must be an array')
+  })
+
+  it("rejects expectedFiles with non-string elements", () => {
+    const err = validateWorkflowState(makeValidState({
+      phase: "IMPLEMENTATION",
+      phaseState: "DRAFT",
+      implDag: [{
+        id: "T1", description: "d", dependencies: [], expectedTests: [],
+        expectedFiles: ["valid.ts", 123 as any],
+        estimatedComplexity: "small", status: "pending",
+      }],
+    }))
+    expect(err).toContain('expectedFiles[1] must be a string')
   })
 })

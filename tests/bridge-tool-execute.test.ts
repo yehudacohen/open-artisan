@@ -23,6 +23,7 @@ function makeBridgeContext(): BridgeContext {
     bumpPolicyVersion() { policyVersion++ },
     setEngine(e: EngineContext) { engine = e },
     stateDir: null,
+    projectDir: null,
     pinoLogger: null,
     shuttingDown: false,
   }
@@ -297,8 +298,8 @@ describe("tool.execute — mark_task_complete", () => {
       d.phase = "IMPLEMENTATION"
       d.phaseState = "DRAFT"
       d.implDag = [
-        { id: "T1", description: "Setup", dependencies: [], expectedTests: [], estimatedComplexity: "small", status: "pending" },
-        { id: "T2", description: "Core", dependencies: ["T1"], expectedTests: [], estimatedComplexity: "medium", status: "pending" },
+        { id: "T1", description: "Setup", dependencies: [], expectedTests: [], expectedFiles: [], estimatedComplexity: "small", status: "pending" },
+        { id: "T2", description: "Core", dependencies: ["T1"], expectedTests: [], expectedFiles: [], estimatedComplexity: "medium", status: "pending" },
       ]
       d.currentTaskId = "T1"
     })

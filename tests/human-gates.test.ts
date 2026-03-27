@@ -36,6 +36,7 @@ function makeTask(overrides: Partial<TaskNode> & { id: string }): TaskNode {
     description: `Task ${overrides.id}`,
     dependencies: [],
     expectedTests: [],
+    expectedFiles: [],
     estimatedComplexity: "medium",
     status: "pending",
     ...overrides,
@@ -83,6 +84,7 @@ function makeState(overrides: Partial<WorkflowState> = {}): WorkflowState {
     parentWorkflow: null,
     childWorkflows: [],
     concurrency: { maxParallelTasks: 1 },
+    reviewArtifactFiles: [],
     ...overrides,
   }
 }
@@ -553,6 +555,7 @@ describe("validateWorkflowState — schema v12 implDag validation", () => {
           description: "test",
           dependencies: [],
           expectedTests: [],
+          expectedFiles: [],
           estimatedComplexity: "small",
           status: "human-gated",
           category: "human-gate",
@@ -571,6 +574,7 @@ describe("validateWorkflowState — schema v12 implDag validation", () => {
           description: "test",
           dependencies: [],
           expectedTests: [],
+          expectedFiles: [],
           estimatedComplexity: "small",
           status: "human-gated",
           // Missing humanGate!
@@ -592,6 +596,7 @@ describe("validateWorkflowState — schema v12 implDag validation", () => {
             description: "test",
             dependencies: [],
             expectedTests: [],
+            expectedFiles: [],
             estimatedComplexity: "small",
             status: "pending",
             category: cat as any,
@@ -610,6 +615,7 @@ describe("validateWorkflowState — schema v12 implDag validation", () => {
           description: "test",
           dependencies: [],
           expectedTests: [],
+          expectedFiles: [],
           estimatedComplexity: "small",
           status: "pending",
           category: "invalid-category" as any,
@@ -629,6 +635,7 @@ describe("validateWorkflowState — schema v12 implDag validation", () => {
           description: "test",
           dependencies: [],
           expectedTests: [],
+          expectedFiles: [],
           estimatedComplexity: "small",
           status: "human-gated",
           category: "human-gate",
@@ -654,6 +661,7 @@ describe("validateWorkflowState — schema v12 implDag validation", () => {
           description: "test",
           dependencies: [],
           expectedTests: [],
+          expectedFiles: [],
           estimatedComplexity: "small",
           status: "pending",
           // No category — should be valid

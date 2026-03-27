@@ -176,12 +176,23 @@ const handleRequestReview: ToolHandler = async (args, toolCtx, ctx) => {
     }
   }
 
+  // Merge agent-provided artifact_files into reviewArtifactFiles
+  const artifactFiles = args.artifact_files as string[] | undefined
+
   await store.update(toolCtx.sessionId, (draft) => {
     draft.phase = outcome.nextPhase
     draft.phaseState = outcome.nextPhaseState
     draft.retryCount = 0
     if (artifactDiskPath && artifactKey) {
       draft.artifactDiskPaths[artifactKey] = artifactDiskPath
+    }
+    if (artifactFiles && artifactFiles.length > 0) {
+      const existing = new Set(draft.reviewArtifactFiles)
+      for (const f of artifactFiles) {
+        if (!existing.has(f)) {
+          draft.reviewArtifactFiles.push(f)
+        }
+      }
     }
   })
 
@@ -255,6 +266,8 @@ const handleSubmitFeedback: ToolHandler = async (args, toolCtx, ctx) => {
           p.startsWith("/") ? p : resolve(toolCtx.directory, p),
         )
       }
+      // Reset artifact file tracking for the new phase
+      draft.reviewArtifactFiles = []
     })
 
     // policyVersion bumped automatically by setPostUpdateHook
@@ -290,6 +303,15 @@ const handleMarkTaskComplete: ToolHandler = async (args, toolCtx, ctx) => {
     draft.implDag = result.updatedNodes
     draft.currentTaskId = result.nextTaskId
     draft.taskReviewCount = 0
+    // Orchestrator-driven artifact tracking (v22): accumulate expected files
+    if (result.completedTaskFiles.length > 0) {
+      const existing = new Set(draft.reviewArtifactFiles)
+      for (const f of result.completedTaskFiles) {
+        if (!existing.has(f)) {
+          draft.reviewArtifactFiles.push(f)
+        }
+      }
+    }
   })
 
   // policyVersion bumped automatically by setPostUpdateHook on store.update

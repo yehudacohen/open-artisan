@@ -56,7 +56,7 @@ export type WorkflowEvent =
   | "analyze_complete"        // DISCOVERY/ANALYZE → DISCOVERY/CONVENTIONS
   | "draft_complete"          // */DRAFT → */REVIEW
   | "self_review_pass"        // */REVIEW → */USER_GATE
-  | "self_review_fail"        // */REVIEW → */REVIEW (loop, increments iterationCount)
+  | "self_review_fail"        // */REVIEW → */REVISE (address feedback, increments iterationCount)
   | "escalate_to_user"        // */REVIEW → */USER_GATE (iteration cap reached — M12)
   | "user_approve"            // */USER_GATE → next Phase/DRAFT (+ git checkpoint)
   | "user_feedback"           // */USER_GATE or */ESCAPE_HATCH → orchestrator → */REVISE
@@ -115,8 +115,12 @@ export type ArtifactKey =
  *        No new WorkflowState fields. Legacy single-file migrated on load().
  *   v21: added parentWorkflow, childWorkflows, concurrency for nested sub-workflows.
  *        Added "delegated" TaskStatus (treated like "in-flight" for dependencies).
+ *   v22: added reviewArtifactFiles (orchestrator-driven artifact tracking for review).
+ *        Added expectedFiles to implDag TaskNode (parsed from IMPL_PLAN "Files:" field).
+ *        The reviewer now receives explicit file paths from the orchestrator instead
+ *        of scanning directories with heuristics.
  */
-export const SCHEMA_VERSION = 21
+export const SCHEMA_VERSION = 22
 
 export interface WorkflowState {
   /** Schema version for forward-compatibility. Must equal SCHEMA_VERSION. */
@@ -397,6 +401,24 @@ export interface WorkflowState {
    * Set at select_mode time. Defaults to sequential (1).
    */
   concurrency: { maxParallelTasks: number }
+
+  // ── Orchestrator-driven artifact tracking (v22) ────────────────────
+
+  /**
+   * Accumulated file paths for the current review cycle.
+   * For IMPLEMENTATION: populated automatically by mark_task_complete from
+   * each task's expectedFiles (defined in the IMPL_PLAN). The orchestrator
+   * derives these from the approved plan — no directory scanning needed.
+   * For INTERFACES/TESTS: populated by request_review from the agent's
+   * artifact_files parameter.
+   *
+   * The agent can supplement with additional files via request_review's
+   * artifact_files parameter. These are merged with the orchestrator-derived
+   * files and passed directly to the isolated reviewer.
+   *
+   * Reset when the review cycle resets (e.g., entering a new DRAFT phase).
+   */
+  reviewArtifactFiles: string[]
 }
 
 // ---------------------------------------------------------------------------
@@ -714,6 +736,17 @@ export function validateWorkflowState(state: WorkflowState): string | null {
       if (typeof node.status !== "string" || !validStatuses.includes(node.status)) {
         return `implDag task "${node.id}" has invalid status "${node.status}"`
       }
+      // v22: validate expectedFiles array
+      if (node.expectedFiles !== undefined && node.expectedFiles !== null) {
+        if (!Array.isArray(node.expectedFiles)) {
+          return `implDag task "${node.id}" expectedFiles must be an array`
+        }
+        for (let j = 0; j < node.expectedFiles.length; j++) {
+          if (typeof node.expectedFiles[j] !== "string") {
+            return `implDag task "${node.id}" expectedFiles[${j}] must be a string`
+          }
+        }
+      }
       // v12: validate optional category field
       if (node.category !== undefined && node.category !== null) {
         const validCategories = ["scaffold", "human-gate", "integration", "standalone"]
@@ -968,6 +1001,15 @@ export function validateWorkflowState(state: WorkflowState): string | null {
   }
   if (typeof state.concurrency.maxParallelTasks !== "number" || !Number.isInteger(state.concurrency.maxParallelTasks) || state.concurrency.maxParallelTasks < 1) {
     return `concurrency.maxParallelTasks must be a positive integer, got ${state.concurrency.maxParallelTasks}`
+  }
+  // v22: reviewArtifactFiles
+  if (!Array.isArray(state.reviewArtifactFiles)) {
+    return `reviewArtifactFiles must be an array, got ${typeof state.reviewArtifactFiles}`
+  }
+  for (let i = 0; i < state.reviewArtifactFiles.length; i++) {
+    if (typeof state.reviewArtifactFiles[i] !== "string") {
+      return `reviewArtifactFiles[${i}] must be a string`
+    }
   }
   // v21 cross-field: running childWorkflows entries must reference a "delegated" DAG task
   if (state.implDag && state.childWorkflows.length > 0) {

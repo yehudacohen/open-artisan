@@ -42,10 +42,12 @@ export function createOpenCodeSubagentDispatcher(client: PluginClient): Subagent
         id: sessionId,
 
         async prompt(text: string): Promise<string> {
+          // Generate a unique part ID with "prt" prefix — required by the OpenCode API
+          const partId = `prt_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
           const result = await client.session!.prompt({
             path: { id: sessionId },
             body: {
-              parts: [{ type: "text", text }],
+              parts: [{ type: "text", text, id: partId }],
             },
           })
           return extractTextFromPromptResult(result, opts.title)

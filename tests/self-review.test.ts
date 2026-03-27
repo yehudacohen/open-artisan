@@ -724,3 +724,49 @@ describe("dispatchSelfReview — design-invariant criteria", () => {
     expect(result.satisfied).toBe(false)
   })
 })
+
+// ---------------------------------------------------------------------------
+// buildReviewPrompt — artifact disk paths and explicit files (v22)
+// ---------------------------------------------------------------------------
+
+describe("buildReviewPrompt — v22 artifact tracking", () => {
+  const { buildReviewPrompt } = require("#core/self-review") as typeof import("#core/self-review")
+
+  it("shows artifactDiskPaths unconditionally (not gated on fileAllowlist)", () => {
+    const prompt = buildReviewPrompt({
+      phase: "IMPLEMENTATION",
+      mode: "GREENFIELD",
+      artifactPaths: [],
+      criteriaText: "Some criteria",
+      artifactDiskPaths: { plan: "/tmp/.openartisan/plan.md", impl_plan: "/tmp/.openartisan/impl_plan.md" },
+      // No fileAllowlist — GREENFIELD mode
+    })
+    expect(prompt).toContain("plan")
+    expect(prompt).toContain("/tmp/.openartisan/plan.md")
+    expect(prompt).toContain("impl_plan")
+    expect(prompt).toContain("/tmp/.openartisan/impl_plan.md")
+    expect(prompt).toContain("Approved Artifact Locations")
+  })
+
+  it("shows explicit artifact file paths when provided", () => {
+    const prompt = buildReviewPrompt({
+      phase: "IMPLEMENTATION",
+      mode: "GREENFIELD",
+      artifactPaths: ["/project/pages/01.html", "/project/pages/02.html"],
+      criteriaText: "Some criteria",
+    })
+    expect(prompt).toContain("/project/pages/01.html")
+    expect(prompt).toContain("/project/pages/02.html")
+    expect(prompt).toContain("Read each of the following files")
+  })
+
+  it("does not show artifact disk paths section when none provided", () => {
+    const prompt = buildReviewPrompt({
+      phase: "IMPLEMENTATION",
+      mode: "GREENFIELD",
+      artifactPaths: [],
+      criteriaText: "Some criteria",
+    })
+    expect(prompt).not.toContain("Approved Artifact Locations")
+  })
+})

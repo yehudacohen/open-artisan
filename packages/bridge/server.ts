@@ -27,6 +27,8 @@ export interface BridgeContext {
   setEngine(engine: EngineContext): void
   /** The state directory path — set during lifecycle.init. */
   stateDir: string | null
+  /** The project directory path — set during lifecycle.init. Used for path resolution. */
+  projectDir: string | null
   /** Pino logger instance — set during lifecycle.init. Available for request logging. */
   pinoLogger: pino.Logger | null
   /** Flag for shutdown. */

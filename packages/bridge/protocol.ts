@@ -51,6 +51,8 @@ export interface GuardPolicyParams {
   phaseState: PhaseState
   mode: WorkflowMode | null
   allowlist: string[]
+  /** Per-task expected files from the current DAG task (IMPLEMENTATION phase) */
+  taskExpectedFiles?: string[]
   traceId?: string
 }
 

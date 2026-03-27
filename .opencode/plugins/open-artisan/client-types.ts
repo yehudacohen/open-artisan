@@ -37,7 +37,7 @@ export interface SessionPromptOptions {
   body: {
     /** When true, the session does not expect a reply (fire-and-forget) */
     noReply?: boolean
-    parts: Array<{ type: string; text: string }>
+    parts: Array<{ type: string; text: string; id?: string }>
   }
 }
 

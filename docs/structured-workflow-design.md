@@ -1,6 +1,6 @@
 # Structured Coding Workflow — Design Document
 
-**Version:** v18 (reflects implementation as of schema v21, March 2026)
+**Version:** v19 (reflects implementation as of schema v22, March 2026)
 **Status:** This document describes the **current implemented system**, not aspirational design. Section 14 documents structural gaps that have all been resolved. Section 14.6 documents meta-structural improvements that prevent agents from silently downgrading structural guarantees. Section 15 documents deferred features.
 
 ---
@@ -196,7 +196,7 @@ DONE            DRAFT (sentinel only)
 Every sequential phase (PLANNING through IMPLEMENTATION) follows this five-state pattern:
 
 ```
-DRAFT ──[draft_complete]──► REVIEW ──[self_review_fail]──► REVIEW (loop)
+DRAFT ──[draft_complete]──► REVIEW ──[self_review_fail]──► REVISE (address feedback)
                                     ──[self_review_pass]──► USER_GATE
                                     ──[escalate_to_user]──► USER_GATE
                             USER_GATE ──[user_approve]──► next Phase/DRAFT
@@ -320,7 +320,7 @@ In greenfield mode, the Conventions artifact does not exist and the graph starts
 
 When the orchestrator routes a cascade to a phase where no changes are needed (e.g., revising the plan doesn't actually affect interfaces), the system deterministically auto-skips that step at cascade ENTRY using `cascadeAutoSkip()`. This prevents the agent from entering no-op REVISE phases where tool guards would block it from doing anything useful.
 
-Auto-skip uses the revision baseline (see Section 10.3) to detect whether an artifact has changed between the cascade entry point and the current state. If unchanged, the step is skipped and the cascade advances to the next downstream phase.
+Auto-skip uses the revision baseline (see Section 10.4) to detect whether an artifact has changed between the cascade entry point and the current state. If unchanged, the step is skipped and the cascade advances to the next downstream phase.
 
 **Implementation details** (`cascadeAutoSkip()` in `index.ts`):
 - Loops up to 10 iterations (safety bound) advancing through pending revision steps
@@ -416,9 +416,9 @@ The cascade depth >= 3 criterion is the only deterministic trigger. The other th
 
 ### 10.1 Schema Versioning
 
-Workflow state is persisted as JSON at `.openartisan/<featureName>/workflow-state.json` (see Section 18). The schema version (currently v21) is stamped on every state object. On load, states with mismatched versions are migrated forward using `??=` defaulting for new fields. States with future versions are discarded.
+Workflow state is persisted as JSON at `.openartisan/<featureName>/workflow-state.json` (see Section 18). The schema version (currently v22) is stamped on every state object. On load, states with mismatched versions are migrated forward using `??=` defaulting for new fields. States with future versions are discarded.
 
-### 10.2 WorkflowState Fields (Schema v21)
+### 10.2 WorkflowState Fields (Schema v22)
 
 | Field | Type | Added | Purpose |
 |-------|------|-------|---------|
@@ -462,8 +462,24 @@ Workflow state is persisted as JSON at `.openartisan/<featureName>/workflow-stat
 | `parentWorkflow` | `{sessionId, featureName, taskId} \| null` | v21 | Link to parent workflow that spawned this sub-workflow |
 | `childWorkflows` | `Array<{taskId, featureName, sessionId, status, delegatedAt}>` | v21 | Child workflows spawned from this workflow's DAG tasks |
 | `concurrency` | `{maxParallelTasks: number}` | v21 | Concurrency configuration (defaults to sequential: 1) |
+| `reviewArtifactFiles` | `string[]` | v22 | Orchestrator-driven file paths for reviewer. Accumulated from DAG task `expectedFiles` at `mark_task_complete`, supplemented by agent's `artifact_files` in `request_review`. Reset on phase approval. |
 
-### 10.3 Revision Baseline (Diff Gate)
+### 10.3 Orchestrator-Driven Artifact Tracking (v22)
+
+The isolated reviewer needs to know exactly which files to evaluate. Prior to v22, the reviewer used heuristic directory scanning (`resolveArtifactPaths`) which was brittle — it assumed hardcoded directory structures and file extensions, leading to wrong files being reviewed in non-standard project layouts.
+
+**v22 design:** The orchestrator determines which files are created, and the reviewer receives those files explicitly:
+
+1. **IMPL_PLAN phase:** Each DAG task specifies `Files:` (expected output files) in the implementation plan. The parser extracts these into `TaskNode.expectedFiles`.
+2. **IMPLEMENTATION phase:** When the agent calls `mark_task_complete`, the orchestrator automatically accumulates the completed task's `expectedFiles` into `state.reviewArtifactFiles`. No agent involvement — the plan is the source of truth.
+3. **INTERFACES/TESTS phases:** The agent passes `artifact_files` in `request_review` listing the files it created.
+4. **`request_review`:** The agent can optionally pass additional `artifact_files` beyond what the orchestrator accumulated (for deviations or extra files not in the plan).
+5. **`mark_satisfied`:** Prefers `state.reviewArtifactFiles` when non-empty. Falls back to `resolveArtifactPaths()` only for legacy sessions.
+6. **Phase approval:** `reviewArtifactFiles` is reset to `[]` when the phase advances.
+
+The reviewer prompt also unconditionally includes `artifactDiskPaths` (plan, conventions, impl_plan locations) so the reviewer can cross-reference the plan regardless of workflow mode.
+
+### 10.4 Revision Baseline (Diff Gate)
 
 At REVISE entry, `captureRevisionBaseline()` snapshots the artifact state:
 - **In-memory phases** (PLANNING, DISCOVERY, IMPL_PLAN): SHA-256 content hash of the artifact file on disk (`type: "content-hash"`)
@@ -551,10 +567,10 @@ In INCREMENTAL mode, the reviewer must validate that the file allowlist covers a
 | `select_mode` | MODE_SELECT | Choose workflow mode + feature name |
 | `mark_scan_complete` | DISCOVERY/SCAN | Signal scan phase complete |
 | `mark_analyze_complete` | DISCOVERY/ANALYZE | Signal analysis complete |
-| `request_review` | */DRAFT, */CONVENTIONS, */REVISE, */REVIEW | Submit artifact for review. At REVIEW: re-submits updated content (requires `artifact_content`), resets iteration count. |
-| `mark_satisfied` | */REVIEW | Submit criteria assessment (triggers isolated reviewer) |
+| `request_review` | */DRAFT, */CONVENTIONS, */REVISE, */REVIEW | Submit artifact for review. `artifact_content` for in-memory phases, `artifact_files` for file-based phases (INTERFACES, TESTS). IMPLEMENTATION files are accumulated automatically from DAG. At REVIEW: re-submits updated content (requires `artifact_content`), resets iteration count. |
+| `mark_satisfied` | */REVIEW | Submit criteria assessment (triggers isolated reviewer). Uses `state.reviewArtifactFiles` for reviewer paths (v22). |
 | `submit_feedback` | */USER_GATE, */ESCAPE_HATCH | Route user feedback (approve or revise). At ESCAPE_HATCH: accept drift, provide alternative direction, start new direction, or abort. |
-| `mark_task_complete` | IMPLEMENTATION/DRAFT, IMPLEMENTATION/REVISE | Complete a DAG task (triggers per-task review) |
+| `mark_task_complete` | IMPLEMENTATION/DRAFT, IMPLEMENTATION/REVISE | Complete a DAG task (triggers per-task review). Accumulates the task's `expectedFiles` into `state.reviewArtifactFiles` for the final implementation reviewer. |
 | `resolve_human_gate` | IMPLEMENTATION/* | Activate a human gate for a DAG task |
 | `check_prior_workflow` | MODE_SELECT | Check if prior workflow artifacts are relevant to current intent; blocks `select_mode` if mismatch detected unless user overrides |
 | `spawn_sub_workflow` | IMPLEMENTATION/* | Delegate a DAG task to an independent child sub-workflow session |
@@ -928,7 +944,7 @@ tests/
 └── utils.test.ts
 ```
 
-**Test count:** 1430 tests across 58 files (schema v21).
+**Test count:** 1456 tests across 58 files (schema v22).
 
 **Runtime artifacts** (in target project directory):
 - `.openartisan/<featureName>/workflow-state.json` — per-feature persisted session state (JSON object keyed by session ID). Sub-workflows nest further: `.openartisan/<parentFeature>/<childFeature>/workflow-state.json`. Legacy single-file format (`.opencode/workflow-state.json`) is auto-migrated on load (schema v20).
@@ -941,7 +957,7 @@ tests/
 | Dimension | Ralph Wiggum | Oh My OpenCode | Weave | Open Artisan |
 |-----------|-------------|----------------|-------|-------------|
 | Core pattern | `while(true)` loop | Multi-agent orchestration | Plan → Review → Execute | Phased state machine with dependency DAG |
-| State tracking | None (infers from git) | Session-level | Plan file with checkboxes | 34-state machine persisted to JSON (schema v21) |
+| State tracking | None (infers from git) | Session-level | Plan file with checkboxes | 34-state machine persisted to JSON (schema v22) |
 | Quality control | None structural | Approval-biased review | Single review pass | Iterative isolated self-review per phase with 7-dimension quality scoring (9/10 threshold) + per-task review |
 | User involvement | Fire-and-forget | Interview mode at start | Plan approval | Up to 6 phase gates + escape hatch. Robot-artisan mode: fully autonomous with AI gates |
 | Dependency tracking | None | None | None | Full artifact dependency graph with cascade |

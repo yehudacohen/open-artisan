@@ -48,6 +48,7 @@ function makeState(overrides: Partial<WorkflowState> = {}): WorkflowState {
     parentWorkflow: null,
     childWorkflows: [],
     concurrency: { maxParallelTasks: 1 },
+    reviewArtifactFiles: [],
     ...overrides,
   }
 }
@@ -487,8 +488,8 @@ describe("buildWorkflowSystemPrompt — IMPLEMENTATION DAG completion signal", (
       phase: "IMPLEMENTATION",
       phaseState: "DRAFT",
       implDag: [
-        { id: "T1", description: "First task", dependencies: [], expectedTests: [], estimatedComplexity: "small", status: "complete" },
-        { id: "T2", description: "Second task", dependencies: ["T1"], expectedTests: [], estimatedComplexity: "small", status: "complete" },
+        { id: "T1", description: "First task", dependencies: [], expectedTests: [], expectedFiles: [], estimatedComplexity: "small", status: "complete" },
+        { id: "T2", description: "Second task", dependencies: ["T1"], expectedTests: [], expectedFiles: [], estimatedComplexity: "small", status: "complete" },
       ],
     }))
     expect(prompt).toContain("request_review")
@@ -502,8 +503,8 @@ describe("buildWorkflowSystemPrompt — IMPLEMENTATION DAG completion signal", (
       phase: "IMPLEMENTATION",
       phaseState: "DRAFT",
       implDag: [
-        { id: "T1", description: "First task", dependencies: [], expectedTests: [], estimatedComplexity: "small", status: "complete" },
-        { id: "T2", description: "Second task", dependencies: ["T1"], expectedTests: [], estimatedComplexity: "medium", status: "pending" },
+        { id: "T1", description: "First task", dependencies: [], expectedTests: [], expectedFiles: [], estimatedComplexity: "small", status: "complete" },
+        { id: "T2", description: "Second task", dependencies: ["T1"], expectedTests: [], expectedFiles: [], estimatedComplexity: "medium", status: "pending" },
       ],
     }))
     expect(prompt).toContain("T2")

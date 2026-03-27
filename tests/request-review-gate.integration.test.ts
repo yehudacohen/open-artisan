@@ -154,7 +154,7 @@ beforeEach(async () => {
  */
 async function approvePhase(
   sid: string,
-  opts: { artifactContent?: string } = {},
+  opts: { artifactContent?: string; artifactFiles?: string[] } = {},
 ): Promise<string> {
   const ctx = { directory: tempDir, sessionId: sid }
 
@@ -164,6 +164,7 @@ async function approvePhase(
       summary: "Phase artifact complete",
       artifact_description: "Artifact for this phase",
       artifact_content: opts.artifactContent,
+      artifact_files: opts.artifactFiles,
     },
     ctx,
   )
@@ -223,11 +224,11 @@ async function driveToImplementation(sid: string): Promise<void> {
   // 2. Approve PLANNING (requires artifact_content)
   await approvePhase(sid, { artifactContent: "# Plan\nBuild the thing." })
 
-  // 3. Approve INTERFACES (requires artifact_content)
-  await approvePhase(sid, { artifactContent: "# Interfaces\nexport function doThing(): void" })
+  // 3. Approve INTERFACES (requires artifact_content + artifact_files for v22)
+  await approvePhase(sid, { artifactContent: "# Interfaces\nexport function doThing(): void", artifactFiles: ["src/types.ts"] })
 
-  // 4. Approve TESTS (requires artifact_content)
-  await approvePhase(sid, { artifactContent: "# Tests\ndescribe('doThing', () => { it('works') })" })
+  // 4. Approve TESTS (requires artifact_content + artifact_files for v22)
+  await approvePhase(sid, { artifactContent: "# Tests\ndescribe('doThing', () => { it('works') })", artifactFiles: ["tests/thing.test.ts"] })
 
   // 5. Approve IMPL_PLAN — the artifact_content is parsed into a DAG
   await approvePhase(sid, { artifactContent: IMPL_PLAN_ARTIFACT })
@@ -308,7 +309,7 @@ describe("request_review — IMPLEMENTATION DAG hard gate", () => {
 
     // Now all tasks complete — request_review should succeed
     const rrResult = await plugin.tool.request_review.execute(
-      { summary: "Implementation complete", artifact_description: "All code written" },
+      { summary: "Implementation complete", artifact_description: "All code written", artifact_files: ["src/core.ts", "src/feature.ts"] },
       ctx,
     )
     expect(rrResult).not.toContain("Error: Cannot request review")
@@ -346,6 +347,111 @@ describe("request_review — IMPLEMENTATION DAG hard gate", () => {
     expect(result).toContain("Error")
     expect(result).toContain("1/2")
     expect(result).toContain("T2")
+  }, 30000)
+})
+
+// ---------------------------------------------------------------------------
+// Tests: v22 structural gate — file-based phases require reviewArtifactFiles
+// ---------------------------------------------------------------------------
+
+describe("mark_satisfied — v22 artifact files gate", () => {
+  it("blocks mark_satisfied for IMPLEMENTATION when reviewArtifactFiles is empty", async () => {
+    const sid = `gate-v22-${Date.now()}-impl`
+    await driveToImplementation(sid)
+    const ctx = { directory: tempDir, sessionId: sid }
+
+    // Complete T1 and T2 to reach request_review eligibility
+    for (const taskId of ["T1", "T2"]) {
+      client._pushPromptResponse({
+        data: { parts: [{ type: "text", text: JSON.stringify({ passed: true, issues: [], reasoning: "OK" }) }] },
+      })
+      await plugin.tool.mark_task_complete.execute(
+        { task_id: taskId, implementation_summary: `${taskId} done`, tests_passing: true },
+        ctx,
+      )
+    }
+
+    // Call request_review WITHOUT artifact_files — reviewArtifactFiles stays empty
+    // (DAG tasks in the test fixture don't have expectedFiles)
+    const rrResult = await plugin.tool.request_review.execute(
+      { summary: "Done", artifact_description: "All code" },
+      ctx,
+    )
+    expect(rrResult).not.toContain("Error: Cannot request review")
+
+    // Now call mark_satisfied — should be BLOCKED by the structural gate
+    const msResult = await plugin.tool.mark_satisfied.execute(
+      { criteria_met: [{ criterion: "Test", met: true, evidence: "pass", severity: "blocking" }] },
+      ctx,
+    )
+    expect(msResult).toContain("No artifact files registered")
+    expect(msResult).toContain("request_review")
+    expect(msResult).toContain("artifact_files")
+  }, 30000)
+
+  it("allows mark_satisfied for IMPLEMENTATION when artifact_files are provided", async () => {
+    const sid = `gate-v22-${Date.now()}-impl-ok`
+    await driveToImplementation(sid)
+    const ctx = { directory: tempDir, sessionId: sid }
+
+    // Complete T1 and T2
+    for (const taskId of ["T1", "T2"]) {
+      client._pushPromptResponse({
+        data: { parts: [{ type: "text", text: JSON.stringify({ passed: true, issues: [], reasoning: "OK" }) }] },
+      })
+      await plugin.tool.mark_task_complete.execute(
+        { task_id: taskId, implementation_summary: `${taskId} done`, tests_passing: true },
+        ctx,
+      )
+    }
+
+    // Call request_review WITH artifact_files
+    await plugin.tool.request_review.execute(
+      { summary: "Done", artifact_description: "All code", artifact_files: ["src/core.ts"] },
+      ctx,
+    )
+
+    // Push self-review response for the isolated reviewer
+    client._pushPromptResponse({
+      data: { parts: [{ type: "text", text: JSON.stringify({ satisfied: true, criteria_results: [{ criterion: "Test", met: true, evidence: "pass", severity: "blocking" }] }) }] },
+    })
+
+    // mark_satisfied should NOT be blocked
+    const msResult = await plugin.tool.mark_satisfied.execute(
+      { criteria_met: [{ criterion: "Test", met: true, evidence: "pass", severity: "blocking" }] },
+      ctx,
+    )
+    expect(msResult).not.toContain("No artifact files registered")
+  }, 30000)
+
+  it("allows mark_satisfied for PLANNING (in-memory phase) without artifact_files", async () => {
+    const sid = `gate-v22-${Date.now()}-plan`
+    const ctx = { directory: tempDir, sessionId: sid }
+
+    // Set up session in PLANNING/DRAFT
+    await plugin.event({ event: { type: "session.created", properties: { info: { id: sid } } } })
+    await plugin.tool.select_mode.execute(
+      { mode: "GREENFIELD", feature_name: `plan-gate-test-${Date.now()}` },
+      ctx,
+    )
+
+    // request_review with artifact_content (no artifact_files — in-memory phase)
+    await plugin.tool.request_review.execute(
+      { summary: "Plan ready", artifact_description: "The plan", artifact_content: "# Plan\nDo the thing." },
+      ctx,
+    )
+
+    // Push self-review response
+    client._pushPromptResponse({
+      data: { parts: [{ type: "text", text: JSON.stringify({ satisfied: true, criteria_results: [{ criterion: "Test", met: true, evidence: "pass", severity: "blocking" }] }) }] },
+    })
+
+    // mark_satisfied should NOT be blocked (PLANNING is in-memory, not file-based)
+    const msResult = await plugin.tool.mark_satisfied.execute(
+      { criteria_met: [{ criterion: "Test", met: true, evidence: "pass", severity: "blocking" }] },
+      ctx,
+    )
+    expect(msResult).not.toContain("No artifact files registered")
   }, 30000)
 })
 

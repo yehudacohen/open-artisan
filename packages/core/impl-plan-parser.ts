@@ -9,12 +9,14 @@
  *   ## Task T1: Set up database schema
  *   **Dependencies:** none
  *   **Expected tests:** tests/db.test.ts, tests/schema.test.ts
+ *   **Files:** src/db/schema.ts, src/db/migrations/001.sql
  *   **Complexity:** small
  *   <description prose>
  *
  *   ## Task T2: Implement repository layer
  *   **Dependencies:** T1
  *   **Expected tests:** tests/repository.test.ts
+ *   **Files:** src/db/repository.ts
  *   **Complexity:** medium
  *   <description prose>
  *
@@ -22,6 +24,7 @@
  * - Task IDs may be bare ("T1"), labeled ("Task T1"), or slugified ("task-auth")
  * - Dependencies may be comma-separated or space-separated, "none" means empty
  * - Expected tests may be absent (treated as empty array)
+ * - Files may be absent (treated as empty array)
  * - Complexity defaults to "medium" if absent or unrecognized
  *
  * Returns a ParseResult with either the ImplDAG or a list of parse errors.
@@ -79,6 +82,9 @@ const COMPLEXITY_RE = /^\*{0,2}Complexity[*:\s]+(.+)/i
 /** Matches "**Category:** scaffold" or "**Category:** human-gate" */
 const CATEGORY_RE = /^\*{0,2}Category[*:\s]+(.+)/i
 
+/** Matches "**Files:** src/foo.ts, src/bar.ts" or "**Expected files:** ..." */
+const FILES_RE = /^\*{0,2}(?:Expected\s+)?files?[*:\s]+(.+)/i
+
 // ---------------------------------------------------------------------------
 // Line-level parsers
 // ---------------------------------------------------------------------------
@@ -122,6 +128,7 @@ interface RawBlock {
   description: string
   rawDeps: string
   rawTests: string
+  rawFiles: string
   rawComplexity: string
   rawCategory: string
   bodyLines: string[]
@@ -158,6 +165,7 @@ function extractRawBlocks(text: string): RawBlock[] {
         description: headerMatch[2]!.trim(),
         rawDeps: "",
         rawTests: "",
+        rawFiles: "",
         rawComplexity: "",
         rawCategory: "",
         bodyLines: [],
@@ -176,6 +184,12 @@ function extractRawBlocks(text: string): RawBlock[] {
     const testsMatch = TESTS_RE.exec(line)
     if (testsMatch) {
       current.rawTests = testsMatch[1]!.trim()
+      continue
+    }
+
+    const filesMatch = FILES_RE.exec(line)
+    if (filesMatch) {
+      current.rawFiles = filesMatch[1]!.trim()
       continue
     }
 
@@ -248,6 +262,7 @@ export function parseImplPlan(artifactText: string): ParseResult {
       description,
       dependencies: parseList(block.rawDeps),
       expectedTests: parseList(block.rawTests),
+      expectedFiles: parseList(block.rawFiles),
       estimatedComplexity: parseComplexity(block.rawComplexity),
       status: "pending",
       // Only set category if explicitly specified; undefined = defaults to "standalone"

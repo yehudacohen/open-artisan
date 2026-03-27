@@ -25,6 +25,7 @@ function makeTask(overrides: Partial<TaskNode> & { id: string }): TaskNode {
     description: `Task ${overrides.id}`,
     dependencies: [],
     expectedTests: [],
+    expectedFiles: [],
     estimatedComplexity: "medium",
     status: "pending",
     ...overrides,
@@ -351,5 +352,40 @@ describe("processMarkTaskComplete — blocked DAG", () => {
     const result = processMarkTaskComplete({ ...VALID_ARGS, task_id: "T2" }, nodes)
     // T2 is the last task — should be "complete" outcome
     expect("error" in result).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// completedTaskFiles (v22)
+// ---------------------------------------------------------------------------
+
+describe("processMarkTaskComplete — completedTaskFiles", () => {
+  it("returns the task's expectedFiles on success", () => {
+    const nodes = [
+      makeTask({ id: "T1", expectedFiles: ["src/foo.ts", "src/bar.ts"] }),
+    ]
+    const result = processMarkTaskComplete(VALID_ARGS, nodes)
+    expect("error" in result).toBe(false)
+    if (!("error" in result)) {
+      expect(result.completedTaskFiles).toEqual(["src/foo.ts", "src/bar.ts"])
+    }
+  })
+
+  it("returns empty array when task has no expectedFiles", () => {
+    const nodes = [makeTask({ id: "T1" })]
+    const result = processMarkTaskComplete(VALID_ARGS, nodes)
+    expect("error" in result).toBe(false)
+    if (!("error" in result)) {
+      expect(result.completedTaskFiles).toEqual([])
+    }
+  })
+
+  it("returns empty array when expectedFiles is undefined (backward compat)", () => {
+    const nodes = [{ ...makeTask({ id: "T1" }), expectedFiles: undefined as any }]
+    const result = processMarkTaskComplete(VALID_ARGS, nodes)
+    expect("error" in result).toBe(false)
+    if (!("error" in result)) {
+      expect(result.completedTaskFiles).toEqual([])
+    }
   })
 })

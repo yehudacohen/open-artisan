@@ -65,6 +65,15 @@ export interface TaskNode {
    */
   expectedTests: string[]
 
+  /**
+   * File paths (relative to project root) that this task is expected to
+   * create or modify. Specified in the IMPL_PLAN by the agent, parsed by
+   * the impl-plan-parser. Accumulated by mark_task_complete into
+   * state.reviewArtifactFiles so the reviewer knows exactly which files
+   * to evaluate — no directory scanning needed.
+   */
+  expectedFiles: string[]
+
   /** Rough complexity estimate — used for scheduling prioritization */
   estimatedComplexity: TaskComplexity
 
@@ -169,6 +178,7 @@ export function createImplDAG(tasks: TaskNode[]): ImplDAG {
     ...t,
     dependencies: [...t.dependencies],
     expectedTests: [...t.expectedTests],
+    expectedFiles: [...(t.expectedFiles ?? [])],
     // Deep copy humanGate if present (nested object)
     ...(t.humanGate ? { humanGate: { ...t.humanGate } } : {}),
   }))

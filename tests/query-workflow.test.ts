@@ -47,6 +47,7 @@ function makeState(overrides: Partial<WorkflowState> = {}): WorkflowState {
     parentWorkflow: null,
     childWorkflows: [],
     concurrency: { maxParallelTasks: 1 },
+    reviewArtifactFiles: [],
     ...overrides,
   }
 }
@@ -152,9 +153,9 @@ describe("query_child_workflow", () => {
       mode: "GREENFIELD",
       currentTaskId: "T2",
       implDag: [
-        { id: "T1", description: "d", dependencies: [], expectedTests: [], estimatedComplexity: "small", status: "complete" },
-        { id: "T2", description: "d", dependencies: ["T1"], expectedTests: [], estimatedComplexity: "medium", status: "in-flight" },
-        { id: "T3", description: "d", dependencies: ["T2"], expectedTests: [], estimatedComplexity: "small", status: "pending" },
+        { id: "T1", description: "d", dependencies: [], expectedTests: [], expectedFiles: [], estimatedComplexity: "small", status: "complete" },
+        { id: "T2", description: "d", dependencies: ["T1"], expectedTests: [], expectedFiles: [], estimatedComplexity: "medium", status: "in-flight" },
+        { id: "T3", description: "d", dependencies: ["T2"], expectedTests: [], expectedFiles: [], estimatedComplexity: "small", status: "pending" },
       ],
     })
     const result = processQueryChildWorkflow(parent, "T3", child)

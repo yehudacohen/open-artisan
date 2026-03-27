@@ -123,6 +123,16 @@ function buildTaskPrompt(task: TaskNode, progress: TaskProgress): string {
     lines.push("")
   }
 
+  if (task.expectedFiles && task.expectedFiles.length > 0) {
+    lines.push("**Files you must create/modify for this task:**")
+    for (const f of task.expectedFiles) {
+      lines.push(`  - \`${f}\``)
+    }
+    lines.push("")
+    lines.push("You may ONLY write to these files for this task. If you need to write to additional files,")
+    lines.push("note them in the `implementation_summary` when calling `mark_task_complete`.")
+  }
+
   if (task.expectedTests.length > 0) {
     lines.push("**Tests this task must make pass:**")
     for (const t of task.expectedTests) {

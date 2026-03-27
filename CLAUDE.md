@@ -39,7 +39,7 @@ Pure, side-effect-free table-driven FSM. 34 valid (Phase, PhaseState) combinatio
 
 ### Session State (`session-state.ts`, `state-backend-fs.ts`)
 
-Pluggable persistence via `StateBackend` interface (read/write/remove/list/lock). Built-in `FileSystemStateBackend` stores per-feature state at `.openartisan/<featureName>/workflow-state.json` (schema version 21, with migrations for all prior versions). Sub-workflow state nests under parent: `.openartisan/<parent>/sub/<child>/workflow-state.json`. Sessions without a featureName (pre-MODE_SELECT) are memory-only. Legacy single-file `.opencode/workflow-state.json` is migrated at startup via `migrateLegacyStateFile()`. Two-layer locking: per-feature promise chains for in-process serialization, plus backend locks (lockfiles with O_CREAT|O_EXCL for the FS backend) for cross-process safety. `validateWorkflowState()` runs before every persist.
+Pluggable persistence via `StateBackend` interface (read/write/remove/list/lock). Built-in `FileSystemStateBackend` stores per-feature state at `.openartisan/<featureName>/workflow-state.json` (schema version 22, with migrations for all prior versions). Sub-workflow state nests under parent: `.openartisan/<parent>/sub/<child>/workflow-state.json`. Sessions without a featureName (pre-MODE_SELECT) are memory-only. Legacy single-file `.opencode/workflow-state.json` is migrated at startup via `migrateLegacyStateFile()`. Two-layer locking: per-feature promise chains for in-process serialization, plus backend locks (lockfiles with O_CREAT|O_EXCL for the FS backend) for cross-process safety. `validateWorkflowState()` runs before every persist.
 
 ### Session Registry (`session-registry.ts`)
 
@@ -56,7 +56,7 @@ Pluggable persistence via `StateBackend` interface (read/write/remove/list/lock)
 
 ### Tools (`tools/`)
 
-Each tool validates state, calls `transition()`, and updates session state. Key tools: `select_mode`, `mark_scan_complete`, `mark_analyze_complete`, `mark_satisfied`, `request_review`, `submit_feedback`, `mark_task_complete`, `spawn_sub_workflow`, `query_parent_workflow`, `query_child_workflow`. Tool names must be added to `WORKFLOW_TOOL_NAMES` in `index.ts` so the tool guard allows them (currently 13 tools).
+Each tool validates state, calls `transition()`, and updates session state. Key tools: `select_mode`, `mark_scan_complete`, `mark_analyze_complete`, `mark_satisfied`, `request_review` (accepts `artifact_files` for file-based phases), `submit_feedback`, `mark_task_complete` (accumulates DAG `expectedFiles` into `reviewArtifactFiles`), `spawn_sub_workflow`, `query_parent_workflow`, `query_child_workflow`. Tool names must be added to `WORKFLOW_TOOL_NAMES` in `index.ts` so the tool guard allows them (currently 13 tools).
 
 ### Artifact Dependency Graph (`artifacts.ts`)
 
@@ -72,7 +72,7 @@ Six parallel scanner subagents analyze the existing codebase (structure, convent
 
 ### Implementation DAG (`dag.ts`, `impl-plan-parser.ts`, `scheduler.ts`)
 
-The IMPL_PLAN artifact is parsed from Markdown into a task DAG. Sequential scheduler executes tasks with per-task review (`task-review.ts`) and drift detection (`task-drift.ts`). TaskStatus values: `pending`, `in-flight`, `complete`, `aborted`, `human-gated`, `delegated`. Delegated tasks are handled by child sub-workflows — downstream tasks block until the delegation completes or times out (`SUB_WORKFLOW_TIMEOUT_MS` = 30 min).
+The IMPL_PLAN artifact is parsed from Markdown into a task DAG. Each task declares `expectedFiles` (the files it will create/modify) via the `**Files:**` metadata field. Sequential scheduler executes tasks with per-task review (`task-review.ts`) and drift detection (`task-drift.ts`). TaskStatus values: `pending`, `in-flight`, `complete`, `aborted`, `human-gated`, `delegated`. Delegated tasks are handled by child sub-workflows — downstream tasks block until the delegation completes or times out (`SUB_WORKFLOW_TIMEOUT_MS` = 30 min).
 
 ### Sub-Workflows (`tools/spawn-sub-workflow.ts`, `tools/query-workflow.ts`, `tools/complete-sub-workflow.ts`)
 
@@ -85,6 +85,8 @@ JSON-RPC 2.0 server over stdio using the `json-rpc-2.0` library. Wraps the core 
 ### Self-Review (`self-review.ts`)
 
 Dispatches an ephemeral `workflow-reviewer` subagent in a fresh session that sees only the artifact and acceptance criteria — never the authoring conversation. 5-minute timeout, escalates to USER_GATE after 10 iterations.
+
+**Artifact tracking (v22):** The reviewer receives explicit file paths from the orchestrator, not heuristic directory scans. For IMPLEMENTATION, file paths accumulate automatically from each DAG task's `expectedFiles` at `mark_task_complete` time. For INTERFACES/TESTS, the agent passes `artifact_files` in `request_review`. The reviewer also always sees `artifactDiskPaths` (plan, conventions, impl_plan locations) for cross-reference.
 
 ### Three Modes
 

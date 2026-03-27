@@ -29,6 +29,7 @@ function makeBridgeContext(): BridgeContext {
     bumpPolicyVersion() { policyVersion++ },
     setEngine(e: EngineContext) { engine = e },
     stateDir: null,
+    projectDir: null,
     pinoLogger: null,
     shuttingDown: false,
   }

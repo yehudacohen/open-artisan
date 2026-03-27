@@ -71,7 +71,7 @@ export interface SelfReviewRequest {
   userMessages?: string[]
 }
 
-function buildReviewPrompt(req: SelfReviewRequest): string {
+export function buildReviewPrompt(req: SelfReviewRequest): string {
   const lines: string[] = []
 
   lines.push(`You are reviewing the **${req.phase}** artifact produced by the workflow.`)
@@ -142,6 +142,18 @@ function buildReviewPrompt(req: SelfReviewRequest): string {
     lines.push("")
   }
 
+  // Always show artifact disk paths so the reviewer can cross-reference
+  // the plan, conventions, interfaces, etc. regardless of mode.
+  if (req.artifactDiskPaths && Object.keys(req.artifactDiskPaths).length > 0) {
+    lines.push("## Approved Artifact Locations")
+    lines.push("These are the disk paths for artifacts approved in prior phases. Read them for context.")
+    lines.push("")
+    for (const [key, value] of Object.entries(req.artifactDiskPaths)) {
+      if (value) lines.push(`- **${key}**: \`${value}\``)
+    }
+    lines.push("")
+  }
+
   if (req.fileAllowlist && req.fileAllowlist.length > 0) {
     lines.push("## Allowlist Review (State-Aware)")
     lines.push("The file allowlist governs which phases can be executed in INCREMENTAL mode.")
@@ -156,13 +168,6 @@ function buildReviewPrompt(req: SelfReviewRequest): string {
       lines.push("**Approved artifacts (already complete):**")
       for (const [key, value] of Object.entries(req.approvedArtifacts)) {
         if (value) lines.push(`- ${key}`)
-      }
-    }
-    if (req.artifactDiskPaths && Object.keys(req.artifactDiskPaths).length > 0) {
-      lines.push("")
-      lines.push("**Artifact disk paths (for reference):**")
-      for (const [key, value] of Object.entries(req.artifactDiskPaths)) {
-        if (value) lines.push(`- ${key}: ${value}`)
       }
     }
     lines.push("")

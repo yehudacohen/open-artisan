@@ -51,6 +51,8 @@ document is a living document in REFACTOR mode.
   (hardcoded returns, placeholder credentials, TODO markers), the review will fail.
   The scheduler will assign the next task only after the per-task review passes.
   When ALL tasks are complete, call `request_review` for the final implementation review.
+  The reviewer will automatically receive all files listed in the DAG tasks' `Files:` fields.
+  If you created additional files beyond what was planned, pass them in `artifact_files`.
   You CANNOT call `request_review` until all DAG tasks have passed their per-task reviews.
 
 **REVIEW** — (Isolated self-review checks alignment, test outcomes, conventions, and stubs)

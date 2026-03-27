@@ -122,12 +122,17 @@ export function isTestFile(path: string): boolean {
  * @param phaseState      Sub-state within the phase (included for forward-compat)
  * @param mode            Workflow mode (null = not yet selected)
  * @param fileAllowlist   Absolute paths allowed to write in INCREMENTAL mode
+ * @param taskExpectedFiles  Per-task file restriction for IMPLEMENTATION phase.
+ *                           When set, the agent can only write to these files
+ *                           (plus .openartisan/ for artifact writes). Enforces
+ *                           one-task-at-a-time discipline from the approved DAG.
  */
 export function getPhaseToolPolicy(
   phase: Phase,
   phaseState: PhaseState,
   mode: WorkflowMode | null,
   fileAllowlist: string[],
+  taskExpectedFiles?: string[],
 ): PhaseToolPolicy {
   switch (phase) {
     // -----------------------------------------------------------------------
@@ -295,12 +300,21 @@ export function getPhaseToolPolicy(
             allowedDescription: "INCREMENTAL mode: no file allowlist provided — all writes blocked until an allowlist is set.",
           }
         }
+        // In INCREMENTAL, per-task files intersect with the workflow allowlist.
+        // The agent can only write files that are both in the task's expectedFiles
+        // AND in the workflow allowlist. If no task files specified, use the full allowlist.
         const allowSet = new Set(fileAllowlist)
+        const taskSet = taskExpectedFiles && taskExpectedFiles.length > 0
+          ? new Set(taskExpectedFiles)
+          : null
         return {
           blocked: [],
           writePathPredicate: (filePath: string) => {
             if (isEnvFile(filePath)) return false
-            return allowSet.has(filePath)
+            if (isOpenArtisanFile(filePath)) return true // always allow artifact writes
+            if (!allowSet.has(filePath)) return false
+            if (taskSet && !taskSet.has(filePath)) return false
+            return true
           },
           bashCommandPredicate: (command: string) => {
             // Block bash commands that contain obvious file-write operators.
@@ -311,11 +325,30 @@ export function getPhaseToolPolicy(
             const WRITE_OPS = /(?:>>|>[^&]|\btee\b|\bsed\s+-i\b|\bdd\b.*\bof=|<<-?\s*['"]?\w+['"]?)/
             return !WRITE_OPS.test(command)
           },
-          allowedDescription: `INCREMENTAL mode: only allowlisted files may be written (${fileAllowlist.length} files). .env always blocked. Bash write operators (>, >>, tee, sed -i) are blocked.`,
+          allowedDescription: taskSet
+            ? `INCREMENTAL mode: only current task files may be written (${taskSet.size} files). .env always blocked.`
+            : `INCREMENTAL mode: only allowlisted files may be written (${fileAllowlist.length} files). .env always blocked. Bash write operators (>, >>, tee, sed -i) are blocked.`,
         }
       }
 
-      // GREENFIELD or REFACTOR — unrestricted except for .env files.
+      // GREENFIELD or REFACTOR — per-task file restriction when a task is active.
+      // When taskExpectedFiles is set, the agent can only write to those files
+      // (plus .openartisan/). This enforces one-task-at-a-time from the DAG.
+      // When no task is active (e.g. between tasks, or pre-v22 DAGs without
+      // expectedFiles), fall back to unrestricted writes.
+      if (taskExpectedFiles && taskExpectedFiles.length > 0) {
+        const taskSet = new Set(taskExpectedFiles)
+        return {
+          blocked: [],
+          writePathPredicate: (filePath: string) => {
+            if (isEnvFile(filePath)) return false
+            if (isOpenArtisanFile(filePath)) return true // always allow artifact writes
+            return taskSet.has(filePath)
+          },
+          allowedDescription: `Implementation phase: only current task files may be written (${taskSet.size} files). .openartisan/ always allowed. .env always blocked.`,
+        }
+      }
+
       return {
         blocked: [],
         writePathPredicate: (filePath: string) => !isEnvFile(filePath),

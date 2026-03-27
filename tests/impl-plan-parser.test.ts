@@ -391,3 +391,87 @@ Some intro text.
     }
   })
 })
+
+// ---------------------------------------------------------------------------
+// Expected files parsing (v22)
+// ---------------------------------------------------------------------------
+
+describe("parseImplPlan — expectedFiles", () => {
+  it("parses Files: field into expectedFiles array", () => {
+    const plan = `
+## Task T1: Build page
+**Dependencies:** none
+**Files:** pages/01.html, css/page.css
+**Complexity:** small
+
+Build the first page.
+`
+    const result = parseImplPlan(plan)
+    if (!result.success) throw new Error(result.errors.join("; "))
+    const t1 = Array.from(result.dag.tasks).find((t) => t.id === "T1")!
+    expect(t1.expectedFiles).toEqual(["pages/01.html", "css/page.css"])
+  })
+
+  it("parses Expected files: variant", () => {
+    const plan = `
+## Task T1: Build page
+**Dependencies:** none
+**Expected files:** src/index.ts
+**Complexity:** small
+`
+    const result = parseImplPlan(plan)
+    if (!result.success) throw new Error(result.errors.join("; "))
+    const t1 = Array.from(result.dag.tasks).find((t) => t.id === "T1")!
+    expect(t1.expectedFiles).toEqual(["src/index.ts"])
+  })
+
+  it("defaults to empty array when Files: is absent", () => {
+    const plan = `
+## Task T1: Build page
+**Dependencies:** none
+**Complexity:** small
+
+Build the page without specifying files.
+`
+    const result = parseImplPlan(plan)
+    if (!result.success) throw new Error(result.errors.join("; "))
+    const t1 = Array.from(result.dag.tasks).find((t) => t.id === "T1")!
+    expect(t1.expectedFiles).toEqual([])
+  })
+
+  it("handles none as empty files list", () => {
+    const plan = `
+## Task T1: Config task
+**Dependencies:** none
+**Files:** none
+**Complexity:** small
+`
+    const result = parseImplPlan(plan)
+    if (!result.success) throw new Error(result.errors.join("; "))
+    const t1 = Array.from(result.dag.tasks).find((t) => t.id === "T1")!
+    expect(t1.expectedFiles).toEqual([])
+  })
+
+  it("parses multiple tasks with different files", () => {
+    const plan = `
+## Task T1: Create types
+**Dependencies:** none
+**Files:** src/types.ts
+**Complexity:** small
+
+## Task T2: Implement logic
+**Dependencies:** T1
+**Files:** src/logic.ts, src/helpers.ts
+**Expected tests:** tests/logic.test.ts
+**Complexity:** medium
+`
+    const result = parseImplPlan(plan)
+    if (!result.success) throw new Error(result.errors.join("; "))
+    const tasks = Array.from(result.dag.tasks)
+    const t1 = tasks.find((t) => t.id === "T1")!
+    const t2 = tasks.find((t) => t.id === "T2")!
+    expect(t1.expectedFiles).toEqual(["src/types.ts"])
+    expect(t2.expectedFiles).toEqual(["src/logic.ts", "src/helpers.ts"])
+    expect(t2.expectedTests).toEqual(["tests/logic.test.ts"])
+  })
+})

@@ -13,9 +13,11 @@ For each task:
 2. **Description** — what this task implements, which interface methods/types it covers
 3. **Dependencies** — IDs of tasks that must complete before this one starts
 4. **Expected tests** — which test file paths should pass when this task is complete
-5. **Category** — one of: `scaffold`, `human-gate`, `integration`, `standalone` (see below)
-6. **Complexity** — small / medium / large estimate
-7. **Merge point** — if parallel tasks converge here, identify it
+5. **Files** — which file paths this task will create or modify (relative to project root).
+   These are the files the reviewer will evaluate — be explicit and complete.
+6. **Category** — one of: `scaffold`, `human-gate`, `integration`, `standalone` (see below)
+7. **Complexity** — small / medium / large estimate
+8. **Merge point** — if parallel tasks converge here, identify it
 
 ### Task categories
 

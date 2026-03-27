@@ -658,3 +658,67 @@ describe("Tool policy — exhaustive default case (H5)", () => {
     expect(policy.bashCommandPredicate).toBeUndefined()
   })
 })
+
+// ---------------------------------------------------------------------------
+// Per-task file enforcement (v22)
+// ---------------------------------------------------------------------------
+
+describe("IMPLEMENTATION — per-task expectedFiles enforcement", () => {
+  it("GREENFIELD with taskExpectedFiles restricts writes to task files", () => {
+    const policy = getPhaseToolPolicy("IMPLEMENTATION", "DRAFT", "GREENFIELD", [], ["pages/01.html", "css/page.css"])
+    expect(policy.writePathPredicate).toBeDefined()
+    expect(policy.writePathPredicate!("pages/01.html")).toBe(true)
+    expect(policy.writePathPredicate!("css/page.css")).toBe(true)
+    expect(policy.writePathPredicate!("pages/02.html")).toBe(false) // different task's file
+    expect(policy.writePathPredicate!("src/random.ts")).toBe(false)
+  })
+
+  it("GREENFIELD with taskExpectedFiles always allows .openartisan/ writes", () => {
+    const policy = getPhaseToolPolicy("IMPLEMENTATION", "DRAFT", "GREENFIELD", [], ["pages/01.html"])
+    expect(policy.writePathPredicate!("/project/.openartisan/status.md")).toBe(true)
+  })
+
+  it("GREENFIELD with taskExpectedFiles still blocks .env", () => {
+    const policy = getPhaseToolPolicy("IMPLEMENTATION", "DRAFT", "GREENFIELD", [], ["pages/01.html", ".env"])
+    expect(policy.writePathPredicate!(".env")).toBe(false)
+    expect(policy.writePathPredicate!(".env.local")).toBe(false)
+  })
+
+  it("GREENFIELD without taskExpectedFiles allows any file (except .env)", () => {
+    const policy = getPhaseToolPolicy("IMPLEMENTATION", "DRAFT", "GREENFIELD", [])
+    expect(policy.writePathPredicate!("anything.ts")).toBe(true)
+    expect(policy.writePathPredicate!(".env")).toBe(false)
+  })
+
+  it("GREENFIELD with empty taskExpectedFiles allows any file (fallback)", () => {
+    const policy = getPhaseToolPolicy("IMPLEMENTATION", "DRAFT", "GREENFIELD", [], [])
+    expect(policy.writePathPredicate!("anything.ts")).toBe(true)
+  })
+
+  it("INCREMENTAL with taskExpectedFiles intersects with allowlist", () => {
+    const allowlist = ["/project/src/a.ts", "/project/src/b.ts", "/project/src/c.ts"]
+    const taskFiles = ["/project/src/a.ts", "/project/src/b.ts"]
+    const policy = getPhaseToolPolicy("IMPLEMENTATION", "DRAFT", "INCREMENTAL", allowlist, taskFiles)
+    expect(policy.writePathPredicate!("/project/src/a.ts")).toBe(true)  // in both
+    expect(policy.writePathPredicate!("/project/src/b.ts")).toBe(true)  // in both
+    expect(policy.writePathPredicate!("/project/src/c.ts")).toBe(false) // in allowlist but not task
+    expect(policy.writePathPredicate!("/project/src/d.ts")).toBe(false) // in neither
+  })
+
+  it("INCREMENTAL with taskExpectedFiles still allows .openartisan/", () => {
+    const policy = getPhaseToolPolicy("IMPLEMENTATION", "DRAFT", "INCREMENTAL", ["/a.ts"], ["/a.ts"])
+    expect(policy.writePathPredicate!("/project/.openartisan/status.md")).toBe(true)
+  })
+
+  it("REFACTOR with taskExpectedFiles restricts writes to task files", () => {
+    const policy = getPhaseToolPolicy("IMPLEMENTATION", "DRAFT", "REFACTOR", [], ["src/refactored.ts"])
+    expect(policy.writePathPredicate!("src/refactored.ts")).toBe(true)
+    expect(policy.writePathPredicate!("src/other.ts")).toBe(false)
+  })
+
+  it("description mentions current task files count", () => {
+    const policy = getPhaseToolPolicy("IMPLEMENTATION", "DRAFT", "GREENFIELD", [], ["a.ts", "b.ts"])
+    expect(policy.allowedDescription).toContain("2 files")
+    expect(policy.allowedDescription).toContain("current task")
+  })
+})

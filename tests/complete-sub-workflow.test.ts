@@ -18,6 +18,7 @@ function makeTask(overrides: Partial<TaskNode> & { id: string }): TaskNode {
     description: `Task ${overrides.id}`,
     dependencies: [],
     expectedTests: [],
+    expectedFiles: [],
     estimatedComplexity: "medium",
     status: "pending",
     ...overrides,
@@ -77,6 +78,7 @@ function makeState(overrides: Partial<WorkflowState> = {}): WorkflowState {
       },
     ],
     concurrency: { maxParallelTasks: 1 },
+    reviewArtifactFiles: [],
     ...overrides,
   }
 }

@@ -22,7 +22,8 @@ If any test passes at the end of this phase, that means implementation has leake
   - Import from the interfaces you defined — do not import implementation
   - Organize tests by interface or feature
   - Every test must assert behavior that will fail against a stub or unimplemented code
-  - When the test suite is complete, call `request_review`.
+  - When the test suite is complete, call `request_review` with `artifact_files` listing
+    every test file you created (e.g. `["tests/auth.test.ts", "tests/api.test.ts"]`).
 
 **REVIEW** — (Isolated self-review checks test coverage against the interfaces)
 

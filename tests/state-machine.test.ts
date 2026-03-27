@@ -147,21 +147,29 @@ describe("StateMachine — greenfield mode skips discovery", () => {
 // ---------------------------------------------------------------------------
 // Self-review loop
 // ---------------------------------------------------------------------------
-describe("StateMachine — self-review fail loops within REVIEW", () => {
-  it("PLANNING/REVIEW + self_review_fail → PLANNING/REVIEW (stays in review)", () => {
+describe("StateMachine — self-review fail routes to REVISE", () => {
+  it("PLANNING/REVIEW + self_review_fail → PLANNING/REVISE", () => {
     const result = sm.transition("PLANNING", "REVIEW", "self_review_fail", "GREENFIELD")
     expect(result.success).toBe(true)
     if (!result.success) return
     expect(result.nextPhase).toBe("PLANNING")
-    expect(result.nextPhaseState).toBe("REVIEW")
+    expect(result.nextPhaseState).toBe("REVISE")
   })
 
-  it("INTERFACES/REVIEW + self_review_fail → INTERFACES/REVIEW", () => {
+  it("INTERFACES/REVIEW + self_review_fail → INTERFACES/REVISE", () => {
     const result = sm.transition("INTERFACES", "REVIEW", "self_review_fail", "GREENFIELD")
     expect(result.success).toBe(true)
     if (!result.success) return
     expect(result.nextPhase).toBe("INTERFACES")
-    expect(result.nextPhaseState).toBe("REVIEW")
+    expect(result.nextPhaseState).toBe("REVISE")
+  })
+
+  it("IMPLEMENTATION/REVIEW + self_review_fail → IMPLEMENTATION/REVISE", () => {
+    const result = sm.transition("IMPLEMENTATION", "REVIEW", "self_review_fail", "GREENFIELD")
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    expect(result.nextPhase).toBe("IMPLEMENTATION")
+    expect(result.nextPhaseState).toBe("REVISE")
   })
 })
 
@@ -269,12 +277,12 @@ describe("StateMachine — DISCOVERY revision loop", () => {
     expect(result.nextPhaseState).toBe("REVIEW")
   })
 
-  it("DISCOVERY/REVIEW + self_review_fail loops back to DISCOVERY/REVIEW", () => {
+  it("DISCOVERY/REVIEW + self_review_fail → DISCOVERY/REVISE", () => {
     const result = sm.transition("DISCOVERY", "REVIEW", "self_review_fail", "INCREMENTAL")
     expect(result.success).toBe(true)
     if (!result.success) return
     expect(result.nextPhase).toBe("DISCOVERY")
-    expect(result.nextPhaseState).toBe("REVIEW")
+    expect(result.nextPhaseState).toBe("REVISE")
   })
 
   it("DISCOVERY revision feedback never produces nextPhaseState=DRAFT", () => {
@@ -318,16 +326,16 @@ describe("StateMachine — helpers", () => {
 })
 
 // ---------------------------------------------------------------------------
-// Review loop — self_review_fail stays in REVIEW, self_review_pass advances
+// Review loop — self_review_fail routes to REVISE, self_review_pass advances
 // ---------------------------------------------------------------------------
 
 describe("StateMachine — REVIEW loop behavior", () => {
-  it("self_review_fail in PLANNING/REVIEW stays in PLANNING/REVIEW", () => {
+  it("self_review_fail in PLANNING/REVIEW routes to PLANNING/REVISE", () => {
     const result = sm.transition("PLANNING", "REVIEW", "self_review_fail", "GREENFIELD")
     expect(result.success).toBe(true)
     if (!result.success) return
     expect(result.nextPhase).toBe("PLANNING")
-    expect(result.nextPhaseState).toBe("REVIEW")
+    expect(result.nextPhaseState).toBe("REVISE")
   })
 
   it("self_review_pass in PLANNING/REVIEW advances to PLANNING/USER_GATE", () => {

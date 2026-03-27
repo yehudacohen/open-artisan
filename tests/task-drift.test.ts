@@ -23,6 +23,7 @@ function makeTask(id: string, deps: string[] = []): TaskNode {
     description: `Task ${id} description`,
     dependencies: deps,
     expectedTests: [],
+    expectedFiles: [],
     estimatedComplexity: "small" as const,
     status: "pending" as const,
   }

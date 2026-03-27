@@ -22,7 +22,8 @@ specification that all subsequent phases (tests and implementation) must conform
   `.graphql`/`.gql` (GraphQL), `.json` (JSON Schema), `.yaml`/`.yml` (OpenAPI), etc.
   - No implementation code (no function bodies, no class bodies — only signatures)
   - No test files, no markdown files
-  - When all interfaces are defined, call `request_review`.
+  - When all interfaces are defined, call `request_review` with `artifact_files` listing
+    every interface/type file you created (e.g. `["src/types.ts", "src/api.d.ts"]`).
 
 **REVIEW** — (Isolated self-review evaluator checks against criteria)
 

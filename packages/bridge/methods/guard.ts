@@ -5,6 +5,7 @@
  * guard.policy: Return the tool policy metadata for a phase/state combination.
  */
 import { JSONRPCErrorException } from "json-rpc-2.0"
+import { resolve } from "node:path"
 import type { MethodHandler } from "../server"
 import type { GuardCheckParams, GuardPolicyParams, GuardCheckResult, GuardPolicyResult } from "../protocol"
 import { SESSION_NOT_FOUND, INVALID_PARAMS } from "../protocol"
@@ -48,7 +49,15 @@ export const handleGuardCheck: MethodHandler = async (params, ctx) => {
     throw new JSONRPCErrorException(`Session "${p.sessionId}" not found`, SESSION_NOT_FOUND)
   }
 
-  const policy = getPhaseToolPolicy(state.phase, state.phaseState, state.mode, state.fileAllowlist)
+  // Resolve per-task expected files for the current task.
+  // Resolve relative paths to absolute using the project directory.
+  const rawTaskFiles = state.currentTaskId && state.implDag
+    ? state.implDag.find((t: { id: string; expectedFiles?: string[] }) => t.id === state.currentTaskId)?.expectedFiles
+    : undefined
+  const taskExpectedFiles = rawTaskFiles && ctx.projectDir
+    ? rawTaskFiles.map((f: string) => f.startsWith("/") ? f : resolve(ctx.projectDir!, f))
+    : rawTaskFiles
+  const policy = getPhaseToolPolicy(state.phase, state.phaseState, state.mode, state.fileAllowlist, taskExpectedFiles)
 
   // Check blocked list
   if (policy.blocked.some((blocked) => toolName.includes(blocked))) {
@@ -106,6 +115,7 @@ export const handleGuardPolicy: MethodHandler = async (params, ctx) => {
     p.phaseState as PhaseState,
     p.mode as WorkflowMode | null,
     p.allowlist ?? [],
+    p.taskExpectedFiles,
   )
 
   return {

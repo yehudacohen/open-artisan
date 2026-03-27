@@ -535,9 +535,10 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
     sessions,
     lastRepromptTimestamps,
     async promptExistingSession(sessionId: string, text: string): Promise<void> {
+      const partId = `prt_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
       await client.session?.prompt({
         path: { id: sessionId },
-        body: { noReply: false, parts: [{ type: "text", text }] },
+        body: { noReply: false, parts: [{ type: "text", text, id: partId }] },
       })
     },
   }
@@ -762,6 +763,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
           draft.taskReviewCount = 0
           draft.pendingFeedback = null
           draft.revisionBaseline = null
+          draft.reviewArtifactFiles = []
           draft.userMessages = textContent ? [textContent] : []
           // Preserve: mode, approvedArtifacts, conventions, fileAllowlist,
           // featureName, artifactDiskPaths, activeAgent, phaseApprovalCounts,
@@ -808,13 +810,13 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
       if (result.intercepted) {
         // Prepend routing note as a v2-compliant Part object.
         // v2 requires every Part to carry id, sessionID, and messageID (PartBase).
-        // We generate a synthetic id prefixed with "oa-" so it's identifiable in logs.
+        // We generate a synthetic id prefixed with "prt_oa_" so it's identifiable in logs.
         const injectedText = result.parts[0]?.text ?? ""
         if (injectedText) {
           output.parts.splice(0, 0, {
             type: "text",
             text: injectedText,
-            id: `oa-routing-${Date.now()}`,
+            id: `prt_oa_routing_${Date.now()}`,
             sessionID: sessionId,
             messageID: messageId,
           })
@@ -950,11 +952,19 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
           // Use the parent's state for tool policy enforcement
           const parentState = store.get(parentId)
           if (!parentState) return // Parent state gone — allow through (graceful degradation)
+          // Resolve per-task expected files for the parent's current task.
+          // Resolve relative paths to absolute using the project directory.
+          const parentCwd = projectRoot
+          const rawParentTaskFiles = parentState.currentTaskId && parentState.implDag
+            ? parentState.implDag.find((t) => t.id === parentState.currentTaskId)?.expectedFiles
+            : undefined
+          const parentTaskFiles = rawParentTaskFiles?.map((f) => f.startsWith("/") ? f : resolve(parentCwd, f))
           const policy = getPhaseToolPolicy(
             parentState.phase,
             parentState.phaseState,
             parentState.mode,
             parentState.fileAllowlist,
+            parentTaskFiles,
           )
           // Apply the same blocked/predicate checks using the parent's policy
           const toolName = input.tool.toLowerCase()
@@ -1015,11 +1025,19 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
       // "write"/"edit" would otherwise false-positive on tools like "todowrite".
       if (PASSTHROUGH_TOOL_NAMES.has(input.tool.toLowerCase())) return
 
+      // Resolve per-task expected files for the current task.
+      // Task expectedFiles are relative paths from the IMPL_PLAN; resolve to
+      // absolute so they match the absolute fileAllowlist and tool input paths.
+      const rawTaskFiles = state.currentTaskId && state.implDag
+        ? state.implDag.find((t) => t.id === state.currentTaskId)?.expectedFiles
+        : undefined
+      const currentTaskFiles = rawTaskFiles?.map((f) => f.startsWith("/") ? f : resolve(projectRoot, f))
       const policy = getPhaseToolPolicy(
         state.phase,
         state.phaseState,
         state.mode,
         state.fileAllowlist,
+        currentTaskFiles,
       )
 
       const toolName = input.tool.toLowerCase()
@@ -1325,6 +1343,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
               draft.taskReviewCount = 0
               draft.pendingFeedback = null
               draft.revisionBaseline = null
+              draft.reviewArtifactFiles = []
             })
             log.info("Auto-reset DONE -> MODE_SELECT for fresh workflow", { sessionId })
             // Use the returned state instead of mutating the stale reference
@@ -1749,16 +1768,36 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
           let result = evaluateMarkSatisfied(parsedArgs, expectedBlocking, iterationInfo) // fallback baseline (agent self-report)
 
           if (criteriaText) {
-            // resolveArtifactPaths now returns real disk paths for all phases
-            // that have written artifacts (.openartisan/). The reviewer reads
-            // files directly rather than receiving inlined content.
-            const artifactPaths = resolveArtifactPaths(
-              state.phase,
-              state.mode,
-              context.directory || process.cwd(),
-              state.fileAllowlist,
-              state.artifactDiskPaths,
-            )
+            // Orchestrator-driven artifact paths (v22): prefer explicit paths
+            // from state.reviewArtifactFiles when available. These are accumulated
+            // by mark_task_complete (from DAG expectedFiles) and request_review
+            // (from agent's artifact_files).
+            //
+            // For file-based phases (INTERFACES, TESTS, IMPLEMENTATION), explicit
+            // paths are REQUIRED — no heuristic scanning fallback. If the agent
+            // hasn't provided them, gate here and instruct.
+            // For in-memory phases, resolveArtifactPaths returns .openartisan/ disk
+            // paths which are always correct.
+            const isFileBased = ["INTERFACES", "TESTS", "IMPLEMENTATION"].includes(state.phase)
+            if (isFileBased && state.reviewArtifactFiles.length === 0) {
+              return (
+                `Error: No artifact files registered for the ${state.phase} review.\n\n` +
+                `The reviewer needs to know which files to evaluate. ` +
+                `Call \`request_review\` with \`artifact_files\` listing every file you ` +
+                `created or modified in this phase, then call \`mark_satisfied\` again.\n\n` +
+                `Example: \`request_review({ summary: "...", artifact_description: "...", ` +
+                `artifact_files: ["src/types.ts", "src/api.ts"] })\``
+              )
+            }
+            const artifactPaths = state.reviewArtifactFiles.length > 0
+              ? state.reviewArtifactFiles
+              : resolveArtifactPaths(
+                  state.phase,
+                  state.mode,
+                  context.directory || process.cwd(),
+                  state.fileAllowlist,
+                  state.artifactDiskPaths,
+                )
             // Upstream summary: pass the disk path to the conventions file if available,
             // otherwise fall back to the inline conventions text (for backward compat
             // with sessions approved before v9 disk path tracking was added).
@@ -1961,6 +2000,16 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             if (outcome.nextPhaseState === "USER_GATE") {
               draft.userGateMessageReceived = false
             }
+            // self_review_fail now routes to REVISE: the agent addresses the
+            // reviewer's feedback, then calls request_review to re-enter REVIEW.
+            // Preserve reviewArtifactFiles so the next review cycle uses the same
+            // file list (the agent can supplement via request_review.artifact_files).
+            // Clear revision baseline for review-fail REVISE — the diff gate should
+            // NOT block request_review here. The agent needs to address the reviewer's
+            // feedback and re-submit, not prove the artifact changed from a baseline.
+            if (outcome.nextPhaseState === "REVISE") {
+              draft.revisionBaseline = null
+            }
           })
 
           // Robot-artisan auto-approval: when the active agent is "robot-artisan"
@@ -2049,6 +2098,8 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                       if (autoArtifactKey) {
                         draft.approvedArtifacts[autoArtifactKey] = `approved-at-${Date.now()}`
                       }
+                      // Reset artifact file tracking for the new phase
+                      draft.reviewArtifactFiles = []
                     })
 
                     const autoCheckpointMsg = autoCheckpointResult.success
@@ -2312,11 +2363,22 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
 
             // Persist the updated DAG and set currentTaskId to the next dispatched task.
             // Reset taskReviewCount when moving to a new task (14.4).
+            // Accumulate the completed task's expectedFiles into reviewArtifactFiles
+            // so the final implementation reviewer knows exactly which files to review.
             await store.update(sessionId, (draft) => {
               draft.implDag = result.updatedNodes
               draft.currentTaskId = result.nextTaskId
               if (result.nextTaskId !== args.task_id) {
                 draft.taskReviewCount = 0
+              }
+              // Orchestrator-driven artifact tracking (v22): accumulate expected files
+              if (result.completedTaskFiles.length > 0) {
+                const existing = new Set(draft.reviewArtifactFiles)
+                for (const f of result.completedTaskFiles) {
+                  if (!existing.has(f)) {
+                    draft.reviewArtifactFiles.push(f)
+                  }
+                }
               }
             })
 
@@ -2675,7 +2737,10 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
           "For in-memory phases (PLANNING, DISCOVERY conventions, IMPL_PLAN), pass the full " +
           "artifact text in artifact_content — it will be written to .openartisan/ immediately " +
           "so the user can read it before approving and the isolated reviewer can evaluate the " +
-          "real file. For file-based phases (INTERFACES, TESTS, IMPLEMENTATION), omit artifact_content.",
+          "real file. For file-based phases (INTERFACES, TESTS), pass artifact_files with the " +
+          "list of files you created. For IMPLEMENTATION, artifact_files are accumulated " +
+          "automatically from the DAG tasks — pass artifact_files only for additional files " +
+          "not listed in the implementation plan.",
         args: {
           summary: tool.schema.string().describe(
             "Brief description of what was built in this phase.",
@@ -2690,9 +2755,17 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
               "The full text of the artifact (required for PLANNING, DISCOVERY conventions, IMPL_PLAN). " +
               "Written to .openartisan/ immediately so it is readable before approval.",
             ),
+          artifact_files: tool.schema
+            .array(tool.schema.string())
+            .optional()
+            .describe(
+              "File paths of artifacts produced in this phase (for INTERFACES, TESTS). " +
+              "For IMPLEMENTATION, the orchestrator accumulates files from the DAG automatically — " +
+              "only pass additional files here if you created files beyond what was in the plan.",
+            ),
         },
         async execute(
-          args: { summary: string; artifact_description: string; artifact_content?: string },
+          args: { summary: string; artifact_description: string; artifact_content?: string; artifact_files?: string[] },
           context: ToolExecuteContext,
         ) {
           const { store, sm, log, notify } = ctx
@@ -2712,15 +2785,15 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
           // the artifact on disk and restart the review cycle (reset iterationCount).
           // No state machine transition — we stay in REVIEW.
           if (state.phaseState === "REVIEW") {
-            if (!args.artifact_content) {
+            if (!args.artifact_content && !args.artifact_files?.length) {
               return (
-                "Error: request_review at REVIEW state requires artifact_content — " +
-                "you must provide the updated artifact text to replace the version on disk."
+                "Error: request_review at REVIEW state requires either artifact_content " +
+                "(to update the on-disk artifact) or artifact_files (to register files for the reviewer)."
               )
             }
             let artifactDiskPath: string | null = null
             const artifactKey = PHASE_TO_ARTIFACT[state.phase]
-            if (artifactKey && artifactKey !== "implementation") {
+            if (args.artifact_content && artifactKey && artifactKey !== "implementation") {
               try {
                 const cwd = context.directory || process.cwd()
                 artifactDiskPath = await writeArtifact(cwd, artifactKey, args.artifact_content, state.featureName)
@@ -2739,12 +2812,31 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             } else if (args.artifact_content) {
               reviewHash = artifactHash(args.artifact_content)
             }
+            // Only reset iterationCount when artifact_content is provided (actual
+            // content change). Providing just artifact_files is metadata that
+            // registers files for the reviewer — it should NOT reset the review
+            // escalation timer. Otherwise the agent can loop forever by calling
+            // request_review to reset the counter before escalation triggers.
+            const contentChanged = !!args.artifact_content
             await store.update(sessionId, (draft) => {
-              draft.iterationCount = 0
+              if (contentChanged) {
+                draft.iterationCount = 0
+              }
               draft.retryCount = 0
-              draft.reviewArtifactHash = reviewHash
+              if (reviewHash !== null) {
+                draft.reviewArtifactHash = reviewHash
+              }
               if (artifactDiskPath) {
                 if (artifactKey) draft.artifactDiskPaths[artifactKey] = artifactDiskPath
+              }
+              // Merge artifact_files into reviewArtifactFiles (same dedup as main path)
+              if (args.artifact_files && args.artifact_files.length > 0) {
+                const existing = new Set(draft.reviewArtifactFiles)
+                for (const f of args.artifact_files) {
+                  if (!existing.has(f)) {
+                    draft.reviewArtifactFiles.push(f)
+                  }
+                }
               }
             })
             // Refetch state after update
@@ -2752,9 +2844,15 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             const diskMsg = artifactDiskPath
               ? `\nArtifact updated on disk at \`${artifactDiskPath}\`.`
               : ""
+            const filesMsg = (args.artifact_files?.length)
+              ? `\nArtifact files registered for review: ${args.artifact_files.length} file(s).`
+              : ""
+            const iterMsg = contentChanged
+              ? "Review cycle restarted (iteration count reset to 0). "
+              : `Artifact files updated (review iteration ${updatedState.iterationCount}/${MAX_REVIEW_ITERATIONS} preserved). `
             return (
-              `Artifact re-submitted for ${updatedState.phase} review. The on-disk version has been updated.${diskMsg}\n\n` +
-              `Review cycle restarted (iteration count reset to 0). ` +
+              `Artifact re-submitted for ${updatedState.phase} review. ${artifactDiskPath ? "The on-disk version has been updated." : ""}${diskMsg}${filesMsg}\n\n` +
+              `${iterMsg}` +
               `Now call \`mark_satisfied\` with your criteria evaluation to proceed with the review.`
             )
           }
@@ -2892,14 +2990,29 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
               const artifactKey = PHASE_TO_ARTIFACT[state.phase]
               if (artifactKey) draft.artifactDiskPaths[artifactKey] = artifactDiskPath
             }
+            // Merge agent-provided artifact_files into reviewArtifactFiles.
+            // For INTERFACES/TESTS this is the primary source; for IMPLEMENTATION
+            // these supplement the DAG-accumulated files.
+            if (args.artifact_files && args.artifact_files.length > 0) {
+              const existing = new Set(draft.reviewArtifactFiles)
+              for (const f of args.artifact_files) {
+                if (!existing.has(f)) {
+                  draft.reviewArtifactFiles.push(f)
+                }
+              }
+            }
           })
 
           const diskMsg = artifactDiskPath
             ? `\n\nArtifact written to \`${artifactDiskPath}\` — the user can read it there before approving.`
             : ""
 
+          const filesMsg = (args.artifact_files && args.artifact_files.length > 0)
+            ? `\n\nArtifact files registered for review: ${args.artifact_files.length} file(s).`
+            : ""
+
           const result = processRequestReview(args)
-          return result.responseMessage + diskMsg + "\n\n" + result.phaseInstructions
+          return result.responseMessage + diskMsg + filesMsg + "\n\n" + result.phaseInstructions
         },
       }),
 
@@ -3141,6 +3254,8 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                 draft.retryCount = 0
                 draft.iterationCount = 0
                 draft.userGateMessageReceived = false
+                // Reset artifact file tracking for the new phase
+                draft.reviewArtifactFiles = []
               })
 
               log.info("Cascade auto-advance on approval", { detail: `${state.phase}/USER_GATE → ${nextStep.phase}/REVISE` })
@@ -3237,6 +3352,8 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
               draft.userGateMessageReceived = false
               draft.reviewArtifactHash = null
               draft.latestReviewResults = null
+              // Reset artifact file tracking for the new phase
+              draft.reviewArtifactFiles = []
               if (checkpointResult.success) {
                 draft.lastCheckpointTag = checkpointResult.tag
               }
@@ -3500,6 +3617,10 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
               draft.phaseState = effectivePhaseState
               draft.pendingRevisionSteps = handlerOutcome.pendingRevisionSteps
               draft.revisionBaseline = revisionBaseline
+              // Reset artifact file tracking: revision may reorder DAG tasks or change
+              // which files are produced. The agent re-accumulates via mark_task_complete
+              // as tasks re-complete, and can supplement via request_review.artifact_files.
+              draft.reviewArtifactFiles = []
               if (handlerOutcome.clearEscapePending) draft.escapePending = false
               if (handlerOutcome.newIntentBaseline !== undefined) {
                 draft.intentBaseline = handlerOutcome.newIntentBaseline
@@ -3634,6 +3755,8 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             draft.pendingRevisionSteps = outcome.pendingRevisionSteps
             draft.revisionBaseline = revisionBaseline
             draft.retryCount = 0
+            // Reset artifact file tracking when changing phase (backtrack)
+            draft.reviewArtifactFiles = []
 
             if (effectivePhaseState === "DRAFT") {
               // Backtrack-specific resets

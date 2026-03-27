@@ -67,6 +67,7 @@ function freshState(sessionId: string): WorkflowState {
     parentWorkflow: null,
     childWorkflows: [],
     concurrency: { maxParallelTasks: 1 },
+    reviewArtifactFiles: [],
   }
 }
 
@@ -153,6 +154,17 @@ function migrateState(migrated: Record<string, unknown>): void {
   }
   if (!migrated["concurrency"] || typeof migrated["concurrency"] !== "object") {
     migrated["concurrency"] = { maxParallelTasks: 1 }
+  }
+  // v21 → v22: add reviewArtifactFiles (orchestrator-driven artifact tracking)
+  migrated["reviewArtifactFiles"] ??= []
+  // v22: backfill expectedFiles on implDag nodes (new field, defaults to empty array)
+  const dagNodes = migrated["implDag"]
+  if (Array.isArray(dagNodes)) {
+    for (const node of dagNodes) {
+      if (node && typeof node === "object" && !Array.isArray(node)) {
+        (node as Record<string, unknown>)["expectedFiles"] ??= []
+      }
+    }
   }
   // retryCount is transient — reset on load so the idle handler starts fresh.
   // If the agent was stuck before a restart, it deserves a clean retry budget.

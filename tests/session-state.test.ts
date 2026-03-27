@@ -54,6 +54,7 @@ function makeState(sessionId: string, featureName: string | null, overrides?: Pa
     parentWorkflow: null,
     childWorkflows: [],
     concurrency: { maxParallelTasks: 1 },
+    reviewArtifactFiles: [],
     ...overrides,
   }
 }
@@ -325,7 +326,7 @@ describe("SessionStateStore — invariant validation (G4)", () => {
         d.phase = "IMPLEMENTATION"
         d.phaseState = "DRAFT"
         d.mode = "GREENFIELD"
-        d.implDag = [{ id: "T1", description: "d", dependencies: [], expectedTests: [], estimatedComplexity: "small", status: "delegated" }]
+        d.implDag = [{ id: "T1", description: "d", dependencies: [], expectedTests: [], expectedFiles: [], estimatedComplexity: "small", status: "delegated" }]
         d.childWorkflows = [{ taskId: "T1", featureName: "child", sessionId: "s1", status: "running", delegatedAt: "" }]
       }),
     ).rejects.toThrow(/delegatedAt/)
@@ -340,7 +341,7 @@ describe("SessionStateStore — invariant validation (G4)", () => {
         d.phase = "IMPLEMENTATION"
         d.phaseState = "DRAFT"
         d.mode = "GREENFIELD"
-        d.implDag = [{ id: "T1", description: "task", dependencies: [], expectedTests: [], estimatedComplexity: "small", status: "pending" }]
+        d.implDag = [{ id: "T1", description: "task", dependencies: [], expectedTests: [], expectedFiles: [], estimatedComplexity: "small", status: "pending" }]
         d.childWorkflows = [{ taskId: "T1", featureName: "child", sessionId: "s1", status: "running", delegatedAt: "2026-01-01T00:00:00.000Z" }]
       }),
     ).rejects.toThrow(/childWorkflows.*delegated/)
@@ -696,6 +697,76 @@ describe("SessionStateStore — load", () => {
     expect(loaded?.childWorkflows).toEqual([])
     expect(loaded?.concurrency).toEqual({ maxParallelTasks: 1 })
     expect(loaded?.approvalCount).toBe(1) // preserved from v20
+  })
+
+  it("migrates v21 state (missing reviewArtifactFiles, missing expectedFiles on DAG) to v22", async () => {
+    const dir = join(tmpDir, "v21-feature")
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(
+      join(dir, "workflow-state.json"),
+      JSON.stringify({
+        schemaVersion: 21,
+        sessionId: "v21-session",
+        mode: "GREENFIELD",
+        phase: "IMPLEMENTATION",
+        phaseState: "DRAFT",
+        iterationCount: 0,
+        retryCount: 0,
+        approvedArtifacts: {},
+        conventions: null,
+        fileAllowlist: [],
+        lastCheckpointTag: null,
+        approvalCount: 2,
+        orchestratorSessionId: null,
+        intentBaseline: null,
+        modeDetectionNote: null,
+        discoveryReport: null,
+        implDag: [
+          { id: "T1", description: "Build page", dependencies: [], expectedTests: ["tests/page.test.ts"], expectedFiles: [], estimatedComplexity: "small", status: "complete" },
+          { id: "T2", description: "Build nav", dependencies: ["T1"], expectedTests: [], expectedFiles: [], estimatedComplexity: "medium", status: "pending" },
+        ],
+        phaseApprovalCounts: {},
+        escapePending: false,
+        pendingRevisionSteps: null,
+        currentTaskId: "T2",
+        feedbackHistory: [],
+        userGateMessageReceived: false,
+        reviewArtifactHash: null,
+        latestReviewResults: null,
+        artifactDiskPaths: {},
+        featureName: "v21-feature",
+        revisionBaseline: null,
+        activeAgent: null,
+        taskCompletionInProgress: null,
+        taskReviewCount: 0,
+        pendingFeedback: null,
+        userMessages: [],
+        cachedPriorState: null,
+        priorWorkflowChecked: false,
+        sessionModel: null,
+        parentWorkflow: null,
+        childWorkflows: [],
+        concurrency: { maxParallelTasks: 1 },
+        // Note: no reviewArtifactFiles — v22 field
+        // Note: implDag nodes lack expectedFiles — v22 field
+      }),
+    )
+    const store2 = createSessionStateStore(createFileSystemStateBackend(tmpDir))
+    const result = await store2.load()
+    expect(result.success).toBe(true)
+    const loaded = store2.get("v21-session")
+    expect(loaded).not.toBeNull()
+    expect(loaded?.schemaVersion).toBe(SCHEMA_VERSION)
+    // v22: reviewArtifactFiles backfilled to []
+    expect(loaded?.reviewArtifactFiles).toEqual([])
+    // v22: expectedFiles backfilled on DAG nodes
+    expect(loaded?.implDag).not.toBeNull()
+    expect(loaded?.implDag?.[0]?.expectedFiles).toEqual([])
+    expect(loaded?.implDag?.[1]?.expectedFiles).toEqual([])
+    // Existing fields preserved
+    expect(loaded?.approvalCount).toBe(2)
+    expect(loaded?.currentTaskId).toBe("T2")
+    expect(loaded?.implDag?.[0]?.status).toBe("complete")
   })
 
   it("reports count of successfully loaded sessions", async () => {

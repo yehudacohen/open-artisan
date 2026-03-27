@@ -2,7 +2,7 @@
  * Tests for processRequestReview.
  */
 import { describe, expect, it } from "bun:test"
-import { processRequestReview } from "#plugin/tools/request-review"
+import { processRequestReview } from "#core/tools/request-review"
 
 describe("processRequestReview — response message", () => {
   it("includes the summary in the response message", () => {

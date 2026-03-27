@@ -3,9 +3,9 @@
  * Covers G6: processUserMessage and the new buildUserGateHint export.
  */
 import { describe, expect, it } from "bun:test"
-import { processUserMessage, buildUserGateHint } from "#plugin/hooks/chat-message"
-import type { WorkflowState } from "#plugin/types"
-import { SCHEMA_VERSION } from "#plugin/types"
+import { processUserMessage, buildUserGateHint } from "#core/hooks/chat-message"
+import type { WorkflowState } from "#core/types"
+import { SCHEMA_VERSION } from "#core/types"
 
 function makeState(overrides: Partial<WorkflowState> = {}): WorkflowState {
   return {

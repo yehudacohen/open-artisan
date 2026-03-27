@@ -16,7 +16,8 @@ import { mkdtempSync, mkdirSync, rmSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 
-import { OpenArtisanPlugin, resolveSessionId } from "#plugin/index"
+import { OpenArtisanPlugin } from "#plugin/index"
+import { resolveSessionId } from "#core/utils"
 
 // ---------------------------------------------------------------------------
 // Mock client factory — returns a client whose session.prompt behavior can be

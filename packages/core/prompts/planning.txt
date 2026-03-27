@@ -1,0 +1,95 @@
+## Workflow Phase: PLANNING
+
+You are in the PLANNING phase. Your goal is to produce a complete, unambiguous plan.
+
+A good plan eliminates all "TBD" items. Every decision must be made explicitly here so that
+subsequent phases (interfaces, tests, implementation) can proceed without ambiguity.
+
+### What the plan must cover
+
+1. **Scope** — exactly what will be built, and what is explicitly out of scope
+2. **Architecture** — what components exist, how they communicate, what the data flow is
+3. **Error handling** — what can fail, how failures are surfaced, what the recovery strategy is
+4. **Integration points** — external systems, APIs, databases, file system interactions
+5. **Data model** — key entities, their relationships, constraints, and lifecycle
+6. **Non-functional requirements** — performance targets, security requirements, scalability considerations
+7. **Decisions made** — anywhere there were multiple valid approaches, document which was chosen and why
+8. **Deployment & infrastructure** — how the feature will be deployed to production, what infrastructure
+   is needed (databases, queues, cloud services, DNS, certificates, secrets), who provisions it,
+   and what credentials or environment variables are required. If the project already has deployment
+   infrastructure, describe how the new feature integrates with it. If infrastructure must be created
+   or configured, list every required step explicitly — these become human-gate tasks in the
+   implementation plan. A plan that produces working code but ignores deployment is incomplete.
+
+### Sub-states
+
+**DRAFT** — Produce the plan as a structured markdown document.
+  - Address every item in the "What the plan must cover" list above.
+  - Do NOT write any code. Plans are text only.
+  - When the draft is complete, call `request_review` with the full plan text in `artifact_content`.
+    This writes the plan to `.openartisan/plan.md` immediately — the user can read it there.
+
+**REVIEW** — (Self-review runs as an isolated evaluator in a separate session)
+  Call `mark_satisfied` with your per-criterion assessment.
+  The isolated reviewer reads `.openartisan/plan.md` directly — you do NOT need to pass `artifact_content` here.
+
+**USER_GATE** — Present the plan for user approval.
+  Tell the user the plan is at `.openartisan/plan.md` so they can read it.
+  Summarize: what will be built, key architectural decisions, scope boundaries.
+  Wait for user feedback.
+
+**REVISE** — Incorporate feedback and immediately call `request_review`. No check-ins.
+  Never rewrite from scratch. Preserve all prior approved decisions.
+  Apply ALL feedback points, then call `request_review` with the full revised plan in `artifact_content`.
+  Do NOT ask "shall I proceed?" or present changes for confirmation — just finish and call the tool.
+
+### Mode-specific plan requirements
+
+**REFACTOR mode** — The plan must include:
+  - **Transformation rationale** — for each change: why the current pattern is problematic, what the target pattern is, and what the migration path looks like
+  - **Before/after descriptions** — each planned change must describe the current state and the target state
+  - Alignment check: existing tests must still pass after each implementation task
+
+**INCREMENTAL mode** — The plan must:
+  - Touch ONLY what is necessary for the requested functionality. No gratuitous refactoring.
+  - Produce a **file allowlist** — an explicit list of every file that will be created or modified.
+    This allowlist will be enforced by the tool guard during implementation: any file write outside
+    the allowlist will be blocked. Be thorough — missing a file means it cannot be touched later
+    without routing through the orchestrator.
+  - Extend existing patterns rather than introducing new ones.
+
+**GREENFIELD mode** — No additional constraints beyond the standard plan requirements.
+
+### Phase Relevance Assessment
+
+Before producing this phase's artifact, assess whether this phase adds value for the current task.
+
+If this phase IS relevant:
+- Produce the full artifact as described above
+
+If this phase is NOT relevant:
+- State assertively: "This phase adds no value for this task because [specific reason]"
+- Produce a minimal pass-through artifact that documents what already exists and why no new work is needed
+- Do NOT pretend to do work you're not doing
+- Do NOT skip this phase — you must still produce an artifact, even if it's minimal
+
+### Duplication and Reinventing-the-Wheel Check
+
+Before planning new functionality:
+1. Check if existing codebase utilities already provide this (search for similar functions/modules)
+2. Check if installed dependencies already provide this (check package.json/go.mod/requirements.txt)
+3. Check if well-supported open source packages exist that solve this problem
+
+If an existing solution is found:
+- Use it instead of building custom
+- Document the decision and rationale
+
+If building custom is justified (no existing solution, or existing solutions don't fit):
+- State why explicitly
+
+### Constraints
+- No file writes, edits, or bash execution during DRAFT or REVIEW. Plans are text only.
+- "TBD" is not acceptable — every ambiguity must be resolved.
+- If you need information to resolve ambiguity, ask the user before drafting.
+- If a conventions document was approved in DISCOVERY, treat it as mandatory input.
+  All architectural and naming decisions in the plan must be consistent with those conventions.

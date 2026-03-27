@@ -3,10 +3,10 @@
  * Covers G12: ANALYZE sub-state handling, plus full coverage of all states.
  */
 import { describe, expect, it } from "bun:test"
-import { handleIdle } from "#plugin/hooks/idle-handler"
-import { MAX_IDLE_RETRIES } from "#plugin/constants"
-import type { WorkflowState } from "#plugin/types"
-import { SCHEMA_VERSION } from "#plugin/types"
+import { handleIdle } from "#core/hooks/idle-handler"
+import { MAX_IDLE_RETRIES } from "#core/constants"
+import type { WorkflowState } from "#core/types"
+import { SCHEMA_VERSION } from "#core/types"
 
 function makeState(overrides: Partial<WorkflowState> = {}): WorkflowState {
   return {

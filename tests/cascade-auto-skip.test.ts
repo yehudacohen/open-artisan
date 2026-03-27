@@ -12,11 +12,11 @@
  * - Safety cap prevents infinite loops
  */
 import { describe, expect, it, mock, beforeEach } from "bun:test"
-import { cascadeAutoSkip, type CascadeAutoSkipDeps } from "#plugin/cascade-auto-skip"
-import { createStateMachine } from "#plugin/state-machine"
-import { SCHEMA_VERSION } from "#plugin/types"
-import type { WorkflowState, SessionStateStore, Phase } from "#plugin/types"
-import type { Logger } from "#plugin/logger"
+import { cascadeAutoSkip, type CascadeAutoSkipDeps } from "#core/cascade-auto-skip"
+import { createStateMachine } from "#core/state-machine"
+import { SCHEMA_VERSION } from "#core/types"
+import type { WorkflowState, SessionStateStore, Phase } from "#core/types"
+import type { Logger } from "#core/logger"
 
 // ---------------------------------------------------------------------------
 // Helpers

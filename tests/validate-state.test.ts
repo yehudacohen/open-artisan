@@ -3,9 +3,9 @@
  * Also tests resolveSessionId — the session ID resolver (G19).
  */
 import { describe, expect, it } from "bun:test"
-import { validateWorkflowState, SCHEMA_VERSION } from "#plugin/types"
-import type { WorkflowState } from "#plugin/types"
-import { resolveSessionId } from "#plugin/utils"
+import { validateWorkflowState, SCHEMA_VERSION } from "#core/types"
+import type { WorkflowState } from "#core/types"
+import { resolveSessionId } from "#core/utils"
 
 function makeValidState(overrides: Partial<WorkflowState> = {}): WorkflowState {
   return {
@@ -39,6 +39,12 @@ function makeValidState(overrides: Partial<WorkflowState> = {}): WorkflowState {
     taskCompletionInProgress: null,
     taskReviewCount: 0,
     pendingFeedback: null,
+    userMessages: [],
+    cachedPriorState: null,
+    priorWorkflowChecked: false,
+    sessionModel: null,
+    reviewArtifactHash: null,
+    latestReviewResults: null,
     ...overrides,
   }
 }

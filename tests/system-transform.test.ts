@@ -3,9 +3,9 @@
  * Covers G11: ANALYZE sub-state now correctly mentions mark_analyze_complete.
  */
 import { describe, expect, it } from "bun:test"
-import { buildWorkflowSystemPrompt } from "#plugin/hooks/system-transform"
-import type { WorkflowState } from "#plugin/types"
-import { SCHEMA_VERSION } from "#plugin/types"
+import { buildWorkflowSystemPrompt } from "#core/hooks/system-transform"
+import type { WorkflowState } from "#core/types"
+import { SCHEMA_VERSION } from "#core/types"
 
 function makeState(overrides: Partial<WorkflowState> = {}): WorkflowState {
   return {

@@ -3,7 +3,8 @@
   "version": "0.1.0",
   "type": "module",
   "imports": {
-    "#plugin/*": "./.opencode/plugins/open-artisan/*"
+    "#plugin/*": "./.opencode/plugins/open-artisan/*",
+    "#core/*": "./packages/core/*"
   },
   "scripts": {
     "test": "bun test",

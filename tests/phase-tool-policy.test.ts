@@ -3,8 +3,8 @@
  */
 import { describe, expect, it } from "bun:test"
 
-import { getPhaseToolPolicy } from "#plugin/hooks/tool-guard"
-import type { PhaseToolPolicy } from "#plugin/types"
+import { getPhaseToolPolicy } from "#core/hooks/tool-guard"
+import type { PhaseToolPolicy } from "#core/types"
 
 describe("Tool policy — DISCOVERY/SCAN and DISCOVERY/ANALYZE are strictly read-only", () => {
   for (const ps of ["SCAN", "ANALYZE"] as const) {

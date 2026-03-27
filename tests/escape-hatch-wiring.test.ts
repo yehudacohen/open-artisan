@@ -12,11 +12,11 @@
  *   low-level route logic (covered by orchestrator.test.ts).
  */
 import { describe, expect, it, mock, beforeEach } from "bun:test"
-import { createOrchestrator } from "#plugin/orchestrator/route"
-import { createArtifactGraph } from "#plugin/artifacts"
-import { createStateMachine } from "#plugin/state-machine"
-import { buildEscapeHatchPresentation, isEscapeHatchAbort } from "#plugin/orchestrator/escape-hatch"
-import { handleCascade } from "#plugin/tools/submit-feedback-handlers"
+import { createOrchestrator } from "#core/orchestrator/route"
+import { createArtifactGraph } from "#core/artifacts"
+import { createStateMachine } from "#core/state-machine"
+import { buildEscapeHatchPresentation, isEscapeHatchAbort } from "#core/orchestrator/escape-hatch"
+import { handleCascade } from "#core/tools/submit-feedback-handlers"
 import type {
   OrchestratorAssessResult,
   OrchestratorDivergeResult,
@@ -24,8 +24,8 @@ import type {
   RevisionStep,
   OrchestratorPlanResult,
   WorkflowState,
-} from "#plugin/types"
-import { SCHEMA_VERSION } from "#plugin/types"
+} from "#core/types"
+import { SCHEMA_VERSION } from "#core/types"
 
 // ---------------------------------------------------------------------------
 // Lightweight orchestrator factory driven by mocked assess/diverge

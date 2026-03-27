@@ -7,11 +7,13 @@
     "noUncheckedIndexedAccess": true,
     "exactOptionalPropertyTypes": true,
     "paths": {
-      "#plugin/*": ["./.opencode/plugins/open-artisan/*"]
+      "#plugin/*": ["./.opencode/plugins/open-artisan/*"],
+      "#core/*": ["./packages/core/*"]
     }
   },
   "include": [
     ".opencode/plugins/open-artisan/**/*.ts",
+    "packages/core/**/*.ts",
     "tests/**/*.ts"
   ]
 }

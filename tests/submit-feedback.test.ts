@@ -2,7 +2,7 @@
  * Tests for processSubmitFeedback.
  */
 import { describe, expect, it } from "bun:test"
-import { processSubmitFeedback } from "#plugin/tools/submit-feedback"
+import { processSubmitFeedback } from "#core/tools/submit-feedback"
 
 describe("processSubmitFeedback — approve path", () => {
   it("returns feedbackType='approve'", () => {

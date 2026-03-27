@@ -6,9 +6,9 @@ import { join } from "node:path"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 
-import { createSessionStateStore } from "#plugin/session-state"
-import { SCHEMA_VERSION } from "#plugin/types"
-import type { SessionStateStore, WorkflowState } from "#plugin/types"
+import { createSessionStateStore } from "#core/session-state"
+import { SCHEMA_VERSION } from "#core/types"
+import type { SessionStateStore, WorkflowState } from "#core/types"
 
 let store: SessionStateStore
 let tmpDir: string

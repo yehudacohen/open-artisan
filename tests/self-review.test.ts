@@ -12,73 +12,49 @@
  * - Severity defaults: unknown severity treated as "blocking"
  */
 import { describe, expect, it, mock } from "bun:test"
-import { dispatchSelfReview, dispatchRebuttal, buildRebuttalPrompt } from "#plugin/self-review"
-import type { SelfReviewRequest } from "#plugin/self-review"
-import type { RebuttalRequest, CriterionResult } from "#plugin/types"
+import { dispatchSelfReview, dispatchRebuttal, buildRebuttalPrompt } from "#core/self-review"
+import type { SelfReviewRequest } from "#core/self-review"
+import type { SubagentDispatcher, SubagentSession } from "#core/subagent-dispatcher"
+import type { RebuttalRequest, CriterionResult } from "#core/types"
 
 // ---------------------------------------------------------------------------
-// Mock client factory
+// Mock dispatcher factory
 // ---------------------------------------------------------------------------
 
-function makeClient(responseText: string) {
+function makeDispatcher(responseText: string): SubagentDispatcher & { _promptMock: ReturnType<typeof mock>; _destroyMock: ReturnType<typeof mock>; _createMock: ReturnType<typeof mock> } {
+  const promptMock = mock(async () => responseText)
+  const destroyMock = mock(async () => {})
+  const createMock = mock(async () => ({
+    id: "mock-review-session",
+    prompt: promptMock,
+    destroy: destroyMock,
+  }))
   return {
-    session: {
-      create: mock(async () => ({ data: { id: "mock-review-session" } })),
-      prompt: mock(async () => ({
-        data: { parts: [{ type: "text", text: responseText }] },
-      })),
-      delete: mock(async () => ({ data: true })),
-    },
+    createSession: createMock,
+    _promptMock: promptMock,
+    _destroyMock: destroyMock,
+    _createMock: createMock,
   }
 }
 
-function makeClientWithTextShape(responseText: string) {
-  // v2: text part in data.parts array (same as primary shape)
+function makeDispatcherThrows(): SubagentDispatcher & { _destroyMock: ReturnType<typeof mock> } {
+  const destroyMock = mock(async () => {})
+  const promptMock = mock(async () => { throw new Error("Network error during review") })
   return {
-    session: {
-      create: mock(async () => ({ data: { id: "mock-review-session" } })),
-      prompt: mock(async () => ({
-        data: { parts: [{ type: "text", text: responseText }] },
-      })),
-      delete: mock(async () => ({ data: true })),
-    },
+    createSession: mock(async () => ({
+      id: "mock-review-session",
+      prompt: promptMock,
+      destroy: destroyMock,
+    })),
+    _destroyMock: destroyMock,
   }
 }
 
-function makeClientWithContentShape(responseText: string) {
-  // v2: text part in data.parts array (same as primary shape)
+function makeDispatcherCreateThrows(): SubagentDispatcher {
   return {
-    session: {
-      create: mock(async () => ({ data: { id: "mock-review-session" } })),
-      prompt: mock(async () => ({
-        data: { parts: [{ type: "text", text: responseText }] },
-      })),
-      delete: mock(async () => ({ data: true })),
-    },
-  }
-}
-
-function makeClientThrows() {
-  return {
-    session: {
-      create: mock(async () => ({ data: { id: "mock-review-session" } })),
-      prompt: mock(async () => {
-        throw new Error("Network error during review")
-      }),
-      delete: mock(async () => ({ data: true })),
-    },
-  }
-}
-
-function makeClientCreateThrows() {
-  return {
-    session: {
-      create: mock(async () => {
-        throw new Error("Cannot create review session")
-      }),
-      prompt: mock(async () => ({ data: { parts: [] } })),
-      delete: mock(async () => ({ data: true })),
-    },
+    createSession: mock(async () => {
+      throw new Error("Cannot create review session")
+    }),
   }
 }
 
@@ -113,8 +89,8 @@ function makeReviewResponse(overrides?: {
 
 describe("dispatchSelfReview — all criteria met", () => {
   it("returns success=true with satisfied=true when all blocking criteria pass", async () => {
-    const client = makeClient(makeReviewResponse())
-    const result = await dispatchSelfReview(client, BASE_REQ)
+    const dispatcher = makeDispatcher(makeReviewResponse())
+    const result = await dispatchSelfReview(dispatcher, BASE_REQ)
 
     expect(result.success).toBe(true)
     if (!result.success) return
@@ -123,8 +99,8 @@ describe("dispatchSelfReview — all criteria met", () => {
   })
 
   it("reports per-criterion results with evidence and severity", async () => {
-    const client = makeClient(makeReviewResponse())
-    const result = await dispatchSelfReview(client, BASE_REQ)
+    const dispatcher = makeDispatcher(makeReviewResponse())
+    const result = await dispatchSelfReview(dispatcher, BASE_REQ)
 
     if (!result.success) return
     const first = result.criteriaResults[0]!
@@ -135,11 +111,11 @@ describe("dispatchSelfReview — all criteria met", () => {
   })
 
   it("uses ephemeral session: create() and delete() each called once", async () => {
-    const client = makeClient(makeReviewResponse())
-    await dispatchSelfReview(client, BASE_REQ)
+    const dispatcher = makeDispatcher(makeReviewResponse())
+    await dispatchSelfReview(dispatcher, BASE_REQ)
 
-    expect((client.session.create as ReturnType<typeof mock>).mock.calls).toHaveLength(1)
-    expect((client.session.delete as ReturnType<typeof mock>).mock.calls).toHaveLength(1)
+    expect(dispatcher._createMock.mock.calls).toHaveLength(1)
+    expect(dispatcher._destroyMock.mock.calls).toHaveLength(1)
   })
 })
 
@@ -156,8 +132,8 @@ describe("dispatchSelfReview — blocking criterion fails", () => {
         { criterion: "Scope boundaries explicit", met: true, evidence: "plan.md:22 present", severity: "blocking" },
       ],
     })
-    const client = makeClient(resp)
-    const result = await dispatchSelfReview(client, BASE_REQ)
+    const dispatcher = makeDispatcher(resp)
+    const result = await dispatchSelfReview(dispatcher, BASE_REQ)
 
     expect(result.success).toBe(true)
     if (!result.success) return
@@ -181,8 +157,8 @@ describe("dispatchSelfReview — LLM inconsistency guard", () => {
         { criterion: "Scope explicit", met: true, evidence: "present", severity: "blocking" },
       ],
     })
-    const client = makeClient(resp)
-    const result = await dispatchSelfReview(client, BASE_REQ)
+    const dispatcher = makeDispatcher(resp)
+    const result = await dispatchSelfReview(dispatcher, BASE_REQ)
 
     expect(result.success).toBe(true)
     if (!result.success) return
@@ -198,8 +174,8 @@ describe("dispatchSelfReview — LLM inconsistency guard", () => {
         { criterion: "Scope explicit", met: true, evidence: "section exists", severity: "blocking" },
       ],
     })
-    const client = makeClient(resp)
-    const result = await dispatchSelfReview(client, BASE_REQ)
+    const dispatcher = makeDispatcher(resp)
+    const result = await dispatchSelfReview(dispatcher, BASE_REQ)
 
     expect(result.success).toBe(true)
     if (!result.success) return
@@ -220,8 +196,8 @@ describe("dispatchSelfReview — suggestion criteria are non-blocking", () => {
         { criterion: "Rationale documented", met: false, evidence: "no rationale section", severity: "suggestion" },
       ],
     })
-    const client = makeClient(resp)
-    const result = await dispatchSelfReview(client, BASE_REQ)
+    const dispatcher = makeDispatcher(resp)
+    const result = await dispatchSelfReview(dispatcher, BASE_REQ)
 
     expect(result.success).toBe(true)
     if (!result.success) return
@@ -245,8 +221,8 @@ describe("dispatchSelfReview — unknown severity defaults to blocking", () => {
         { criterion: "A criterion", met: false, evidence: "no evidence", severity: "unknown-value" },
       ],
     })
-    const client = makeClient(resp)
-    const result = await dispatchSelfReview(client, BASE_REQ)
+    const dispatcher = makeDispatcher(resp)
+    const result = await dispatchSelfReview(dispatcher, BASE_REQ)
 
     expect(result.success).toBe(true)
     if (!result.success) return
@@ -262,8 +238,8 @@ describe("dispatchSelfReview — unknown severity defaults to blocking", () => {
 
 describe("dispatchSelfReview — network failure", () => {
   it("returns SelfReviewError when prompt throws", async () => {
-    const client = makeClientThrows()
-    const result = await dispatchSelfReview(client, BASE_REQ)
+    const dispatcher = makeDispatcherThrows()
+    const result = await dispatchSelfReview(dispatcher, BASE_REQ)
 
     expect(result.success).toBe(false)
     if (result.success) return
@@ -271,8 +247,8 @@ describe("dispatchSelfReview — network failure", () => {
   })
 
   it("returns SelfReviewError when session.create throws", async () => {
-    const client = makeClientCreateThrows()
-    const result = await dispatchSelfReview(client, BASE_REQ)
+    const dispatcher = makeDispatcherCreateThrows()
+    const result = await dispatchSelfReview(dispatcher, BASE_REQ)
 
     expect(result.success).toBe(false)
     if (result.success) return
@@ -280,10 +256,10 @@ describe("dispatchSelfReview — network failure", () => {
   })
 
   it("still calls session.delete even when prompt throws (finally block)", async () => {
-    const client = makeClientThrows()
-    await dispatchSelfReview(client, BASE_REQ)
+    const dispatcher = makeDispatcherThrows()
+    await dispatchSelfReview(dispatcher, BASE_REQ)
     // delete is called in finally — even after a prompt failure
-    expect((client.session.delete as ReturnType<typeof mock>).mock.calls).toHaveLength(1)
+    expect(dispatcher._destroyMock.mock.calls).toHaveLength(1)
   })
 })
 
@@ -293,22 +269,22 @@ describe("dispatchSelfReview — network failure", () => {
 
 describe("dispatchSelfReview — response shape variants", () => {
   it("extracts text from parts array (primary shape)", async () => {
-    const client = makeClient(makeReviewResponse())
-    const result = await dispatchSelfReview(client, BASE_REQ)
+    const dispatcher = makeDispatcher(makeReviewResponse())
+    const result = await dispatchSelfReview(dispatcher, BASE_REQ)
     expect(result.success).toBe(true)
   })
 
   it("extracts text from flat 'text' field", async () => {
-    const client = makeClientWithTextShape(makeReviewResponse())
-    const result = await dispatchSelfReview(client, BASE_REQ)
+    const dispatcher = makeDispatcher(makeReviewResponse())
+    const result = await dispatchSelfReview(dispatcher, BASE_REQ)
     expect(result.success).toBe(true)
     if (!result.success) return
     expect(result.satisfied).toBe(true)
   })
 
   it("extracts text from flat 'content' field", async () => {
-    const client = makeClientWithContentShape(makeReviewResponse())
-    const result = await dispatchSelfReview(client, BASE_REQ)
+    const dispatcher = makeDispatcher(makeReviewResponse())
+    const result = await dispatchSelfReview(dispatcher, BASE_REQ)
     expect(result.success).toBe(true)
     if (!result.success) return
     expect(result.satisfied).toBe(true)
@@ -321,48 +297,46 @@ describe("dispatchSelfReview — response shape variants", () => {
 
 describe("dispatchSelfReview — prompt construction", () => {
   /** Helper to extract prompt text from the v1-style mock call */
-  function getPromptText(client: ReturnType<typeof makeClient>): string {
-    const promptCall = (client.session.prompt as ReturnType<typeof mock>).mock.calls[0]
-    const arg = (promptCall as Array<unknown>)[0] as { path?: { id: string }; body?: { parts: Array<{ text: string }> } }
-    return arg?.body?.parts?.[0]?.text ?? ""
+  function getPromptText(dispatcher: ReturnType<typeof makeDispatcher>): string {
+    const promptCall = dispatcher._promptMock.mock.calls[0]
+    // prompt() now receives a plain string (not SDK envelope)
+    return (promptCall as Array<unknown>)[0] as string ?? ""
   }
 
   it("includes phase name in the prompt sent to the reviewer session", async () => {
-    const client = makeClient(makeReviewResponse())
-    await dispatchSelfReview(client, { ...BASE_REQ, phase: "INTERFACES" })
-    expect(getPromptText(client)).toContain("INTERFACES")
+    const dispatcher = makeDispatcher(makeReviewResponse())
+    await dispatchSelfReview(dispatcher, { ...BASE_REQ, phase: "INTERFACES" })
+    expect(getPromptText(dispatcher)).toContain("INTERFACES")
   })
 
   it("includes artifact paths in the prompt when provided", async () => {
-    const client = makeClient(makeReviewResponse())
-    await dispatchSelfReview(client, { ...BASE_REQ, artifactPaths: ["/workspace/interfaces.ts"] })
-    expect(getPromptText(client)).toContain("/workspace/interfaces.ts")
+    const dispatcher = makeDispatcher(makeReviewResponse())
+    await dispatchSelfReview(dispatcher, { ...BASE_REQ, artifactPaths: ["/workspace/interfaces.ts"] })
+    expect(getPromptText(dispatcher)).toContain("/workspace/interfaces.ts")
   })
 
   it("includes criteria text in the prompt", async () => {
     const criteria = "1. Must have tests\n2. Must have docs"
-    const client = makeClient(makeReviewResponse())
-    await dispatchSelfReview(client, { ...BASE_REQ, criteriaText: criteria })
-    expect(getPromptText(client)).toContain("Must have tests")
+    const dispatcher = makeDispatcher(makeReviewResponse())
+    await dispatchSelfReview(dispatcher, { ...BASE_REQ, criteriaText: criteria })
+    expect(getPromptText(dispatcher)).toContain("Must have tests")
   })
 
   it("includes upstream summary in the prompt when provided", async () => {
-    const client = makeClient(makeReviewResponse())
-    await dispatchSelfReview(client, { ...BASE_REQ, upstreamSummary: "Conventions: use tabs" })
-    expect(getPromptText(client)).toContain("use tabs")
+    const dispatcher = makeDispatcher(makeReviewResponse())
+    await dispatchSelfReview(dispatcher, { ...BASE_REQ, upstreamSummary: "Conventions: use tabs" })
+    expect(getPromptText(dispatcher)).toContain("use tabs")
   })
 
   it("uses v1 SDK path/body style in prompt() call", async () => {
-    const client = makeClient(makeReviewResponse())
-    await dispatchSelfReview(client, BASE_REQ)
+    const dispatcher = makeDispatcher(makeReviewResponse())
+    await dispatchSelfReview(dispatcher, BASE_REQ)
 
-    const promptCall = (client.session.prompt as ReturnType<typeof mock>).mock.calls[0]
-    const arg = (promptCall as Array<unknown>)[0] as Record<string, unknown>
-    // v1 SDK: path.id, body.parts — no top-level sessionID, parts, or agent
-    expect((arg["path"] as any)?.id).toBe("mock-review-session")
-    expect(Array.isArray((arg["body"] as any)?.parts)).toBe(true)
-    expect(arg["agent"]).toBeUndefined()
-    expect(arg["sessionID"]).toBeUndefined()
+    // Verify the dispatcher was called with a string prompt
+    expect(dispatcher._promptMock.mock.calls).toHaveLength(1)
+    const promptArg = dispatcher._promptMock.mock.calls[0]?.[0]
+    expect(typeof promptArg).toBe("string")
+    expect((promptArg as string).length).toBeGreaterThan(0)
   })
 })
 
@@ -373,8 +347,8 @@ describe("dispatchSelfReview — prompt construction", () => {
 describe("dispatchSelfReview — empty criteria list", () => {
   it("returns satisfied=true when criteria_results is empty (nothing to fail)", async () => {
     const resp = JSON.stringify({ satisfied: true, criteria_results: [] })
-    const client = makeClient(resp)
-    const result = await dispatchSelfReview(client, BASE_REQ)
+    const dispatcher = makeDispatcher(resp)
+    const result = await dispatchSelfReview(dispatcher, BASE_REQ)
 
     expect(result.success).toBe(true)
     if (!result.success) return
@@ -388,28 +362,15 @@ describe("dispatchSelfReview — empty criteria list", () => {
 // ---------------------------------------------------------------------------
 
 describe("dispatchSelfReview — timeout", () => {
-  it("returns SelfReviewError when prompt hangs (simulated by never-resolving promise)", async () => {
-    const client = {
-      session: {
-        create: mock(async () => ({ data: { id: "mock-review-session" } })),
-        prompt: mock(() => new Promise<never>(() => { /* hangs forever */ })),
-        delete: mock(async () => ({ data: true })),
-      },
-    }
-    // Use a very short timeout via the SELF_REVIEW_TIMEOUT_MS constant.
-    // We cannot override the module constant directly, so we verify the timeout
-    // path is reachable by confirming withTimeout is wired: if the call ever
-    // resolved it would fail the test; if it rejects with the timeout error we pass.
-    // Since the constant is 120_000ms we instead test via a direct withTimeout call
-    // in the utils test. Here we just verify that a network error (throw) is handled.
-    const throwsClient = {
-      session: {
-        create: mock(async () => ({ data: { id: "session" } })),
+  it("returns SelfReviewError when prompt throws timeout error", async () => {
+    const dispatcher: SubagentDispatcher = {
+      createSession: mock(async () => ({
+        id: "timeout-session",
         prompt: mock(async () => { throw new Error("timeout: self-review timed out after 120000ms") }),
-        delete: mock(async () => ({ data: true })),
-      },
+        destroy: mock(async () => {}),
+      })),
     }
-    const result = await dispatchSelfReview(throwsClient, BASE_REQ)
+    const result = await dispatchSelfReview(dispatcher, BASE_REQ)
     expect(result.success).toBe(false)
     if (result.success) return
     expect(result.error).toContain("timeout")
@@ -423,20 +384,15 @@ describe("dispatchSelfReview — timeout", () => {
 describe("dispatchSelfReview — artifactContent for in-memory phases", () => {
   it("includes artifact content in prompt when artifactPaths is empty", async () => {
     const capturedPrompts: string[] = []
-    const client = {
-      session: {
-        create: mock(async () => ({ data: { id: "content-session" } })),
-        prompt: mock(async (opts: { path?: { id: string }; body?: { parts: Array<{ text: string }> } }) => {
-          capturedPrompts.push(opts.body!.parts[0]!.text)
-          return {
-            data: { parts: [{ type: "text", text: makeReviewResponse() }] },
-          }
-        }),
-        delete: mock(async () => ({ data: true })),
-      },
+    const capturingDispatcher: SubagentDispatcher = {
+      createSession: mock(async () => ({
+        id: "content-session",
+        prompt: mock(async (text: string) => { capturedPrompts.push(text); return makeReviewResponse() }),
+        destroy: mock(async () => {}),
+      })),
     }
 
-    await dispatchSelfReview(client, {
+    await dispatchSelfReview(capturingDispatcher, {
       phase: "PLANNING",
       mode: "GREENFIELD",
       artifactPaths: [],
@@ -452,20 +408,15 @@ describe("dispatchSelfReview — artifactContent for in-memory phases", () => {
 
   it("uses file paths when provided, even if artifactContent is also set", async () => {
     const capturedPrompts: string[] = []
-    const client = {
-      session: {
-        create: mock(async () => ({ data: { id: "files-session" } })),
-        prompt: mock(async (opts: { path?: { id: string }; body?: { parts: Array<{ text: string }> } }) => {
-          capturedPrompts.push(opts.body!.parts[0]!.text)
-          return {
-            data: { parts: [{ type: "text", text: makeReviewResponse() }] },
-          }
-        }),
-        delete: mock(async () => ({ data: true })),
-      },
+    const capturingDispatcher: SubagentDispatcher = {
+      createSession: mock(async () => ({
+        id: "files-session",
+        prompt: mock(async (text: string) => { capturedPrompts.push(text); return makeReviewResponse() }),
+        destroy: mock(async () => {}),
+      })),
     }
 
-    await dispatchSelfReview(client, {
+    await dispatchSelfReview(capturingDispatcher, {
       phase: "INTERFACES",
       mode: "GREENFIELD",
       artifactPaths: ["/workspace/src/types.ts"],
@@ -479,20 +430,15 @@ describe("dispatchSelfReview — artifactContent for in-memory phases", () => {
 
   it("shows graceful fallback when no paths and no content", async () => {
     const capturedPrompts: string[] = []
-    const client = {
-      session: {
-        create: mock(async () => ({ data: { id: "empty-session" } })),
-        prompt: mock(async (opts: { path?: { id: string }; body?: { parts: Array<{ text: string }> } }) => {
-          capturedPrompts.push(opts.body!.parts[0]!.text)
-          return {
-            data: { parts: [{ type: "text", text: makeReviewResponse() }] },
-          }
-        }),
-        delete: mock(async () => ({ data: true })),
-      },
+    const capturingDispatcher: SubagentDispatcher = {
+      createSession: mock(async () => ({
+        id: "empty-session",
+        prompt: mock(async (text: string) => { capturedPrompts.push(text); return makeReviewResponse() }),
+        destroy: mock(async () => {}),
+      })),
     }
 
-    await dispatchSelfReview(client, {
+    await dispatchSelfReview(capturingDispatcher, {
       phase: "PLANNING",
       mode: "GREENFIELD",
       artifactPaths: [],
@@ -581,8 +527,8 @@ describe("dispatchRebuttal — reviewer concedes", () => {
         },
       ],
     })
-    const client = makeClient(responseText)
-    const result = await dispatchRebuttal(client, BASE_REBUTTAL_REQ)
+    const dispatcher = makeDispatcher(responseText)
+    const result = await dispatchRebuttal(dispatcher, BASE_REBUTTAL_REQ)
 
     expect(result.success).toBe(true)
     if (!result.success) return
@@ -607,8 +553,8 @@ describe("dispatchRebuttal — reviewer holds firm", () => {
         },
       ],
     })
-    const client = makeClient(responseText)
-    const result = await dispatchRebuttal(client, BASE_REBUTTAL_REQ)
+    const dispatcher = makeDispatcher(responseText)
+    const result = await dispatchRebuttal(dispatcher, BASE_REBUTTAL_REQ)
 
     expect(result.success).toBe(true)
     if (!result.success) return
@@ -637,8 +583,8 @@ describe("dispatchRebuttal — multiple disputed criteria", () => {
         { criterion: "[Q] Op excellence — retry", met: false, evidence: "rejected: plan says test retries", severity: "blocking", score: 7 },
       ],
     })
-    const client = makeClient(responseText)
-    const result = await dispatchRebuttal(client, req)
+    const dispatcher = makeDispatcher(responseText)
+    const result = await dispatchRebuttal(dispatcher, req)
 
     expect(result.success).toBe(true)
     if (!result.success) return
@@ -650,8 +596,8 @@ describe("dispatchRebuttal — multiple disputed criteria", () => {
 
 describe("dispatchRebuttal — error handling", () => {
   it("returns RebuttalError on network failure", async () => {
-    const client = makeClientThrows()
-    const result = await dispatchRebuttal(client, BASE_REBUTTAL_REQ)
+    const dispatcher = makeDispatcherThrows()
+    const result = await dispatchRebuttal(dispatcher, BASE_REBUTTAL_REQ)
 
     expect(result.success).toBe(false)
     if (result.success) return
@@ -659,8 +605,8 @@ describe("dispatchRebuttal — error handling", () => {
   })
 
   it("returns RebuttalError on session creation failure", async () => {
-    const client = makeClientCreateThrows()
-    const result = await dispatchRebuttal(client, BASE_REBUTTAL_REQ)
+    const dispatcher = makeDispatcherCreateThrows()
+    const result = await dispatchRebuttal(dispatcher, BASE_REBUTTAL_REQ)
 
     expect(result.success).toBe(false)
     if (result.success) return
@@ -675,14 +621,14 @@ describe("dispatchRebuttal — session lifecycle", () => {
         { criterion: "[Q] Op ex", met: true, evidence: "ok", severity: "blocking", score: 9 },
       ],
     })
-    const client = makeClient(responseText)
-    await dispatchRebuttal(client, { ...BASE_REBUTTAL_REQ, featureName: "cloud-cost-platform" })
+    const dispatcher = makeDispatcher(responseText)
+    await dispatchRebuttal(dispatcher, { ...BASE_REBUTTAL_REQ, featureName: "cloud-cost-platform" })
 
-    const createCall = (client.session.create as ReturnType<typeof mock>).mock.calls[0]
-    const createArg = (createCall as Array<unknown>)[0] as { body: { title: string } }
-    expect(createArg.body.title).toContain("Rebuttal")
-    expect(createArg.body.title).toContain("TESTS")
-    expect(createArg.body.title).toContain("cloud-cost-platform")
+    const createCall = dispatcher._createMock.mock.calls[0]
+    const createArg = (createCall as Array<unknown>)[0] as { title: string }
+    expect(createArg.title).toContain("Rebuttal")
+    expect(createArg.title).toContain("TESTS")
+    expect(createArg.title).toContain("cloud-cost-platform")
   })
 
   it("cleans up session via delete() even on success", async () => {
@@ -691,10 +637,10 @@ describe("dispatchRebuttal — session lifecycle", () => {
         { criterion: "[Q] Op ex", met: true, evidence: "ok", severity: "blocking", score: 9 },
       ],
     })
-    const client = makeClient(responseText)
-    await dispatchRebuttal(client, BASE_REBUTTAL_REQ)
+    const dispatcher = makeDispatcher(responseText)
+    await dispatchRebuttal(dispatcher, BASE_REBUTTAL_REQ)
 
-    expect((client.session.delete as ReturnType<typeof mock>).mock.calls).toHaveLength(1)
+    expect(dispatcher._destroyMock.mock.calls).toHaveLength(1)
   })
 })
 
@@ -711,8 +657,8 @@ describe("dispatchSelfReview — design-invariant criteria", () => {
         { criterion: "Code compiles", met: true, evidence: "tsc clean", severity: "blocking" },
       ],
     })
-    const client = makeClient(resp)
-    const result = await dispatchSelfReview(client, BASE_REQ)
+    const dispatcher = makeDispatcher(resp)
+    const result = await dispatchSelfReview(dispatcher, BASE_REQ)
 
     expect(result.success).toBe(true)
     if (!result.success) return
@@ -729,8 +675,8 @@ describe("dispatchSelfReview — design-invariant criteria", () => {
         { criterion: "Code compiles", met: true, evidence: "tsc clean", severity: "blocking" },
       ],
     })
-    const client = makeClient(resp)
-    const result = await dispatchSelfReview(client, BASE_REQ)
+    const dispatcher = makeDispatcher(resp)
+    const result = await dispatchSelfReview(dispatcher, BASE_REQ)
 
     expect(result.success).toBe(true)
     if (!result.success) return
@@ -749,8 +695,8 @@ describe("dispatchSelfReview — design-invariant criteria", () => {
         { criterion: "Code compiles", met: true, evidence: "tsc clean", severity: "blocking" },
       ],
     })
-    const client = makeClient(resp)
-    const result = await dispatchSelfReview(client, BASE_REQ)
+    const dispatcher = makeDispatcher(resp)
+    const result = await dispatchSelfReview(dispatcher, BASE_REQ)
 
     expect(result.success).toBe(true)
     if (!result.success) return
@@ -769,8 +715,8 @@ describe("dispatchSelfReview — design-invariant criteria", () => {
         { criterion: "Code compiles", met: true, evidence: "tsc clean", severity: "blocking" },
       ],
     })
-    const client = makeClient(resp)
-    const result = await dispatchSelfReview(client, BASE_REQ)
+    const dispatcher = makeDispatcher(resp)
+    const result = await dispatchSelfReview(dispatcher, BASE_REQ)
 
     expect(result.success).toBe(true)
     if (!result.success) return

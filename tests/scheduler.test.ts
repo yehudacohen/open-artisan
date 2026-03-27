@@ -11,14 +11,14 @@
  * - Task prompt includes task ID and description
  */
 import { describe, expect, it } from "bun:test"
-import { createImplDAG } from "#plugin/dag"
+import { createImplDAG } from "#core/dag"
 import {
   nextSchedulerDecision,
   markTaskComplete,
   markTaskInFlight,
   markTaskAborted,
-} from "#plugin/scheduler"
-import type { TaskNode } from "#plugin/dag"
+} from "#core/scheduler"
+import type { TaskNode } from "#core/dag"
 
 // ---------------------------------------------------------------------------
 // Fixtures

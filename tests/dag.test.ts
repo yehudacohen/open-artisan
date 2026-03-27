@@ -8,8 +8,8 @@
  * - getDependents(): transitive dependent lookup
  */
 import { describe, expect, it } from "bun:test"
-import { createImplDAG } from "#plugin/dag"
-import type { TaskNode } from "#plugin/dag"
+import { createImplDAG } from "#core/dag"
+import type { TaskNode } from "#core/dag"
 
 // ---------------------------------------------------------------------------
 // Fixtures

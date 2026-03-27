@@ -16,7 +16,8 @@ import { tmpdir } from "node:os"
 // which is a runtime-provided package. We rely on the tsconfig path mapping
 // set up for tests. The `tool` and `Plugin` imports inside index.ts are
 // resolved via the test shim at #opencode-ai/plugin.
-import { OpenArtisanPlugin, WORKFLOW_TOOL_NAMES, resolveSessionId } from "#plugin/index"
+import { OpenArtisanPlugin, WORKFLOW_TOOL_NAMES } from "#plugin/index"
+import { resolveSessionId } from "#core/utils"
 
 // ---------------------------------------------------------------------------
 // Mock client factory
@@ -128,12 +129,14 @@ describe("Plugin shape — returned object has all required keys", () => {
     expect(tools.submit_feedback).toBeDefined()
   })
 
-  it("WORKFLOW_TOOL_NAMES contains all 8 tool names", () => {
-    expect(WORKFLOW_TOOL_NAMES.size).toBe(8)
+  it("WORKFLOW_TOOL_NAMES contains all 10 tool names", () => {
+    expect(WORKFLOW_TOOL_NAMES.size).toBe(10)
+    expect(WORKFLOW_TOOL_NAMES.has("check_prior_workflow")).toBe(true)
     expect(WORKFLOW_TOOL_NAMES.has("select_mode")).toBe(true)
     expect(WORKFLOW_TOOL_NAMES.has("mark_task_complete")).toBe(true)
     expect(WORKFLOW_TOOL_NAMES.has("submit_feedback")).toBe(true)
     expect(WORKFLOW_TOOL_NAMES.has("resolve_human_gate")).toBe(true)
+    expect(WORKFLOW_TOOL_NAMES.has("propose_backtrack")).toBe(true)
   })
 })
 

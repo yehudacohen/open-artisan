@@ -4,9 +4,9 @@
  */
 import { describe, expect, it, mock, beforeEach } from "bun:test"
 
-import { createOrchestrator } from "#plugin/orchestrator/route"
-import { createArtifactGraph } from "#plugin/artifacts"
-import type { OrchestratorAssessResult, OrchestratorDivergeResult, OrchestratorDeps, ArtifactKey } from "#plugin/types"
+import { createOrchestrator } from "#core/orchestrator/route"
+import { createArtifactGraph } from "#core/artifacts"
+import type { OrchestratorAssessResult, OrchestratorDivergeResult, OrchestratorDeps, ArtifactKey } from "#core/types"
 
 // Typed mocks — cast to any to allow .mockImplementation() / .mock access
 // (Bun's mock() return type doesn't expose these on the function overload)

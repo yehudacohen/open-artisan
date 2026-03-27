@@ -12,7 +12,7 @@
  */
 import { describe, expect, it } from "bun:test"
 import { join } from "node:path"
-import { resolveArtifactPaths } from "#plugin/tools/artifact-paths"
+import { resolveArtifactPaths } from "#core/tools/artifact-paths"
 
 // ---------------------------------------------------------------------------
 // Phases that return [] regardless of mode

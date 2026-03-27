@@ -9,13 +9,14 @@
  */
 import { describe, expect, it, beforeEach, afterEach } from "bun:test"
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs"
+import { execSync } from "node:child_process"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { createHash } from "node:crypto"
 
-import { captureRevisionBaseline, hasArtifactChanged } from "#plugin/revision-baseline"
-import type { WorkflowState } from "#plugin/types"
-import { SCHEMA_VERSION } from "#plugin/types"
+import { captureRevisionBaseline, hasArtifactChanged } from "#core/revision-baseline"
+import type { WorkflowState } from "#core/types"
+import { SCHEMA_VERSION } from "#core/types"
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -61,39 +62,16 @@ function contentHash(text: string): string {
   return createHash("sha256").update(text).digest("hex").slice(0, 32)
 }
 
-/** No-op shell mock that returns empty output. */
-const mockShellEmpty: any = Object.assign(
-  (strings: TemplateStringsArray, ...args: unknown[]) => ({
-    text: async () => "",
-    exitCode: Promise.resolve(0),
-  }),
-  {},
-)
-
-/** Shell mock that returns a specific output (used for both git diff and git rev-parse). */
-function mockShellWithOutput(output: string): any {
-  return Object.assign(
-    (strings: TemplateStringsArray, ...args: unknown[]) => ({
-      text: async () => output,
-      exitCode: Promise.resolve(0),
-    }),
-    {},
-  )
-}
-
-// Aliases for readability (kept for backward compat with test naming)
-const mockShellWithDiff = mockShellWithOutput
-
-/** Shell mock that fails. */
-const mockShellFail: any = Object.assign(
-  (strings: TemplateStringsArray, ...args: unknown[]) => ({
-    text: async () => "",
-    exitCode: Promise.resolve(1),
-  }),
-  {},
-)
-
 let tmpDir: string
+
+/** Initialize a git repo in the given directory with an initial commit. */
+function initGitRepo(dir: string): void {
+  execSync("git init", { cwd: dir, stdio: "pipe" })
+  execSync("git config user.email test@test.com", { cwd: dir, stdio: "pipe" })
+  execSync("git config user.name Test", { cwd: dir, stdio: "pipe" })
+  writeFileSync(join(dir, ".gitkeep"), "")
+  execSync("git add -A && git commit -m init", { cwd: dir, stdio: "pipe", shell: "/bin/sh" })
+}
 
 beforeEach(() => {
   tmpDir = mkdtempSync(join(tmpdir(), "revision-baseline-"))
@@ -116,7 +94,7 @@ describe("captureRevisionBaseline — in-memory phases", () => {
       artifactDiskPaths: { plan: artifactPath },
     })
 
-    const baseline = await captureRevisionBaseline("PLANNING", state, tmpDir, mockShellEmpty)
+    const baseline = await captureRevisionBaseline("PLANNING", state, tmpDir)
     expect(baseline).not.toBeNull()
     expect(baseline!.type).toBe("content-hash")
     if (baseline!.type === "content-hash") {
@@ -132,7 +110,7 @@ describe("captureRevisionBaseline — in-memory phases", () => {
       artifactDiskPaths: { conventions: artifactPath },
     })
 
-    const baseline = await captureRevisionBaseline("DISCOVERY", state, tmpDir, mockShellEmpty)
+    const baseline = await captureRevisionBaseline("DISCOVERY", state, tmpDir)
     expect(baseline).not.toBeNull()
     expect(baseline!.type).toBe("content-hash")
   })
@@ -145,7 +123,7 @@ describe("captureRevisionBaseline — in-memory phases", () => {
       artifactDiskPaths: { impl_plan: artifactPath },
     })
 
-    const baseline = await captureRevisionBaseline("IMPL_PLAN", state, tmpDir, mockShellEmpty)
+    const baseline = await captureRevisionBaseline("IMPL_PLAN", state, tmpDir)
     expect(baseline).not.toBeNull()
     expect(baseline!.type).toBe("content-hash")
   })
@@ -156,7 +134,7 @@ describe("captureRevisionBaseline — in-memory phases", () => {
       artifactDiskPaths: { plan: "/nonexistent/path/plan.md" },
     })
 
-    const baseline = await captureRevisionBaseline("PLANNING", state, tmpDir, mockShellEmpty)
+    const baseline = await captureRevisionBaseline("PLANNING", state, tmpDir)
     expect(baseline).toBeNull()
   })
 
@@ -166,7 +144,7 @@ describe("captureRevisionBaseline — in-memory phases", () => {
       artifactDiskPaths: {},
     })
 
-    const baseline = await captureRevisionBaseline("PLANNING", state, tmpDir, mockShellEmpty)
+    const baseline = await captureRevisionBaseline("PLANNING", state, tmpDir)
     expect(baseline).toBeNull()
   })
 })
@@ -177,45 +155,55 @@ describe("captureRevisionBaseline — in-memory phases", () => {
 
 describe("captureRevisionBaseline — file-based phases", () => {
   it("returns git-sha (worktree hash) for INTERFACES with no uncommitted changes", async () => {
+    initGitRepo(tmpDir)
     const state = makeState({ phase: "INTERFACES" })
-    // git diff returns empty output when no uncommitted changes
-    const baseline = await captureRevisionBaseline("INTERFACES", state, tmpDir, mockShellWithOutput(""))
+    const baseline = await captureRevisionBaseline("INTERFACES", state, tmpDir)
     expect(baseline).not.toBeNull()
     expect(baseline!.type).toBe("git-sha")
     if (baseline!.type === "git-sha") {
-      // Should be a content hash of the empty diff output
+      // git diff on a clean repo returns empty string
       expect(baseline!.sha).toBe(contentHash(""))
     }
   })
 
   it("returns git-sha (worktree hash) for INTERFACES with uncommitted changes", async () => {
-    const diffOutput = "diff --git a/src/types.ts b/src/types.ts\n--- a/src/types.ts\n+++ b/src/types.ts\n@@ -1 +1 @@\n-old\n+new\n"
+    initGitRepo(tmpDir)
+    // Create a tracked file, commit it, then modify it (uncommitted change)
+    const filePath = join(tmpDir, "types.ts")
+    writeFileSync(filePath, "old")
+    execSync("git add -A && git commit -m add-file", { cwd: tmpDir, stdio: "pipe", shell: "/bin/sh" })
+    writeFileSync(filePath, "new")
     const state = makeState({ phase: "INTERFACES" })
-    const baseline = await captureRevisionBaseline("INTERFACES", state, tmpDir, mockShellWithOutput(diffOutput))
+    const baseline = await captureRevisionBaseline("INTERFACES", state, tmpDir)
     expect(baseline).not.toBeNull()
     expect(baseline!.type).toBe("git-sha")
     if (baseline!.type === "git-sha") {
-      expect(baseline!.sha).toBe(contentHash(diffOutput))
+      // Hash should match what git diff would produce
+      const expectedDiff = execSync("git diff", { cwd: tmpDir, stdio: "pipe", encoding: "utf-8" })
+      expect(baseline!.sha).toBe(contentHash(expectedDiff))
     }
   })
 
   it("returns git-sha for TESTS", async () => {
+    initGitRepo(tmpDir)
     const state = makeState({ phase: "TESTS" })
-    const baseline = await captureRevisionBaseline("TESTS", state, tmpDir, mockShellWithOutput(""))
+    const baseline = await captureRevisionBaseline("TESTS", state, tmpDir)
     expect(baseline).not.toBeNull()
     expect(baseline!.type).toBe("git-sha")
   })
 
   it("returns git-sha for IMPLEMENTATION", async () => {
+    initGitRepo(tmpDir)
     const state = makeState({ phase: "IMPLEMENTATION" })
-    const baseline = await captureRevisionBaseline("IMPLEMENTATION", state, tmpDir, mockShellWithOutput(""))
+    const baseline = await captureRevisionBaseline("IMPLEMENTATION", state, tmpDir)
     expect(baseline).not.toBeNull()
     expect(baseline!.type).toBe("git-sha")
   })
 
-  it("returns null when git fails", async () => {
+  it("returns null when not a git repo", async () => {
+    // tmpDir is NOT a git repo — git diff should fail gracefully
     const state = makeState({ phase: "INTERFACES" })
-    const baseline = await captureRevisionBaseline("INTERFACES", state, tmpDir, mockShellFail)
+    const baseline = await captureRevisionBaseline("INTERFACES", state, tmpDir)
     expect(baseline).toBeNull()
   })
 })
@@ -227,13 +215,13 @@ describe("captureRevisionBaseline — file-based phases", () => {
 describe("captureRevisionBaseline — edge cases", () => {
   it("returns null for MODE_SELECT (no artifact)", async () => {
     const state = makeState({ phase: "MODE_SELECT" })
-    const baseline = await captureRevisionBaseline("MODE_SELECT", state, tmpDir, mockShellEmpty)
+    const baseline = await captureRevisionBaseline("MODE_SELECT", state, tmpDir)
     expect(baseline).toBeNull()
   })
 
   it("returns null for DONE (no artifact)", async () => {
     const state = makeState({ phase: "DONE" })
-    const baseline = await captureRevisionBaseline("DONE", state, tmpDir, mockShellEmpty)
+    const baseline = await captureRevisionBaseline("DONE", state, tmpDir)
     expect(baseline).toBeNull()
   })
 })
@@ -248,7 +236,7 @@ describe("hasArtifactChanged — content-hash", () => {
     const baseline = { type: "content-hash" as const, hash: contentHash(content) }
     const state = makeState({ phase: "PLANNING" })
 
-    const changed = await hasArtifactChanged(baseline, "PLANNING", content, state, tmpDir, mockShellEmpty)
+    const changed = await hasArtifactChanged(baseline, "PLANNING", content, state, tmpDir)
     expect(changed).toBe(false)
   })
 
@@ -258,7 +246,7 @@ describe("hasArtifactChanged — content-hash", () => {
     const baseline = { type: "content-hash" as const, hash: contentHash(originalContent) }
     const state = makeState({ phase: "PLANNING" })
 
-    const changed = await hasArtifactChanged(baseline, "PLANNING", revisedContent, state, tmpDir, mockShellEmpty)
+    const changed = await hasArtifactChanged(baseline, "PLANNING", revisedContent, state, tmpDir)
     expect(changed).toBe(true)
   })
 
@@ -272,7 +260,7 @@ describe("hasArtifactChanged — content-hash", () => {
       artifactDiskPaths: { plan: artifactPath },
     })
 
-    const changed = await hasArtifactChanged(baseline, "PLANNING", undefined, state, tmpDir, mockShellEmpty)
+    const changed = await hasArtifactChanged(baseline, "PLANNING", undefined, state, tmpDir)
     expect(changed).toBe(false)
   })
 
@@ -286,7 +274,7 @@ describe("hasArtifactChanged — content-hash", () => {
       artifactDiskPaths: { plan: artifactPath },
     })
 
-    const changed = await hasArtifactChanged(baseline, "PLANNING", undefined, state, tmpDir, mockShellEmpty)
+    const changed = await hasArtifactChanged(baseline, "PLANNING", undefined, state, tmpDir)
     expect(changed).toBe(true)
   })
 
@@ -297,7 +285,7 @@ describe("hasArtifactChanged — content-hash", () => {
       artifactDiskPaths: { plan: "/nonexistent/plan.md" },
     })
 
-    const changed = await hasArtifactChanged(baseline, "PLANNING", undefined, state, tmpDir, mockShellEmpty)
+    const changed = await hasArtifactChanged(baseline, "PLANNING", undefined, state, tmpDir)
     expect(changed).toBe(true)
   })
 })
@@ -308,55 +296,67 @@ describe("hasArtifactChanged — content-hash", () => {
 
 describe("hasArtifactChanged — git-sha (worktree hash)", () => {
   it("returns false when git diff output hash matches baseline (no new changes)", async () => {
-    // Simulate: at REVISE entry, git diff output was empty. At check time, still empty.
-    const baselineDiffOutput = ""
-    const baseline = { type: "git-sha" as const, sha: contentHash(baselineDiffOutput) }
+    // Real git repo with no uncommitted changes — diff is empty at both capture and check
+    initGitRepo(tmpDir)
     const state = makeState({ phase: "INTERFACES" })
-
-    // Mock shell returns same empty diff
-    const changed = await hasArtifactChanged(baseline, "INTERFACES", undefined, state, tmpDir, mockShellWithDiff(""))
+    const baseline = await captureRevisionBaseline("INTERFACES", state, tmpDir)
+    expect(baseline).not.toBeNull()
+    // No changes made between capture and check
+    const changed = await hasArtifactChanged(baseline!, "INTERFACES", undefined, state, tmpDir)
     expect(changed).toBe(false)
   })
 
   it("returns false when git diff output is identical to baseline (earlier cascade changes present but unchanged)", async () => {
-    // Simulate: at REVISE entry, there were uncommitted changes from earlier cascade steps.
-    // At check time, those same changes are still there, unchanged.
-    const earlierCascadeDiff = "diff --git a/src/interfaces.ts b/src/interfaces.ts\n--- a/src/interfaces.ts\n+++ b/src/interfaces.ts\n@@ -1 +1 @@\n-old\n+new\n"
-    const baseline = { type: "git-sha" as const, sha: contentHash(earlierCascadeDiff) }
+    // Real git repo with uncommitted changes — same diff at capture and check
+    initGitRepo(tmpDir)
+    const filePath = join(tmpDir, "interfaces.ts")
+    writeFileSync(filePath, "old")
+    execSync("git add -A && git commit -m add", { cwd: tmpDir, stdio: "pipe", shell: "/bin/sh" })
+    writeFileSync(filePath, "new")  // uncommitted change (earlier cascade)
     const state = makeState({ phase: "TESTS" })
-
-    // Mock shell returns same diff output (no new work done during this REVISE step)
-    const changed = await hasArtifactChanged(baseline, "TESTS", undefined, state, tmpDir, mockShellWithDiff(earlierCascadeDiff))
+    const baseline = await captureRevisionBaseline("TESTS", state, tmpDir)
+    expect(baseline).not.toBeNull()
+    // No NEW changes — same diff as at capture time
+    const changed = await hasArtifactChanged(baseline!, "TESTS", undefined, state, tmpDir)
     expect(changed).toBe(false)
   })
 
   it("returns true when git diff output changes (new work done during REVISE)", async () => {
-    // Simulate: at REVISE entry, git diff was empty. Agent made changes.
-    const baselineDiffOutput = ""
-    const baseline = { type: "git-sha" as const, sha: contentHash(baselineDiffOutput) }
+    // Capture baseline with clean repo, then make an unstaged change to a tracked file
+    initGitRepo(tmpDir)
+    const filePath = join(tmpDir, "types.ts")
+    writeFileSync(filePath, "old content")
+    execSync("git add -A && git commit -m track", { cwd: tmpDir, stdio: "pipe", shell: "/bin/sh" })
     const state = makeState({ phase: "INTERFACES" })
-
-    const newDiff = "diff --git a/src/types.ts b/src/types.ts\n--- a/src/types.ts\n+++ b/src/types.ts\n@@ -1 +1 @@\n-old\n+new\n"
-    const changed = await hasArtifactChanged(baseline, "INTERFACES", undefined, state, tmpDir, mockShellWithDiff(newDiff))
+    const baseline = await captureRevisionBaseline("INTERFACES", state, tmpDir)
+    expect(baseline).not.toBeNull()
+    // Modify tracked file (unstaged change — shows in git diff)
+    writeFileSync(filePath, "new content")
+    const changed = await hasArtifactChanged(baseline!, "INTERFACES", undefined, state, tmpDir)
     expect(changed).toBe(true)
   })
 
   it("returns true when earlier cascade changes exist and new changes are added", async () => {
-    // Simulate: at REVISE entry, earlier cascade changes were present. Agent adds more.
-    const earlierDiff = "diff --git a/src/interfaces.ts b/src/interfaces.ts\n-old\n+new\n"
-    const baseline = { type: "git-sha" as const, sha: contentHash(earlierDiff) }
+    // Start with existing uncommitted changes, capture baseline, then modify further
+    initGitRepo(tmpDir)
+    const file1 = join(tmpDir, "interfaces.ts")
+    writeFileSync(file1, "old")
+    execSync("git add -A && git commit -m add", { cwd: tmpDir, stdio: "pipe", shell: "/bin/sh" })
+    writeFileSync(file1, "new")  // earlier cascade change (unstaged)
     const state = makeState({ phase: "TESTS" })
-
-    const expandedDiff = earlierDiff + "diff --git a/tests/foo.test.ts b/tests/foo.test.ts\n-old_test\n+new_test\n"
-    const changed = await hasArtifactChanged(baseline, "TESTS", undefined, state, tmpDir, mockShellWithDiff(expandedDiff))
+    const baseline = await captureRevisionBaseline("TESTS", state, tmpDir)
+    expect(baseline).not.toBeNull()
+    // Add MORE changes during REVISE (modify the same or different tracked file)
+    writeFileSync(file1, "even newer")  // further unstaged change
+    const changed = await hasArtifactChanged(baseline!, "TESTS", undefined, state, tmpDir)
     expect(changed).toBe(true)
   })
 
-  it("returns true (allow through) when git fails", async () => {
+  it("returns true (allow through) when not a git repo", async () => {
+    // tmpDir is not a git repo — graceful degradation
     const baseline = { type: "git-sha" as const, sha: contentHash("") }
     const state = makeState({ phase: "INTERFACES" })
-
-    const changed = await hasArtifactChanged(baseline, "INTERFACES", undefined, state, tmpDir, mockShellFail)
+    const changed = await hasArtifactChanged(baseline, "INTERFACES", undefined, state, tmpDir)
     expect(changed).toBe(true)
   })
 })
@@ -371,7 +371,7 @@ describe("hasArtifactChanged — graceful degradation", () => {
     const baseline = { type: "unknown", data: "whatever" } as any
     const state = makeState({ phase: "PLANNING" })
 
-    const changed = await hasArtifactChanged(baseline, "PLANNING", "content", state, tmpDir, mockShellEmpty)
+    const changed = await hasArtifactChanged(baseline, "PLANNING", "content", state, tmpDir)
     expect(changed).toBe(true)
   })
 })

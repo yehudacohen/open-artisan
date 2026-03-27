@@ -2,7 +2,7 @@
  * mark-analyze-complete.test.ts — Tests for mark_analyze_complete tool handler.
  */
 import { describe, it, expect } from "bun:test"
-import { processMarkAnalyzeComplete } from "#plugin/tools/mark-analyze-complete"
+import { processMarkAnalyzeComplete } from "#core/tools/mark-analyze-complete"
 
 describe("processMarkAnalyzeComplete", () => {
   it("returns a response message containing the summary", () => {

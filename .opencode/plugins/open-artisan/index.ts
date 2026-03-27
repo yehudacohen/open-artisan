@@ -24,54 +24,63 @@
 // @ts-ignore — @opencode-ai/plugin is provided by the OpenCode runtime, not installed as a dev dep
 import { tool, type Plugin } from "@opencode-ai/plugin"
 import { join, resolve } from "node:path"
-import { existsSync } from "node:fs"
-import { $ } from "bun"
+import { existsSync, readFileSync } from "node:fs"
+import { readFile } from "node:fs/promises"
 
-import { createSessionStateStore } from "./session-state"
-import { createStateMachine } from "./state-machine"
-import { getPhaseToolPolicy } from "./hooks/tool-guard"
-import { buildWorkflowSystemPrompt, buildSubagentContext } from "./hooks/system-transform"
-import { buildUserGateHint, processUserMessage } from "./hooks/chat-message"
-import { handleIdle } from "./hooks/idle-handler"
-import { buildCompactionContext } from "./hooks/compaction"
-import { createGitCheckpoint } from "./hooks/git-checkpoint"
-import { detectMode } from "./mode-detect"
+import { createSessionStateStore, setPostUpdateHook } from "../../../packages/core/session-state"
+import { createStateMachine } from "../../../packages/core/state-machine"
+import { getPhaseToolPolicy } from "../../../packages/core/hooks/tool-guard"
+import { buildWorkflowSystemPrompt, buildSubagentContext } from "../../../packages/core/hooks/system-transform"
+import { buildUserGateHint, processUserMessage } from "../../../packages/core/hooks/chat-message"
+import { handleIdle } from "../../../packages/core/hooks/idle-handler"
+import { buildCompactionContext } from "../../../packages/core/hooks/compaction"
+import { createGitCheckpoint } from "../../../packages/core/hooks/git-checkpoint"
+import { detectMode } from "../../../packages/core/mode-detect"
+import { compareIntentsWithLLM } from "../../../packages/core/intent-comparison"
+import { validatePriorState } from "../../../packages/core/type-validation"
+import { createLogger, setDefaultStateDir, type Logger, type NotificationSink } from "../../../packages/core/logger"
+import type { EngineContext } from "../../../packages/core/engine-context"
+import { 
+  MAX_INTENT_DISPLAY_CHARS, 
+  MIN_COMPLETE_ARTIFACTS 
+} from "../../../packages/core/constants"
 
 // Tool handlers
-import { parseSelectModeArgs, buildSelectModeResponse } from "./tools/select-mode"
-import { processMarkScanComplete } from "./tools/mark-scan-complete"
-import { processMarkAnalyzeComplete } from "./tools/mark-analyze-complete"
-import { evaluateMarkSatisfied, countExpectedBlockingCriteria } from "./tools/mark-satisfied"
-import { processRequestReview } from "./tools/request-review"
-import { processSubmitFeedback } from "./tools/submit-feedback"
-import { processMarkTaskComplete } from "./tools/mark-task-complete"
+import { parseSelectModeArgs, buildSelectModeResponse } from "../../../packages/core/tools/select-mode"
+import { processMarkScanComplete } from "../../../packages/core/tools/mark-scan-complete"
+import { processMarkAnalyzeComplete } from "../../../packages/core/tools/mark-analyze-complete"
+import { evaluateMarkSatisfied, countExpectedBlockingCriteria } from "../../../packages/core/tools/mark-satisfied"
+import { processRequestReview } from "../../../packages/core/tools/request-review"
+import { processSubmitFeedback } from "../../../packages/core/tools/submit-feedback"
+import { processMarkTaskComplete } from "../../../packages/core/tools/mark-task-complete"
+import { handleProposeBacktrack } from "../../../packages/core/tools/propose-backtrack"
 
 // Orchestrator (Layer 2)
-import { createOrchestrator } from "./orchestrator/route"
-import { createArtifactGraph, PHASE_TO_ARTIFACT } from "./artifacts"
-import { createAssessFn, createDivergeFn } from "./orchestrator/llm-calls"
-import { handleEscapeHatch, handleCascade, handleNormalRevise } from "./tools/submit-feedback-handlers"
-import { dispatchSelfReview, dispatchRebuttal } from "./self-review"
-import { getAcceptanceCriteria } from "./hooks/system-transform"
-import { runDiscoveryFleet } from "./discovery/index"
-import { parseImplPlan } from "./impl-plan-parser"
-import { createImplDAG, type TaskCategory, type HumanGateInfo } from "./dag"
-import { nextSchedulerDecision, resolveHumanGate } from "./scheduler"
-import { resolveArtifactPaths } from "./tools/artifact-paths"
-import { writeArtifact, detectDesignDoc } from "./artifact-store"
-import { dispatchTaskReview, type AdjacentTask } from "./task-review"
-import { dispatchDriftCheck } from "./task-drift"
-import { captureRevisionBaseline, hasArtifactChanged } from "./revision-baseline"
-import { computeFastForward, computeForwardSkip } from "./fast-forward"
-import { cascadeAutoSkip, type CascadeAutoSkipDeps } from "./cascade-auto-skip"
-import { dispatchAutoApproval } from "./auto-approve"
-import { createLogger, setDefaultStateDir, type Logger } from "./logger"
-
+import { createOrchestrator } from "../../../packages/core/orchestrator/route"
+import { createArtifactGraph, PHASE_TO_ARTIFACT } from "../../../packages/core/artifacts"
+import { createAssessFn, createDivergeFn } from "../../../packages/core/orchestrator/llm-calls"
+import { handleEscapeHatch, handleCascade, handleNormalRevise } from "../../../packages/core/tools/submit-feedback-handlers"
+import { dispatchSelfReview, dispatchRebuttal } from "../../../packages/core/self-review"
+import { createOpenCodeSubagentDispatcher } from "./opencode-subagent-dispatcher"
+import { getAcceptanceCriteria } from "../../../packages/core/hooks/system-transform"
+import { runDiscoveryFleet } from "../../../packages/core/discovery/index"
+import { parseImplPlan } from "../../../packages/core/impl-plan-parser"
+import { createImplDAG, type TaskCategory, type HumanGateInfo } from "../../../packages/core/dag"
+import { nextSchedulerDecision, resolveHumanGate } from "../../../packages/core/scheduler"
+import { resolveArtifactPaths } from "../../../packages/core/tools/artifact-paths"
+import { writeArtifact, detectDesignDoc } from "../../../packages/core/artifact-store"
+import { dispatchTaskReview, type AdjacentTask } from "../../../packages/core/task-review"
+import { dispatchDriftCheck } from "../../../packages/core/task-drift"
+import { captureRevisionBaseline, hasArtifactChanged } from "../../../packages/core/revision-baseline"
+import { writeStatusFile } from "../../../packages/core/status-writer"
+import { computeFastForward, computeForwardSkip } from "../../../packages/core/fast-forward"
+import { cascadeAutoSkip } from "../../../packages/core/cascade-auto-skip"
+import { dispatchAutoApproval } from "../../../packages/core/auto-approve"
 import { createHash } from "node:crypto"
-import type { WorkflowMode, WorkflowState, SessionStateStore, ArtifactKey, RevisionStep, MarkSatisfiedArgs } from "./types"
-import { VALID_PHASE_STATES } from "./types"
+import type { WorkflowMode, WorkflowState, SessionStateStore, ArtifactKey, RevisionStep, MarkSatisfiedArgs, CriterionResult } from "../../../packages/core/types"
+import { VALID_PHASE_STATES } from "../../../packages/core/types"
 import type { PluginClient } from "./client-types"
-import { resolveSessionId } from "./utils"
+import { resolveSessionId } from "../../../packages/core/utils"
 import {
   MAX_REVIEW_ITERATIONS,
   MAX_TASK_REVIEW_ITERATIONS,
@@ -79,11 +88,152 @@ import {
   MAX_FEEDBACK_CHARS,
   IDLE_COOLDOWN_MS,
   MAX_IDLE_RETRIES,
-} from "./constants"
+} from "../../../packages/core/constants"
 
 /** Returns a 16-char SHA-256 hex fingerprint of the given text. */
 function artifactHash(text: string): string {
   return createHash("sha256").update(text).digest("hex").slice(0, 16)
+}
+
+/**
+ * Phases where the artifact is a single plan document under .openartisan/.
+ * For these phases, the complete expected file list is just the artifact path.
+ * The checkpoint can safely stage only these files without missing source files.
+ */
+const PLAN_ONLY_PHASES: Set<string> = new Set(["DISCOVERY", "PLANNING", "IMPL_PLAN"])
+
+/**
+ * Derive the list of files this phase is expected to have modified.
+ * Used by git checkpoint to stage only the right files.
+ *
+ * Returns a non-empty array ONLY when we can enumerate the complete file list:
+ *   - Plan-only phases (DISCOVERY, PLANNING, IMPL_PLAN): just the artifact path
+ *   - IMPLEMENTATION in INCREMENTAL mode: artifact path + file allowlist
+ *
+ * Returns empty array for phases where the agent writes source files we can't
+ * enumerate (INTERFACES, TESTS, IMPLEMENTATION in GREENFIELD/REFACTOR).
+ * Empty array causes the checkpoint to fall back to legacy staging (git add -u).
+ */
+function deriveExpectedFiles(state: WorkflowState): string[] {
+  const files: string[] = []
+
+  // Include the current phase's artifact disk path (plan.md, conventions.md, etc.)
+  const artifactKey = PHASE_TO_ARTIFACT[state.phase]
+  if (artifactKey) {
+    const diskPath = state.artifactDiskPaths[artifactKey]
+    if (diskPath) files.push(diskPath)
+  }
+
+  // For plan-only phases, the artifact path is the complete manifest
+  if (PLAN_ONLY_PHASES.has(state.phase)) {
+    return files
+  }
+
+  // For IMPLEMENTATION in INCREMENTAL mode, add the file allowlist
+  if (state.phase === "IMPLEMENTATION" && state.mode === "INCREMENTAL" && state.fileAllowlist.length > 0) {
+    files.push(...state.fileAllowlist)
+    return files
+  }
+
+  // For INTERFACES, TESTS, and non-INCREMENTAL IMPLEMENTATION:
+  // We can't enumerate which source files the agent wrote.
+  // Return empty → checkpoint falls back to legacy staging (git add -u).
+  return []
+}
+
+/**
+ * Validate feature name format (kebab-case).
+ * Returns null if valid, error message if invalid.
+ */
+function validateFeatureName(featureName: string): string | null {
+  if (!featureName) {
+    return "feature_name is required"
+  }
+  if (!/^[a-z0-9]+(-[a-z0-9]+)*$/.test(featureName)) {
+    return "feature_name must be kebab-case (lowercase letters, numbers, hyphens only, e.g. 'my-feature-name')"
+  }
+  return null
+}
+
+/**
+ * Find prior workflow state by feature name.
+ * Uses SessionStateStore abstraction instead of direct file reads.
+ * Returns the state if found, null otherwise.
+ */
+async function findPriorWorkflowState(
+  store: ReturnType<typeof createSessionStateStore>,
+  featureName: string,
+  log?: Logger,
+): Promise<{ intentBaseline: string | null; phase: string; artifactDiskPaths: Record<string, string>; approvedArtifacts?: Record<string, string> } | null> {
+  try {
+    log?.info("findPriorWorkflowState", { featureName, action: "searching" })
+    
+    const state = store.findByFeatureName(featureName)
+    if (!state) {
+      log?.info("findPriorWorkflowState", { featureName, result: "not found" })
+      return null
+    }
+
+    // Validate and extract state fields
+    const validated = validatePriorState(state)
+    log?.info("findPriorWorkflowState", { featureName, result: "found", phase: validated?.phase })
+    return validated
+  } catch (err) {
+    const errorMsg = err instanceof Error ? err.message : String(err)
+    log?.error("findPriorWorkflowState", { featureName, error: errorMsg })
+    return null
+  }
+}
+
+/**
+ * Extracts full model config (modelID + providerID) from input.model.
+ * Returns an object suitable for passing to session.create().
+ */
+function extractModelConfig(model: unknown): { modelID: string; providerID?: string } | null {
+  if (!model) return null
+  if (typeof model === "object" && !Array.isArray(model)) {
+    const obj = model as Record<string, unknown>
+    const id = obj["id"]
+    const providerID = obj["providerID"]
+    if (typeof id === "string" && id.trim()) {
+      return {
+        modelID: id,
+        ...(typeof providerID === "string" && providerID.trim() ? { providerID } : {}),
+      }
+    }
+    const modelID = obj["modelID"]
+    if (typeof modelID === "string" && modelID.trim()) {
+      return {
+        modelID,
+        ...(typeof providerID === "string" && providerID.trim() ? { providerID } : {}),
+      }
+    }
+  }
+  return null
+}
+
+const ALLOWLIST_CRITERION = "Allowlist adequacy"
+
+function requiresAllowlistCriterion(state: WorkflowState): boolean {
+  return state.mode === "INCREMENTAL" && state.phase === "PLANNING" && state.fileAllowlist.length > 0
+}
+
+function ensureAllowlistCriterion(
+  criteria: Array<{ criterion: string; met: boolean; evidence: string; severity?: "blocking" | "suggestion"; score?: number }>,
+  state: WorkflowState,
+): Array<{ criterion: string; met: boolean; evidence: string; severity?: "blocking" | "suggestion"; score?: number }> {
+  if (!requiresAllowlistCriterion(state)) return criteria
+  const hasAllowlist = criteria.some((c) => c.criterion.toLowerCase().includes("allowlist adequacy"))
+  if (hasAllowlist) return criteria
+  return [
+    ...criteria,
+    {
+      criterion: ALLOWLIST_CRITERION,
+      met: false,
+      evidence: "Allowlist adequacy was not assessed. Review whether the allowlist covers remaining phases before approval.",
+      severity: "blocking",
+    },
+  ]
 }
 
 /**
@@ -114,20 +264,13 @@ export const ARTISAN_AGENT_NAMES = new Set(["artisan", "robot-artisan"])
 async function ensureState(
   store: SessionStateStore,
   sessionId: string,
-  client?: PluginClient,
+  notify?: NotificationSink,
 ): Promise<WorkflowState> {
   const existing = store.get(sessionId)
   if (existing) return existing
   // State doesn't exist — likely missed session.created event. Create it now.
   try {
-    client?.tui?.showToast?.({
-      body: {
-        title: "Workflow initialized",
-        message: "Session state created (missed startup event)",
-        variant: "info",
-        duration: 3000,
-      },
-    })
+    notify?.toast("Workflow initialized", "Session state created (missed startup event)", "info")
   } catch { /* ignore */ }
   return store.create(sessionId)
 }
@@ -167,22 +310,14 @@ function logTransition(
   from: { phase: string; phaseState: string },
   to: { nextPhase: string; nextPhaseState: string } | { phase: string; phaseState: string },
   trigger: string,
-  client?: PluginClient,
+  notify?: NotificationSink,
 ): void {
   const toPhase = "nextPhase" in to ? to.nextPhase : to.phase
   const toState = "nextPhaseState" in to ? to.nextPhaseState : to.phaseState
   const message = `${from.phase}/${from.phaseState} → ${toPhase}/${toState}`
-  // Show as a transient toast in the TUI (best-effort, non-blocking)
   try {
-    client?.tui?.showToast?.({
-      body: {
-        title: `Workflow: ${trigger}`,
-        message,
-        variant: "info",
-        duration: 4000,
-      },
-    })
-  } catch { /* ignore — TUI API may not be available */ }
+    notify?.toast(`Workflow: ${trigger}`, message, "info")
+  } catch { /* ignore — sink may not be available */ }
 }
 
 // Re-export for consumers who import from index.ts (G19)
@@ -238,6 +373,7 @@ function wrapToolMap<T extends Record<string, { execute: (...args: any[]) => Pro
  * Defined as a module constant so adding a new tool cannot be silently missed.
  */
 export const WORKFLOW_TOOL_NAMES = new Set([
+  "check_prior_workflow",
   "select_mode",
   "mark_scan_complete",
   "mark_analyze_complete",
@@ -246,6 +382,7 @@ export const WORKFLOW_TOOL_NAMES = new Set([
   "request_review",
   "submit_feedback",
   "resolve_human_gate",
+  "propose_backtrack",
 ])
 
 /**
@@ -296,12 +433,28 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
     : join(import.meta.dirname, "..", "..")  // .opencode/ fallback
   const store = createSessionStateStore(stateDir)
   const sm = createStateMachine()
-  // Set the module-level default stateDir so all createLogger(client) calls
-  // (without explicit stateDir) still persist errors to disk. This fixes the
-  // bug where self-review, orchestrator, auto-approve, and discovery errors
-  // were silently lost because they called createLogger(client) without stateDir.
+
+  // Register post-update hook for status file writer (Change 5)
+  const projectDir = resolvedDir || process.cwd()
+  setPostUpdateHook((state, dir) => {
+    // Fire-and-forget — status file write should never block state transitions
+    writeStatusFile(dir, state).catch(() => { /* non-fatal */ })
+  }, projectDir)
+
+  // Set the module-level default stateDir for error log persistence.
   setDefaultStateDir(stateDir)
-  const log = createLogger(client, stateDir)
+
+  // Create notification sink from the OpenCode client's TUI API.
+  // The logger wraps toast calls in try/catch, so we don't need to here.
+  const notify: NotificationSink = {
+    toast(title: string, message: string, level: "info" | "warning" | "error"): void {
+      const duration = level === "error" ? 8000 : level === "warning" ? 6000 : 4000
+      client.tui?.showToast?.({ body: { title, message, variant: level, duration } })
+    },
+  }
+
+  const log = createLogger(notify, stateDir)
+  log.debug("Plugin initialized", { detail: `stateDir: ${stateDir}` })
 
   // Layer 2: Orchestrator — wires LLM-backed assess + diverge into the routing logic.
   // The graph and orchestrator are shared across sessions (stateless pure functions).
@@ -314,10 +467,20 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
     log.info("Design document detected", { detail: designDocPath! })
   }
   const graph = createArtifactGraph(hasDesignDoc)
-  const getActiveSessionId = () => activeSessionId
+  const activeSession: { id: string | undefined } = { id: undefined }
+  const getActiveSessionId = () => activeSession.id
+  const getActiveSessionModel = (): string | { modelID: string; providerID?: string } | undefined => {
+    if (!activeSession.id) return undefined
+    const state = store.get(activeSession.id)
+    return state?.sessionModel ?? undefined
+  }
+  // Subagent dispatcher — platform-agnostic interface for ephemeral LLM sessions.
+  // All review/orchestrator/discovery dispatch uses this instead of client.session directly.
+  const subagentDispatcher = createOpenCodeSubagentDispatcher(client)
+
   const orchestrator = createOrchestrator({
-    assess: createAssessFn(client, getActiveSessionId),
-    diverge: createDivergeFn(client, getActiveSessionId),
+    assess: createAssessFn(subagentDispatcher, getActiveSessionId, getActiveSessionModel),
+    diverge: createDivergeFn(subagentDispatcher, getActiveSessionId, getActiveSessionModel),
     graph,
   })
 
@@ -350,7 +513,6 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
 
   // Active session tracking: stores the most recently active primary session ID.
   // Used to pass parentID to orchestrator sessions so they appear in the session tree.
-  let activeSessionId: string | undefined
 
   // Child session tracking: maps child session IDs → parent session IDs.
   // Used to resolve the parent's workflow state for tool guard and system-transform
@@ -359,9 +521,29 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
   // workflow state — they inherit the parent's tool policy.
   const childSessionParents = new Map<string, string>()
 
-  // Cascade auto-skip dependencies — wired once at plugin init, passed to
-  // the extracted cascadeAutoSkip function for each invocation.
-  const cascadeDeps: CascadeAutoSkipDeps = { store, sm, log, shell: $ }
+  // Engine context — explicit dependency bag for tool and hook handlers.
+  // Created once at plugin init. Handlers reference ctx.field instead of closures.
+  // The mutable fields (activeSession, childSessionParents, lastRepromptTimestamps)
+  // are shared by reference — mutations propagate automatically.
+  const ctx: EngineContext = {
+    store,
+    sm,
+    orchestrator,
+    subagentDispatcher,
+    log,
+    notify,
+    graph,
+    designDocPath,
+    activeSession,
+    childSessionParents,
+    lastRepromptTimestamps,
+    async promptExistingSession(sessionId: string, text: string): Promise<void> {
+      await client.session?.prompt({
+        path: { id: sessionId },
+        body: { noReply: false, parts: [{ type: "text", text }] },
+      })
+    },
+  }
 
   return {
     // -------------------------------------------------------------------------
@@ -369,6 +551,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
     // -------------------------------------------------------------------------
 
     event: async ({ event }: { event: { type: string; properties?: Record<string, unknown> } }) => {
+      const { store, log, childSessionParents, lastRepromptTimestamps, notify } = ctx
       try {
       // Session created: initialize fresh workflow state.
       // SDK type: { type: "session.created", properties: { info: Session } }
@@ -461,9 +644,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
           // visible in the conversation, making the stall impossible to miss.
           log.warn(`Idle escalation: agent stopped ${state.retryCount} times at ${state.phase}/${state.phaseState}`, { sessionId })
           try {
-            await client.tui?.showToast?.({
-              body: { title: "Workflow Stalled", message: decision.message, variant: "warning" },
-            })
+            notify.toast("Workflow Stalled", decision.message, "warning")
           } catch { /* ignore */ }
           // Reset retry count so the agent gets fresh attempts after user input
           try {
@@ -472,17 +653,10 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             log.warn("Failed to reset retryCount on escalation", { detail: e instanceof Error ? e.message : String(e), sessionId })
           }
           try {
-            await client.session?.prompt({
-              path: { id: sessionId },
-              body: {
-                noReply: false,
-                parts: [{ type: "text", text:
-                  `WORKFLOW STALLED: You have stopped ${state.retryCount} times during ${state.phase}/${state.phaseState} ` +
-                  `without completing the current step. Stop what you are doing and ask the user for guidance. ` +
-                  `Explain what you were trying to do and where you got stuck.`,
-                }],
-              },
-            })
+            await ctx.promptExistingSession(sessionId,
+              `WORKFLOW STALLED: You have stopped ${state.retryCount} times during ${state.phase}/${state.phaseState} ` +
+              `without completing the current step. Stop what you are doing and ask the user for guidance. ` +
+              `Explain what you were trying to do and where you got stuck.`)
           } catch { /* ignore if API shape differs */ }
           return
         }
@@ -492,13 +666,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
         log.warn(`Idle reprompt ${decision.retryCount}/${MAX_IDLE_RETRIES} at ${state.phase}/${state.phaseState}`, { sessionId })
         try {
           lastRepromptTimestamps.set(sessionId, Date.now())
-          await client.session?.prompt({
-            path: { id: sessionId },
-            body: {
-              noReply: false,
-              parts: [{ type: "text", text: decision.message }],
-            },
-          })
+          await ctx.promptExistingSession(sessionId, decision.message)
           await store.update(sessionId, (draft) => {
             draft.retryCount = decision.retryCount
           })
@@ -524,6 +692,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
       input: { sessionID?: string; sessionId?: string; session_id?: string; messageID?: string; [key: string]: unknown },
       output: { message: { sessionID?: string; sessionId?: string; id?: string }; parts: Array<{ type: string; text?: string; id?: string; sessionID?: string; messageID?: string }> },
     ) => {
+      const { store, log, notify } = ctx
       try {
       // Resolve sessionID — probe all casing variants the SDK may use
       const sessionId = (
@@ -555,7 +724,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
           draft.phaseState = "DRAFT"
           draft.iterationCount = 0
           draft.retryCount = 0
-          draft.intentBaseline = textContent ? textContent.slice(0, 2000) : null
+          draft.intentBaseline = textContent ? textContent.slice(0, MAX_INTENT_BASELINE_CHARS) : null
           draft.userGateMessageReceived = false
           draft.currentTaskId = null
           draft.implDag = null
@@ -566,6 +735,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
           draft.taskReviewCount = 0
           draft.pendingFeedback = null
           draft.revisionBaseline = null
+          draft.userMessages = textContent ? [textContent] : []
           // Preserve: mode, approvedArtifacts, conventions, fileAllowlist,
           // featureName, artifactDiskPaths, activeAgent, phaseApprovalCounts,
           // lastCheckpointTag, approvalCount — these carry forward from the
@@ -575,7 +745,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
           { phase: "DONE", phaseState: "DRAFT" },
           { phase: "MODE_SELECT", phaseState: "DRAFT" },
           "new workflow cycle — user sent new work",
-          client,
+          notify,
         )
         return // Don't inject USER_GATE routing hints — we're now at MODE_SELECT
       }
@@ -583,22 +753,25 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
       // Resolve messageID from input — required for v2 Part objects
       const messageId = (input.messageID as string | undefined) ?? (output.message?.id as string | undefined) ?? ""
 
-      // Capture first real user message as intent baseline (for O_DIVERGE later).
-      // intentBaseline is null until the first real user message arrives.
-      // After capture, only O_INTENT_UPDATE (in the escape hatch path) may update it.
-      if (!state.intentBaseline) {
-        const textContent = (output.parts as Array<{ type: string; text?: string }>)
-          .filter((p) => p.type === "text" && p.text)
-          .map((p) => p.text!)
-          .join(" ")
-          .trim()
-        if (textContent) {
-          await store.update(sessionId, (draft) => {
-            if (!draft.intentBaseline) {
-              draft.intentBaseline = textContent.slice(0, 2000)
-            }
-          })
-        }
+      // Collect all user messages for self-review context
+      const textContent = (output.parts as Array<{ type: string; text?: string }>)
+        .filter((p) => p.type === "text" && p.text)
+        .map((p) => p.text!)
+        .join(" ")
+        .trim()
+
+      if (textContent) {
+        await store.update(sessionId, (draft) => {
+          // Append to userMessages array
+          draft.userMessages.push(textContent)
+          
+          // Capture first real user message as intent baseline (for O_DIVERGE later).
+          // intentBaseline is null until the first real user message arrives.
+          // After capture, only O_INTENT_UPDATE (in the escape hatch path) may update it.
+          if (!draft.intentBaseline) {
+            draft.intentBaseline = textContent.slice(0, MAX_INTENT_BASELINE_CHARS)
+          }
+        })
       }
 
       // Only inject routing hint at USER_GATE
@@ -642,6 +815,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
       input: { sessionID?: string; sessionId?: string; session_id?: string; model?: unknown },
       output: { system: string[] },
     ) => {
+      const { store, log, childSessionParents, designDocPath } = ctx
       try {
       const sessionId = (input.sessionID ?? input.sessionId ?? input.session_id) as string | undefined
       if (!sessionId) return
@@ -661,6 +835,28 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
 
       const state = store.get(sessionId)
       if (!state) return
+
+      // Extract full model config (modelID + providerID) from input.model
+      const modelConfig = extractModelConfig(input.model)
+      // Always log model detection for debugging
+      if (input.model) {
+        log.debug("Session model detected", { detail: `input.model: ${JSON.stringify(input.model)}, extracted: ${JSON.stringify(modelConfig)}` })
+      }
+      if (modelConfig) {
+        // Compare by fields to avoid unnecessary store updates
+        const current = state.sessionModel
+        const changed = !current
+          || typeof current === "string"
+          || current.modelID !== modelConfig.modelID
+          || (current.providerID ?? undefined) !== (modelConfig.providerID ?? undefined)
+        if (changed) {
+          await store.update(sessionId, (draft) => {
+            draft.sessionModel = modelConfig
+          })
+        }
+      } else if (input.model) {
+        log.warn("Failed to extract model config", { detail: `input.model type: ${typeof input.model}, value: ${JSON.stringify(input.model).slice(0, 200)}` })
+      }
 
       // Agent-aware dormancy: if the active agent is NOT an artisan agent,
       // skip workflow prompt injection entirely. The plugin should be invisible
@@ -691,6 +887,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
     // -------------------------------------------------------------------------
 
     "tool.execute.before": async (input: { sessionID?: string; sessionId?: string; session_id?: string; tool: string; args?: Record<string, unknown> }) => {
+      const { store, log, childSessionParents } = ctx
       try {
       const sessionId = (input.sessionID ?? input.sessionId ?? input.session_id) as string | undefined
       if (!sessionId) return
@@ -758,7 +955,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
       if (!state) return
 
       // Track the most recently active primary session ID for orchestrator parentID.
-      activeSessionId = sessionId
+      activeSession.id = sessionId
 
       // Agent-aware dormancy: if the active agent is NOT an artisan agent
       // (e.g. Plan, Build, or any unknown agent), skip ALL tool blocking.
@@ -844,6 +1041,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
       input: { sessionID?: string; sessionId?: string; session_id?: string },
       output: { context?: string[] },
     ) => {
+      const { store, childSessionParents } = ctx
       try {
       const sessionId = (input.sessionID ?? input.sessionId ?? input.session_id) as string | undefined
       if (!sessionId) return
@@ -872,15 +1070,177 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
 
     tool: wrapToolMap({
       // -----------------------------------------------------------------------
-      // select_mode — first call in every session
+      // check_prior_workflow — run before select_mode to validate intent alignment
       // -----------------------------------------------------------------------
+      check_prior_workflow: tool({
+        description:
+          "Check if prior workflow artifacts match the user's current intent. " +
+          "Call this BEFORE select_mode when starting a new workflow to verify whether " +
+          "the existing artifacts are relevant to what the user is asking for. " +
+          "Returns either 'safe to resume' or 'suggest a different feature name'.",
+        args: {
+          feature_name: tool.schema
+            .string()
+            .describe(
+              "The feature name to check for prior workflow state. " +
+              "This should match what the user is asking to work on.",
+            ),
+          user_intent: tool.schema
+            .string()
+            .optional()
+            .describe(
+              "The user's current request/goal. If not provided, will be derived from the session context.",
+            ),
+        },
+        async execute(
+          args: { feature_name?: string; user_intent?: string },
+          context: ToolExecuteContext,
+        ) {
+          const { store, log, subagentDispatcher } = ctx
+          const sessionId = resolveSessionId(context)
+          if (!sessionId) return "Error: Could not determine session ID."
+
+          const featureName = args.feature_name?.trim()
+          if (!featureName) {
+            return "Error: feature_name is required."
+          }
+
+          // Validate feature name format
+          const validationError = validateFeatureName(featureName)
+          if (validationError) {
+            return `Error: ${validationError}`
+          }
+
+          // Check if feature directory exists
+          const cwd = context.directory || process.cwd()
+          const featureDir = join(cwd, ".openartisan", featureName)
+          if (!existsSync(featureDir)) {
+            return (
+              `No prior workflow found for "${featureName}". ` +
+              `Proceed with select_mode to start fresh.`
+            )
+          }
+
+          // Mark that check_prior_workflow was called for this feature
+          await store.update(sessionId, (draft) => {
+            draft.priorWorkflowChecked = true
+          })
+
+          const state = store.get(sessionId)
+          const priorState = await findPriorWorkflowState(store, featureName, log)
+
+          // No prior state found
+          if (!priorState) {
+            return (
+              `No prior workflow found for "${featureName}". ` +
+              `Proceed with select_mode to start fresh.`
+            )
+          }
+
+          // Prior state exists — use LLM to compare intents semantically
+          const currentIntent = args.user_intent?.trim() || state?.intentBaseline || "unknown"
+          const priorIntent = priorState.intentBaseline || "unknown"
+
+          // Validate intents are not "unknown" before LLM call
+          if (currentIntent === "unknown" || priorIntent === "unknown") {
+            return (
+              `Error: Cannot compare intents - one or both intents are unknown.\n` +
+              `Current intent: ${currentIntent}\n` +
+              `Prior intent: ${priorIntent}\n\n` +
+              `Provide user_intent parameter or ensure intentBaseline is captured.`
+            )
+          }
+
+          const priorPlanPath = priorState.artifactDiskPaths?.["plan"]
+
+          // Use shared LLM comparison function
+          const comparisonResult = await compareIntentsWithLLM({
+            currentIntent,
+            priorIntent,
+            priorPlanPath,
+            dispatcher: subagentDispatcher,
+            parentModel: state?.sessionModel ?? undefined,
+          })
+
+          const { classification, explanation } = comparisonResult
+
+          // Handle ERROR case first
+          if (classification === "ERROR") {
+            log.error("check_prior_workflow", { 
+              featureName, 
+              error: "LLM comparison failed", 
+              detail: explanation 
+            })
+            return (
+              `Error: Could not compare intents with prior workflow.\n` +
+              `Reason: ${explanation}\n\n` +
+              `Recommendation: Proceed with caution or use a different feature name.`
+            )
+          }
+
+          // Log successful comparison
+          log.info("check_prior_workflow", { 
+            featureName, 
+            classification, 
+            currentIntent: currentIntent.slice(0, 100),
+            priorIntent: priorIntent.slice(0, 100)
+          })
+
+          // Cache the prior state for select_mode to avoid redundant file reads
+          await store.update(sessionId, (draft) => {
+            draft.cachedPriorState = priorState
+            draft.priorWorkflowChecked = true
+          })
+
+          if (classification === "DIFFERENT") {
+            return (
+              `Prior workflow found for "${featureName}" (last phase: ${priorState.phase}).\n\n` +
+              `Current intent: "${currentIntent.slice(0, MAX_INTENT_DISPLAY_CHARS)}"\n` +
+              `Prior intent: "${priorIntent.slice(0, MAX_INTENT_DISPLAY_CHARS)}"\n\n` +
+              `LLM assessment: DIFFERENT\n` +
+              `Explanation: ${explanation}\n\n` +
+              `appears DIFFERENT. The prior workflow was for a different goal.\n\n` +
+              `Recommendation: Use a more specific feature name, for example:\n` +
+              `- "${featureName}-v2" to start fresh with a similar name\n` +
+              `- A name that reflects the specific aspect you're working on\n\n` +
+              `Or manually clear the prior state if you want to reuse this name.`
+            )
+          } else if (classification === "PARTIAL") {
+            return (
+              `Prior workflow found for "${featureName}" (last phase: ${priorState.phase}).\n\n` +
+              `Current intent: "${currentIntent.slice(0, MAX_INTENT_DISPLAY_CHARS)}"\n` +
+              `Prior intent: "${priorIntent.slice(0, MAX_INTENT_DISPLAY_CHARS)}"\n\n` +
+              `LLM assessment: PARTIAL\n` +
+              `Explanation: ${explanation}\n\n` +
+              `The prior workflow only PARTIALLY covers your current request. ` +
+              `You need to complete the remaining work.\n\n` +
+              `Recommendation: Use a new feature name to continue the work, for example:\n` +
+              `- "${featureName}-continue" to pick up where it left off\n` +
+              `- "${featureName}-additional" to add the missing parts\n\n` +
+              `The workflow will start fresh and you can reference the prior artifacts as needed.`
+            )
+          } else {
+            // FULL
+            return (
+              `Prior workflow found for "${featureName}" (last phase: ${priorState.phase}).\n\n` +
+              `Current intent: "${currentIntent.slice(0, MAX_INTENT_DISPLAY_CHARS)}"\n` +
+              `Prior intent: "${priorIntent.slice(0, MAX_INTENT_DISPLAY_CHARS)}"\n\n` +
+              `LLM assessment: FULL\n` +
+              `Explanation: ${explanation}\n\n` +
+              `appears RELEVANT and FULLY COVERS your request. ` +
+              `Safe to resume with select_mode. The workflow will fast-forward to where it left off.`
+            )
+          }
+        },
+      }),
       select_mode: tool({
         description:
           "Select the workflow mode: GREENFIELD (new project, skips discovery), " +
           "REFACTOR (restructure existing project, runs discovery), " +
           "or INCREMENTAL (add/fix specific functionality, runs discovery, do-no-harm). " +
-          "You MUST provide a feature_name — all plan artifacts are written to " +
-          ".openartisan/<feature_name>/ so multiple features can coexist in the same repo. " +
+          "IMPORTANT: Call check_prior_workflow first to verify the feature name matches your intent. " +
+          "If check_prior_workflow returns 'DIFFERENT' or 'PARTIAL', use a different feature name. " +
+          "All plan artifacts are written to .openartisan/<feature_name>/ so multiple features can coexist in the same repo. " +
           "Derive a short kebab-case slug from the user's request (e.g. 'cloud-cost-platform').",
         args: {
           mode: tool.schema.enum(["GREENFIELD", "REFACTOR", "INCREMENTAL"]).describe(
@@ -898,11 +1258,38 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
           args: { mode: string; feature_name: string },
           context: ToolExecuteContext,
         ) {
+          const { store, sm, log, notify, subagentDispatcher } = ctx
           const sessionId = resolveSessionId(context)
           if (!sessionId) return "Error: Could not determine session ID from tool context."
 
-          const state = await ensureState(store, sessionId, client)
+          const state = await ensureState(store, sessionId, notify)
           await detectAgent(store, sessionId, context)
+
+          // If at DONE, reset to MODE_SELECT to allow starting a fresh workflow.
+          // This handles the case where the user wants to start a new workflow
+          // after a prior one completed, without needing to send a chat message first.
+          if (state.phase === "DONE") {
+            const updatedState = await store.update(sessionId, (draft) => {
+              draft.phase = "MODE_SELECT"
+              draft.phaseState = "DRAFT"
+              draft.iterationCount = 0
+              draft.retryCount = 0
+              draft.intentBaseline = null
+              draft.userGateMessageReceived = false
+              draft.currentTaskId = null
+              draft.implDag = null
+              draft.feedbackHistory = []
+              draft.pendingRevisionSteps = null
+              draft.escapePending = false
+              draft.taskCompletionInProgress = null
+              draft.taskReviewCount = 0
+              draft.pendingFeedback = null
+              draft.revisionBaseline = null
+            })
+            log.info("Auto-reset DONE -> MODE_SELECT for fresh workflow", { sessionId })
+            // Use the returned state instead of mutating the stale reference
+            return await this.execute(args, context)
+          }
 
           if (state.phase !== "MODE_SELECT") {
             return `Error: Mode already selected (current phase: ${state.phase}).`
@@ -916,10 +1303,132 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
           if (!featureName) {
             return "Error: feature_name is required. Provide a short kebab-case slug derived from the user's request (e.g. 'cloud-cost-platform')."
           }
-          const outcome = sm.transition(state.phase, state.phaseState, "mode_selected", mode)
+
+          // Validate feature name format
+          const validationError = validateFeatureName(featureName)
+          if (validationError) {
+            return `Error: ${validationError}`
+          }
+
+          // Check if feature directory exists - enforce check_prior_workflow before proceeding
+          const featureDir = join(context.directory || process.cwd(), ".openartisan", featureName)
+          if (existsSync(featureDir) && !state.priorWorkflowChecked) {
+            log.warn("select_mode blocked without check_prior_workflow", {
+              featureName,
+              detail: "Feature directory exists but check_prior_workflow was not called first",
+            })
+            return (
+              `Error: Prior workflow artifacts detected for "${featureName}". ` +
+              `Call check_prior_workflow first to verify intent alignment before select_mode.`
+            )
+          }
+
+          // STEP 1: Check if this is an existing workflow (FIRST THING)
+          // Use cached result from check_prior_workflow if available, otherwise read from disk
+          let priorState = state.cachedPriorState
+          if (!priorState) {
+            priorState = await findPriorWorkflowState(store, featureName, log)
+          } else {
+            log.info("select_mode using cached prior state", { featureName })
+          }
+          
+          // Clear cached prior state and consume the check_prior_workflow flag
+          if (state.cachedPriorState || state.priorWorkflowChecked) {
+            await store.update(sessionId, (draft) => {
+              draft.cachedPriorState = null
+              draft.priorWorkflowChecked = false
+            })
+          }
+          
+          const currentIntent = state.intentBaseline || "unknown"
+
+          if (priorState) {
+            // Prior workflow exists for this feature - check if complete
+            const hasAllArtifacts = priorState.approvedArtifacts && 
+              Object.keys(priorState.approvedArtifacts).length >= MIN_COMPLETE_ARTIFACTS
+
+            if (hasAllArtifacts) {
+              // Prior workflow is complete - check if it covers current intent
+              // Use shared LLM comparison function
+              const priorIntent = priorState.intentBaseline || ""
+              const priorPlanPath = priorState.artifactDiskPaths?.["plan"]
+
+              const comparisonResult = await compareIntentsWithLLM({
+                currentIntent,
+                priorIntent,
+                priorPlanPath,
+                dispatcher: subagentDispatcher,
+                parentModel: state.sessionModel ?? undefined,
+              })
+
+              const { classification } = comparisonResult
+
+              if (classification === "DIFFERENT" || classification === "PARTIAL") {
+                return (
+                  `Prior workflow found for "${featureName}" but it ${classification === "DIFFERENT" ? "is for a different goal" : "only partially covers your request"}.\n\n` +
+                  `Current: "${currentIntent.slice(0, MAX_INTENT_DISPLAY_CHARS)}"\n` +
+                  `Prior: "${priorIntent.slice(0, MAX_INTENT_DISPLAY_CHARS)}"\n\n` +
+                  `Use a different feature name to start fresh, e.g. "${featureName}-v2" or "${featureName}-continue".`
+                )
+              }
+              
+              // If FULL, fast-forward to skip completed phases
+              if (classification === "FULL") {
+                const ffResult = await computeFastForward(
+                  mode,
+                  priorState.approvedArtifacts || {},
+                  priorState.artifactDiskPaths
+                )
+
+                log.info("select_mode fast-forward", {
+                  featureName,
+                  targetPhase: ffResult.targetPhase,
+                  skippedPhases: ffResult.skippedPhases,
+                })
+
+                // Detect design doc
+                const cwd = context.directory || process.cwd()
+                const featureDesignDocPath = detectDesignDoc(cwd, featureName)
+
+                // Apply fast-forward result
+                const updatedState = await store.update(sessionId, (draft) => {
+                  draft.mode = mode
+                  draft.featureName = featureName
+                  draft.phase = ffResult.targetPhase
+                  draft.phaseState = ffResult.targetPhaseState
+                  draft.iterationCount = 0
+                  draft.retryCount = 0
+                  if (featureDesignDocPath) {
+                    draft.artifactDiskPaths = { ...draft.artifactDiskPaths, design: featureDesignDocPath }
+                  }
+                  if (draft.fileAllowlist.length > 0) {
+                    draft.fileAllowlist = draft.fileAllowlist.map((p) =>
+                      p.startsWith("/") ? p : resolve(cwd, p),
+                    )
+                  }
+                })
+
+                const designDocNote = featureDesignDocPath
+                  ? ` Design document detected at \`${featureDesignDocPath}\`.`
+                  : ""
+
+                return (
+                  `Mode: ${mode}\n` +
+                  `Feature: ${featureName}\n\n` +
+                  `${ffResult.message}\n\n` +
+                  `Resuming at ${updatedState.phase}/${updatedState.phaseState}.${designDocNote}`
+                )
+              }
+            }
+          }
+
+          // STEP 2: Transition to the next phase (if not fast-forwarding)
+          // Refetch state after potential fast-forward update
+          const currentState = store.get(sessionId) || state
+          const outcome = sm.transition(currentState.phase, currentState.phaseState, "mode_selected", mode)
           if (!outcome.success) return `Error: ${outcome.message}`
 
-          logTransition(state, outcome, "select_mode", client)
+          logTransition(currentState, outcome, "select_mode", notify)
 
           // Detect design doc now that feature name is known (enables feature-scoped detection)
           const cwd = context.directory || process.cwd()
@@ -950,25 +1459,6 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             ? ` Design document detected at \`${featureDesignDocPath}\` — it will be used as a constraint for all subsequent phases.`
             : ""
 
-          // Phase fast-forward: if prior approved artifacts exist (preserved across
-          // DONE → MODE_SELECT resets), check which phases can be skipped because
-          // their artifacts are still intact on disk. This avoids re-running 6+
-          // approval gates when the user is returning to an existing project.
-          const updatedState = store.get(sessionId)
-          if (updatedState && Object.keys(updatedState.approvedArtifacts).length > 0) {
-            const ff = computeFastForward(mode, updatedState.approvedArtifacts, updatedState.artifactDiskPaths)
-            if (ff.skippedPhases.length > 0) {
-              await store.update(sessionId, (draft) => {
-                draft.phase = ff.targetPhase
-                draft.phaseState = ff.targetPhaseState
-                draft.iterationCount = 0
-                draft.retryCount = 0
-              })
-              log.info("Phase fast-forward", { detail: `Skipped ${ff.skippedPhases.length} phase(s): ${ff.skippedPhases.join(", ")} → ${ff.targetPhase}` })
-              return buildSelectModeResponse(mode) + ` Artifacts will be written to \`.openartisan/${featureName}/\`.` + designDocNote + `\n\n` + ff.message
-            }
-          }
-
           return buildSelectModeResponse(mode) + ` Artifacts will be written to \`.openartisan/${featureName}/\`.` + designDocNote
         },
       }),
@@ -986,10 +1476,11 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
           ),
         },
         async execute(args: { scan_summary: string }, context: ToolExecuteContext) {
+          const { store, sm, notify } = ctx
           const sessionId = resolveSessionId(context)
           if (!sessionId) return "Error: Could not determine session ID from tool context."
 
-          const state = await ensureState(store, sessionId, client)
+          const state = await ensureState(store, sessionId, notify)
           await detectAgent(store, sessionId, context)
 
           if (state.phase !== "DISCOVERY" || state.phaseState !== "SCAN") {
@@ -999,7 +1490,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
           const outcome = sm.transition(state.phase, state.phaseState, "scan_complete", state.mode)
           if (!outcome.success) return `Error: ${outcome.message}`
 
-          logTransition(state, outcome, "mark_scan_complete", client)
+          logTransition(state, outcome, "mark_scan_complete", notify)
           await store.update(sessionId, (draft) => {
             draft.phase = outcome.nextPhase
             draft.phaseState = outcome.nextPhaseState
@@ -1024,10 +1515,11 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
           ),
         },
         async execute(args: { analysis_summary: string }, context: ToolExecuteContext) {
+          const { store, sm, log, notify, subagentDispatcher } = ctx
           const sessionId = resolveSessionId(context)
           if (!sessionId) return "Error: Could not determine session ID from tool context."
 
-          const state = await ensureState(store, sessionId, client)
+          const state = await ensureState(store, sessionId, notify)
           await detectAgent(store, sessionId, context)
 
           if (state.phase !== "DISCOVERY" || state.phaseState !== "ANALYZE") {
@@ -1046,10 +1538,20 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
           if (state.mode === "REFACTOR" || state.mode === "INCREMENTAL") {
             try {
               const cwd = context.directory || process.cwd()
-              const report = await runDiscoveryFleet(client, cwd, state.mode, sessionId ?? undefined, state.featureName)
+              const report = await runDiscoveryFleet(
+                subagentDispatcher,
+                cwd,
+                state.mode,
+                sessionId ?? undefined,
+                state.featureName,
+                state.sessionModel ?? undefined,
+              )
               fleetReport = report.combinedReport
               const successCount = report.scanners.filter((s) => s.success).length
               fleetMsg = `\n\n**Discovery fleet:** ${successCount}/${report.scanners.length} scanners completed.`
+              if (successCount === 0) {
+                fleetMsg += "\nManual fallback: draft conventions from README/CONTRIBUTING and direct code inspection, or re-run discovery after fixing the prompt/template error."
+              }
             } catch (fleetErr) {
               // Non-fatal — fleet failure does not block conventions drafting
               const errMsg = fleetErr instanceof Error ? fleetErr.message : String(fleetErr)
@@ -1072,7 +1574,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
           }
 
           // Single atomic update: phase transition + fleet report together
-          logTransition(state, outcome, "mark_analyze_complete", client)
+          logTransition(state, outcome, "mark_analyze_complete", notify)
           await store.update(sessionId, (draft) => {
             draft.phase = outcome.nextPhase
             draft.phaseState = outcome.nextPhaseState
@@ -1134,14 +1636,36 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
           args: { criteria_met: Array<{ criterion: string; met: boolean; evidence: string; severity?: "blocking" | "suggestion"; score?: string }>; artifact_content?: string },
           context: ToolExecuteContext,
         ) {
+          const { store, sm, log, notify, subagentDispatcher } = ctx
           const sessionId = resolveSessionId(context)
           if (!sessionId) return "Error: Could not determine session ID from tool context."
 
-          const state = await ensureState(store, sessionId, client)
+          const state = await ensureState(store, sessionId, notify)
           await detectAgent(store, sessionId, context)
 
           if (state.phaseState !== "REVIEW") {
             return `Error: mark_satisfied can only be called in REVIEW state (current: ${state.phaseState}).`
+          }
+
+          // Review integrity check (Change 4): verify the artifact hasn't changed
+          // since request_review was called. If it has, the isolated reviewer needs
+          // to re-read the updated file.
+          if (state.reviewArtifactHash) {
+            const artifactKey = PHASE_TO_ARTIFACT[state.phase]
+            const diskPath = artifactKey ? state.artifactDiskPaths[artifactKey] : null
+            if (diskPath) {
+              try {
+                const currentContent = await readFile(diskPath, "utf-8")
+                const currentHash = artifactHash(currentContent)
+                if (currentHash !== state.reviewArtifactHash) {
+                  return (
+                    `Error: Artifact has changed since last request_review. ` +
+                    `Call request_review again so the reviewer can evaluate the updated artifact.\n\n` +
+                    `Expected hash: ${state.reviewArtifactHash}, current hash: ${currentHash}`
+                  )
+                }
+              } catch { /* non-fatal — if file unreadable, skip hash check */ }
+            }
           }
 
           // Layer 3: Dispatch isolated reviewer subagent.
@@ -1154,13 +1678,16 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
           // Parse string scores to numbers — tool.schema has no .number() so
           // the schema declares score as string, but MarkSatisfiedArgs expects number.
           const parsedArgs: MarkSatisfiedArgs = {
-            criteria_met: args.criteria_met.map((c) => ({
-              criterion: c.criterion,
-              met: c.met,
-              evidence: c.evidence,
-              ...(c.severity ? { severity: c.severity } : {}),
-              ...(c.score ? { score: parseInt(c.score, 10) } : {}),
-            })),
+            criteria_met: ensureAllowlistCriterion(
+              args.criteria_met.map((c) => ({
+                criterion: c.criterion,
+                met: c.met,
+                evidence: c.evidence,
+                ...(c.severity ? { severity: c.severity } : {}),
+                ...(c.score ? { score: parseInt(c.score, 10) } : {}),
+              })),
+              state,
+            ),
           }
           // Iteration info for display in fail messages: "Review iteration X of Y"
           const iterationInfo = { current: state.iterationCount + 1, max: MAX_REVIEW_ITERATIONS }
@@ -1195,7 +1722,10 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
 
             let reviewResult: Awaited<ReturnType<typeof dispatchSelfReview>> | null = null
             try {
-              reviewResult = await dispatchSelfReview(client, {
+              // Pass full user messages array for vision alignment evaluation
+              const userMessages = state.userMessages || []
+
+              reviewResult = await dispatchSelfReview(subagentDispatcher, {
                 phase: state.phase,
                 mode: state.mode,
                 artifactPaths,
@@ -1205,6 +1735,11 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                 ...(artifactContent ? { artifactContent } : {}),
                 parentSessionId: sessionId ?? undefined,
                 featureName: state.featureName,
+                ...(userMessages.length > 0 ? { userMessages } : {}),
+                ...(state.sessionModel ? { parentModel: state.sessionModel } : {}),
+                ...(state.fileAllowlist.length > 0 ? { fileAllowlist: state.fileAllowlist } : {}),
+                ...(Object.keys(state.approvedArtifacts).length > 0 ? { approvedArtifacts: state.approvedArtifacts } : {}),
+                ...(Object.keys(state.artifactDiskPaths).length > 0 ? { artifactDiskPaths: state.artifactDiskPaths } : {}),
               })
             } catch (reviewErr) {
               // dispatchSelfReview should never throw (returns SelfReviewError),
@@ -1215,15 +1750,39 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             }
 
             if (reviewResult && !reviewResult.success) {
-              log.warn(`Review ${iterationInfo.current}/${iterationInfo.max}: reviewer error — using agent self-report`)
+              log.warn(`Review ${iterationInfo.current}/${iterationInfo.max}: reviewer error — forcing revision cycle`)
+              // When the isolated reviewer fails, don't silently fall back to self-report.
+              // The agent's self-assessment is unreliable — it will self-report "all criteria met"
+              // even when the artifact is clearly incomplete. Force the agent to REVISE with
+              // explicit instructions to re-evaluate its work and address any issues before
+              // re-submitting. This prevents the agent from getting a free pass to USER_GATE.
+              result = {
+                passed: false,
+                unmetCriteria: [{
+                  criterion: "Isolated reviewer could not evaluate",
+                  met: false,
+                  evidence: `Reviewer failed: ${reviewResult.errors?.join("; ") || "unknown error"}. Re-evaluate your work against all criteria, address any issues you find, and re-submit for review.`,
+                  severity: "blocking" as const,
+                }],
+                metCount: 0,
+                totalBlocking: expectedBlocking,
+              }
             }
 
             if (reviewResult?.success) {
+              const reviewerCriteria = ensureAllowlistCriterion(reviewResult.criteriaResults, state) as CriterionResult[]
+              if (reviewerCriteria.length !== reviewResult.criteriaResults.length) {
+                reviewResult = {
+                  ...reviewResult,
+                  satisfied: false,
+                  criteriaResults: reviewerCriteria,
+                }
+              }
               // Isolated reviewer succeeded — use its verdict as authoritative truth.
               // Re-evaluate using the reviewer's criteria_results (same logic as agent path).
               // Pass expectedBlocking for cross-validation (same anti-gaming check as agent path).
               result = evaluateMarkSatisfied({
-                criteria_met: reviewResult.criteriaResults.map((c) => ({
+                criteria_met: reviewerCriteria.map((c) => ({
                   criterion: c.criterion,
                   met: c.met,
                   evidence: c.evidence,
@@ -1263,7 +1822,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                 if (rebuttableCriteria.length > 0 && agentCounterargs.length > 0) {
                   log.debug("Attempting rebuttal", { detail: `${rebuttableCriteria.length} criteria scoring 7-8` })
                   try {
-                    const rebuttalResult = await dispatchRebuttal(client, {
+                    const rebuttalResult = await dispatchRebuttal(subagentDispatcher, {
                       phase: state.phase,
                       mode: state.mode,
                       reviewerVerdict: rebuttableCriteria,
@@ -1272,6 +1831,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                       criteriaText,
                       parentSessionId: sessionId ?? undefined,
                       featureName: state.featureName,
+                      parentModel: state.sessionModel ?? undefined,
                     })
                     if (rebuttalResult.success) {
                       // Merge revised results: replace the disputed criteria in the
@@ -1308,7 +1868,9 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                 }
               }
             }
-            // If reviewResult.success === false, result keeps the agent's self-report (fallback)
+            // If reviewer failed, result was set to "failed" above (forces revision).
+            // If reviewer succeeded, result was set from reviewer's criteria.
+            // If reviewer never ran (no criteriaText), result is agent's self-report.
           }
 
           // Iteration cap: if self-review has failed MAX_REVIEW_ITERATIONS times
@@ -1322,12 +1884,23 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
           const outcome = sm.transition(state.phase, state.phaseState, event, state.mode)
           if (!outcome.success) return `Error: ${outcome.message}`
 
-          logTransition(state, outcome, `mark_satisfied/${event}`, client)
+          logTransition(state, outcome, `mark_satisfied/${event}`, notify)
           await store.update(sessionId, (draft) => {
             draft.phase = outcome.nextPhase
             draft.phaseState = outcome.nextPhaseState
             draft.iterationCount = nextIterationCount
             draft.retryCount = 0
+            // Store latest review results for the status file (Change 5)
+            draft.latestReviewResults = parsedArgs.criteria_met.map((c) => ({
+              criterion: c.criterion,
+              met: c.met,
+              evidence: c.evidence,
+              ...(c.score !== undefined ? { score: String(c.score) } : {}),
+            }))
+            // Clear reviewArtifactHash when leaving REVIEW
+            if (outcome.nextPhaseState !== "REVIEW") {
+              draft.reviewArtifactHash = null
+            }
             // Reset the user gate flag whenever we enter USER_GATE so the agent
             // cannot reuse a stale approval signal from a previous gate.
             if (outcome.nextPhaseState === "USER_GATE") {
@@ -1354,13 +1927,14 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             currentState?.activeAgent === "robot-artisan"
           ) {
             try {
-              const autoResult = await dispatchAutoApproval(client, {
+              const autoResult = await dispatchAutoApproval(subagentDispatcher, {
                 phase: state.phase,
                 mode: state.mode,
                 artifactDiskPaths: state.artifactDiskPaths,
                 featureName: state.featureName,
                 conventionsPath: state.artifactDiskPaths["conventions"] ?? null,
                 parentSessionId: sessionId ?? undefined,
+                parentModel: state.sessionModel ?? undefined,
                 isEscalation: hitIterationCap,
               })
 
@@ -1376,7 +1950,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                     // SM rejected the transition — fall through to normal USER_GATE behavior
                     log.warn("Robot-artisan: inline approval SM transition failed", { detail: approveOutcome.message })
                   } else {
-                    logTransition({ phase: state.phase, phaseState: outcome.nextPhaseState }, approveOutcome, "auto-approve/inline", client)
+                    logTransition({ phase: state.phase, phaseState: outcome.nextPhaseState }, approveOutcome, "auto-approve/inline", notify)
 
                     // Forward-pass skip for the auto-approve path
                     const autoForwardSkip = computeForwardSkip(
@@ -1390,11 +1964,16 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                     // Git checkpoint
                     const autoPhaseCount = (state.phaseApprovalCounts[state.phase] ?? 0) + 1
                     const autoApprovalCount = state.approvalCount + 1
-                    const autoCheckpointOpts = state.mode === "INCREMENTAL"
-                      ? { phase: state.phase, approvalCount: autoPhaseCount, fileAllowlist: state.fileAllowlist }
-                      : { phase: state.phase, approvalCount: autoPhaseCount }
+                    const autoExpectedFiles = deriveExpectedFiles(state)
+                    const autoCheckpointOpts = {
+                      phase: state.phase,
+                      approvalCount: autoPhaseCount,
+                      featureName: state.featureName,
+                      expectedFiles: autoExpectedFiles,
+                      ...(state.mode === "INCREMENTAL" ? { fileAllowlist: state.fileAllowlist } : {}),
+                    }
                     const autoCheckpointResult = await createGitCheckpoint(
-                      { cwd: context.directory || process.cwd(), $ },
+                      { cwd: context.directory || process.cwd() },
                       autoCheckpointOpts,
                     )
 
@@ -1509,10 +2088,11 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
           args: { task_id: string; implementation_summary: string; tests_passing: boolean },
           context: ToolExecuteContext,
         ) {
+          const { store, log, notify, subagentDispatcher } = ctx
           const sessionId = resolveSessionId(context)
           if (!sessionId) return "Error: Could not determine session ID from tool context."
 
-          const state = await ensureState(store, sessionId, client)
+          const state = await ensureState(store, sessionId, notify)
           await detectAgent(store, sessionId, context)
 
           if (state.phase !== "IMPLEMENTATION") {
@@ -1590,13 +2170,14 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
 
               let taskReviewResult: Awaited<ReturnType<typeof dispatchTaskReview>> | null = null
               try {
-                taskReviewResult = await dispatchTaskReview(client, {
+                taskReviewResult = await dispatchTaskReview(subagentDispatcher, {
                   task: taskNode,
                   implementationSummary: args.implementation_summary,
                   mode: state.mode,
                   cwd: context.directory || process.cwd(),
                   parentSessionId: sessionId ?? undefined,
                   featureName: state.featureName,
+                  parentModel: state.sessionModel ?? undefined,
                   conventions: state.conventions,
                   artifactDiskPaths: state.artifactDiskPaths,
                   adjacentTasks: adjacentTasks.length > 0 ? adjacentTasks : undefined,
@@ -1624,8 +2205,17 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                 )
               }
               // If taskReviewResult is null (dispatch failed) or success===false (error),
-              // we fall through and accept the task — graceful degradation.
-              // The full implementation review at request_review will catch issues.
+              // force the agent to re-evaluate instead of silently accepting.
+              // The agent's self-assessment is unreliable — it will claim the task is done
+              // even when it isn't. Force the agent to fix issues and re-submit.
+              if (!taskReviewResult || !taskReviewResult.success) {
+                log.warn(`Per-task review failed for ${args.task_id} — forcing re-evaluation`)
+                return (
+                  `Task "${args.task_id}" could not be reviewed — the reviewer returned an error.\n\n` +
+                  `Re-evaluate your work against the task description and acceptance criteria. ` +
+                  `Fix any issues you find, ensure all tests pass, then re-call \`mark_task_complete\`.`
+                )
+              }
             } else if (reviewCapped) {
               log.warn("Per-task review cap reached", {
                 detail: `Task ${args.task_id}: ${MAX_TASK_REVIEW_ITERATIONS} attempts — bypassing review`,
@@ -1638,11 +2228,12 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             // This is the X_ALIGN -> O_ASSESS path from the original design.
             if (taskNode && state.implDag && state.implDag.length > 1) {
               try {
-                const driftResult = await dispatchDriftCheck(client, {
+                const driftResult = await dispatchDriftCheck(subagentDispatcher, {
                   task: taskNode,
                   implementationSummary: args.implementation_summary,
                   dagTasks: state.implDag,
                   parentSessionId: sessionId ?? undefined,
+                  parentModel: state.sessionModel ?? undefined,
                 })
                 if (driftResult.success && driftResult.driftDetected) {
                   // Patch downstream task descriptions in the result nodes
@@ -1767,7 +2358,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                   currentState,
                   { phase: currentState.phase, phaseState: "USER_GATE" },
                   "mark_task_complete/awaiting-human",
-                  client,
+                  notify,
                 )
               }
             }
@@ -1817,10 +2408,11 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
           args: { task_id: string; what_is_needed: string; why: string; verification_steps: string },
           context: ToolExecuteContext,
         ) {
+          const { store, log, notify } = ctx
           const sessionId = resolveSessionId(context)
           if (!sessionId) return "Error: Could not determine session ID from tool context."
 
-          const state = await ensureState(store, sessionId, client)
+          const state = await ensureState(store, sessionId, notify)
           await detectAgent(store, sessionId, context)
 
           if (state.phase !== "IMPLEMENTATION") {
@@ -1926,7 +2518,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                 updatedState,
                 { phase: updatedState.phase, phaseState: "USER_GATE" },
                 "resolve_human_gate/awaiting-human",
-                client,
+                notify,
               )
 
               const gateList = decision.humanGatedTasks
@@ -1999,10 +2591,11 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
           args: { summary: string; artifact_description: string; artifact_content?: string },
           context: ToolExecuteContext,
         ) {
+          const { store, sm, log, notify } = ctx
           const sessionId = resolveSessionId(context)
           if (!sessionId) return "Error: Could not determine session ID from tool context."
 
-          const state = await ensureState(store, sessionId, client)
+          const state = await ensureState(store, sessionId, notify)
           await detectAgent(store, sessionId, context)
 
           const validStates = ["DRAFT", "CONVENTIONS", "REVISE", "REVIEW"]
@@ -2031,18 +2624,32 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                 log.warn("Failed to re-write artifact to disk on re-submit")
               }
             }
+            // Capture hash from disk after writing (same as main request_review path).
+            // Without this, mark_satisfied compares against a stale hash and rejects.
+            let reviewHash: string | null = null
+            if (artifactDiskPath) {
+              try {
+                const diskContent = await readFile(artifactDiskPath, "utf-8")
+                reviewHash = artifactHash(diskContent)
+              } catch { /* non-fatal */ }
+            } else if (args.artifact_content) {
+              reviewHash = artifactHash(args.artifact_content)
+            }
             await store.update(sessionId, (draft) => {
               draft.iterationCount = 0
               draft.retryCount = 0
+              draft.reviewArtifactHash = reviewHash
               if (artifactDiskPath) {
                 if (artifactKey) draft.artifactDiskPaths[artifactKey] = artifactDiskPath
               }
             })
+            // Refetch state after update
+            const updatedState = store.get(sessionId) || state
             const diskMsg = artifactDiskPath
               ? `\nArtifact updated on disk at \`${artifactDiskPath}\`.`
               : ""
             return (
-              `Artifact re-submitted for ${state.phase} review. The on-disk version has been updated.${diskMsg}\n\n` +
+              `Artifact re-submitted for ${updatedState.phase} review. The on-disk version has been updated.${diskMsg}\n\n` +
               `Review cycle restarted (iteration count reset to 0). ` +
               `Now call \`mark_satisfied\` with your criteria evaluation to proceed with the review.`
             )
@@ -2087,7 +2694,6 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                 args.artifact_content,
                 state,
                 context.directory || process.cwd(),
-                $,
               )
               if (!changed) {
                 // Cascade active (has remaining steps) → delegate to cascadeAutoSkip
@@ -2096,7 +2702,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                 // OR empty=last cascade step which cascadeAutoSkip handles).
                 // null means "no cascade context" (standalone REVISE) → hard block.
                 if (state.pendingRevisionSteps !== null) {
-                  const skipMsg = await cascadeAutoSkip(cascadeDeps, sessionId, context.directory || process.cwd())
+                  const skipMsg = await cascadeAutoSkip({ store, sm, log }, sessionId, context.directory || process.cwd())
                   if (skipMsg) return skipMsg
                   // cascadeAutoSkip returned null → couldn't determine skip
                   // (e.g., pendingRevisionSteps was [] and SM transitions failed).
@@ -2119,11 +2725,13 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             }
           }
 
-          const event = state.phaseState === "REVISE" ? "revision_complete" : "draft_complete"
+          const event = state.phaseState === "REVISE" ? "revision_complete"
+                      : state.phaseState === "REVIEW" ? "self_review_pass"
+                      : "draft_complete"
           const outcome = sm.transition(state.phase, state.phaseState, event, state.mode)
           if (!outcome.success) return `Error: ${outcome.message}`
 
-          logTransition(state, outcome, `request_review/${event}`, client)
+          logTransition(state, outcome, `request_review/${event}`, notify)
           // Write the artifact to disk immediately (before the user gate) so:
           //   1. The user can read the real file before approving.
           //   2. The isolated self-reviewer reads from disk (no inline content size cap).
@@ -2142,12 +2750,39 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             }
           }
 
+          // Capture artifact hash for review integrity check (Change 4).
+          // IMPORTANT: hash the FILE on disk, not the in-memory content.
+          // writeFile and readFile may handle encoding differently (line endings, BOM).
+          // Writing first then reading ensures the hash matches what mark_satisfied will see.
+          let reviewHash: string | null = null
+          if (artifactDiskPath) {
+            try {
+              const diskContent = await readFile(artifactDiskPath, "utf-8")
+              reviewHash = artifactHash(diskContent)
+            } catch { /* non-fatal — hash gate disabled if file unreadable */ }
+          } else if (args.artifact_content) {
+            // No disk write happened (e.g., implementation artifact) — hash in-memory
+            reviewHash = artifactHash(args.artifact_content)
+          } else {
+            // No artifact_content and no disk write — try to hash existing file
+            const artifactKey = PHASE_TO_ARTIFACT[state.phase]
+            const diskPath = artifactKey ? state.artifactDiskPaths[artifactKey] : null
+            if (diskPath) {
+              try {
+                const content = await readFile(diskPath, "utf-8")
+                reviewHash = artifactHash(content)
+              } catch { /* non-fatal — hash gate disabled if file unreadable */ }
+            }
+          }
+
           await store.update(sessionId, (draft) => {
             draft.phase = outcome.nextPhase
             draft.phaseState = outcome.nextPhaseState
             draft.retryCount = 0
             // Clear revision baseline — we're leaving REVISE
             draft.revisionBaseline = null
+            // Capture artifact hash for review integrity (mark_satisfied checks this)
+            draft.reviewArtifactHash = reviewHash
             // Record the disk path so mark_satisfied and system-transform can use it
             if (artifactDiskPath) {
               const artifactKey = PHASE_TO_ARTIFACT[state.phase]
@@ -2212,10 +2847,11 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
           },
           context: ToolExecuteContext,
         ) {
+          const { store, sm, log, notify, orchestrator } = ctx
           const sessionId = resolveSessionId(context)
           if (!sessionId) return "Error: Could not determine session ID from tool context."
 
-          const state = await ensureState(store, sessionId, client)
+          const state = await ensureState(store, sessionId, notify)
           await detectAgent(store, sessionId, context)
 
           if (state.phaseState !== "USER_GATE" && state.phaseState !== "ESCAPE_HATCH") {
@@ -2316,7 +2952,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                 // Don't return — fall through to normal approval path
               } else if (nextDecision.action === "dispatch") {
                 // There's more implementation work to do — go back to DRAFT
-                logTransition(state, { phase: "IMPLEMENTATION", phaseState: "DRAFT" }, "submit_feedback/human-gate-resolved", client)
+                logTransition(state, { phase: "IMPLEMENTATION", phaseState: "DRAFT" }, "submit_feedback/human-gate-resolved", notify)
 
                 await store.update(sessionId, (draft) => {
                   draft.implDag = updatedNodes
@@ -2388,11 +3024,10 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                   nextStep.phase,
                   state,
                   context.directory || process.cwd(),
-                  $,
                 )
               } catch { /* non-fatal */ }
 
-              logTransition(state, { phase: nextStep.phase, phaseState: "REVISE" }, "submit_feedback/cascade-advance", client)
+              logTransition(state, { phase: nextStep.phase, phaseState: "REVISE" }, "submit_feedback/cascade-advance", notify)
 
               await store.update(sessionId, (draft) => {
                 draft.phase = nextStep.phase
@@ -2408,7 +3043,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
 
               // Deterministic auto-skip: check if this step (and subsequent steps)
               // can be skipped because no artifact changes are needed.
-              const skipMsg = await cascadeAutoSkip(cascadeDeps, sessionId, context.directory || process.cwd())
+              const skipMsg = await cascadeAutoSkip({ store, sm, log }, sessionId, context.directory || process.cwd())
               if (skipMsg) return skipMsg + approvalWarning
 
               // Next step needs work — tell the agent to proceed
@@ -2425,7 +3060,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
               )
             }
 
-            logTransition(state, outcome, "submit_feedback/approve", client)
+            logTransition(state, outcome, "submit_feedback/approve", notify)
 
             // Forward-pass skip: in INCREMENTAL mode, if the fileAllowlist proves
             // the next phase has no relevant files (e.g. no interface files for
@@ -2457,11 +3092,16 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             // Git checkpoint — use per-phase approval count for tag versioning (M11)
             const phaseCount = (state.phaseApprovalCounts[state.phase] ?? 0) + 1
             const newApprovalCount = state.approvalCount + 1
-            const checkpointOpts = state.mode === "INCREMENTAL"
-              ? { phase: state.phase, approvalCount: phaseCount, fileAllowlist: state.fileAllowlist }
-              : { phase: state.phase, approvalCount: phaseCount }
+            const expectedFiles = deriveExpectedFiles(state)
+            const checkpointOpts = {
+              phase: state.phase,
+              approvalCount: phaseCount,
+              featureName: state.featureName,
+              expectedFiles,
+              ...(state.mode === "INCREMENTAL" ? { fileAllowlist: state.fileAllowlist } : {}),
+            }
             const checkpointResult = await createGitCheckpoint(
-              { cwd: context.directory || process.cwd(), $ },
+              { cwd: context.directory || process.cwd() },
               checkpointOpts,
             )
 
@@ -2491,6 +3131,8 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
               draft.retryCount = 0
               // Reset after approval — the next USER_GATE starts fresh.
               draft.userGateMessageReceived = false
+              draft.reviewArtifactHash = null
+              draft.latestReviewResults = null
               if (checkpointResult.success) {
                 draft.lastCheckpointTag = checkpointResult.tag
               }
@@ -2566,16 +3208,32 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                 ? "\n\n**Warning:** No conventions document available (neither `artifact_content` provided nor written to disk via `request_review`). Downstream phases will receive no conventions context. Re-call `submit_feedback` with `artifact_content`, or proceed knowing convention injection is disabled."
                 : ""
 
-            // Warn if IMPL_PLAN approved without artifact_content or with a DAG parse failure —
-            // without a DAG the IMPLEMENTATION phase loses task scheduling (H2/H3).
-            let implPlanWarning = ""
+            // Reject IMPL_PLAN approval without artifact_content — without a DAG,
+            // the IMPLEMENTATION phase loses per-task review, dependency checking,
+            // and drift detection. The agent must provide the implementation plan.
             if (state.phase === "IMPL_PLAN") {
               if (!args.artifact_content) {
-                implPlanWarning = "\n\n**Warning:** No `artifact_content` provided for IMPL_PLAN approval. The implementation DAG will be null — task scheduling is disabled. Re-call `submit_feedback` with the implementation plan text, or proceed with manual task ordering."
+                // No artifact_content — check if feedback_text contains a justification.
+                // The agent may justify why per-task review isn't needed (e.g., trivial scope).
+                // The reviewer will evaluate whether the justification holds up.
+                const hasJustification = args.feedback_text.trim().length > 20 &&
+                  /justification|no plan needed|per-task|brief scope|not needed|skip impl plan/i.test(args.feedback_text)
+                if (!hasJustification) {
+                  return (
+                    "Error: IMPL_PLAN approval requires either `artifact_content` (the implementation plan) " +
+                    "or a justification in `feedback_text` explaining why per-task review isn't needed. " +
+                    "Re-call `submit_feedback` with the plan in `artifact_content`, or provide a justification " +
+                    "in `feedback_text` (the reviewer will evaluate whether your reasoning holds up)."
+                  )
+                }
+                // Justification accepted — skip DAG parsing (no artifact to parse)
               } else {
                 const parseCheck = parseImplPlan(args.artifact_content)
                 if (!parseCheck.success) {
-                  implPlanWarning = `\n\n**Warning:** Failed to parse implementation plan into DAG: ${parseCheck.errors.join("; ")}. Task scheduling is disabled — the agent will fall back to manual task ordering.`
+                  return (
+                    `Error: Failed to parse implementation plan into DAG: ${parseCheck.errors.join("; ")}. ` +
+                    `Fix the plan format and re-submit approval with corrected \`artifact_content\`.`
+                  )
                 }
               }
             }
@@ -2587,7 +3245,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
               log.info("Forward-pass skip", { detail: `Skipped ${forwardSkip.skippedPhases.length} phase(s): ${forwardSkip.skippedPhases.join(", ")} → ${forwardSkip.targetPhase}` })
             }
 
-            return result.responseMessage + checkpointMsg + discoveryWarning + implPlanWarning + forwardSkipMsg + approvalWarning
+            return result.responseMessage + checkpointMsg + discoveryWarning + forwardSkipMsg + approvalWarning
 
           } else {
             // N3 fix: mode must be set before revision routing
@@ -2661,7 +3319,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                 // Should never happen — USER_GATE always has escape_hatch_triggered
                 return `Error: Failed to transition to ESCAPE_HATCH: ${escapeTransition.message}`
               }
-              logTransition(state, escapeTransition, "submit_feedback/escape_hatch_triggered", client)
+              logTransition(state, escapeTransition, "submit_feedback/escape_hatch_triggered", notify)
               await store.update(sessionId, (draft) => {
                 draft.phase = escapeTransition.nextPhase
                 draft.phaseState = escapeTransition.nextPhaseState
@@ -2673,34 +3331,37 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             }
 
             // action === "revise"
-            // Validate targetPhase supports REVISE — guard against orchestrator returning an invalid destination
+            const effectivePhaseState = handlerOutcome.targetPhaseState
+            // Validate targetPhase supports the target phaseState
             const validStates = VALID_PHASE_STATES[handlerOutcome.targetPhase]
-            if (!validStates || !validStates.includes("REVISE")) {
-              return `Error: Orchestrator routed to invalid phase "${handlerOutcome.targetPhase}" which does not support REVISE.`
+            if (!validStates || !validStates.includes(effectivePhaseState)) {
+              return `Error: Orchestrator routed to invalid phase "${handlerOutcome.targetPhase}" which does not support ${effectivePhaseState}.`
             }
-            logTransition(state, { phase: handlerOutcome.targetPhase, phaseState: "REVISE" }, "submit_feedback/revise", client)
+            logTransition(state, { phase: handlerOutcome.targetPhase, phaseState: effectivePhaseState }, `submit_feedback/${effectivePhaseState === "DRAFT" ? "backtrack" : "revise"}`, notify)
 
             // Capture revision baseline BEFORE updating state — this snapshot is
             // compared against the artifact at request_review time to verify that
             // the agent actually made changes during REVISE.
+            // Skip baseline capture for backtrack (DRAFT) — we're restarting from scratch.
             let revisionBaseline: WorkflowState["revisionBaseline"] = null
-            try {
-              revisionBaseline = await captureRevisionBaseline(
-                handlerOutcome.targetPhase,
-                state,
-                context.directory || process.cwd(),
-                $,
-              )
-            } catch (baselineErr) {
-              // Non-fatal — if we can't capture a baseline, the diff gate
-              // is disabled for this revision (graceful degradation).
-              const errMsg = baselineErr instanceof Error ? baselineErr.message : String(baselineErr)
-              log.debug("Failed to capture revision baseline", { detail: errMsg })
+            if (effectivePhaseState === "REVISE") {
+              try {
+                revisionBaseline = await captureRevisionBaseline(
+                  handlerOutcome.targetPhase,
+                  state,
+                  context.directory || process.cwd(),
+                )
+              } catch (baselineErr) {
+                // Non-fatal — if we can't capture a baseline, the diff gate
+                // is disabled for this revision (graceful degradation).
+                const errMsg = baselineErr instanceof Error ? baselineErr.message : String(baselineErr)
+                log.debug("Failed to capture revision baseline", { detail: errMsg })
+              }
             }
 
             await store.update(sessionId, (draft) => {
               draft.phase = handlerOutcome.targetPhase
-              draft.phaseState = "REVISE"
+              draft.phaseState = effectivePhaseState
               draft.pendingRevisionSteps = handlerOutcome.pendingRevisionSteps
               draft.revisionBaseline = revisionBaseline
               if (handlerOutcome.clearEscapePending) draft.escapePending = false
@@ -2708,10 +3369,22 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                 draft.intentBaseline = handlerOutcome.newIntentBaseline
               }
               draft.retryCount = 0
+              // For backtrack, clear the approved status of the artifact being rewritten.
+              // Otherwise the orchestrator sees a stale "approved" hash for an artifact
+              // that's being restarted from scratch, which could mis-classify future
+              // feedback as "already approved" instead of "being rewritten".
+              if (effectivePhaseState === "DRAFT") {
+                draft.iterationCount = 0
+                draft.userGateMessageReceived = false
+                const backtrackArtifact = PHASE_TO_ARTIFACT[handlerOutcome.targetPhase]
+                if (backtrackArtifact) {
+                  delete draft.approvedArtifacts[backtrackArtifact]
+                }
+              }
               // Record feedback in history for accumulated-drift detection (design doc §9)
               draft.feedbackHistory.push({
                 phase: state.phase,
-                feedback: args.feedback_text.slice(0, 2000),
+                feedback: args.feedback_text.slice(0, MAX_FEEDBACK_CHARS),
                 timestamp: Date.now(),
               })
             })
@@ -2722,12 +3395,125 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             // This prevents the agent from ever seeing no-op cascade phases
             // where tool guards would block it.
             if (handlerOutcome.pendingRevisionSteps.length > 0 || revisionBaseline) {
-              const skipMsg = await cascadeAutoSkip(cascadeDeps, sessionId, context.directory || process.cwd())
+              const skipMsg = await cascadeAutoSkip({ store, sm, log }, sessionId, context.directory || process.cwd())
               if (skipMsg) return skipMsg
             }
 
             return handlerOutcome.message
           }
+        },
+      }),
+
+      // propose_backtrack — agent proposes going back to an earlier phase
+      // -----------------------------------------------------------------------
+      propose_backtrack: tool({
+        description:
+          "Propose going back to an earlier workflow phase when you discover a fundamental " +
+          "problem with a prior artifact that cannot be fixed in the current phase. " +
+          "The orchestrator validates whether backtracking is warranted. " +
+          "Only call this from DRAFT or REVISE state, in phases PLANNING through IMPLEMENTATION.",
+        args: {
+          target_phase: tool.schema
+            .enum(["DISCOVERY", "PLANNING", "INTERFACES", "TESTS", "IMPL_PLAN"])
+            .describe(
+              "The phase you want to go back to. Must be earlier than the current phase. " +
+              "The orchestrator may route to a different phase based on root cause analysis.",
+            ),
+          reason: tool.schema.string().describe(
+            "Detailed explanation of why backtracking is needed. " +
+            "Describe the specific flaw in the earlier artifact and why it cannot be fixed in the current phase.",
+          ),
+        },
+        async execute(
+          args: { target_phase: string; reason: string },
+          context: ToolExecuteContext,
+        ) {
+          const { store, sm, log, orchestrator, notify } = ctx
+          const sessionId = resolveSessionId(context)
+          if (!sessionId) return "Error: Could not determine session ID from tool context."
+
+          const state = await ensureState(store, sessionId, notify)
+          await detectAgent(store, sessionId, context)
+
+          const outcome = await handleProposeBacktrack(
+            { target_phase: args.target_phase as Phase, reason: args.reason },
+            state,
+            orchestrator,
+          )
+
+          if (outcome.action === "error") return `Error: ${outcome.message}`
+          if (outcome.action === "reject") return outcome.message
+
+          // outcome.action === "execute" — apply state mutations
+          const effectivePhaseState = outcome.targetPhaseState
+
+          // Validate target supports the phaseState
+          const validStates = VALID_PHASE_STATES[outcome.targetPhase]
+          if (!validStates || !validStates.includes(effectivePhaseState)) {
+            return `Error: Orchestrator routed to invalid phase "${outcome.targetPhase}" which does not support ${effectivePhaseState}.`
+          }
+
+          logTransition(
+            state,
+            { phase: outcome.targetPhase, phaseState: effectivePhaseState },
+            `propose_backtrack/${outcome.classification}`,
+            notify,
+          )
+
+          // Capture revision baseline for strategic (REVISE) — backtrack (DRAFT) restarts from scratch
+          let revisionBaseline: WorkflowState["revisionBaseline"] = null
+          if (effectivePhaseState === "REVISE") {
+            try {
+              revisionBaseline = await captureRevisionBaseline(
+                outcome.targetPhase,
+                state,
+                context.directory || process.cwd(),
+              )
+            } catch {
+              // Non-fatal — diff gate disabled for this revision
+            }
+          }
+
+          await store.update(sessionId, (draft) => {
+            draft.phase = outcome.targetPhase
+            draft.phaseState = effectivePhaseState
+            draft.pendingRevisionSteps = outcome.pendingRevisionSteps
+            draft.revisionBaseline = revisionBaseline
+            draft.retryCount = 0
+
+            if (effectivePhaseState === "DRAFT") {
+              // Backtrack-specific resets
+              draft.iterationCount = 0
+              draft.userGateMessageReceived = false
+              const backtrackArtifact = PHASE_TO_ARTIFACT[outcome.targetPhase]
+              if (backtrackArtifact) {
+                delete draft.approvedArtifacts[backtrackArtifact]
+              }
+            }
+
+            // If backtracking FROM IMPLEMENTATION, clear DAG state
+            if (state.phase === "IMPLEMENTATION") {
+              draft.implDag = null
+              draft.currentTaskId = null
+              draft.taskReviewCount = 0
+              draft.taskCompletionInProgress = null
+            }
+
+            // Record in feedbackHistory for drift detection
+            draft.feedbackHistory.push({
+              phase: state.phase,
+              feedback: `[propose_backtrack → ${outcome.targetPhase}] ${args.reason.slice(0, MAX_FEEDBACK_CHARS - 50)}`,
+              timestamp: Date.now(),
+            })
+          })
+
+          // Cascade auto-skip: check if pending steps can be skipped
+          if (outcome.pendingRevisionSteps.length > 0 || revisionBaseline) {
+            const skipMsg = await cascadeAutoSkip({ store, sm, log }, sessionId, context.directory || process.cwd())
+            if (skipMsg) return skipMsg
+          }
+
+          return outcome.message
         },
       }),
     }, log),

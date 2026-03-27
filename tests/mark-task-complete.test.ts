@@ -13,8 +13,8 @@
  * - Blocked DAG: appropriate message
  */
 import { describe, expect, it } from "bun:test"
-import { processMarkTaskComplete } from "#plugin/tools/mark-task-complete"
-import type { TaskNode } from "#plugin/dag"
+import { processMarkTaskComplete } from "#core/tools/mark-task-complete"
+import type { TaskNode } from "#core/dag"
 
 // ---------------------------------------------------------------------------
 // Fixtures

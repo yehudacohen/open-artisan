@@ -24,6 +24,9 @@ export interface SessionCreateOptions {
     parentID?: string
     /** Agent identifier to use for this session */
     agent?: string
+    /** Model identifier — use parent's model for subagent sessions.
+     *  OpenCode SDK expects { model: { modelID: string, providerID?: string } } */
+    model?: { modelID: string; providerID?: string }
   }
   /** v1 SDK: path params (not used for create, but present in the envelope) */
   path?: Record<string, string>

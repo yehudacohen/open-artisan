@@ -12,7 +12,7 @@
  * - Partial tasks (missing optional fields) still parse
  */
 import { describe, expect, it } from "bun:test"
-import { parseImplPlan } from "#plugin/impl-plan-parser"
+import { parseImplPlan } from "#core/impl-plan-parser"
 
 // ---------------------------------------------------------------------------
 // Fixtures

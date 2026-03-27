@@ -13,19 +13,19 @@
  * - mark-task-complete.ts: human-gated task rejection
  */
 import { describe, expect, it } from "bun:test"
-import { createImplDAG } from "#plugin/dag"
-import type { TaskNode, TaskCategory, HumanGateInfo } from "#plugin/dag"
+import { createImplDAG } from "#core/dag"
+import type { TaskNode, TaskCategory, HumanGateInfo } from "#core/dag"
 import {
   nextSchedulerDecision,
   markTaskComplete,
   markTaskAborted,
   resolveHumanGate,
-} from "#plugin/scheduler"
-import { parseImplPlan } from "#plugin/impl-plan-parser"
-import { buildTaskReviewPrompt } from "#plugin/task-review"
-import { validateWorkflowState, SCHEMA_VERSION } from "#plugin/types"
-import type { WorkflowState } from "#plugin/types"
-import { processMarkTaskComplete } from "#plugin/tools/mark-task-complete"
+} from "#core/scheduler"
+import { parseImplPlan } from "#core/impl-plan-parser"
+import { buildTaskReviewPrompt } from "#core/task-review"
+import { validateWorkflowState, SCHEMA_VERSION } from "#core/types"
+import type { WorkflowState } from "#core/types"
+import { processMarkTaskComplete } from "#core/tools/mark-task-complete"
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -74,6 +74,12 @@ function makeState(overrides: Partial<WorkflowState> = {}): WorkflowState {
     taskCompletionInProgress: null,
     taskReviewCount: 0,
     pendingFeedback: null,
+    userMessages: [],
+    cachedPriorState: null,
+    priorWorkflowChecked: false,
+    sessionModel: null,
+    reviewArtifactHash: null,
+    latestReviewResults: null,
     ...overrides,
   }
 }

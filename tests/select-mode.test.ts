@@ -2,7 +2,7 @@
  * Tests for parseSelectModeArgs and buildSelectModeResponse.
  */
 import { describe, expect, it } from "bun:test"
-import { parseSelectModeArgs, buildSelectModeResponse, VALID_MODES } from "#plugin/tools/select-mode"
+import { parseSelectModeArgs, buildSelectModeResponse, VALID_MODES } from "#core/tools/select-mode"
 
 // ---------------------------------------------------------------------------
 // parseSelectModeArgs

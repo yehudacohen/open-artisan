@@ -3,10 +3,10 @@
  * All tests import the implementation module, which does not exist yet → tests fail.
  */
 import { describe, expect, it, beforeEach } from "bun:test"
-import type { StateMachine } from "#plugin/types"
+import type { StateMachine } from "#core/types"
 
 // Will fail until implementation exists:
-import { createStateMachine } from "#plugin/state-machine"
+import { createStateMachine } from "#core/state-machine"
 
 let sm: StateMachine
 

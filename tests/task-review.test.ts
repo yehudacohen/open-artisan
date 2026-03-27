@@ -12,8 +12,8 @@ import {
   parseTaskReviewResult,
   dispatchTaskReview,
   type TaskReviewRequest,
-} from "#plugin/task-review"
-import type { TaskNode } from "#plugin/dag"
+} from "#core/task-review"
+import type { TaskNode } from "#core/dag"
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -327,50 +327,38 @@ describe("parseTaskReviewResult", () => {
 // ---------------------------------------------------------------------------
 
 describe("dispatchTaskReview", () => {
-  function makeMockClient(promptResponse?: unknown) {
-    const defaultResponse = {
-      data: {
-        parts: [{
-          type: "text",
-          text: JSON.stringify({
-            passed: true,
-            issues: [],
-            reasoning: "All checks pass",
-          }),
-        }],
-      },
-    }
+  function makeMockDispatcher(promptText?: string) {
+    const defaultText = promptText ?? JSON.stringify({
+      passed: true,
+      issues: [],
+      reasoning: "All checks pass",
+    })
+    const createMock = mock(async () => ({
+      id: "review-session-1",
+      prompt: mock(async () => defaultText),
+      destroy: mock(async () => {}),
+    }))
     return {
-      session: {
-        create: mock(async () => ({ data: { id: "review-session-1" } })),
-        prompt: mock(async () => promptResponse ?? defaultResponse),
-        delete: mock(async () => {}),
-      },
+      createSession: createMock,
+      _createMock: createMock,
     }
   }
 
   it("returns passing result on successful review", async () => {
-    const client = makeMockClient()
-    const result = await dispatchTaskReview(client as any, makeRequest())
+    const dispatcher = makeMockDispatcher()
+    const result = await dispatchTaskReview(dispatcher, makeRequest())
     expect(result.success).toBe(true)
     if (!result.success) return
     expect(result.passed).toBe(true)
   })
 
   it("returns failing result when reviewer finds issues", async () => {
-    const client = makeMockClient({
-      data: {
-        parts: [{
-          type: "text",
-          text: JSON.stringify({
-            passed: false,
-            issues: ["Test fails"],
-            reasoning: "Auth test fails",
-          }),
-        }],
-      },
-    })
-    const result = await dispatchTaskReview(client as any, makeRequest())
+    const dispatcher2 = makeMockDispatcher(JSON.stringify({
+      passed: false,
+      issues: ["Test fails"],
+      reasoning: "Auth test fails",
+    }))
+    const result = await dispatchTaskReview(dispatcher2, makeRequest())
     expect(result.success).toBe(true)
     if (!result.success) return
     expect(result.passed).toBe(false)
@@ -378,60 +366,34 @@ describe("dispatchTaskReview", () => {
   })
 
   it("creates an ephemeral session with task-specific title", async () => {
-    const client = makeMockClient()
-    await dispatchTaskReview(client as any, makeRequest({
+    const dispatcher = makeMockDispatcher()
+    await dispatchTaskReview(dispatcher, makeRequest({
       featureName: "auth-refactor",
     }))
-    expect(client.session.create).toHaveBeenCalledTimes(1)
+    expect(dispatcher._createMock).toHaveBeenCalledTimes(1)
   })
 
-  it("returns error when session.create fails", async () => {
-    const client = {
-      session: {
-        create: mock(async () => { throw new Error("Cannot create session") }),
-        prompt: mock(async () => ({})),
-        delete: mock(async () => {}),
-      },
+  it("returns error when session create fails", async () => {
+    const failDispatcher: import("#core/subagent-dispatcher").SubagentDispatcher = {
+      createSession: mock(async () => { throw new Error("Cannot create session") }),
     }
-    const result = await dispatchTaskReview(client as any, makeRequest())
+    const result = await dispatchTaskReview(failDispatcher, makeRequest())
     expect(result.success).toBe(false)
     if (result.success) return
     expect(result.error).toContain("Cannot create session")
   })
 
-  it("returns error when session.prompt fails", async () => {
-    const client = {
-      session: {
-        create: mock(async () => ({ data: { id: "review-1" } })),
+  it("returns error when session prompt fails", async () => {
+    const failDispatcher: import("#core/subagent-dispatcher").SubagentDispatcher = {
+      createSession: mock(async () => ({
+        id: "review-1",
         prompt: mock(async () => { throw new Error("Network error") }),
-        delete: mock(async () => {}),
-      },
+        destroy: mock(async () => {}),
+      })),
     }
-    const result = await dispatchTaskReview(client as any, makeRequest())
+    const result = await dispatchTaskReview(failDispatcher, makeRequest())
     expect(result.success).toBe(false)
     if (result.success) return
     expect(result.error).toContain("Network error")
-  })
-
-  it("returns error when client.session is missing", async () => {
-    const client = {} // no session API
-    const result = await dispatchTaskReview(client as any, makeRequest())
-    expect(result.success).toBe(false)
-    if (result.success) return
-    expect(result.error).toContain("not available")
-  })
-
-  it("cleans up orphaned sessions (no parentSessionId)", async () => {
-    const client = makeMockClient()
-    await dispatchTaskReview(client as any, makeRequest())
-    expect(client.session.delete).toHaveBeenCalledTimes(1)
-  })
-
-  it("does not delete child sessions (parentSessionId set)", async () => {
-    const client = makeMockClient()
-    await dispatchTaskReview(client as any, makeRequest({
-      parentSessionId: "parent-123",
-    }))
-    expect(client.session.delete).not.toHaveBeenCalled()
   })
 })

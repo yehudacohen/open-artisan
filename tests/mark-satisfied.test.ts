@@ -3,7 +3,7 @@
  * Covers G9: suggestion-severity criteria don't block advancement.
  */
 import { describe, expect, it } from "bun:test"
-import { evaluateMarkSatisfied, countExpectedBlockingCriteria } from "#plugin/tools/mark-satisfied"
+import { evaluateMarkSatisfied, countExpectedBlockingCriteria } from "#core/tools/mark-satisfied"
 
 // ---------------------------------------------------------------------------
 // All criteria blocking (default behavior)

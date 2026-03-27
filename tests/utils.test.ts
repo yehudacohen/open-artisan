@@ -6,7 +6,7 @@
  * - withTimeout: resolves on time, rejects on timeout, clears timer on resolve
  */
 import { describe, expect, it } from "bun:test"
-import { resolveSessionId, withTimeout, getNextActionForState } from "#plugin/utils"
+import { resolveSessionId, withTimeout, getNextActionForState } from "#core/utils"
 
 // ---------------------------------------------------------------------------
 // resolveSessionId

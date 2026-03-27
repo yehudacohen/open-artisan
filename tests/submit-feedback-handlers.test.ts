@@ -24,10 +24,10 @@ import {
   handleEscapeHatch,
   handleCascade,
   handleNormalRevise,
-} from "#plugin/tools/submit-feedback-handlers"
-import type { WorkflowState, RevisionStep } from "#plugin/types"
-import { SCHEMA_VERSION } from "#plugin/types"
-import { createStateMachine } from "#plugin/state-machine"
+} from "#core/tools/submit-feedback-handlers"
+import type { WorkflowState, RevisionStep } from "#core/types"
+import { SCHEMA_VERSION } from "#core/types"
+import { createStateMachine } from "#core/state-machine"
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -73,7 +73,7 @@ function makeState(overrides: Partial<WorkflowState> = {}): WorkflowState {
 
 function makeRevisionStep(artifact: string): RevisionStep {
   return {
-    artifact: artifact as import("#plugin/types").ArtifactKey,
+    artifact: artifact as import("#core/types").ArtifactKey,
     phase: "PLANNING",
     phaseState: "REVISE",
     instructions: `Revise the ${artifact} artifact.`,

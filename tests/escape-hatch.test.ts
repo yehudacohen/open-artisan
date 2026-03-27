@@ -7,8 +7,8 @@ import {
   isEscapeHatchAbort,
   isEscapeHatchAccept,
   isEscapeHatchAmbiguous,
-} from "#plugin/orchestrator/escape-hatch"
-import type { OrchestratorAssessResult, OrchestratorDivergeResult, RevisionStep } from "#plugin/types"
+} from "#core/orchestrator/escape-hatch"
+import type { OrchestratorAssessResult, OrchestratorDivergeResult, RevisionStep } from "#core/types"
 
 // ---------------------------------------------------------------------------
 // Helpers

@@ -3,40 +3,39 @@
  * The OpenCode client is mocked so no real LLM calls are made.
  */
 import { describe, expect, it, mock } from "bun:test"
-import { createAssessFn, createDivergeFn } from "#plugin/orchestrator/llm-calls"
-import type { OrchestratorAssessResult } from "#plugin/types"
+import { createAssessFn, createDivergeFn } from "#core/orchestrator/llm-calls"
+import type { OrchestratorAssessResult } from "#core/types"
+import type { SubagentDispatcher } from "#core/subagent-dispatcher"
 
 // ---------------------------------------------------------------------------
-// Mock client factory
+// Mock dispatcher factory
 // ---------------------------------------------------------------------------
 
-/**
- * The llm-calls module uses ephemeralPrompt() which calls (v2 SDK flat params):
- *   client.session.create({ title }) → { data: { id: "mock-session-id" } }
- *   client.session.prompt({ sessionID, parts, ... }) → { data: { parts: [...] } }
- *   client.session.delete({ sessionID })  [best-effort, errors ignored]
- */
-function makeClient(responseText: string) {
+function makeDispatcher(responseText: string): SubagentDispatcher & { _createMock: ReturnType<typeof mock>; _promptMock: ReturnType<typeof mock>; _destroyMock: ReturnType<typeof mock> } {
+  const promptMock = mock(async () => responseText)
+  const destroyMock = mock(async () => {})
+  const createMock = mock(async () => ({
+    id: "mock-session-id",
+    prompt: promptMock,
+    destroy: destroyMock,
+  }))
   return {
-    session: {
-      create: mock(async () => ({ data: { id: "mock-session-id" } })),
-      prompt: mock(async () => ({
-        data: { parts: [{ type: "text", text: responseText }] },
-      })),
-      delete: mock(async () => ({ data: true })),
-    },
+    createSession: createMock,
+    _createMock: createMock,
+    _promptMock: promptMock,
+    _destroyMock: destroyMock,
   }
 }
 
-function makeClientThrows() {
+function makeDispatcherThrows(): SubagentDispatcher & { _destroyMock: ReturnType<typeof mock> } {
+  const destroyMock = mock(async () => {})
   return {
-    session: {
-      create: mock(async () => ({ data: { id: "mock-session-id" } })),
-      prompt: mock(async () => {
-        throw new Error("Network error")
-      }),
-      delete: mock(async () => ({ data: true })),
-    },
+    createSession: mock(async () => ({
+      id: "mock-session-id",
+      prompt: mock(async () => { throw new Error("Network error") }),
+      destroy: destroyMock,
+    })),
+    _destroyMock: destroyMock,
   }
 }
 
@@ -51,8 +50,8 @@ describe("createAssessFn — happy path", () => {
       root_cause_artifact: "interfaces",
       reasoning: "The feedback targets the interface definitions",
     })
-    const client = makeClient(response)
-    const assess = createAssessFn(client)
+    const dispatcher = makeDispatcher(response)
+    const assess = createAssessFn(dispatcher)
 
     const result = await assess("The interface is missing error types", "interfaces")
 
@@ -64,59 +63,56 @@ describe("createAssessFn — happy path", () => {
     expect(result.reasoning).toContain("interface")
   })
 
-  it("calls client.session.prompt once", async () => {
-    const client = makeClient(JSON.stringify({
+  it("calls session.prompt once", async () => {
+    const dispatcher = makeDispatcher(JSON.stringify({
       affected_artifacts: ["plan"],
       root_cause_artifact: "plan",
       reasoning: "Plan issue",
     }))
-    const assess = createAssessFn(client)
+    const assess = createAssessFn(dispatcher)
     await assess("The plan is missing a requirement", "plan")
-    expect((client.session.prompt as ReturnType<typeof mock>).mock.calls).toHaveLength(1)
+    expect(dispatcher._promptMock.mock.calls).toHaveLength(1)
   })
 
   it("uses ephemeral session: create() and delete() are called once per assess call", async () => {
-    const client = makeClient(JSON.stringify({
+    const dispatcher = makeDispatcher(JSON.stringify({
       affected_artifacts: ["tests"],
       root_cause_artifact: "tests",
       reasoning: "Tests issue",
     }))
-    const assess = createAssessFn(client)
+    const assess = createAssessFn(dispatcher)
     await assess("Tests are missing edge cases", "tests")
-    expect((client.session.create as ReturnType<typeof mock>).mock.calls).toHaveLength(1)
-    expect((client.session.delete as ReturnType<typeof mock>).mock.calls).toHaveLength(1)
+    expect(dispatcher._createMock.mock.calls).toHaveLength(1)
+    expect(dispatcher._destroyMock.mock.calls).toHaveLength(1)
   })
 
   it("passes session id from create() into prompt() path.id param (v1 SDK style)", async () => {
-    const client = makeClient(JSON.stringify({
+    const dispatcher = makeDispatcher(JSON.stringify({
       affected_artifacts: ["impl_plan"],
       root_cause_artifact: "impl_plan",
       reasoning: "impl plan issue",
     }))
-    const assess = createAssessFn(client)
+    const assess = createAssessFn(dispatcher)
     await assess("Impl plan is wrong", "impl_plan")
-    const promptCall = (client.session.prompt as ReturnType<typeof mock>).mock.calls[0]
-    const arg = (promptCall?.[0] as any)
-    // v1 SDK style: path.id and body.parts
-    expect(arg?.path?.id).toBe("mock-session-id")
-    expect(Array.isArray(arg?.body?.parts)).toBe(true)
+    // prompt() now receives a plain string (not SDK envelope)
+    const promptText = dispatcher._promptMock.mock.calls[0]?.[0] as string
+    expect(typeof promptText).toBe("string")
+    expect(promptText.length).toBeGreaterThan(0)
   })
 
-  it("inlines system prompt into body.parts text (not as separate param)", async () => {
-    const client = makeClient(JSON.stringify({
+  it("inlines system prompt into the prompt text", async () => {
+    const dispatcher = makeDispatcher(JSON.stringify({
       affected_artifacts: ["plan"],
       root_cause_artifact: "plan",
       reasoning: "plan issue",
     }))
-    const assess = createAssessFn(client)
+    const assess = createAssessFn(dispatcher)
     await assess("Plan is wrong", "plan")
-    const promptCall = (client.session.prompt as ReturnType<typeof mock>).mock.calls[0]
-    const arg = (promptCall as Array<unknown>)[0] as Record<string, unknown>
-    // System prompt should NOT be a separate top-level param
-    expect(arg["system"]).toBeUndefined()
-    // System prompt should be inlined into the body.parts text
-    const body = arg["body"] as { parts: Array<{ type: string; text: string }> }
-    expect(body.parts[0]!.text).toContain("workflow orchestrator")
+    const promptText = dispatcher._promptMock.mock.calls[0]?.[0] as string
+    // System prompt should be inlined into the prompt text
+    expect(promptText).toContain("workflow orchestrator")
+    // User feedback should also be in the prompt
+    expect(promptText).toContain("Plan is wrong")
   })
 
   it("filters out invalid artifact keys from affected_artifacts", async () => {
@@ -125,7 +121,7 @@ describe("createAssessFn — happy path", () => {
       root_cause_artifact: "interfaces",
       reasoning: "Interface issue",
     })
-    const assess = createAssessFn(makeClient(response))
+    const assess = createAssessFn(makeDispatcher(response))
     const result = await assess("Interface is wrong", "interfaces")
     expect(result.success).toBe(true)
     if (!result.success) return
@@ -145,7 +141,7 @@ describe("createAssessFn — error handling", () => {
       root_cause_artifact: "NOT_A_VALID_KEY",
       reasoning: "Some issue",
     })
-    const assess = createAssessFn(makeClient(response))
+    const assess = createAssessFn(makeDispatcher(response))
     const result = await assess("Some feedback", "interfaces")
     expect(result.success).toBe(false)
     if (result.success) return
@@ -153,7 +149,7 @@ describe("createAssessFn — error handling", () => {
   })
 
   it("returns error result when client throws", async () => {
-    const assess = createAssessFn(makeClientThrows())
+    const assess = createAssessFn(makeDispatcherThrows())
     const result = await assess("Some feedback", "tests")
     expect(result.success).toBe(false)
     if (result.success) return
@@ -162,7 +158,7 @@ describe("createAssessFn — error handling", () => {
   })
 
   it("returns error result when LLM returns invalid JSON", async () => {
-    const assess = createAssessFn(makeClient("not valid json {{"))
+    const assess = createAssessFn(makeDispatcher("not valid json {{"))
     const result = await assess("Some feedback", "plan")
     expect(result.success).toBe(false)
   })
@@ -178,7 +174,7 @@ describe("createDivergeFn — happy path", () => {
       classification: "tactical",
       reasoning: "Small targeted change",
     })
-    const diverge = createDivergeFn(makeClient(response))
+    const diverge = createDivergeFn(makeDispatcher(response))
     const assessResult: OrchestratorAssessResult = {
       success: true,
       affectedArtifacts: ["tests"],
@@ -197,7 +193,7 @@ describe("createDivergeFn — happy path", () => {
       trigger_criterion: "scope_expansion",
       reasoning: "Adds new microservice not in plan",
     })
-    const diverge = createDivergeFn(makeClient(response))
+    const diverge = createDivergeFn(makeDispatcher(response))
     const assessResult: OrchestratorAssessResult = {
       success: true,
       affectedArtifacts: ["plan", "interfaces"],
@@ -211,11 +207,11 @@ describe("createDivergeFn — happy path", () => {
   })
 
   it("uses ephemeral session: create() and delete() are called once per diverge call", async () => {
-    const client = makeClient(JSON.stringify({
+    const dispatcher = makeDispatcher(JSON.stringify({
       classification: "tactical",
       reasoning: "Small change",
     }))
-    const diverge = createDivergeFn(client)
+    const diverge = createDivergeFn(dispatcher)
     const assessResult: OrchestratorAssessResult = {
       success: true,
       affectedArtifacts: ["tests"],
@@ -223,8 +219,8 @@ describe("createDivergeFn — happy path", () => {
       reasoning: "test",
     }
     await diverge(assessResult, {})
-    expect((client.session.create as ReturnType<typeof mock>).mock.calls).toHaveLength(1)
-    expect((client.session.delete as ReturnType<typeof mock>).mock.calls).toHaveLength(1)
+    expect(dispatcher._createMock.mock.calls).toHaveLength(1)
+    expect(dispatcher._destroyMock.mock.calls).toHaveLength(1)
   })
 
   it("auto-classifies as strategic when 3+ APPROVED artifacts affected (cascade_depth)", async () => {
@@ -233,7 +229,7 @@ describe("createDivergeFn — happy path", () => {
       classification: "tactical",
       reasoning: "Seems small",
     })
-    const diverge = createDivergeFn(makeClient(response))
+    const diverge = createDivergeFn(makeDispatcher(response))
     const assessResult: OrchestratorAssessResult = {
       success: true,
       affectedArtifacts: ["interfaces", "tests", "impl_plan"], // 3 artifacts
@@ -258,7 +254,7 @@ describe("createDivergeFn — happy path", () => {
       classification: "tactical",
       reasoning: "Just interface fixes",
     })
-    const diverge = createDivergeFn(makeClient(response))
+    const diverge = createDivergeFn(makeDispatcher(response))
     const assessResult: OrchestratorAssessResult = {
       success: true,
       affectedArtifacts: ["interfaces", "tests", "impl_plan", "implementation"], // 4 artifacts
@@ -281,21 +277,19 @@ describe("createDivergeFn — happy path", () => {
 // ---------------------------------------------------------------------------
 
 describe("createDivergeFn — error handling", () => {
-  it("returns fallback to tactical when assess failed", async () => {
-    const diverge = createDivergeFn(makeClient("{}"))
+  it("returns error when assess failed", async () => {
+    const diverge = createDivergeFn(makeDispatcher("{}"))
     const failedAssess: OrchestratorAssessResult = {
       success: false,
       error: "LLM timed out",
       fallbackArtifact: "interfaces",
     }
     const result = await diverge(failedAssess, {})
-    expect(result.success).toBe(true)
-    if (!result.success) return
-    expect(result.classification).toBe("tactical")
+    expect(result.success).toBe(false)
   })
 
   it("returns error result when client throws", async () => {
-    const diverge = createDivergeFn(makeClientThrows())
+    const diverge = createDivergeFn(makeDispatcherThrows())
     const assessResult: OrchestratorAssessResult = {
       success: true,
       affectedArtifacts: ["tests"],

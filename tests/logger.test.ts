@@ -3,23 +3,21 @@
  * Verifies that errors and warnings are appended to the log file,
  * and that the logger gracefully handles write failures.
  */
-import { describe, expect, it, beforeEach, afterEach } from "bun:test"
+import { describe, expect, it, beforeEach, afterEach, mock } from "bun:test"
 import { mkdtempSync, rmSync, readFileSync, existsSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 
-import { createLogger } from "#plugin/logger"
-import type { PluginClient } from "#plugin/client-types"
+import { createLogger } from "#core/logger"
+import type { NotificationSink } from "#core/logger"
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-function makeMockClient(): PluginClient {
+function makeMockNotify(): NotificationSink {
   return {
-    tui: {
-      showToast: () => {},
-    },
+    toast: () => {},
   }
 }
 
@@ -39,28 +37,28 @@ afterEach(() => {
 
 describe("Persistent error log — file creation", () => {
   it("creates openartisan-errors.log on first error", () => {
-    const log = createLogger(makeMockClient(), tempDir)
+    const log = createLogger(makeMockNotify(), tempDir)
     log.error("test error")
     const logPath = join(tempDir, "openartisan-errors.log")
     expect(existsSync(logPath)).toBe(true)
   })
 
   it("creates openartisan-errors.log on first warning", () => {
-    const log = createLogger(makeMockClient(), tempDir)
+    const log = createLogger(makeMockNotify(), tempDir)
     log.warn("test warning")
     const logPath = join(tempDir, "openartisan-errors.log")
     expect(existsSync(logPath)).toBe(true)
   })
 
   it("does NOT create log file for info messages", () => {
-    const log = createLogger(makeMockClient(), tempDir)
+    const log = createLogger(makeMockNotify(), tempDir)
     log.info("test info")
     const logPath = join(tempDir, "openartisan-errors.log")
     expect(existsSync(logPath)).toBe(false)
   })
 
   it("does NOT create log file for debug messages", () => {
-    const log = createLogger(makeMockClient(), tempDir)
+    const log = createLogger(makeMockNotify(), tempDir)
     log.debug("test debug")
     const logPath = join(tempDir, "openartisan-errors.log")
     expect(existsSync(logPath)).toBe(false)
@@ -69,7 +67,7 @@ describe("Persistent error log — file creation", () => {
 
 describe("Persistent error log — content format", () => {
   it("writes JSON lines with ts, level, and message", () => {
-    const log = createLogger(makeMockClient(), tempDir)
+    const log = createLogger(makeMockNotify(), tempDir)
     log.error("disk write failed")
     const logPath = join(tempDir, "openartisan-errors.log")
     const content = readFileSync(logPath, "utf-8").trim()
@@ -82,7 +80,7 @@ describe("Persistent error log — content format", () => {
   })
 
   it("includes detail field when provided", () => {
-    const log = createLogger(makeMockClient(), tempDir)
+    const log = createLogger(makeMockNotify(), tempDir)
     log.error("store update failed", { detail: "validation error: invalid phase" })
     const logPath = join(tempDir, "openartisan-errors.log")
     const entry = JSON.parse(readFileSync(logPath, "utf-8").trim())
@@ -90,7 +88,7 @@ describe("Persistent error log — content format", () => {
   })
 
   it("includes sessionId field when provided", () => {
-    const log = createLogger(makeMockClient(), tempDir)
+    const log = createLogger(makeMockNotify(), tempDir)
     log.warn("retryCount reset failed", { sessionId: "sess-123" })
     const logPath = join(tempDir, "openartisan-errors.log")
     const entry = JSON.parse(readFileSync(logPath, "utf-8").trim())
@@ -98,7 +96,7 @@ describe("Persistent error log — content format", () => {
   })
 
   it("omits detail field when not provided", () => {
-    const log = createLogger(makeMockClient(), tempDir)
+    const log = createLogger(makeMockNotify(), tempDir)
     log.error("simple error")
     const logPath = join(tempDir, "openartisan-errors.log")
     const entry = JSON.parse(readFileSync(logPath, "utf-8").trim())
@@ -106,7 +104,7 @@ describe("Persistent error log — content format", () => {
   })
 
   it("omits sessionId field when not provided", () => {
-    const log = createLogger(makeMockClient(), tempDir)
+    const log = createLogger(makeMockNotify(), tempDir)
     log.error("simple error")
     const logPath = join(tempDir, "openartisan-errors.log")
     const entry = JSON.parse(readFileSync(logPath, "utf-8").trim())
@@ -114,7 +112,7 @@ describe("Persistent error log — content format", () => {
   })
 
   it("writes warn level for warnings", () => {
-    const log = createLogger(makeMockClient(), tempDir)
+    const log = createLogger(makeMockNotify(), tempDir)
     log.warn("non-fatal issue")
     const logPath = join(tempDir, "openartisan-errors.log")
     const entry = JSON.parse(readFileSync(logPath, "utf-8").trim())
@@ -124,7 +122,7 @@ describe("Persistent error log — content format", () => {
 
 describe("Persistent error log — append behavior", () => {
   it("appends multiple entries as separate JSON lines", () => {
-    const log = createLogger(makeMockClient(), tempDir)
+    const log = createLogger(makeMockNotify(), tempDir)
     log.error("first error")
     log.error("second error")
     log.warn("first warning")
@@ -137,21 +135,63 @@ describe("Persistent error log — append behavior", () => {
   })
 })
 
+describe("NotificationSink — toast calls", () => {
+  it("calls notify.toast on error", () => {
+    const toastMock = mock(() => {})
+    const log = createLogger({ toast: toastMock }, tempDir)
+    log.error("test error", { detail: "details here" })
+    expect(toastMock).toHaveBeenCalledTimes(1)
+    const [title, message, level] = toastMock.mock.calls[0] as [string, string, string]
+    expect(title).toBe("Workflow Error")
+    expect(message).toContain("test error")
+    expect(message).toContain("details here")
+    expect(level).toBe("error")
+  })
+
+  it("calls notify.toast on warn", () => {
+    const toastMock = mock(() => {})
+    const log = createLogger({ toast: toastMock }, tempDir)
+    log.warn("test warning")
+    expect(toastMock).toHaveBeenCalledTimes(1)
+    const [, , level] = toastMock.mock.calls[0] as [string, string, string]
+    expect(level).toBe("warning")
+  })
+
+  it("calls notify.toast on info", () => {
+    const toastMock = mock(() => {})
+    const log = createLogger({ toast: toastMock }, tempDir)
+    log.info("test info")
+    expect(toastMock).toHaveBeenCalledTimes(1)
+    const [, , level] = toastMock.mock.calls[0] as [string, string, string]
+    expect(level).toBe("info")
+  })
+
+  it("does NOT call notify.toast on debug", () => {
+    const toastMock = mock(() => {})
+    const log = createLogger({ toast: toastMock }, tempDir)
+    log.debug("test debug")
+    expect(toastMock).not.toHaveBeenCalled()
+  })
+})
+
 describe("Persistent error log — graceful degradation", () => {
   it("does not throw when stateDir is not provided", () => {
-    const log = createLogger(makeMockClient()) // no stateDir
+    const log = createLogger(makeMockNotify()) // no stateDir
     expect(() => log.error("should not throw")).not.toThrow()
     expect(() => log.warn("should not throw")).not.toThrow()
   })
 
   it("does not throw when stateDir does not exist", () => {
-    const log = createLogger(makeMockClient(), "/nonexistent/path/that/does/not/exist")
+    const log = createLogger(makeMockNotify(), "/nonexistent/path/that/does/not/exist")
     // Should swallow the error — appendFileSync will fail but try/catch handles it
     expect(() => log.error("should not throw")).not.toThrow()
   })
 
-  it("does not throw when tui is undefined", () => {
-    const log = createLogger({} as PluginClient, tempDir)
+  it("does not throw when notify.toast throws", () => {
+    const brokenNotify: NotificationSink = {
+      toast() { throw new Error("TUI not available") },
+    }
+    const log = createLogger(brokenNotify, tempDir)
     expect(() => log.error("no tui available")).not.toThrow()
     // Error should still be persisted to file
     const logPath = join(tempDir, "openartisan-errors.log")

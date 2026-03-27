@@ -6,9 +6,9 @@ import { join } from "node:path"
 import { mkdtemp, rm, mkdir, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 
-import { createArtifactGraph } from "#plugin/artifacts"
-import { detectDesignDoc } from "#plugin/artifact-store"
-import type { ArtifactGraph } from "#plugin/types"
+import { createArtifactGraph } from "#core/artifacts"
+import { detectDesignDoc } from "#core/artifact-store"
+import type { ArtifactGraph } from "#core/types"
 
 let graph: ArtifactGraph
 

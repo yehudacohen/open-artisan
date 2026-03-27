@@ -28,8 +28,8 @@ import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { createHash } from "node:crypto"
-import { computeFastForward, computeForwardSkip } from "#plugin/fast-forward"
-import type { ArtifactKey, Phase } from "#plugin/types"
+import { computeFastForward, computeForwardSkip } from "#core/fast-forward"
+import type { ArtifactKey, Phase } from "#core/types"
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -63,29 +63,29 @@ function writeArtifact(key: string, content: string): string {
 // ---------------------------------------------------------------------------
 
 describe("computeFastForward — no approved artifacts", () => {
-  it("returns first phase for GREENFIELD with no approvals", () => {
-    const result = computeFastForward("GREENFIELD", {}, {})
+  it("returns first phase for GREENFIELD with no approvals", async () => {
+    const result = await computeFastForward("GREENFIELD", {}, {})
     expect(result.targetPhase).toBe("PLANNING")
     expect(result.targetPhaseState).toBe("DRAFT")
     expect(result.skippedPhases).toHaveLength(0)
   })
 
-  it("returns DISCOVERY/SCAN for REFACTOR with no approvals", () => {
-    const result = computeFastForward("REFACTOR", {}, {})
+  it("returns DISCOVERY/SCAN for REFACTOR with no approvals", async () => {
+    const result = await computeFastForward("REFACTOR", {}, {})
     expect(result.targetPhase).toBe("DISCOVERY")
     expect(result.targetPhaseState).toBe("SCAN")
     expect(result.skippedPhases).toHaveLength(0)
   })
 
-  it("returns DISCOVERY/SCAN for INCREMENTAL with no approvals", () => {
-    const result = computeFastForward("INCREMENTAL", {}, {})
+  it("returns DISCOVERY/SCAN for INCREMENTAL with no approvals", async () => {
+    const result = await computeFastForward("INCREMENTAL", {}, {})
     expect(result.targetPhase).toBe("DISCOVERY")
     expect(result.targetPhaseState).toBe("SCAN")
     expect(result.skippedPhases).toHaveLength(0)
   })
 
-  it("message indicates no prior artifacts found", () => {
-    const result = computeFastForward("GREENFIELD", {}, {})
+  it("message indicates no prior artifacts found", async () => {
+    const result = await computeFastForward("GREENFIELD", {}, {})
     expect(result.message).toContain("no prior approved artifacts")
   })
 })
@@ -95,7 +95,7 @@ describe("computeFastForward — no approved artifacts", () => {
 // ---------------------------------------------------------------------------
 
 describe("computeFastForward — all artifacts intact", () => {
-  it("skips all phases for GREENFIELD when all artifacts are intact", () => {
+  it("skips all phases for GREENFIELD when all artifacts are intact", async () => {
     const planContent = "# Plan\nDo the thing."
     const ifaceContent = "# Interfaces\nexport interface Foo {}"
     const testsContent = "# Tests\ntest('works', ...)"
@@ -124,7 +124,7 @@ describe("computeFastForward — all artifacts intact", () => {
       implementation: implPath,
     }
 
-    const result = computeFastForward("GREENFIELD", approved, diskPaths)
+    const result = await computeFastForward("GREENFIELD", approved, diskPaths)
     expect(result.targetPhase).toBe("DONE")
     expect(result.skippedPhases).toHaveLength(5)
     expect(result.skippedPhases).toEqual(["PLANNING", "INTERFACES", "TESTS", "IMPL_PLAN", "IMPLEMENTATION"])
@@ -132,7 +132,7 @@ describe("computeFastForward — all artifacts intact", () => {
     expect(result.message).toContain("intact")
   })
 
-  it("skips all phases for REFACTOR when all artifacts including conventions are intact", () => {
+  it("skips all phases for REFACTOR when all artifacts including conventions are intact", async () => {
     const convContent = "# Conventions\nUse kebab-case."
     const planContent = "# Plan"
     const ifaceContent = "# Interfaces"
@@ -165,7 +165,7 @@ describe("computeFastForward — all artifacts intact", () => {
       implementation: implPath,
     }
 
-    const result = computeFastForward("REFACTOR", approved, diskPaths)
+    const result = await computeFastForward("REFACTOR", approved, diskPaths)
     expect(result.targetPhase).toBe("DONE")
     expect(result.skippedPhases).toHaveLength(6)
     expect(result.skippedPhases[0]).toBe("DISCOVERY")
@@ -178,11 +178,11 @@ describe("computeFastForward — all artifacts intact", () => {
 // ---------------------------------------------------------------------------
 
 describe("computeFastForward — partial artifacts", () => {
-  it("skips PLANNING, stops at INTERFACES when only plan is approved", () => {
+  it("skips PLANNING, stops at INTERFACES when only plan is approved", async () => {
     const planContent = "# Plan\nThe plan."
     const planPath = writeArtifact("plan", planContent)
 
-    const result = computeFastForward("GREENFIELD", {
+    const result = await computeFastForward("GREENFIELD", {
       plan: artifactHash(planContent),
     }, {
       plan: planPath,
@@ -196,13 +196,13 @@ describe("computeFastForward — partial artifacts", () => {
     expect(result.message).toContain("INTERFACES")
   })
 
-  it("skips DISCOVERY+PLANNING, stops at INTERFACES for REFACTOR", () => {
+  it("skips DISCOVERY+PLANNING, stops at INTERFACES for REFACTOR", async () => {
     const convContent = "# Conventions"
     const planContent = "# Plan"
     const convPath = writeArtifact("conventions", convContent)
     const planPath = writeArtifact("plan", planContent)
 
-    const result = computeFastForward("REFACTOR", {
+    const result = await computeFastForward("REFACTOR", {
       conventions: artifactHash(convContent),
       plan: artifactHash(planContent),
     }, {
@@ -215,14 +215,14 @@ describe("computeFastForward — partial artifacts", () => {
     expect(result.skippedPhases).toEqual(["DISCOVERY", "PLANNING"])
   })
 
-  it("stops at first missing artifact even if later ones exist", () => {
+  it("stops at first missing artifact even if later ones exist", async () => {
     // Plan approved, interfaces NOT approved, tests approved
     const planContent = "# Plan"
     const testsContent = "# Tests"
     const planPath = writeArtifact("plan", planContent)
     const testsPath = writeArtifact("tests", testsContent)
 
-    const result = computeFastForward("GREENFIELD", {
+    const result = await computeFastForward("GREENFIELD", {
       plan: artifactHash(planContent),
       // interfaces: NOT in approvedArtifacts
       tests: artifactHash(testsContent),
@@ -242,12 +242,12 @@ describe("computeFastForward — partial artifacts", () => {
 // ---------------------------------------------------------------------------
 
 describe("computeFastForward — file deleted from disk", () => {
-  it("stops at phase whose artifact file was deleted", () => {
+  it("stops at phase whose artifact file was deleted", async () => {
     const planContent = "# Plan"
     const planPath = join(tmpDir, ".openartisan", "test-feature", "plan.md")
     // Do NOT write the file — simulate deletion
 
-    const result = computeFastForward("GREENFIELD", {
+    const result = await computeFastForward("GREENFIELD", {
       plan: artifactHash(planContent),
     }, {
       plan: planPath, // Path exists in state but file doesn't exist on disk
@@ -263,12 +263,12 @@ describe("computeFastForward — file deleted from disk", () => {
 // ---------------------------------------------------------------------------
 
 describe("computeFastForward — content hash mismatch", () => {
-  it("stops at phase whose artifact content changed", () => {
+  it("stops at phase whose artifact content changed", async () => {
     const originalContent = "# Plan v1"
     const modifiedContent = "# Plan v2 — user edited this"
     const planPath = writeArtifact("plan", modifiedContent) // Write modified content
 
-    const result = computeFastForward("GREENFIELD", {
+    const result = await computeFastForward("GREENFIELD", {
       plan: artifactHash(originalContent), // Hash of original content
     }, {
       plan: planPath,
@@ -285,13 +285,13 @@ describe("computeFastForward — content hash mismatch", () => {
 // ---------------------------------------------------------------------------
 
 describe("computeFastForward — time-sentinel approved hash", () => {
-  it("skips phase with time-sentinel hash without verifying content", () => {
+  it("skips phase with time-sentinel hash without verifying content", async () => {
     // Time sentinels are used for file-based phases where artifact_content
     // wasn't provided at approval. We trust the sentinel as "was approved."
     const planContent = "# Plan"
     const planPath = writeArtifact("plan", planContent)
 
-    const result = computeFastForward("GREENFIELD", {
+    const result = await computeFastForward("GREENFIELD", {
       plan: "approved-at-1710000000000", // Time sentinel — skip content verification
     }, {
       plan: planPath,
@@ -302,10 +302,10 @@ describe("computeFastForward — time-sentinel approved hash", () => {
     expect(result.skippedPhases).toEqual(["PLANNING"])
   })
 
-  it("still requires file to exist on disk even with time-sentinel", () => {
+  it("still requires file to exist on disk even with time-sentinel", async () => {
     const planPath = join(tmpDir, ".openartisan", "nonexistent", "plan.md")
 
-    const result = computeFastForward("GREENFIELD", {
+    const result = await computeFastForward("GREENFIELD", {
       plan: "approved-at-1710000000000",
     }, {
       plan: planPath, // File doesn't exist
@@ -321,8 +321,8 @@ describe("computeFastForward — time-sentinel approved hash", () => {
 // ---------------------------------------------------------------------------
 
 describe("computeFastForward — no disk path", () => {
-  it("stops at phase with approved hash but no disk path", () => {
-    const result = computeFastForward("GREENFIELD", {
+  it("stops at phase with approved hash but no disk path", async () => {
+    const result = await computeFastForward("GREENFIELD", {
       plan: artifactHash("content"),
       // No disk path for plan
     }, {})
@@ -337,30 +337,30 @@ describe("computeFastForward — no disk path", () => {
 // ---------------------------------------------------------------------------
 
 describe("computeFastForward — mode-specific phase sequences", () => {
-  it("GREENFIELD starts at PLANNING (no DISCOVERY)", () => {
-    const result = computeFastForward("GREENFIELD", {}, {})
+  it("GREENFIELD starts at PLANNING (no DISCOVERY)", async () => {
+    const result = await computeFastForward("GREENFIELD", {}, {})
     expect(result.targetPhase).toBe("PLANNING")
     expect(result.targetPhaseState).toBe("DRAFT")
   })
 
-  it("REFACTOR starts at DISCOVERY/SCAN", () => {
-    const result = computeFastForward("REFACTOR", {}, {})
+  it("REFACTOR starts at DISCOVERY/SCAN", async () => {
+    const result = await computeFastForward("REFACTOR", {}, {})
     expect(result.targetPhase).toBe("DISCOVERY")
     expect(result.targetPhaseState).toBe("SCAN")
   })
 
-  it("INCREMENTAL starts at DISCOVERY/SCAN", () => {
-    const result = computeFastForward("INCREMENTAL", {}, {})
+  it("INCREMENTAL starts at DISCOVERY/SCAN", async () => {
+    const result = await computeFastForward("INCREMENTAL", {}, {})
     expect(result.targetPhase).toBe("DISCOVERY")
     expect(result.targetPhaseState).toBe("SCAN")
   })
 
-  it("DISCOVERY uses SCAN as initial phaseState, others use DRAFT", () => {
+  it("DISCOVERY uses SCAN as initial phaseState, others use DRAFT", async () => {
     // Make conventions approved so DISCOVERY is skipped, landing at PLANNING
     const convContent = "# Conv"
     const convPath = writeArtifact("conventions", convContent)
 
-    const result = computeFastForward("REFACTOR", {
+    const result = await computeFastForward("REFACTOR", {
       conventions: artifactHash(convContent),
     }, {
       conventions: convPath,
@@ -376,16 +376,16 @@ describe("computeFastForward — mode-specific phase sequences", () => {
 // ---------------------------------------------------------------------------
 
 describe("computeFastForward — message format", () => {
-  it("no-skip message mentions starting phase", () => {
-    const result = computeFastForward("GREENFIELD", {}, {})
+  it("no-skip message mentions starting phase", async () => {
+    const result = await computeFastForward("GREENFIELD", {}, {})
     expect(result.message).toContain("PLANNING")
   })
 
-  it("skip message mentions skipped phases and target", () => {
+  it("skip message mentions skipped phases and target", async () => {
     const planContent = "# Plan"
     const planPath = writeArtifact("plan", planContent)
 
-    const result = computeFastForward("GREENFIELD", {
+    const result = await computeFastForward("GREENFIELD", {
       plan: artifactHash(planContent),
     }, {
       plan: planPath,
@@ -397,14 +397,14 @@ describe("computeFastForward — message format", () => {
     expect(result.message).toContain("Prior artifacts are intact")
   })
 
-  it("all-skipped message mentions all phases verified", () => {
+  it("all-skipped message mentions all phases verified", async () => {
     const planContent = "# P"
     const ifaceContent = "# I"
     const testsContent = "# T"
     const implPlanContent = "# IP"
     const implContent = "# Impl"
 
-    const result = computeFastForward("GREENFIELD", {
+    const result = await computeFastForward("GREENFIELD", {
       plan: artifactHash(planContent),
       interfaces: artifactHash(ifaceContent),
       tests: artifactHash(testsContent),
@@ -444,10 +444,14 @@ describe("computeForwardSkip — non-INCREMENTAL mode returns null", () => {
   })
 })
 
-describe("computeForwardSkip — empty fileAllowlist returns null", () => {
-  it("returns null when allowlist is empty", () => {
+describe("computeForwardSkip — empty fileAllowlist behavior", () => {
+  it("skips ceremony phases when allowlist is empty (operational-only task)", () => {
+    // Empty allowlist means "no source files will be changed" (operational task)
+    // This should skip INTERFACES, TESTS, IMPL_PLAN and go to IMPLEMENTATION
     const result = computeForwardSkip("INTERFACES", "INCREMENTAL", [])
-    expect(result).toBeNull()
+    expect(result).not.toBeNull()
+    expect(result?.targetPhase).toBe("IMPLEMENTATION")
+    expect(result?.skippedPhases).toEqual(["INTERFACES", "TESTS", "IMPL_PLAN"])
   })
 })
 

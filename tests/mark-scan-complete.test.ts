@@ -2,7 +2,7 @@
  * mark-scan-complete.test.ts — Tests for mark_scan_complete tool handler.
  */
 import { describe, it, expect } from "bun:test"
-import { processMarkScanComplete } from "#plugin/tools/mark-scan-complete"
+import { processMarkScanComplete } from "#core/tools/mark-scan-complete"
 
 describe("processMarkScanComplete", () => {
   it("returns a response message containing the summary", () => {

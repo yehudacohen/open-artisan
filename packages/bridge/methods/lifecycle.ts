@@ -120,7 +120,11 @@ export const handleInit: MethodHandler = async (params, ctx) => {
   ctx.setEngine(engine)
   ctx.stateDir = stateDir
   ctx.projectDir = projectDir
-  ctx.selfReviewMode = p.selfReviewMode ?? "isolated"
+  ctx.capabilities = {
+    selfReview: p.capabilities?.selfReview ?? "isolated",
+    orchestrator: p.capabilities?.orchestrator ?? true,
+    discoveryFleet: p.capabilities?.discoveryFleet ?? true,
+  }
   ctx.pinoLogger = pinoLogger
 
   log.info("Bridge initialized", {

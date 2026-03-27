@@ -29,8 +29,12 @@ export interface BridgeContext {
   stateDir: string | null
   /** The project directory path — set during lifecycle.init. Used for path resolution. */
   projectDir: string | null
-  /** Self-review mode — set during lifecycle.init. */
-  selfReviewMode: "isolated" | "agent-only"
+  /** Adapter capabilities — set during lifecycle.init. */
+  capabilities: {
+    selfReview: "isolated" | "agent-only"
+    orchestrator: boolean
+    discoveryFleet: boolean
+  }
   /** Pino logger instance — set during lifecycle.init. Available for request logging. */
   pinoLogger: pino.Logger | null
   /** Flag for shutdown. */
@@ -72,7 +76,7 @@ export function createBridgeServer(
   let shuttingDown = false
   let stateDir: string | null = null
   let projectDir: string | null = null
-  let selfReviewMode: "isolated" | "agent-only" = "isolated"
+  let capabilities = { selfReview: "isolated" as const, orchestrator: true, discoveryFleet: true }
   let pinoLogger: pino.Logger | null = null
 
   const bridgeCtx: BridgeContext = {
@@ -84,8 +88,8 @@ export function createBridgeServer(
     set stateDir(v: string | null) { stateDir = v },
     get projectDir() { return projectDir },
     set projectDir(v: string | null) { projectDir = v },
-    get selfReviewMode() { return selfReviewMode },
-    set selfReviewMode(v: "isolated" | "agent-only") { selfReviewMode = v },
+    get capabilities() { return capabilities },
+    set capabilities(v: typeof capabilities) { capabilities = v },
     get pinoLogger() { return pinoLogger },
     set pinoLogger(v: pino.Logger | null) { pinoLogger = v },
     get shuttingDown() { return shuttingDown },

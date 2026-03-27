@@ -24,7 +24,7 @@ function makeBridgeContext(): BridgeContext {
     setEngine(e: EngineContext) { engine = e },
     stateDir: null,
     projectDir: null,
-    selfReviewMode: "isolated" as const,
+    capabilities: { selfReview: "isolated" as const, orchestrator: true, discoveryFleet: true },
     pinoLogger: null,
     shuttingDown: false,
   }
@@ -357,8 +357,8 @@ describe("tool.execute — agent-only mode", () => {
 
   beforeEach(async () => {
     agentCtx = makeBridgeContext()
-    agentCtx.selfReviewMode = "agent-only"
-    await handleInit({ projectDir: tmpDir, selfReviewMode: "agent-only" }, agentCtx)
+    agentCtx.capabilities = { selfReview: "agent-only", orchestrator: false, discoveryFleet: false }
+    await handleInit({ projectDir: tmpDir, capabilities: { selfReview: "agent-only", orchestrator: false, discoveryFleet: false } }, agentCtx)
     await handleSessionCreated({ sessionId: "ao-session" }, agentCtx)
     agentExec = (name, args = {}) =>
       handleToolExecute(

@@ -26,14 +26,20 @@ export interface LifecycleInitParams {
   projectDir: string
   stateDir?: string
   /**
-   * Self-review mode:
-   * - "isolated" (default): mark_satisfied dispatches an isolated reviewer subagent.
-   *   Requires SubagentDispatcher — errors if not available.
-   * - "agent-only": mark_satisfied evaluates the agent's submitted criteria directly.
-   *   No SubagentDispatcher needed. The agent self-evaluates, the human reviews at USER_GATE.
-   *   Used by the Claude Code adapter where SubagentDispatcher is not available.
+   * Adapter capabilities — declares which engine features are available.
+   * Defaults: all features require SubagentDispatcher (error if not available).
+   *
+   * - selfReview: "isolated" (SubagentDispatcher) | "agent-only" (agent self-evaluates)
+   * - orchestrator: true (feedback classification via LLM) | false (direct route to REVISE)
+   * - discoveryFleet: true (parallel scanner subagents) | false (agent provides summary directly)
+   *
+   * Example: Claude Code adapter sets { selfReview: "agent-only", orchestrator: false, discoveryFleet: false }
    */
-  selfReviewMode?: "isolated" | "agent-only"
+  capabilities?: {
+    selfReview?: "isolated" | "agent-only"
+    orchestrator?: boolean
+    discoveryFleet?: boolean
+  }
   traceId?: string
 }
 

@@ -30,7 +30,7 @@ function makeBridgeContext(): BridgeContext {
     setEngine(e: EngineContext) { engine = e },
     stateDir: null,
     projectDir: null,
-    selfReviewMode: "isolated" as const,
+    capabilities: { selfReview: "isolated" as const, orchestrator: true, discoveryFleet: true },
     pinoLogger: null,
     shuttingDown: false,
   }

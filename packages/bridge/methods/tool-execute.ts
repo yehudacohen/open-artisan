@@ -25,14 +25,16 @@ import { resolve } from "node:path"
 import { parseSelectModeArgs } from "../../core/tools/select-mode"
 import { processMarkScanComplete } from "../../core/tools/mark-scan-complete"
 import { processMarkTaskComplete } from "../../core/tools/mark-task-complete"
-import { evaluateMarkSatisfied, countExpectedBlockingCriteria } from "../../core/tools/mark-satisfied"
-import { processMarkAnalyzeComplete } from "../../core/tools/mark-analyze-complete"
 import { processQueryParentWorkflow, processQueryChildWorkflow } from "../../core/tools/query-workflow"
+import {
+  computeMarkSatisfiedTransition,
+  computeMarkAnalyzeCompleteTransition,
+  computeSubmitFeedbackReviseTransition,
+  computeProposeBacktrackTransition,
+} from "../../core/tools/transitions"
 import { writeArtifact } from "../../core/artifact-store"
 import { parseImplPlan } from "../../core/impl-plan-parser"
 import { PHASE_TO_ARTIFACT } from "../../core/artifacts"
-import { getAcceptanceCriteria } from "../../core/hooks/system-transform"
-import { MAX_REVIEW_ITERATIONS } from "../../core/constants"
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -146,117 +148,46 @@ const handleMarkScanComplete: ToolHandler = async (args, toolCtx, ctx) => {
 // ---- mark_analyze_complete ----
 
 const handleMarkAnalyzeComplete: ToolHandler = async (args, toolCtx, ctx) => {
-  if (ctx.selfReviewMode !== "agent-only") {
+  if (ctx.capabilities.discoveryFleet !== false) {
     return subagentError("mark_analyze_complete", "the discovery fleet (SubagentDispatcher)")
   }
-
-  // Agent-only mode: accept the agent's scan summary directly
-  const { store, sm } = ctx.engine!
   const state = requireState(ctx, toolCtx.sessionId)
-
-  if (state.phase !== "DISCOVERY" || state.phaseState !== "ANALYZE") {
-    return `Error: mark_analyze_complete can only be called in DISCOVERY/ANALYZE (current: ${state.phase}/${state.phaseState}).`
-  }
-
-  const result = processMarkAnalyzeComplete(args as any)
-
-  const outcome = sm.transition(state.phase, state.phaseState, "analyze_complete", state.mode)
-  if (!outcome.success) return `Error: ${outcome.message}`
-
-  const analysisSummary = ((args as Record<string, unknown>).analysis_summary as string | undefined)?.trim() ?? null
-  await store.update(toolCtx.sessionId, (draft) => {
-    draft.phase = outcome.nextPhase
-    draft.phaseState = outcome.nextPhaseState
+  const result = computeMarkAnalyzeCompleteTransition(args as any, state, ctx.engine!.sm)
+  if (!result.success) return `Error: ${result.error}`
+  const { nextPhase, nextPhaseState, analysisSummary, responseMessage } = result.transition
+  await ctx.engine!.store.update(toolCtx.sessionId, (draft) => {
+    draft.phase = nextPhase
+    draft.phaseState = nextPhaseState
     draft.discoveryReport = analysisSummary
   })
-
-  return result.responseMessage
+  return responseMessage
 }
 
 // ---- mark_satisfied ----
 
 const handleMarkSatisfied: ToolHandler = async (args, toolCtx, ctx) => {
-  if (ctx.selfReviewMode !== "agent-only") {
+  if (ctx.capabilities.selfReview !== "agent-only") {
     return subagentError("mark_satisfied", "the self-review subagent (SubagentDispatcher)")
   }
-
-  // Agent-only mode: evaluate the agent's criteria directly (no isolated reviewer)
-  const { store, sm } = ctx.engine!
   const state = requireState(ctx, toolCtx.sessionId)
-
-  if (state.phaseState !== "REVIEW") {
-    return `Error: mark_satisfied can only be called in REVIEW state (current: ${state.phaseState}).`
-  }
-
-  // Structural gate: file-based phases require reviewArtifactFiles
-  const isFileBased = ["INTERFACES", "TESTS", "IMPLEMENTATION"].includes(state.phase)
-  if (isFileBased && state.reviewArtifactFiles.length === 0) {
-    return (
-      `Error: No artifact files registered for the ${state.phase} review.\n\n` +
-      `Call \`request_review\` with \`artifact_files\` listing the files to review, then call \`mark_satisfied\` again.`
-    )
-  }
-
-  // Parse criteria — handle string scores (JSON-RPC params may send scores as strings)
   const rawCriteria = (args.criteria_met ?? []) as Array<{
     criterion: string; met: boolean; evidence: string;
     severity?: "blocking" | "suggestion"; score?: string | number
   }>
-  const criteriaMet = rawCriteria.map((c) => ({
-    criterion: c.criterion,
-    met: c.met,
-    evidence: c.evidence,
-    ...(c.severity ? { severity: c.severity } : {}),
-    ...(c.score !== undefined ? { score: typeof c.score === "string" ? parseInt(c.score, 10) : c.score } : {}),
-  }))
-
-  // INCREMENTAL allowlist criterion: ensure the agent assessed allowlist adequacy at PLANNING
-  if (state.mode === "INCREMENTAL" && state.phase === "PLANNING" && state.fileAllowlist.length > 0) {
-    const hasAllowlist = criteriaMet.some((c) => c.criterion.toLowerCase().includes("allowlist adequacy"))
-    if (!hasAllowlist) {
-      criteriaMet.push({
-        criterion: "Allowlist adequacy",
-        met: false,
-        evidence: "Agent did not assess allowlist adequacy. Add this criterion.",
-        severity: "blocking" as const,
-      })
-    }
-  }
-
-  const criteriaText = getAcceptanceCriteria(state.phase, state.phaseState, state.mode, state.artifactDiskPaths?.design ?? null)
-  const expectedBlocking = countExpectedBlockingCriteria(criteriaText)
-  const iterationInfo = { current: state.iterationCount + 1, max: MAX_REVIEW_ITERATIONS }
-  const result = evaluateMarkSatisfied({ criteria_met: criteriaMet }, expectedBlocking, iterationInfo)
-
-  const nextIterationCount = result.passed ? 0 : state.iterationCount + 1
-  const hitCap = !result.passed && nextIterationCount >= MAX_REVIEW_ITERATIONS
-  const event = result.passed ? "self_review_pass" : hitCap ? "escalate_to_user" : "self_review_fail"
-  const outcome = sm.transition(state.phase, state.phaseState, event, state.mode)
-  if (!outcome.success) return `Error: ${outcome.message}`
-
-  await store.update(toolCtx.sessionId, (draft) => {
-    draft.phase = outcome.nextPhase
-    draft.phaseState = outcome.nextPhaseState
-    draft.iterationCount = nextIterationCount
+  const result = computeMarkSatisfiedTransition(rawCriteria, state, ctx.engine!.sm)
+  if (!result.success) return `Error: ${result.error}`
+  const t = result.transition
+  await ctx.engine!.store.update(toolCtx.sessionId, (draft) => {
+    draft.phase = t.nextPhase
+    draft.phaseState = t.nextPhaseState
+    draft.iterationCount = t.nextIterationCount
     draft.retryCount = 0
-    draft.latestReviewResults = criteriaMet.map((c) => ({
-      criterion: c.criterion,
-      met: c.met,
-      evidence: c.evidence,
-      ...(c.score !== undefined ? { score: String(c.score) } : {}),
-    }))
-    if (outcome.nextPhaseState !== "REVIEW") {
-      draft.reviewArtifactHash = null
-    }
-    if (outcome.nextPhaseState === "USER_GATE") {
-      draft.userGateMessageReceived = false
-    }
-    if (outcome.nextPhaseState === "REVISE") {
-      draft.revisionBaseline = null
-    }
+    draft.latestReviewResults = t.latestReviewResults
+    if (t.clearReviewArtifactHash) draft.reviewArtifactHash = null
+    if (t.resetUserGateMessage) draft.userGateMessageReceived = false
+    if (t.clearRevisionBaseline) draft.revisionBaseline = null
   })
-
-  return result.responseMessage
+  return t.responseMessage
 }
 
 // ---- request_review ----
@@ -383,29 +314,22 @@ const handleSubmitFeedback: ToolHandler = async (args, toolCtx, ctx) => {
   }
 
   if (feedbackType === "revise") {
-    if (ctx.selfReviewMode !== "agent-only") {
+    if (ctx.capabilities.orchestrator !== false) {
       return subagentError("submit_feedback(revise)", "the orchestrator (SubagentDispatcher)")
     }
-
-    // Agent-only mode: route directly to REVISE (skip orchestrator classification)
     const feedbackText = (args.feedback_text ?? "") as string
-    const outcome = sm.transition(state.phase, state.phaseState, "user_feedback", state.mode)
-    if (!outcome.success) return `Error: ${outcome.message}`
-
+    const result = computeSubmitFeedbackReviseTransition(feedbackText, state, sm)
+    if (!result.success) return `Error: ${result.error}`
+    const t = result.transition
     await store.update(toolCtx.sessionId, (draft) => {
-      draft.phase = outcome.nextPhase
-      draft.phaseState = outcome.nextPhaseState
+      draft.phase = t.nextPhase
+      draft.phaseState = t.nextPhaseState
       draft.retryCount = 0
       draft.reviewArtifactFiles = []
       draft.pendingRevisionSteps = null
-      draft.feedbackHistory.push({
-        phase: state.phase,
-        feedback: feedbackText.slice(0, 2000),
-        timestamp: Date.now(),
-      })
+      draft.feedbackHistory.push(t.feedbackEntry)
     })
-
-    return `Revision requested. Transitioning to ${outcome.nextPhase}/${outcome.nextPhaseState}. Apply the feedback and call \`request_review\` when done.`
+    return t.responseMessage
   }
 
   return `Error: feedback_type must be "approve" or "revise", got "${feedbackType}".`
@@ -516,35 +440,18 @@ const handleResolveHumanGate: ToolHandler = async (args, toolCtx, ctx) => {
 // ---- propose_backtrack ----
 
 const handleProposeBacktrack: ToolHandler = async (args, toolCtx, ctx) => {
-  if (ctx.selfReviewMode !== "agent-only") {
+  if (ctx.capabilities.orchestrator !== false) {
     return subagentError("propose_backtrack", "the orchestrator (SubagentDispatcher)")
   }
-
-  // Agent-only mode: accept the backtrack without orchestrator validation.
-  // Route directly to the target phase's DRAFT state.
-  const { store, sm } = ctx.engine!
   const state = requireState(ctx, toolCtx.sessionId)
-
-  if (state.phaseState !== "DRAFT" && state.phaseState !== "REVISE") {
-    return `Error: propose_backtrack can only be called from DRAFT or REVISE state (current: ${state.phase}/${state.phaseState}).`
-  }
-  if (state.phase === "MODE_SELECT" || state.phase === "DISCOVERY" || state.phase === "DONE") {
-    return `Error: propose_backtrack cannot be called from ${state.phase} — there is no earlier phase to backtrack to.`
-  }
-
-  const targetPhase = (args.target_phase ?? "") as string
-  const reason = (args.reason ?? "") as string
-  if (!targetPhase) return "Error: target_phase is required."
-  if (!reason || reason.length < 20) return "Error: reason must be at least 20 characters."
-
-  const PHASE_ORDER = ["MODE_SELECT", "DISCOVERY", "PLANNING", "INTERFACES", "TESTS", "IMPL_PLAN", "IMPLEMENTATION", "DONE"]
-  const currentIdx = PHASE_ORDER.indexOf(state.phase)
-  const targetIdx = PHASE_ORDER.indexOf(targetPhase)
-  if (targetIdx === -1) return `Error: "${targetPhase}" is not a valid phase.`
-  if (targetIdx >= currentIdx) return `Error: target_phase "${targetPhase}" is not earlier than current phase "${state.phase}".`
-
-  await store.update(toolCtx.sessionId, (draft) => {
-    draft.phase = targetPhase as any
+  const result = computeProposeBacktrackTransition(
+    { target_phase: (args.target_phase ?? "") as string, reason: (args.reason ?? "") as string },
+    state,
+  )
+  if (!result.success) return `Error: ${result.error}`
+  const t = result.transition
+  await ctx.engine!.store.update(toolCtx.sessionId, (draft) => {
+    draft.phase = t.targetPhase
     draft.phaseState = "DRAFT"
     draft.iterationCount = 0
     draft.retryCount = 0
@@ -552,29 +459,18 @@ const handleProposeBacktrack: ToolHandler = async (args, toolCtx, ctx) => {
     draft.reviewArtifactFiles = []
     draft.revisionBaseline = null
     draft.pendingRevisionSteps = null
-    // Clear approved status of the target artifact AND all downstream artifacts
-    for (let i = targetIdx; i < PHASE_ORDER.length; i++) {
-      const phaseKey = PHASE_ORDER[i] as keyof typeof PHASE_TO_ARTIFACT
-      const artifactKey = PHASE_TO_ARTIFACT[phaseKey]
-      if (artifactKey) {
-        delete draft.approvedArtifacts[artifactKey]
-      }
+    for (const key of t.clearedArtifactKeys) {
+      delete draft.approvedArtifacts[key]
     }
-    // Clear IMPLEMENTATION-specific state when backtracking from or past IMPLEMENTATION
-    if (state.phase === "IMPLEMENTATION" || targetIdx <= PHASE_ORDER.indexOf("IMPL_PLAN")) {
+    if (t.clearImplDag) {
       draft.implDag = null
       draft.currentTaskId = null
       draft.taskReviewCount = 0
       draft.taskCompletionInProgress = null
     }
-    draft.feedbackHistory.push({
-      phase: state.phase,
-      feedback: `[propose_backtrack → ${targetPhase}] ${reason.slice(0, 1950)}`,
-      timestamp: Date.now(),
-    })
+    draft.feedbackHistory.push(t.feedbackEntry)
   })
-
-  return `Backtrack accepted. Moved to ${targetPhase}/DRAFT. ${reason}`
+  return t.responseMessage
 }
 
 // ---- spawn_sub_workflow ----

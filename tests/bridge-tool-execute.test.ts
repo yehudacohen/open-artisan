@@ -346,3 +346,125 @@ describe("tool.execute — query tools", () => {
     expect(result).toContain("No child workflow")
   })
 })
+
+// ---------------------------------------------------------------------------
+// agent-only self-review mode
+// ---------------------------------------------------------------------------
+
+describe("tool.execute — agent-only mode", () => {
+  let agentCtx: BridgeContext
+  let agentExec: (name: string, args?: Record<string, unknown>) => Promise<string>
+
+  beforeEach(async () => {
+    agentCtx = makeBridgeContext()
+    agentCtx.selfReviewMode = "agent-only"
+    await handleInit({ projectDir: tmpDir, selfReviewMode: "agent-only" }, agentCtx)
+    await handleSessionCreated({ sessionId: "ao-session" }, agentCtx)
+    agentExec = (name, args = {}) =>
+      handleToolExecute(
+        { name, args, context: { sessionId: "ao-session", directory: tmpDir } },
+        agentCtx,
+      ) as Promise<string>
+  })
+
+  it("mark_satisfied passes with all blocking criteria met", async () => {
+    // Advance to PLANNING/REVIEW
+    await agentExec("select_mode", { mode: "GREENFIELD", feature_name: `ao-test-${Date.now()}` })
+    await agentExec("request_review", { summary: "Plan", artifact_description: "Plan doc", artifact_content: "# Plan" })
+
+    // PLANNING has many expected blocking criteria. Provide enough to satisfy the count check.
+    const criteria = Array.from({ length: 15 }, (_, i) => ({
+      criterion: `Criterion ${i + 1}`, met: true, evidence: "verified", severity: "blocking",
+    }))
+    const result = await agentExec("mark_satisfied", { criteria_met: criteria })
+    // Should advance to USER_GATE (not error about SubagentDispatcher)
+    expect(result).not.toContain("SubagentDispatcher")
+    expect(result.toLowerCase()).toContain("user gate")
+  })
+
+  it("mark_satisfied fails and routes to REVISE with unmet criteria", async () => {
+    await agentExec("select_mode", { mode: "GREENFIELD", feature_name: `ao-fail-${Date.now()}` })
+    await agentExec("request_review", { summary: "Plan", artifact_description: "Plan", artifact_content: "# Plan" })
+
+    // Provide enough criteria but with one unmet blocking
+    const criteria = Array.from({ length: 15 }, (_, i) => ({
+      criterion: `Criterion ${i + 1}`,
+      met: i !== 0, // first criterion is unmet
+      evidence: i === 0 ? "Missing scope" : "verified",
+      severity: "blocking",
+    }))
+    const result = await agentExec("mark_satisfied", { criteria_met: criteria })
+    // Should route to REVISE (self_review_fail → REVISE)
+    expect(result).not.toContain("SubagentDispatcher")
+    expect(result).toContain("blocking")
+    // Verify state is REVISE
+    const state = agentCtx.engine!.store.get("ao-session")
+    expect(state?.phaseState).toBe("REVISE")
+  })
+
+  it("mark_analyze_complete works in agent-only mode", async () => {
+    await agentExec("select_mode", { mode: "REFACTOR", feature_name: `ao-disc-${Date.now()}` })
+    // Advance past SCAN to ANALYZE
+    await agentExec("mark_scan_complete", { scan_summary: "Found stuff" })
+
+    const result = await agentExec("mark_analyze_complete", { analysis_summary: "Architecture is solid" })
+    expect(result).not.toContain("SubagentDispatcher")
+    expect(result).toContain("CONVENTIONS")
+    // Check discoveryReport was stored
+    const state = agentCtx.engine!.store.get("ao-session")
+    expect(state?.discoveryReport).toBe("Architecture is solid")
+  })
+
+  it("submit_feedback(revise) routes directly to REVISE in agent-only mode", async () => {
+    await agentExec("select_mode", { mode: "GREENFIELD", feature_name: `ao-rev-${Date.now()}` })
+    await agentExec("request_review", { summary: "Plan", artifact_description: "Plan", artifact_content: "# Plan" })
+    // mark_satisfied → pass → USER_GATE (provide enough criteria)
+    const passingCriteria = Array.from({ length: 15 }, (_, i) => ({
+      criterion: `C${i + 1}`, met: true, evidence: "ok", severity: "blocking",
+    }))
+    await agentExec("mark_satisfied", { criteria_met: passingCriteria })
+    // Simulate user message for USER_GATE
+    await agentCtx.engine!.store.update("ao-session", (d) => { d.userGateMessageReceived = true })
+
+    const result = await agentExec("submit_feedback", { feedback_type: "revise", feedback_text: "Add more detail" })
+    expect(result).not.toContain("SubagentDispatcher")
+    expect(result).toContain("REVISE")
+    const state = agentCtx.engine!.store.get("ao-session")
+    expect(state?.phaseState).toBe("REVISE")
+  })
+
+  it("propose_backtrack works in agent-only mode", async () => {
+    await agentExec("select_mode", { mode: "GREENFIELD", feature_name: `ao-bt-${Date.now()}` })
+    // Advance to PLANNING/REVIEW → USER_GATE → approve → INTERFACES/DRAFT
+    await agentExec("request_review", { summary: "Plan", artifact_description: "Plan", artifact_content: "# Plan" })
+    const passingCriteria = Array.from({ length: 15 }, (_, i) => ({
+      criterion: `C${i + 1}`, met: true, evidence: "ok", severity: "blocking",
+    }))
+    await agentExec("mark_satisfied", { criteria_met: passingCriteria })
+    await agentCtx.engine!.store.update("ao-session", (d) => { d.userGateMessageReceived = true })
+    await agentExec("submit_feedback", { feedback_type: "approve", feedback_text: "approved" })
+    // Now in INTERFACES/DRAFT — backtrack to PLANNING
+    const state1 = agentCtx.engine!.store.get("ao-session")
+    expect(state1?.phase).toBe("INTERFACES")
+
+    const result = await agentExec("propose_backtrack", {
+      target_phase: "PLANNING",
+      reason: "The plan is missing critical requirements that were discovered during interface design",
+    })
+    expect(result).not.toContain("SubagentDispatcher")
+    expect(result).toContain("PLANNING")
+    const state2 = agentCtx.engine!.store.get("ao-session")
+    expect(state2?.phase).toBe("PLANNING")
+    expect(state2?.phaseState).toBe("DRAFT")
+  })
+
+  it("mark_satisfied returns subagent error in isolated mode", async () => {
+    // Use the default ctx (isolated mode)
+    await exec("select_mode", { mode: "GREENFIELD", feature_name: `iso-test-${Date.now()}` })
+    await exec("request_review", { summary: "Plan", artifact_description: "Plan", artifact_content: "# Plan" })
+    const result = await exec("mark_satisfied", {
+      criteria_met: [{ criterion: "OK", met: true, evidence: "good", severity: "blocking" }],
+    })
+    expect(result).toContain("SubagentDispatcher")
+  })
+})

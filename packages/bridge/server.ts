@@ -71,6 +71,8 @@ export function createBridgeServer(
   let engine: EngineContext | null = null
   let shuttingDown = false
   let stateDir: string | null = null
+  let projectDir: string | null = null
+  let selfReviewMode: "isolated" | "agent-only" = "isolated"
   let pinoLogger: pino.Logger | null = null
 
   const bridgeCtx: BridgeContext = {
@@ -80,6 +82,10 @@ export function createBridgeServer(
     setEngine(e: EngineContext) { engine = e },
     get stateDir() { return stateDir },
     set stateDir(v: string | null) { stateDir = v },
+    get projectDir() { return projectDir },
+    set projectDir(v: string | null) { projectDir = v },
+    get selfReviewMode() { return selfReviewMode },
+    set selfReviewMode(v: "isolated" | "agent-only") { selfReviewMode = v },
     get pinoLogger() { return pinoLogger },
     set pinoLogger(v: pino.Logger | null) { pinoLogger = v },
     get shuttingDown() { return shuttingDown },

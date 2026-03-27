@@ -154,16 +154,20 @@ const handleMarkAnalyzeComplete: ToolHandler = async (args, toolCtx, ctx) => {
   const { store, sm } = ctx.engine!
   const state = requireState(ctx, toolCtx.sessionId)
 
+  if (state.phase !== "DISCOVERY" || state.phaseState !== "ANALYZE") {
+    return `Error: mark_analyze_complete can only be called in DISCOVERY/ANALYZE (current: ${state.phase}/${state.phaseState}).`
+  }
+
   const result = processMarkAnalyzeComplete(args as any)
-  if (!result.success) return `Error: ${result.error}`
 
   const outcome = sm.transition(state.phase, state.phaseState, "analyze_complete", state.mode)
   if (!outcome.success) return `Error: ${outcome.message}`
 
+  const analysisSummary = ((args as Record<string, unknown>).analysis_summary as string | undefined)?.trim() ?? null
   await store.update(toolCtx.sessionId, (draft) => {
     draft.phase = outcome.nextPhase
     draft.phaseState = outcome.nextPhaseState
-    draft.discoveryReport = result.scanSummary ?? null
+    draft.discoveryReport = analysisSummary
   })
 
   return result.responseMessage
@@ -193,10 +197,31 @@ const handleMarkSatisfied: ToolHandler = async (args, toolCtx, ctx) => {
     )
   }
 
-  const criteriaMet = (args.criteria_met ?? []) as Array<{
+  // Parse criteria — handle string scores (JSON-RPC params may send scores as strings)
+  const rawCriteria = (args.criteria_met ?? []) as Array<{
     criterion: string; met: boolean; evidence: string;
-    severity?: "blocking" | "suggestion"; score?: number
+    severity?: "blocking" | "suggestion"; score?: string | number
   }>
+  const criteriaMet = rawCriteria.map((c) => ({
+    criterion: c.criterion,
+    met: c.met,
+    evidence: c.evidence,
+    ...(c.severity ? { severity: c.severity } : {}),
+    ...(c.score !== undefined ? { score: typeof c.score === "string" ? parseInt(c.score, 10) : c.score } : {}),
+  }))
+
+  // INCREMENTAL allowlist criterion: ensure the agent assessed allowlist adequacy at PLANNING
+  if (state.mode === "INCREMENTAL" && state.phase === "PLANNING" && state.fileAllowlist.length > 0) {
+    const hasAllowlist = criteriaMet.some((c) => c.criterion.toLowerCase().includes("allowlist adequacy"))
+    if (!hasAllowlist) {
+      criteriaMet.push({
+        criterion: "Allowlist adequacy",
+        met: false,
+        evidence: "Agent did not assess allowlist adequacy. Add this criterion.",
+        severity: "blocking" as const,
+      })
+    }
+  }
 
   const criteriaText = getAcceptanceCriteria(state.phase, state.phaseState, state.mode, state.artifactDiskPaths?.design ?? null)
   const expectedBlocking = countExpectedBlockingCriteria(criteriaText)
@@ -372,6 +397,7 @@ const handleSubmitFeedback: ToolHandler = async (args, toolCtx, ctx) => {
       draft.phaseState = outcome.nextPhaseState
       draft.retryCount = 0
       draft.reviewArtifactFiles = []
+      draft.pendingRevisionSteps = null
       draft.feedbackHistory.push({
         phase: state.phase,
         feedback: feedbackText.slice(0, 2000),
@@ -502,6 +528,9 @@ const handleProposeBacktrack: ToolHandler = async (args, toolCtx, ctx) => {
   if (state.phaseState !== "DRAFT" && state.phaseState !== "REVISE") {
     return `Error: propose_backtrack can only be called from DRAFT or REVISE state (current: ${state.phase}/${state.phaseState}).`
   }
+  if (state.phase === "MODE_SELECT" || state.phase === "DISCOVERY" || state.phase === "DONE") {
+    return `Error: propose_backtrack cannot be called from ${state.phase} — there is no earlier phase to backtrack to.`
+  }
 
   const targetPhase = (args.target_phase ?? "") as string
   const reason = (args.reason ?? "") as string
@@ -522,10 +551,21 @@ const handleProposeBacktrack: ToolHandler = async (args, toolCtx, ctx) => {
     draft.userGateMessageReceived = false
     draft.reviewArtifactFiles = []
     draft.revisionBaseline = null
-    // Clear approved status of the artifact being restarted
-    const artifactKey = PHASE_TO_ARTIFACT[targetPhase as keyof typeof PHASE_TO_ARTIFACT]
-    if (artifactKey) {
-      delete draft.approvedArtifacts[artifactKey]
+    draft.pendingRevisionSteps = null
+    // Clear approved status of the target artifact AND all downstream artifacts
+    for (let i = targetIdx; i < PHASE_ORDER.length; i++) {
+      const phaseKey = PHASE_ORDER[i] as keyof typeof PHASE_TO_ARTIFACT
+      const artifactKey = PHASE_TO_ARTIFACT[phaseKey]
+      if (artifactKey) {
+        delete draft.approvedArtifacts[artifactKey]
+      }
+    }
+    // Clear IMPLEMENTATION-specific state when backtracking from or past IMPLEMENTATION
+    if (state.phase === "IMPLEMENTATION" || targetIdx <= PHASE_ORDER.indexOf("IMPL_PLAN")) {
+      draft.implDag = null
+      draft.currentTaskId = null
+      draft.taskReviewCount = 0
+      draft.taskCompletionInProgress = null
     }
     draft.feedbackHistory.push({
       phase: state.phase,

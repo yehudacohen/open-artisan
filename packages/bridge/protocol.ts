@@ -25,6 +25,15 @@ export const INVALID_PARAMS = -32602
 export interface LifecycleInitParams {
   projectDir: string
   stateDir?: string
+  /**
+   * Self-review mode:
+   * - "isolated" (default): mark_satisfied dispatches an isolated reviewer subagent.
+   *   Requires SubagentDispatcher — errors if not available.
+   * - "agent-only": mark_satisfied evaluates the agent's submitted criteria directly.
+   *   No SubagentDispatcher needed. The agent self-evaluates, the human reviews at USER_GATE.
+   *   Used by the Claude Code adapter where SubagentDispatcher is not available.
+   */
+  selfReviewMode?: "isolated" | "agent-only"
   traceId?: string
 }
 

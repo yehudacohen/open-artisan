@@ -24,6 +24,7 @@ function makeBridgeContext(): BridgeContext {
     setEngine(e: EngineContext) { engine = e },
     stateDir: null,
     projectDir: null,
+    selfReviewMode: "isolated" as const,
     pinoLogger: null,
     shuttingDown: false,
   }

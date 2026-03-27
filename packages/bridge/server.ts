@@ -29,6 +29,8 @@ export interface BridgeContext {
   stateDir: string | null
   /** The project directory path — set during lifecycle.init. Used for path resolution. */
   projectDir: string | null
+  /** Self-review mode — set during lifecycle.init. */
+  selfReviewMode: "isolated" | "agent-only"
   /** Pino logger instance — set during lifecycle.init. Available for request logging. */
   pinoLogger: pino.Logger | null
   /** Flag for shutdown. */

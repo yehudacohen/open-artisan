@@ -318,6 +318,19 @@ describe("SessionStateStore — invariant validation (G4)", () => {
     ).rejects.toThrow(/maxParallelTasks/)
   })
 
+  it("throws when childWorkflows entry has empty delegatedAt", async () => {
+    await store.create("session-delegatedAt")
+    await expect(
+      store.update("session-delegatedAt", (d) => {
+        d.phase = "IMPLEMENTATION"
+        d.phaseState = "DRAFT"
+        d.mode = "GREENFIELD"
+        d.implDag = [{ id: "T1", description: "d", dependencies: [], expectedTests: [], estimatedComplexity: "small", status: "delegated" }]
+        d.childWorkflows = [{ taskId: "T1", featureName: "child", sessionId: "s1", status: "running", delegatedAt: "" }]
+      }),
+    ).rejects.toThrow(/delegatedAt/)
+  })
+
   it("throws when running childWorkflow references non-delegated DAG task", async () => {
     await store.create("session-xfield")
     // Set up IMPLEMENTATION with a DAG task that's "pending" (not "delegated")

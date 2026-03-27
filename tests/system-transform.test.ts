@@ -399,9 +399,11 @@ describe("buildWorkflowSystemPrompt — acceptance criteria preview at authoring
     expect(prompt).not.toContain("Acceptance Criteria Preview")
   })
 
-  it("preview tells agent to satisfy criteria before calling request_review", () => {
+  it("preview tells agent to self-evaluate and prepare for strict reviewer", () => {
     const prompt = buildWorkflowSystemPrompt(makeState({ phase: "PLANNING", phaseState: "DRAFT" }))
-    expect(prompt).toContain("Ensure your artifact satisfies ALL blocking criteria before submitting for review")
+    expect(prompt).toContain("Self-evaluate your artifact against EVERY criterion")
+    expect(prompt).toContain("reviewer is intentionally rigorous")
+    expect(prompt).toContain("push back if the reviewer asks for work")
   })
 })
 

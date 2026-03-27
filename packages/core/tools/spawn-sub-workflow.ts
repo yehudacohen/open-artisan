@@ -26,7 +26,7 @@ Use this when a task is large or complex enough to benefit from dedicated focus
 in a separate session. The child inherits the parent's conventions and constraints.
 
 Arguments:
-- task_id: The DAG task ID to delegate (must be "pending" or "in-flight")
+- task_id: The DAG task ID to delegate (must be "pending")
 - feature_name: Name for the child workflow (kebab-case, e.g. "billing-engine")
 
 Constraints:
@@ -99,7 +99,16 @@ export function processSpawnSubWorkflow(
     }
   }
 
-  // Task status check
+  // Task status check — only "pending" tasks can be delegated.
+  // "in-flight" tasks are currently being executed by the agent and
+  // delegating them would cause both agent and child to work on the same task.
+  if (task.status === "in-flight") {
+    return {
+      error:
+        `Task "${args.task_id}" is currently in-flight (being executed). ` +
+        `Complete or abort it before delegating to a sub-workflow.`,
+    }
+  }
   if (task.status === "delegated") {
     return {
       error: `Task "${args.task_id}" is already delegated to a sub-workflow.`,

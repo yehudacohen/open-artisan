@@ -194,7 +194,7 @@ describe("spawn_sub_workflow — task validation", () => {
     expect("error" in result).toBe(false)
   })
 
-  it("accepts in-flight task", () => {
+  it("rejects in-flight task (agent is already working on it)", () => {
     const state = makeState({
       implDag: [
         makeTask({ id: "T1", status: "complete" }),
@@ -205,7 +205,10 @@ describe("spawn_sub_workflow — task validation", () => {
       { task_id: "T2", feature_name: "child-feat" },
       state,
     )
-    expect("error" in result).toBe(false)
+    expect("error" in result).toBe(true)
+    if ("error" in result) {
+      expect(result.error).toContain("in-flight")
+    }
   })
 })
 

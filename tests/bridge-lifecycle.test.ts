@@ -198,6 +198,35 @@ describe("lifecycle.sessionDeleted — edge cases", () => {
   })
 })
 
+describe("lifecycle.shutdown", () => {
+  // Note: handleShutdown calls process.exit() which can't be tested in-process.
+  // Full shutdown behavior (PID removal, response flush, process exit) is tested
+  // in bridge-integration.test.ts via the spawned child process.
+
+  it("shuttingDown starts as false", () => {
+    expect(ctx.shuttingDown).toBe(false)
+  })
+})
+
+describe("lifecycle.init — double init", () => {
+  it("re-initializes with new engine on second call", async () => {
+    await handleInit({ projectDir: tmpDir }, ctx)
+    await handleSessionCreated({ sessionId: "s1" }, ctx)
+    // Give the session a featureName so it persists to disk
+    await ctx.engine!.store.update("s1", (d) => {
+      d.featureName = "double-init-feat"
+      d.mode = "GREENFIELD"
+    })
+
+    // Second init — should reload state from disk
+    await handleInit({ projectDir: tmpDir }, ctx)
+    const state = ctx.engine!.store.get("s1")
+    expect(state).not.toBeNull()
+    expect(state?.sessionId).toBe("s1")
+    expect(state?.featureName).toBe("double-init-feat")
+  })
+})
+
 describe("policyVersion", () => {
   it("starts at 0", () => {
     expect(ctx.policyVersion).toBe(0)

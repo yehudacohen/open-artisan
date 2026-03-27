@@ -126,6 +126,38 @@ describe("guard.check", () => {
     // Sub-workflow should use its own state and policy, not be blocked
     expect(result.allowed).toBe(true)
   })
+
+  it("allows write tools in IMPLEMENTATION/DRAFT with GREENFIELD mode", async () => {
+    await ctx.engine!.store.update("s1", (d) => {
+      d.mode = "GREENFIELD"
+      d.phase = "IMPLEMENTATION"
+      d.phaseState = "DRAFT"
+      d.featureName = "impl-feat"
+    })
+    const result = await handleGuardCheck({
+      toolName: "write_file",
+      args: { filePath: "/project/src/foo.ts" },
+      sessionId: "s1",
+    }, ctx) as any
+    expect(result.allowed).toBe(true)
+  })
+
+  it("blocks bash write operators in INCREMENTAL mode", async () => {
+    await ctx.engine!.store.update("s1", (d) => {
+      d.mode = "INCREMENTAL"
+      d.phase = "IMPLEMENTATION"
+      d.phaseState = "DRAFT"
+      d.featureName = "inc-feat"
+      d.fileAllowlist = ["/project/src/foo.ts"]
+    })
+    const result = await handleGuardCheck({
+      toolName: "bash",
+      args: { command: "echo 'hello' > /tmp/out.txt" },
+      sessionId: "s1",
+    }, ctx) as any
+    expect(result.allowed).toBe(false)
+    expect(result.reason).toContain("INCREMENTAL")
+  })
 })
 
 // ---------------------------------------------------------------------------

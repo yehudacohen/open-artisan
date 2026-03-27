@@ -2,8 +2,14 @@
  * tool-execute.ts — Bridge tool execution dispatcher.
  *
  * Routes tool.execute JSON-RPC calls to per-tool handlers. Each handler
- * replicates the adapter's orchestration pattern: state lookup → validation →
- * transition → store update → response.
+ * implements a simplified version of the adapter's orchestration:
+ * state lookup → validation → transition → store update → response.
+ *
+ * IMPORTANT: The authoritative tool implementations are in the OpenCode adapter
+ * (.opencode/plugins/open-artisan/index.ts). The bridge handlers are simplified
+ * versions that omit platform-specific features (git checkpoints, SubagentDispatcher
+ * calls, design doc detection, fast-forward). A future refactor should extract
+ * shared orchestration into packages/core/engine.ts so both share the same logic.
  *
  * Tools that need SubagentDispatcher (self-review, orchestrator, discovery)
  * return descriptive errors in bridge mode. Basic operations (transitions,

@@ -370,8 +370,22 @@ export function getAcceptanceCriteriaPreview(phase: Phase, phaseState: PhaseStat
   return `### Acceptance Criteria Preview — What the Reviewer Will Evaluate
 
 The following criteria will be used by the isolated reviewer when you call \`request_review\`.
-Ensure your artifact satisfies ALL blocking criteria before submitting for review.
-This reduces review iterations — the reviewer will reject the artifact if any blocking criterion fails.
+
+**Important:** The reviewer is intentionally rigorous — it evaluates each criterion strictly because
+catching issues now prevents costly rework during implementation. This front-loaded effort is by design.
+
+**Before calling \`request_review\`:**
+1. Self-evaluate your artifact against EVERY criterion below
+2. For each criterion, ask: "Would a strict reviewer accept this?"
+3. Fix any weaknesses you find — the reviewer will catch them otherwise
+4. Only submit when you're confident all blocking criteria are met
+
+**When the reviewer gives feedback:**
+- Be receptive — strict review produces better artifacts
+- Iterate on specific issues rather than arguing the reviewer is wrong
+- However: push back if the reviewer asks for work that is explicitly planned for a LATER
+  phase (e.g., implementation details during PLANNING) or is structurally covered by the
+  workflow's state machine (e.g., the next phase will enforce what the reviewer is asking for)
 
 ${fullCriteria.replace(/^### Acceptance Criteria/m, "### Criteria")}`
 }

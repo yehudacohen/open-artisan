@@ -42,9 +42,10 @@ import { compareIntentsWithLLM } from "../../../packages/core/intent-comparison"
 import { validatePriorState } from "../../../packages/core/type-validation"
 import { createLogger, setDefaultStateDir, type Logger, type NotificationSink } from "../../../packages/core/logger"
 import type { EngineContext } from "../../../packages/core/engine-context"
-import { 
-  MAX_INTENT_DISPLAY_CHARS, 
-  MIN_COMPLETE_ARTIFACTS 
+import {
+  MAX_INTENT_DISPLAY_CHARS,
+  MIN_COMPLETE_ARTIFACTS,
+  WORKFLOW_TOOL_NAMES,
 } from "../../../packages/core/constants"
 
 // Tool handlers
@@ -371,27 +372,8 @@ function wrapToolMap<T extends Record<string, { execute: (...args: any[]) => Pro
   return tools
 }
 
-/**
- * Names of all custom workflow control tools.
- * The tool guard must never block these regardless of phase — they are the
- * mechanism by which the agent signals state transitions.
- * Defined as a module constant so adding a new tool cannot be silently missed.
- */
-export const WORKFLOW_TOOL_NAMES = new Set([
-  "check_prior_workflow",
-  "select_mode",
-  "mark_scan_complete",
-  "mark_analyze_complete",
-  "mark_satisfied",
-  "mark_task_complete",
-  "request_review",
-  "submit_feedback",
-  "resolve_human_gate",
-  "propose_backtrack",
-  "spawn_sub_workflow",
-  "query_parent_workflow",
-  "query_child_workflow",
-])
+// WORKFLOW_TOOL_NAMES imported from packages/core/constants.ts (single source of truth)
+export { WORKFLOW_TOOL_NAMES } from "../../../packages/core/constants"
 
 /**
  * OpenCode-internal infrastructure tools that should never be blocked by the

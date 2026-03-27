@@ -239,3 +239,31 @@ export const MAX_SUB_WORKFLOW_DEPTH = 3
  * 30 minutes — long enough for substantial work, short enough to detect stalls.
  */
 export const SUB_WORKFLOW_TIMEOUT_MS = 1_800_000
+
+// ---------------------------------------------------------------------------
+// Workflow tool names — single source of truth
+// ---------------------------------------------------------------------------
+
+/**
+ * Names of all custom workflow control tools.
+ * The tool guard must never block these regardless of phase — they are the
+ * mechanism by which the agent signals state transitions.
+ *
+ * Both the adapter and the bridge import this set. Adding a tool here
+ * ensures it's recognized in both contexts.
+ */
+export const WORKFLOW_TOOL_NAMES = new Set([
+  "check_prior_workflow",
+  "select_mode",
+  "mark_scan_complete",
+  "mark_analyze_complete",
+  "mark_satisfied",
+  "mark_task_complete",
+  "request_review",
+  "submit_feedback",
+  "resolve_human_gate",
+  "propose_backtrack",
+  "spawn_sub_workflow",
+  "query_parent_workflow",
+  "query_child_workflow",
+])

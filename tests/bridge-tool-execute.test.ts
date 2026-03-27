@@ -289,6 +289,44 @@ describe("tool.execute — check_prior_workflow", () => {
   })
 })
 
+describe("tool.execute — mark_task_complete", () => {
+  it("completes a task and returns next scheduler decision", async () => {
+    // Get to IMPLEMENTATION with a DAG
+    await exec("select_mode", { mode: "GREENFIELD", feature_name: "mtc-feat" })
+    await ctx.engine!.store.update("s1", (d) => {
+      d.phase = "IMPLEMENTATION"
+      d.phaseState = "DRAFT"
+      d.implDag = [
+        { id: "T1", description: "Setup", dependencies: [], expectedTests: [], estimatedComplexity: "small", status: "pending" },
+        { id: "T2", description: "Core", dependencies: ["T1"], expectedTests: [], estimatedComplexity: "medium", status: "pending" },
+      ]
+      d.currentTaskId = "T1"
+    })
+
+    const result = await exec("mark_task_complete", {
+      task_id: "T1",
+      implementation_summary: "Set up the project",
+      tests_passing: true,
+    })
+    expect(result).toContain("T1")
+    expect(result).not.toContain("Error")
+
+    const state = ctx.engine!.store.get("s1")
+    expect(state?.implDag?.find((t) => t.id === "T1")?.status).toBe("complete")
+    expect(state?.currentTaskId).toBe("T2")
+  })
+
+  it("rejects when not in IMPLEMENTATION", async () => {
+    const result = await exec("mark_task_complete", {
+      task_id: "T1",
+      implementation_summary: "test",
+      tests_passing: true,
+    })
+    expect(result).toContain("Error")
+    expect(result).toContain("IMPLEMENTATION")
+  })
+})
+
 // ---------------------------------------------------------------------------
 // query tools
 // ---------------------------------------------------------------------------

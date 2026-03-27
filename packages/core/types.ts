@@ -873,6 +873,53 @@ export function validateWorkflowState(state: WorkflowState): string | null {
       return `revisionBaseline of type "git-sha" must have a string "sha" field`
     }
   }
+  // v16: userMessages
+  if (!Array.isArray(state.userMessages)) {
+    return `userMessages must be an array, got ${typeof state.userMessages}`
+  }
+  for (let i = 0; i < state.userMessages.length; i++) {
+    if (typeof state.userMessages[i] !== "string") {
+      return `userMessages[${i}] must be a string`
+    }
+  }
+  // Nullable string fields — validate type when non-null
+  if (state.lastCheckpointTag !== null && typeof state.lastCheckpointTag !== "string") {
+    return `lastCheckpointTag must be null or a string, got ${typeof state.lastCheckpointTag}`
+  }
+  if (state.orchestratorSessionId !== null && typeof state.orchestratorSessionId !== "string") {
+    return `orchestratorSessionId must be null or a string, got ${typeof state.orchestratorSessionId}`
+  }
+  if (state.intentBaseline !== null && typeof state.intentBaseline !== "string") {
+    return `intentBaseline must be null or a string, got ${typeof state.intentBaseline}`
+  }
+  if (state.modeDetectionNote !== null && typeof state.modeDetectionNote !== "string") {
+    return `modeDetectionNote must be null or a string, got ${typeof state.modeDetectionNote}`
+  }
+  if (state.discoveryReport !== null && typeof state.discoveryReport !== "string") {
+    return `discoveryReport must be null or a string, got ${typeof state.discoveryReport}`
+  }
+  // approvedArtifacts — validate as object with string values
+  if (typeof state.approvedArtifacts !== "object" || Array.isArray(state.approvedArtifacts) || state.approvedArtifacts === null) {
+    return `approvedArtifacts must be an object, got ${typeof state.approvedArtifacts}`
+  }
+  for (const [key, val] of Object.entries(state.approvedArtifacts)) {
+    if (typeof val !== "string") {
+      return `approvedArtifacts["${key}"] must be a string, got ${typeof val}`
+    }
+  }
+  // cachedPriorState — validate shape when non-null (transient, cleared on load)
+  if (state.cachedPriorState !== null && state.cachedPriorState !== undefined) {
+    const cps = state.cachedPriorState as Record<string, unknown>
+    if (typeof cps !== "object" || Array.isArray(cps)) {
+      return `cachedPriorState must be null or an object, got ${typeof cps}`
+    }
+    if (typeof cps.phase !== "string") {
+      return `cachedPriorState.phase must be a string`
+    }
+    if (typeof cps.artifactDiskPaths !== "object" || Array.isArray(cps.artifactDiskPaths) || cps.artifactDiskPaths === null) {
+      return `cachedPriorState.artifactDiskPaths must be an object`
+    }
+  }
   // v21: parentWorkflow
   if (state.parentWorkflow !== null && state.parentWorkflow !== undefined) {
     const pw = state.parentWorkflow as Record<string, unknown>

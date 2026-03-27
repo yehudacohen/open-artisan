@@ -9,17 +9,8 @@ import type { MethodHandler } from "../server"
 import type { GuardCheckParams, GuardPolicyParams, GuardCheckResult, GuardPolicyResult } from "../protocol"
 import { SESSION_NOT_FOUND, INVALID_PARAMS } from "../protocol"
 import { getPhaseToolPolicy } from "../../core/hooks/tool-guard"
+import { WORKFLOW_TOOL_NAMES } from "../../core/constants"
 import type { Phase, PhaseState, WorkflowMode } from "../../core/types"
-
-// Workflow tools that only the parent session can call — ephemeral children
-// (self-review, orchestrator) must not call these. Mirrors WORKFLOW_TOOL_NAMES
-// from the adapter. TODO: move to core constants.
-const WORKFLOW_TOOLS = new Set([
-  "check_prior_workflow", "select_mode", "mark_scan_complete", "mark_analyze_complete",
-  "mark_satisfied", "mark_task_complete", "request_review", "submit_feedback",
-  "resolve_human_gate", "propose_backtrack", "spawn_sub_workflow",
-  "query_parent_workflow", "query_child_workflow",
-])
 
 export const handleGuardCheck: MethodHandler = async (params, ctx) => {
   const p = params as GuardCheckParams
@@ -40,7 +31,7 @@ export const handleGuardCheck: MethodHandler = async (params, ctx) => {
 
   if (parentId && !state) {
     // Ephemeral child — block workflow tools, use parent's state for policy
-    if (WORKFLOW_TOOLS.has(toolName)) {
+    if (WORKFLOW_TOOL_NAMES.has(toolName)) {
       return {
         allowed: false,
         reason: `Tool "${p.toolName}" cannot be called from a subagent session. Only the parent session can call workflow control tools.`,

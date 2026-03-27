@@ -37,9 +37,13 @@ There is no build step — the plugin loads TypeScript directly via Bun.
 
 Pure, side-effect-free table-driven FSM. 34 valid (Phase, PhaseState) combinations, 12 named transition events. All phase progression goes through `transition()` which validates current state before advancing. The transition table is built in `buildTable()`.
 
-### Session State (`session-state.ts`)
+### Session State (`session-state.ts`, `state-backend-fs.ts`)
 
-Persists to `.opencode/workflow-state.json` with schema migration support (currently version 19, with migrations for all prior versions). Uses per-session write locks (promise chain) to prevent concurrent corruption. `validateWorkflowState()` runs before every persist.
+Pluggable persistence via `StateBackend` interface (read/write/remove/list/lock). Built-in `FileSystemStateBackend` stores per-feature state at `.openartisan/<featureName>/workflow-state.json` (schema version 20, with migrations for all prior versions). Sessions without a featureName (pre-MODE_SELECT) are memory-only. Legacy single-file `.opencode/workflow-state.json` is migrated at startup via `migrateLegacyStateFile()`. Two-layer locking: per-feature promise chains for in-process serialization, plus backend locks (lockfiles with O_CREAT|O_EXCL for the FS backend) for cross-process safety. `validateWorkflowState()` runs before every persist.
+
+### Session Registry (`session-registry.ts`)
+
+`SessionRegistry` interface tracks session lifecycle and parent-child relationships. Primary sessions get their own WorkflowState; child sessions (subagent reviewers, orchestrator, discovery) inherit the parent's tool policy. Replaces the ad-hoc `activeSession` wrapper and `childSessionParents` Map on EngineContext.
 
 ### Hooks (`hooks/`)
 
@@ -95,12 +99,12 @@ Dispatches an ephemeral `workflow-reviewer` subagent in a fresh session that see
 1. Update transition table in `state-machine.ts` `buildTable()`
 2. Update `VALID_PHASE_STATES` in `types.ts` if adding new phase/state combinations
 3. Update `validateWorkflowState()` in `types.ts` for any new state fields
-4. Bump `SCHEMA_VERSION` in `constants.ts` and add migration logic in `session-state.ts`
+4. Bump `SCHEMA_VERSION` in `types.ts` and add migration logic in `session-state.ts`
 5. Add transition tests in `tests/state-machine.test.ts`
 6. Update `docs/structured-workflow-design.md`
 
 ## Debugging
 
-- Errors/warnings always persist to `.opencode/openartisan-errors.log` (JSON lines) regardless of debug flag
+- Errors/warnings always persist to `.openartisan/openartisan-errors.log` (JSON lines) regardless of debug flag
 - OpenCode SDK logs: `~/.local/share/opencode/log/`
 - Commit style: conventional prefixes (`feat:`, `fix:`, `docs:`, `refactor:`, `test:`)

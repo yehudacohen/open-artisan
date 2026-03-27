@@ -1,25 +1,26 @@
 /**
- * session-state.ts — In-memory store with JSON persistence.
+ * session-state.ts — In-memory store with pluggable persistence backend.
  * All mutation goes through update() so invariants can be validated before write.
  *
+ * The store handles: in-memory caching, schema migration, validation,
+ * in-process serialization (promise chains), and post-update hooks.
+ *
+ * The StateBackend handles: I/O and cross-process locking.
+ * See state-backend-fs.ts for the filesystem implementation.
+ *
  * Fixes:
- * - G4: update() now validates invariants via validateWorkflowState() before persisting
+ * - G4: update() validates invariants via validateWorkflowState() before persisting
  * - G5: load() clears in-memory store before populating to avoid resurrection of stale sessions
- * - G22: update() serializes concurrent calls via a per-session promise chain (write lock)
  */
-import { join } from "node:path"
-import { existsSync } from "node:fs"
-import { writeFile, readFile } from "node:fs/promises"
 import {
   SCHEMA_VERSION,
   validateWorkflowState,
   type WorkflowState,
   type SessionStateStore,
+  type StateBackend,
   type StoreLoadResult,
   type StoreLoadError,
 } from "./types"
-
-const STATE_FILE = "workflow-state.json"
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -82,12 +83,94 @@ function isValidState(s: unknown): s is WorkflowState {
   return typeof v === "number" && v >= 1 && v <= SCHEMA_VERSION && typeof obj["sessionId"] === "string"
 }
 
-async function writeAll(stateFile: string, map: Map<string, WorkflowState>): Promise<void> {
-  const obj: Record<string, WorkflowState> = {}
-  for (const [id, state] of map) {
-    obj[id] = state
+/**
+ * Apply schema migrations to a raw state object.
+ * Fills in fields added in later schema versions with safe defaults.
+ * Mutates the object in place.
+ */
+function migrateState(migrated: Record<string, unknown>): void {
+  // v1 → v2: add orchestratorSessionId, intentBaseline, escapePending, pendingRevisionSteps
+  migrated["orchestratorSessionId"] ??= null
+  migrated["intentBaseline"] ??= null
+  migrated["escapePending"] ??= false
+  migrated["pendingRevisionSteps"] ??= null
+  // v2 → v3: add modeDetectionNote
+  migrated["modeDetectionNote"] ??= null
+  // v3 → v4: add discoveryReport
+  migrated["discoveryReport"] ??= null
+  // v4 → v5: add implDag
+  migrated["implDag"] ??= null
+  // v5 → v6: add currentTaskId, feedbackHistory
+  migrated["currentTaskId"] ??= null
+  migrated["feedbackHistory"] ??= []
+  // v6 → v7: add phaseApprovalCounts
+  migrated["phaseApprovalCounts"] ??= {}
+  // v7 → v8: add userGateMessageReceived
+  migrated["userGateMessageReceived"] ??= false
+  // v8 → v9: add artifactDiskPaths
+  migrated["artifactDiskPaths"] ??= {}
+  // v9 → v10: add featureName
+  migrated["featureName"] ??= null
+  // v10 → v11: add revisionBaseline
+  migrated["revisionBaseline"] ??= null
+  // v11 → v12: add TaskCategory/HumanGateInfo on implDag nodes (no top-level field — node fields are optional)
+  // v12 → v13: add activeAgent
+  migrated["activeAgent"] ??= null
+  // v13 → v14: add taskCompletionInProgress (transient lock — always clear on load)
+  migrated["taskCompletionInProgress"] = null
+  // v14 → v15: add taskReviewCount, pendingFeedback
+  migrated["taskReviewCount"] ??= 0
+  // pendingFeedback is transient (crash-safe store for in-flight orchestrator calls).
+  // Always clear on load — if the process crashed mid-orchestrator, the feedback is
+  // lost and the user will need to re-submit. This is preferable to silently replaying
+  // a stale feedback text through a potentially different orchestrator classification.
+  migrated["pendingFeedback"] = null
+  // v15 → v16: add userMessages
+  migrated["userMessages"] ??= []
+  // v16 → v17: add cachedPriorState
+  migrated["cachedPriorState"] = null // Always clear on load - transient cache
+  // v17 → v18: add priorWorkflowChecked + sessionModel
+  migrated["priorWorkflowChecked"] = false
+  migrated["sessionModel"] ??= null
+  // v18 → v19: add reviewArtifactHash + latestReviewResults
+  migrated["reviewArtifactHash"] ??= null
+  migrated["latestReviewResults"] ??= null
+  // retryCount is transient — reset on load so the idle handler starts fresh.
+  // If the agent was stuck before a restart, it deserves a clean retry budget.
+  migrated["retryCount"] = 0
+  // Defensive: strip relative paths from fileAllowlist. Pre-normalization-fix
+  // sessions may have persisted relative paths. At load time we don't have the
+  // project directory to resolve them, so we remove them. The `select_mode`
+  // handler will re-normalize with the correct cwd if needed.
+  const fa = migrated["fileAllowlist"]
+  if (Array.isArray(fa)) {
+    migrated["fileAllowlist"] = fa.filter((p: unknown) => typeof p === "string" && p.startsWith("/"))
   }
-  await writeFile(stateFile, JSON.stringify(obj, null, 2), "utf-8")
+  // Always stamp with current schema version after migration
+  migrated["schemaVersion"] = SCHEMA_VERSION
+}
+
+/**
+ * Validate and migrate a raw state value. Returns the state if valid, null otherwise.
+ */
+function validateAndMigrate(value: unknown): WorkflowState | null {
+  if (!isValidState(value)) return null
+  migrateState(value as unknown as Record<string, unknown>)
+  const validationError = validateWorkflowState(value)
+  if (validationError) return null
+  return value
+}
+
+/**
+ * Parse and validate a raw JSON string into a WorkflowState.
+ * Applies schema migrations. Returns null if invalid.
+ */
+function parseAndMigrate(json: string): WorkflowState | null {
+  try {
+    return validateAndMigrate(JSON.parse(json) as unknown)
+  } catch {
+    return null
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -110,30 +193,53 @@ export function setPostUpdateHook(callback: PostUpdateCallback, projectDir: stri
   _projectDir = projectDir
 }
 
-export function createSessionStateStore(dir: string): SessionStateStore {
-  const stateFile = join(dir, STATE_FILE)
+/**
+ * Create a session state store backed by a StateBackend.
+ *
+ * The store manages in-memory state, schema migration, validation,
+ * and in-process serialization. The backend handles persistence I/O
+ * and cross-process locking.
+ *
+ * Sessions without a featureName (pre-MODE_SELECT) are held in memory only.
+ * Once featureName is set, state is persisted through the backend.
+ *
+ * @param backend - The persistence backend (e.g., FileSystemStateBackend).
+ */
+export function createSessionStateStore(backend: StateBackend): SessionStateStore {
   const memory = new Map<string, WorkflowState>()
 
-  // G22: Per-session write locks — serialise concurrent update() calls.
-  // Each session ID maps to a promise chain; new updates are chained on top.
+  // Per-feature in-process write locks — serialise concurrent update() calls.
+  // Keyed by featureName for persisted sessions, sessionId for memory-only sessions.
+  // Each key maps to a promise chain; new operations are chained on top.
   const locks = new Map<string, Promise<unknown>>()
 
-  // Global write lock — serialises all writeAll() calls across sessions.
-  // Without this, concurrent updates to different sessions could interleave
-  // writeAll() calls, causing one session's persisted changes to be lost.
-  let globalWriteLock = Promise.resolve()
-
-  async function serializedWrite(): Promise<void> {
-    const work = async () => { await writeAll(stateFile, memory) }
-    globalWriteLock = globalWriteLock.then(work, work)
-    return globalWriteLock
+  /** Returns the lock key for a session: featureName if persisted, sessionId if memory-only. */
+  function lockKeyFor(sessionId: string): string {
+    const state = memory.get(sessionId)
+    return state?.featureName ?? sessionId
   }
 
-  function acquireLock(sessionId: string, work: () => Promise<unknown>): Promise<unknown> {
-    const current = locks.get(sessionId) ?? Promise.resolve()
+  function acquireInProcessLock(key: string, work: () => Promise<unknown>): Promise<unknown> {
+    const current = locks.get(key) ?? Promise.resolve()
     const next = current.then(work, work) // always proceed even if previous rejected
-    locks.set(sessionId, next)
+    locks.set(key, next)
     return next
+  }
+
+  /**
+   * Persist a session's state via the backend.
+   * No-op if featureName is null (memory-only session).
+   * Acquires a backend lock for cross-process safety.
+   */
+  async function persistState(state: WorkflowState): Promise<void> {
+    if (state.featureName) {
+      const { release } = await backend.lock(state.featureName)
+      try {
+        await backend.write(state.featureName, JSON.stringify(state, null, 2))
+      } finally {
+        await release()
+      }
+    }
   }
 
   return {
@@ -154,14 +260,16 @@ export function createSessionStateStore(dir: string): SessionStateStore {
       if (memory.has(sessionId)) {
         throw new Error(`Session "${sessionId}" already exists`)
       }
-      // N1 fix: route through acquireLock so concurrent create+update calls are serialised
-      return acquireLock(sessionId, async () => {
+      // N1 fix: route through in-process lock so concurrent create+update calls are serialised.
+      // New sessions have no featureName yet, so lock by sessionId.
+      return acquireInProcessLock(sessionId, async () => {
         if (memory.has(sessionId)) {
           throw new Error(`Session "${sessionId}" already exists`)
         }
         const state = freshState(sessionId)
         memory.set(sessionId, state)
-        await serializedWrite()
+        // Memory-only — no disk write. Sessions start without featureName,
+        // so there's no per-feature directory to write to yet.
         return cloneState(state)
       }) as Promise<WorkflowState>
     },
@@ -170,8 +278,10 @@ export function createSessionStateStore(dir: string): SessionStateStore {
       sessionId: string,
       mutator: (draft: WorkflowState) => void,
     ): Promise<WorkflowState> {
-      // G22: Serialise through the per-session lock chain
-      return acquireLock(sessionId, async () => {
+      // Serialise through the per-feature in-process lock chain.
+      // The lock key is featureName if set (all writes to the same file serialize),
+      // or sessionId for memory-only sessions.
+      return acquireInProcessLock(lockKeyFor(sessionId), async () => {
         const current = memory.get(sessionId)
         if (!current) {
           throw new Error(`Session "${sessionId}" not found`)
@@ -186,9 +296,9 @@ export function createSessionStateStore(dir: string): SessionStateStore {
           throw new Error(`State mutation produced invalid state for session "${sessionId}": ${validationError}`)
         }
 
-        // Persist the mutated draft, then replace in memory
+        // Replace in memory, then persist via backend if featureName is set.
         memory.set(sessionId, draft)
-        await serializedWrite()
+        await persistState(draft)
         // Fire post-update hook (status file writer) — non-fatal
         if (_postUpdateCallback && _projectDir) {
           try { _postUpdateCallback(draft, _projectDir) } catch { /* non-fatal */ }
@@ -203,82 +313,21 @@ export function createSessionStateStore(dir: string): SessionStateStore {
         memory.clear()
         locks.clear()
 
-        if (!existsSync(stateFile)) return { success: true, count: 0 }
-
-        const raw = JSON.parse(await readFile(stateFile, "utf-8")) as Record<string, unknown>
-        let count = 0
-        for (const [id, value] of Object.entries(raw)) {
-          // First gate: schema version + sessionId type check
-          if (!isValidState(value)) continue
-          // Migration: fill in fields added in later schema versions with safe defaults.
-          // This allows states written before these fields existed to load correctly.
-          const migrated = value as unknown as Record<string, unknown>
-          // v1 → v2: add orchestratorSessionId, intentBaseline, escapePending, pendingRevisionSteps
-          migrated["orchestratorSessionId"] ??= null
-          migrated["intentBaseline"] ??= null
-          migrated["escapePending"] ??= false
-          migrated["pendingRevisionSteps"] ??= null
-          // v2 → v3: add modeDetectionNote
-          migrated["modeDetectionNote"] ??= null
-          // v3 → v4: add discoveryReport
-          migrated["discoveryReport"] ??= null
-          // v4 → v5: add implDag
-          migrated["implDag"] ??= null
-          // v5 → v6: add currentTaskId, feedbackHistory
-          migrated["currentTaskId"] ??= null
-          migrated["feedbackHistory"] ??= []
-          // v6 → v7: add phaseApprovalCounts
-          migrated["phaseApprovalCounts"] ??= {}
-          // v7 → v8: add userGateMessageReceived
-          migrated["userGateMessageReceived"] ??= false
-          // v8 → v9: add artifactDiskPaths
-          migrated["artifactDiskPaths"] ??= {}
-          // v9 → v10: add featureName
-          migrated["featureName"] ??= null
-          // v10 → v11: add revisionBaseline
-          migrated["revisionBaseline"] ??= null
-          // v11 → v12: add TaskCategory/HumanGateInfo on implDag nodes (no top-level field — node fields are optional)
-          // v12 → v13: add activeAgent
-          migrated["activeAgent"] ??= null
-          // v13 → v14: add taskCompletionInProgress (transient lock — always clear on load)
-          migrated["taskCompletionInProgress"] = null
-          // v14 → v15: add taskReviewCount, pendingFeedback
-          migrated["taskReviewCount"] ??= 0
-          // pendingFeedback is transient (crash-safe store for in-flight orchestrator calls).
-          // Always clear on load — if the process crashed mid-orchestrator, the feedback is
-          // lost and the user will need to re-submit. This is preferable to silently replaying
-          // a stale feedback text through a potentially different orchestrator classification.
-          migrated["pendingFeedback"] = null
-          // v15 → v16: add userMessages
-          migrated["userMessages"] ??= []
-          // v16 → v17: add cachedPriorState
-          migrated["cachedPriorState"] = null // Always clear on load - transient cache
-          // v17 → v18: add priorWorkflowChecked + sessionModel
-          migrated["priorWorkflowChecked"] = false
-          migrated["sessionModel"] ??= null
-          // v18 → v19: add reviewArtifactHash + latestReviewResults
-          migrated["reviewArtifactHash"] ??= null
-          migrated["latestReviewResults"] ??= null
-          // retryCount is transient — reset on load so the idle handler starts fresh.
-          // If the agent was stuck before a restart, it deserves a clean retry budget.
-          migrated["retryCount"] = 0
-          // Defensive: strip relative paths from fileAllowlist. Pre-normalization-fix
-          // sessions may have persisted relative paths. At load time we don't have the
-          // project directory to resolve them, so we remove them. The `select_mode`
-          // handler will re-normalize with the correct cwd if needed.
-          const fa = migrated["fileAllowlist"]
-          if (Array.isArray(fa)) {
-            migrated["fileAllowlist"] = fa.filter((p: unknown) => typeof p === "string" && p.startsWith("/"))
+        // Load all persisted states from the backend
+        const features = await backend.list()
+        for (const featureName of features) {
+          const raw = await backend.read(featureName)
+          if (!raw) continue
+          const state = parseAndMigrate(raw)
+          // Guard: state.featureName must match the backend key. If it doesn't,
+          // the data is inconsistent and loading it would cause writes to go to
+          // a different location, orphaning this entry.
+          if (state && state.featureName === featureName) {
+            memory.set(state.sessionId, state)
           }
-          // Always stamp with current schema version after migration
-          migrated["schemaVersion"] = SCHEMA_VERSION
-          // Second gate: full invariant validation (phase/phaseState combos, counts, etc.)
-          const validationError = validateWorkflowState(value)
-          if (validationError) continue // silently discard states that fail invariants
-          memory.set(id, value)
-          count++
         }
-        return { success: true, count }
+
+        return { success: true, count: memory.size }
       } catch (err) {
         return {
           success: false,
@@ -288,9 +337,23 @@ export function createSessionStateStore(dir: string): SessionStateStore {
     },
 
     async delete(sessionId: string): Promise<void> {
-      memory.delete(sessionId)
-      locks.delete(sessionId)
-      await serializedWrite()
+      const lockKey = lockKeyFor(sessionId)
+      // Serialise through the in-process lock to prevent races with concurrent update().
+      await acquireInProcessLock(lockKey, async () => {
+        const state = memory.get(sessionId)
+        memory.delete(sessionId)
+        // Remove persisted state via backend
+        if (state?.featureName) {
+          const { release } = await backend.lock(state.featureName)
+          try {
+            await backend.remove(state.featureName)
+          } finally {
+            await release()
+          }
+        }
+      })
+      // Clean up the lock chain AFTER the lock's work completes.
+      locks.delete(lockKey)
     },
   }
 }

@@ -1,6 +1,6 @@
 # Structured Coding Workflow — Design Document
 
-**Version:** v15 (reflects implementation as of schema v18, March 2026)
+**Version:** v16 (reflects implementation as of schema v20, March 2026)
 **Status:** This document describes the **current implemented system**, not aspirational design. Section 14 documents structural gaps that have all been resolved. Section 14.6 documents meta-structural improvements that prevent agents from silently downgrading structural guarantees. Section 15 documents deferred features.
 
 ---
@@ -886,7 +886,7 @@ tests/
 └── utils.test.ts
 ```
 
-**Test count:** 1130 tests across 39 files (schema v18).
+**Test count:** 1260 tests across 46 files (schema v20).
 
 **Runtime artifacts** (in target project's `.opencode/` directory):
 - `workflow-state.json` — persisted session state (all sessions, JSON object keyed by session ID)

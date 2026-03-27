@@ -5,7 +5,7 @@
  * Uses the @opencode-ai/plugin package (provided by OpenCode at runtime).
  *
  * Architecture overview:
- * - SessionStateStore: per-session WorkflowState, persisted to .opencode/workflow-state.json
+ * - SessionStateStore: per-session WorkflowState, persisted per-feature to .openartisan/<featureName>/workflow-state.json
  * - StateMachine: pure transition function for state changes
  * - Hooks: system-transform (+ USER_GATE hint injection), tool-guard, idle-handler, compaction
  * - Tools: select_mode, mark_scan_complete, mark_analyze_complete,
@@ -28,6 +28,8 @@ import { existsSync, readFileSync } from "node:fs"
 import { readFile } from "node:fs/promises"
 
 import { createSessionStateStore, setPostUpdateHook } from "../../../packages/core/session-state"
+import { createFileSystemStateBackend, migrateLegacyStateFile } from "../../../packages/core/state-backend-fs"
+import { createSessionRegistry } from "../../../packages/core/session-registry"
 import { createStateMachine } from "../../../packages/core/state-machine"
 import { getPhaseToolPolicy } from "../../../packages/core/hooks/tool-guard"
 import { buildWorkflowSystemPrompt, buildSubagentContext } from "../../../packages/core/hooks/system-transform"
@@ -422,16 +424,18 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
   // Plugin init — runs at plugin startup before the return.
   // Load persisted state from disk so sessions survive restarts.
   // IMPORTANT: Use the project directory (resolvedDir) to derive stateDir so that
-  // workflow-state.json is read/written from the correct project's .opencode/ folder.
+  // per-feature state files are read/written from the correct project's .openartisan/ folder.
   // import.meta.dirname resolves to the symlink *target* (dev repo), so using it here
   // would cause the plugin to read/write state from the dev repo rather than the
   // active project. Fall back to import.meta.dirname only when no
   // project directory context is available (e.g. legacy environments).
   const resolvedDir = directory ?? worktree ?? process.env["OPENCODE_PROJECT_DIR"]
-  const stateDir = resolvedDir
-    ? join(resolvedDir.replace(/\/+$/, ""), ".opencode")
-    : join(import.meta.dirname, "..", "..")  // .opencode/ fallback
-  const store = createSessionStateStore(stateDir)
+  const projectRoot = resolvedDir
+    ? resolvedDir.replace(/\/+$/, "")
+    : join(import.meta.dirname, "..", "..", "..")  // project root fallback
+  const stateDir = join(projectRoot, ".openartisan")
+  const stateBackend = createFileSystemStateBackend(stateDir)
+  const store = createSessionStateStore(stateBackend)
   const sm = createStateMachine()
 
   // Register post-update hook for status file writer (Change 5)
@@ -467,11 +471,12 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
     log.info("Design document detected", { detail: designDocPath! })
   }
   const graph = createArtifactGraph(hasDesignDoc)
-  const activeSession: { id: string | undefined } = { id: undefined }
-  const getActiveSessionId = () => activeSession.id
+  const sessions = createSessionRegistry()
+  const getActiveSessionId = () => sessions.getActiveId()
   const getActiveSessionModel = (): string | { modelID: string; providerID?: string } | undefined => {
-    if (!activeSession.id) return undefined
-    const state = store.get(activeSession.id)
+    const id = sessions.getActiveId()
+    if (!id) return undefined
+    const state = store.get(id)
     return state?.sessionModel ?? undefined
   }
   // Subagent dispatcher — platform-agnostic interface for ephemeral LLM sessions.
@@ -484,7 +489,16 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
     graph,
   })
 
-  // Load persisted state on plugin startup (replaces the defunct "session.started" hook)
+  // Migrate legacy single-file state to per-feature files (one-time, idempotent)
+  const legacyStateFile = join(projectRoot, ".opencode", "workflow-state.json")
+  const migration = await migrateLegacyStateFile(stateBackend, legacyStateFile)
+  if (migration.migrated.length > 0) {
+    log.info("Legacy state migrated", { detail: `features: ${migration.migrated.join(", ")}` })
+  }
+
+  // Load persisted state on plugin startup (replaces the defunct "session.started" hook).
+  // Note: legacy sessions without featureName (migration.memoryOnly) are intentionally
+  // dropped — they're pre-MODE_SELECT with no artifacts or real work.
   await store.load()
 
   // Validate that the client object has the session API methods we depend on.
@@ -519,12 +533,8 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
   // in Task subagent sessions (spawned by the agent) and plugin ephemeral sessions
   // (self-review, task-review, discovery). Child sessions do NOT get their own
   // workflow state — they inherit the parent's tool policy.
-  const childSessionParents = new Map<string, string>()
-
   // Engine context — explicit dependency bag for tool and hook handlers.
   // Created once at plugin init. Handlers reference ctx.field instead of closures.
-  // The mutable fields (activeSession, childSessionParents, lastRepromptTimestamps)
-  // are shared by reference — mutations propagate automatically.
   const ctx: EngineContext = {
     store,
     sm,
@@ -534,8 +544,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
     notify,
     graph,
     designDocPath,
-    activeSession,
-    childSessionParents,
+    sessions,
     lastRepromptTimestamps,
     async promptExistingSession(sessionId: string, text: string): Promise<void> {
       await client.session?.prompt({
@@ -551,7 +560,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
     // -------------------------------------------------------------------------
 
     event: async ({ event }: { event: { type: string; properties?: Record<string, unknown> } }) => {
-      const { store, log, childSessionParents, lastRepromptTimestamps, notify } = ctx
+      const { store, log, sessions, lastRepromptTimestamps, notify } = ctx
       try {
       // Session created: initialize fresh workflow state.
       // SDK type: { type: "session.created", properties: { info: Session } }
@@ -563,16 +572,17 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
 
         // Child sessions (Task subagents spawned by the agent, or plugin ephemeral
         // sessions like self-review/task-review) should NOT get workflow state.
-        // They inherit the parent's tool policy via the childSessionParents map.
+        // They inherit the parent's tool policy via the session registry.
         // This prevents:
         //   - Subagents landing in MODE_SELECT with blocked tools
         //   - Wasted detectMode() scans for ephemeral sessions
         //   - State mutation races when multiple subagents modify the DAG
         if (info?.parentID) {
-          childSessionParents.set(sessionId, info.parentID)
+          sessions.registerChild(sessionId, info.parentID)
           return
         }
 
+        sessions.registerPrimary(sessionId)
         try {
           await store.create(sessionId)
         } catch {
@@ -600,8 +610,8 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
         const info = event.properties?.["info"] as { id?: string } | undefined
         const sessionId = info?.id
         if (!sessionId) return
-        // Clean up child session mapping if this was a child session
-        childSessionParents.delete(sessionId)
+        // Clean up session registry (works for both primary and child sessions)
+        sessions.unregister(sessionId)
         try {
           await store.delete(sessionId)
         } catch (e) {
@@ -815,7 +825,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
       input: { sessionID?: string; sessionId?: string; session_id?: string; model?: unknown },
       output: { system: string[] },
     ) => {
-      const { store, log, childSessionParents, designDocPath } = ctx
+      const { store, log, sessions, designDocPath } = ctx
       try {
       const sessionId = (input.sessionID ?? input.sessionId ?? input.session_id) as string | undefined
       if (!sessionId) return
@@ -824,7 +834,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
       // from the parent's workflow state. This gives the subagent structured
       // knowledge of the DAG, artifact paths, conventions, and constraints
       // without injecting workflow tool instructions or review criteria.
-      const parentSessionId = childSessionParents.get(sessionId)
+      const parentSessionId = sessions.getParent(sessionId)
       if (parentSessionId) {
         const parentState = store.get(parentSessionId)
         if (parentState) {
@@ -887,75 +897,82 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
     // -------------------------------------------------------------------------
 
     "tool.execute.before": async (input: { sessionID?: string; sessionId?: string; session_id?: string; tool: string; args?: Record<string, unknown> }) => {
-      const { store, log, childSessionParents } = ctx
+      const { store, log, sessions } = ctx
       try {
       const sessionId = (input.sessionID ?? input.sessionId ?? input.session_id) as string | undefined
       if (!sessionId) return
 
-      // Child session handling: look up the parent's state for tool policy.
-      // Child sessions (Task subagents, plugin ephemeral sessions) inherit the
-      // parent's tool policy but CANNOT call workflow tools.
-      const parentId = childSessionParents.get(sessionId)
+      // Child session handling: two types of children.
+      // 1. Ephemeral (self-review, orchestrator, discovery) — workflow tools BLOCKED.
+      //    These inherit the parent's tool policy.
+      // 2. Sub-workflow (has its own WorkflowState via spawn_sub_workflow) — workflow
+      //    tools ALLOWED. The child drives its own workflow independently.
+      const parentId = sessions.getParent(sessionId)
       if (parentId) {
-        // Never block OpenCode infrastructure tools in child sessions
-        if (PASSTHROUGH_TOOL_NAMES.has(input.tool.toLowerCase())) return
+        // Sub-workflow check: if the child session has its own WorkflowState,
+        // it's a sub-workflow (Phase 3) — skip child blocking and let it run
+        // its own workflow. Fall through to normal tool guard logic below.
+        const childState = store.get(sessionId)
+        if (!childState) {
+          // Ephemeral child — apply parent's policy, block workflow tools.
+          if (PASSTHROUGH_TOOL_NAMES.has(input.tool.toLowerCase())) return
 
-        // Block workflow tools in child sessions — only the parent can
-        // advance workflow state. This prevents state mutation races when
-        // multiple Task subagents run concurrently.
-        if (WORKFLOW_TOOL_NAMES.has(input.tool)) {
-          throw new Error(
-            `[Workflow] Tool "${input.tool}" cannot be called from a subagent session. ` +
-            `Only the parent session can call workflow control tools (mark_task_complete, request_review, etc.). ` +
-            `Complete your implementation work and report results back to the parent session.`,
-          )
-        }
-        // Use the parent's state for tool policy enforcement
-        const parentState = store.get(parentId)
-        if (!parentState) return // Parent state gone — allow through (graceful degradation)
-        const policy = getPhaseToolPolicy(
-          parentState.phase,
-          parentState.phaseState,
-          parentState.mode,
-          parentState.fileAllowlist,
-        )
-        // Apply the same blocked/predicate checks using the parent's policy
-        const toolName = input.tool.toLowerCase()
-        if (policy.blocked.some((blocked) => toolName.includes(blocked))) {
-          throw new Error(
-            `[Workflow] Tool "${input.tool}" is blocked in ${parentState.phase}/${parentState.phaseState}. ` +
-            `Allowed: ${policy.allowedDescription}`,
-          )
-        }
-        if (policy.bashCommandPredicate && toolName.includes("bash")) {
-          const command = (input.args?.["command"] ?? input.args?.["cmd"] ?? input.args?.["script"] ?? "") as string
-          if (command && !policy.bashCommandPredicate(command)) {
+          if (WORKFLOW_TOOL_NAMES.has(input.tool)) {
             throw new Error(
-              `[Workflow] Bash command blocked in INCREMENTAL mode — file-write operators (>, >>, tee, sed -i) are not allowed.`,
+              `[Workflow] Tool "${input.tool}" cannot be called from a subagent session. ` +
+              `Only the parent session can call workflow control tools (mark_task_complete, request_review, etc.). ` +
+              `Complete your implementation work and report results back to the parent session.`,
             )
           }
-        }
-        const WRITE_LIKE_TOKENS_CHILD = ["write", "edit", "patch", "create", "overwrite"]
-        if (policy.writePathPredicate && WRITE_LIKE_TOKENS_CHILD.some((t) => toolName.includes(t))) {
-          const filePath = (
-            input.args?.["filePath"] ?? input.args?.["path"] ?? input.args?.["file"] ??
-            input.args?.["filename"] ?? input.args?.["target"] ?? input.args?.["destination"]
-          ) as string | undefined
-          if (filePath && !policy.writePathPredicate(filePath)) {
+          // Use the parent's state for tool policy enforcement
+          const parentState = store.get(parentId)
+          if (!parentState) return // Parent state gone — allow through (graceful degradation)
+          const policy = getPhaseToolPolicy(
+            parentState.phase,
+            parentState.phaseState,
+            parentState.mode,
+            parentState.fileAllowlist,
+          )
+          // Apply the same blocked/predicate checks using the parent's policy
+          const toolName = input.tool.toLowerCase()
+          if (policy.blocked.some((blocked) => toolName.includes(blocked))) {
             throw new Error(
-              `[Workflow] Writing to "${filePath}" is blocked in ${parentState.phase}/${parentState.phaseState}. ` +
-              `${policy.allowedDescription}`,
+              `[Workflow] Tool "${input.tool}" is blocked in ${parentState.phase}/${parentState.phaseState}. ` +
+              `Allowed: ${policy.allowedDescription}`,
             )
           }
+          if (policy.bashCommandPredicate && toolName.includes("bash")) {
+            const command = (input.args?.["command"] ?? input.args?.["cmd"] ?? input.args?.["script"] ?? "") as string
+            if (command && !policy.bashCommandPredicate(command)) {
+              throw new Error(
+                `[Workflow] Bash command blocked in INCREMENTAL mode — file-write operators (>, >>, tee, sed -i) are not allowed.`,
+              )
+            }
+          }
+          const WRITE_LIKE_TOKENS_CHILD = ["write", "edit", "patch", "create", "overwrite"]
+          if (policy.writePathPredicate && WRITE_LIKE_TOKENS_CHILD.some((t) => toolName.includes(t))) {
+            const filePath = (
+              input.args?.["filePath"] ?? input.args?.["path"] ?? input.args?.["file"] ??
+              input.args?.["filename"] ?? input.args?.["target"] ?? input.args?.["destination"]
+            ) as string | undefined
+            if (filePath && !policy.writePathPredicate(filePath)) {
+              throw new Error(
+                `[Workflow] Writing to "${filePath}" is blocked in ${parentState.phase}/${parentState.phaseState}. ` +
+                `${policy.allowedDescription}`,
+              )
+            }
+          }
+          return
         }
-        return
+        // Sub-workflow child: has its own WorkflowState — fall through to
+        // normal tool guard logic below (uses the child's own state, not parent's).
       }
 
       const state = store.get(sessionId)
       if (!state) return
 
       // Track the most recently active primary session ID for orchestrator parentID.
-      activeSession.id = sessionId
+      sessions.setActive(sessionId)
 
       // Agent-aware dormancy: if the active agent is NOT an artisan agent
       // (e.g. Plan, Build, or any unknown agent), skip ALL tool blocking.
@@ -1041,7 +1058,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
       input: { sessionID?: string; sessionId?: string; session_id?: string },
       output: { context?: string[] },
     ) => {
-      const { store, childSessionParents } = ctx
+      const { store } = ctx
       try {
       const sessionId = (input.sessionID ?? input.sessionId ?? input.session_id) as string | undefined
       if (!sessionId) return

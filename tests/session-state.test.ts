@@ -4,18 +4,75 @@
 import { describe, expect, it, beforeEach, afterEach } from "bun:test"
 import { join } from "node:path"
 import { mkdtemp, rm } from "node:fs/promises"
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 
 import { createSessionStateStore } from "#core/session-state"
+import { createFileSystemStateBackend, migrateLegacyStateFile } from "#core/state-backend-fs"
 import { SCHEMA_VERSION } from "#core/types"
 import type { SessionStateStore, WorkflowState } from "#core/types"
+
+/** Build a minimal valid WorkflowState for test fixtures. */
+function makeState(sessionId: string, featureName: string | null, overrides?: Partial<WorkflowState>): WorkflowState {
+  return {
+    schemaVersion: SCHEMA_VERSION,
+    sessionId,
+    mode: null,
+    phase: "MODE_SELECT",
+    phaseState: "DRAFT",
+    iterationCount: 0,
+    retryCount: 0,
+    approvedArtifacts: {},
+    conventions: null,
+    fileAllowlist: [],
+    lastCheckpointTag: null,
+    approvalCount: 0,
+    orchestratorSessionId: null,
+    intentBaseline: null,
+    modeDetectionNote: null,
+    discoveryReport: null,
+    implDag: null,
+    phaseApprovalCounts: {},
+    escapePending: false,
+    pendingRevisionSteps: null,
+    currentTaskId: null,
+    feedbackHistory: [],
+    userGateMessageReceived: false,
+    reviewArtifactHash: null,
+    latestReviewResults: null,
+    artifactDiskPaths: {},
+    featureName,
+    revisionBaseline: null,
+    activeAgent: null,
+    taskCompletionInProgress: null,
+    taskReviewCount: 0,
+    pendingFeedback: null,
+    userMessages: [],
+    cachedPriorState: null,
+    priorWorkflowChecked: false,
+    sessionModel: null,
+    ...overrides,
+  }
+}
+
+/** Write a per-feature state file to disk. */
+function writePerFeatureState(baseDir: string, featureName: string, state: WorkflowState): void {
+  const dir = join(baseDir, featureName)
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(join(dir, "workflow-state.json"), JSON.stringify(state, null, 2), "utf-8")
+}
+
+/** Write a legacy single-file state to disk (Record<sessionId, WorkflowState>). */
+function writeLegacyState(filePath: string, states: Record<string, unknown>): void {
+  writeFileSync(filePath, JSON.stringify(states), "utf-8")
+}
 
 let store: SessionStateStore
 let tmpDir: string
 
 beforeEach(async () => {
   tmpDir = await mkdtemp(join(tmpdir(), "sw-test-"))
-  store = createSessionStateStore(tmpDir)
+  store = createSessionStateStore(createFileSystemStateBackend(tmpDir))
   await store.load()
 })
 
@@ -54,10 +111,16 @@ describe("SessionStateStore — create", () => {
     await expect(store.create("session-dup")).rejects.toThrow()
   })
 
-  it("persists to disk — survives a reload", async () => {
+  it("persists to disk — survives a reload (requires featureName)", async () => {
     await store.create("session-persist")
+    await store.update("session-persist", (d) => {
+      d.featureName = "persist-test"
+      d.mode = "GREENFIELD"
+      d.phase = "PLANNING"
+      d.phaseState = "DRAFT"
+    })
     // create fresh store from same dir
-    const store2 = createSessionStateStore(tmpDir)
+    const store2 = createSessionStateStore(createFileSystemStateBackend(tmpDir))
     const result = await store2.load()
     expect(result.success).toBe(true)
     const loaded = store2.get("session-persist")
@@ -95,13 +158,16 @@ describe("SessionStateStore — update", () => {
     expect(store.get("session-mem")?.phase).toBe("INTERFACES")
   })
 
-  it("persists update to disk", async () => {
+  it("persists update to disk (requires featureName)", async () => {
     await store.create("session-disk")
     await store.update("session-disk", (d) => {
+      d.featureName = "disk-test"
+      d.mode = "GREENFIELD"
       d.phase = "TESTS"
+      d.phaseState = "DRAFT"
       d.approvalCount = 3
     })
-    const store2 = createSessionStateStore(tmpDir)
+    const store2 = createSessionStateStore(createFileSystemStateBackend(tmpDir))
     await store2.load()
     const s = store2.get("session-disk")
     expect(s?.phase).toBe("TESTS")
@@ -134,8 +200,14 @@ describe("SessionStateStore — delete", () => {
 
   it("removes from disk", async () => {
     await store.create("session-del-disk")
+    await store.update("session-del-disk", (d) => {
+      d.featureName = "del-test"
+      d.mode = "GREENFIELD"
+      d.phase = "PLANNING"
+      d.phaseState = "DRAFT"
+    })
     await store.delete("session-del-disk")
-    const store2 = createSessionStateStore(tmpDir)
+    const store2 = createSessionStateStore(createFileSystemStateBackend(tmpDir))
     await store2.load()
     expect(store2.get("session-del-disk")).toBeNull()
   })
@@ -204,20 +276,13 @@ describe("SessionStateStore — invariant validation (G4)", () => {
 describe("SessionStateStore — load clears memory (G5)", () => {
   it("calling load() on the same store clears previously-created sessions not on disk", async () => {
     // Start with a fresh store with no disk file
-    const store2 = createSessionStateStore(tmpDir)
-    await store2.load() // no file → clean state
+    const store2 = createSessionStateStore(createFileSystemStateBackend(tmpDir))
+    await store2.load() // no files → clean state
 
-    // Manually create a session in memory only (without persisting to disk)
-    // We do this by creating and then deleting the disk file
+    // Create a session in memory only (no featureName → no disk write)
     await store2.create("session-stale-g5")
     // Verify it's in memory
     expect(store2.get("session-stale-g5")).not.toBeNull()
-
-    // Corrupt the disk file to have no sessions (simulating out-of-sync state)
-    await Bun.write(
-      require("node:path").join(tmpDir, "workflow-state.json"),
-      JSON.stringify({}),
-    )
 
     // Now reload — should clear in-memory state and load from disk (empty)
     await store2.load()
@@ -228,7 +293,13 @@ describe("SessionStateStore — load clears memory (G5)", () => {
 
   it("calling load() twice does not double-populate sessions", async () => {
     await store.create("session-dbl")
-    const store2 = createSessionStateStore(tmpDir)
+    await store.update("session-dbl", (d) => {
+      d.featureName = "dbl-test"
+      d.mode = "GREENFIELD"
+      d.phase = "PLANNING"
+      d.phaseState = "DRAFT"
+    })
+    const store2 = createSessionStateStore(createFileSystemStateBackend(tmpDir))
     await store2.load()
     const before = store2.get("session-dbl")
     await store2.load()
@@ -266,20 +337,22 @@ describe("SessionStateStore — concurrent update serialization (G22)", () => {
   })
 })
 
-describe("SessionStateStore — global write lock (M4)", () => {
+describe("SessionStateStore — per-feature write isolation (M4)", () => {
   it("concurrent updates to DIFFERENT sessions do not lose writes", async () => {
-    // M4 fix: without the globalWriteLock, concurrent updates to different sessions
-    // could interleave writeAll() calls, causing one session's changes to be lost.
+    // Per-feature files eliminate the old single-file race condition entirely.
+    // Each feature writes to its own file, so no interleaving is possible.
     await store.create("session-a")
     await store.create("session-b")
 
-    // Fire updates to two different sessions concurrently
+    // Fire updates to two different sessions concurrently (set featureName for persistence)
     const pa = store.update("session-a", (d) => {
+      d.featureName = "feat-a"
       d.phase = "PLANNING"
       d.phaseState = "DRAFT"
       d.mode = "GREENFIELD"
     })
     const pb = store.update("session-b", (d) => {
+      d.featureName = "feat-b"
       d.phase = "INTERFACES"
       d.phaseState = "DRAFT"
       d.mode = "REFACTOR"
@@ -291,7 +364,7 @@ describe("SessionStateStore — global write lock (M4)", () => {
     expect(store.get("session-b")?.phase).toBe("INTERFACES")
 
     // Verify persistence: reload from disk and check both survived
-    const store2 = createSessionStateStore(tmpDir)
+    const store2 = createSessionStateStore(createFileSystemStateBackend(tmpDir))
     await store2.load()
     expect(store2.get("session-a")?.phase).toBe("PLANNING")
     expect(store2.get("session-b")?.phase).toBe("INTERFACES")
@@ -301,6 +374,11 @@ describe("SessionStateStore — global write lock (M4)", () => {
     await store.create("rapid-1")
     await store.create("rapid-2")
     await store.create("rapid-3")
+
+    // Set featureName first so updates persist to per-feature files
+    await store.update("rapid-1", (d) => { d.featureName = "rapid-feat-1"; d.mode = "GREENFIELD"; d.phase = "PLANNING"; d.phaseState = "DRAFT" })
+    await store.update("rapid-2", (d) => { d.featureName = "rapid-feat-2"; d.mode = "GREENFIELD"; d.phase = "PLANNING"; d.phaseState = "DRAFT" })
+    await store.update("rapid-3", (d) => { d.featureName = "rapid-feat-3"; d.mode = "GREENFIELD"; d.phase = "PLANNING"; d.phaseState = "DRAFT" })
 
     const updates = [
       store.update("rapid-1", (d) => { d.approvalCount = 10 }),
@@ -312,7 +390,7 @@ describe("SessionStateStore — global write lock (M4)", () => {
     ]
     await Promise.all(updates)
 
-    const store2 = createSessionStateStore(tmpDir)
+    const store2 = createSessionStateStore(createFileSystemStateBackend(tmpDir))
     await store2.load()
     expect(store2.get("rapid-1")?.approvalCount).toBe(10)
     expect(store2.get("rapid-2")?.approvalCount).toBe(20)
@@ -327,12 +405,16 @@ describe("SessionStateStore — transient field cleanup on load", () => {
   it("clears taskCompletionInProgress on reload (transient lock)", async () => {
     await store.create("session-transient-1")
     await store.update("session-transient-1", (d) => {
+      d.featureName = "transient-1"
+      d.mode = "GREENFIELD"
+      d.phase = "IMPLEMENTATION"
+      d.phaseState = "DRAFT"
       d.taskCompletionInProgress = "task-3"
     })
     // Verify it was set
     expect(store.get("session-transient-1")?.taskCompletionInProgress).toBe("task-3")
     // Reload from disk
-    const store2 = createSessionStateStore(tmpDir)
+    const store2 = createSessionStateStore(createFileSystemStateBackend(tmpDir))
     await store2.load()
     const loaded = store2.get("session-transient-1")
     expect(loaded).not.toBeNull()
@@ -342,12 +424,16 @@ describe("SessionStateStore — transient field cleanup on load", () => {
   it("clears pendingFeedback on reload (transient state)", async () => {
     await store.create("session-transient-2")
     await store.update("session-transient-2", (d) => {
+      d.featureName = "transient-2"
+      d.mode = "GREENFIELD"
+      d.phase = "PLANNING"
+      d.phaseState = "DRAFT"
       d.pendingFeedback = "some feedback text"
     })
     // Verify it was set
     expect(store.get("session-transient-2")?.pendingFeedback).toBe("some feedback text")
     // Reload from disk
-    const store2 = createSessionStateStore(tmpDir)
+    const store2 = createSessionStateStore(createFileSystemStateBackend(tmpDir))
     await store2.load()
     const loaded = store2.get("session-transient-2")
     expect(loaded).not.toBeNull()
@@ -357,10 +443,14 @@ describe("SessionStateStore — transient field cleanup on load", () => {
   it("preserves taskReviewCount on reload (NOT transient)", async () => {
     await store.create("session-transient-3")
     await store.update("session-transient-3", (d) => {
+      d.featureName = "transient-3"
+      d.mode = "GREENFIELD"
+      d.phase = "PLANNING"
+      d.phaseState = "DRAFT"
       d.taskReviewCount = 5
     })
     // Reload from disk
-    const store2 = createSessionStateStore(tmpDir)
+    const store2 = createSessionStateStore(createFileSystemStateBackend(tmpDir))
     await store2.load()
     const loaded = store2.get("session-transient-3")
     expect(loaded).not.toBeNull()
@@ -369,8 +459,14 @@ describe("SessionStateStore — transient field cleanup on load", () => {
 
   it("fresh state defaults: taskCompletionInProgress=null, pendingFeedback=null, taskReviewCount=0 after reload", async () => {
     await store.create("session-transient-4")
+    await store.update("session-transient-4", (d) => {
+      d.featureName = "transient-4"
+      d.mode = "GREENFIELD"
+      d.phase = "PLANNING"
+      d.phaseState = "DRAFT"
+    })
     // Persist with defaults, reload
-    const store2 = createSessionStateStore(tmpDir)
+    const store2 = createSessionStateStore(createFileSystemStateBackend(tmpDir))
     await store2.load()
     const loaded = store2.get("session-transient-4")
     expect(loaded).not.toBeNull()
@@ -381,53 +477,50 @@ describe("SessionStateStore — transient field cleanup on load", () => {
 })
 
 describe("SessionStateStore — load", () => {
-  it("discards states with wrong schemaVersion", async () => {
-    // Manually write a bad state file
-    const badState = {
-      schemaVersion: 999,
-      sessionId: "bad-session",
-      phase: "PLANNING",
-    }
-    await Bun.write(
-      join(tmpDir, "workflow-state.json"),
-      JSON.stringify({ "bad-session": badState }),
+  it("discards per-feature state with wrong schemaVersion", async () => {
+    // Manually write a bad per-feature state file
+    const dir = join(tmpDir, "bad-feature")
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(
+      join(dir, "workflow-state.json"),
+      JSON.stringify({ schemaVersion: 999, sessionId: "bad-session", phase: "PLANNING" }),
     )
-    const store2 = createSessionStateStore(tmpDir)
+    const store2 = createSessionStateStore(createFileSystemStateBackend(tmpDir))
     const result = await store2.load()
     expect(result.success).toBe(true)
     expect(store2.get("bad-session")).toBeNull()
   })
 
-  it("migrates v5 state (missing currentTaskId and feedbackHistory) to v6", async () => {
-    // Write a v5 state that lacks currentTaskId and feedbackHistory
-    const v5State = {
-      schemaVersion: 5,
-      sessionId: "v5-session",
-      mode: null,
-      phase: "MODE_SELECT",
-      phaseState: "DRAFT",
-      iterationCount: 0,
-      retryCount: 0,
-      approvedArtifacts: {},
-      conventions: null,
-      fileAllowlist: [],
-      lastCheckpointTag: null,
-      approvalCount: 0,
-      orchestratorSessionId: null,
-      intentBaseline: null,
-      modeDetectionNote: null,
-      discoveryReport: null,
-      implDag: null,
-      escapePending: false,
-      pendingRevisionSteps: null,
-      // Note: no currentTaskId, feedbackHistory, or userGateMessageReceived
-      // — these are v6/v8 fields that get migrated in
-    }
-    await Bun.write(
-      join(tmpDir, "workflow-state.json"),
-      JSON.stringify({ "v5-session": v5State }),
+  it("migrates v5 per-feature state (missing currentTaskId and feedbackHistory) to current", async () => {
+    // Write a v5 state as a per-feature file
+    const dir = join(tmpDir, "v5-feature")
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(
+      join(dir, "workflow-state.json"),
+      JSON.stringify({
+        schemaVersion: 5,
+        sessionId: "v5-session",
+        mode: null,
+        phase: "MODE_SELECT",
+        phaseState: "DRAFT",
+        iterationCount: 0,
+        retryCount: 0,
+        approvedArtifacts: {},
+        conventions: null,
+        fileAllowlist: [],
+        lastCheckpointTag: null,
+        approvalCount: 0,
+        orchestratorSessionId: null,
+        intentBaseline: null,
+        modeDetectionNote: null,
+        discoveryReport: null,
+        implDag: null,
+        escapePending: false,
+        pendingRevisionSteps: null,
+        featureName: "v5-feature",
+      }),
     )
-    const store2 = createSessionStateStore(tmpDir)
+    const store2 = createSessionStateStore(createFileSystemStateBackend(tmpDir))
     const result = await store2.load()
     expect(result.success).toBe(true)
     const loaded = store2.get("v5-session")
@@ -436,49 +529,15 @@ describe("SessionStateStore — load", () => {
     expect(loaded?.currentTaskId).toBeNull()
     expect(loaded?.feedbackHistory).toEqual([])
     expect(loaded?.userGateMessageReceived).toBe(false)
-    expect(loaded?.featureName).toBeNull()
+    expect(loaded?.featureName).toBe("v5-feature")
   })
 
   it("reports count of successfully loaded sessions", async () => {
-    // Write two valid sessions directly
-    const s1: WorkflowState = {
-      schemaVersion: SCHEMA_VERSION,
-      sessionId: "s1",
-      mode: null,
-      phase: "MODE_SELECT",
-      phaseState: "DRAFT",
-      iterationCount: 0,
-      retryCount: 0,
-      approvedArtifacts: {},
-      conventions: null,
-      fileAllowlist: [],
-      lastCheckpointTag: null,
-      approvalCount: 0,
-      orchestratorSessionId: null,
-      intentBaseline: null,
-      modeDetectionNote: null,
-      discoveryReport: null,
-      implDag: null,
-      phaseApprovalCounts: {},
-      escapePending: false,
-      pendingRevisionSteps: null,
-      currentTaskId: null,
-      feedbackHistory: [],
-      userGateMessageReceived: false,
-      artifactDiskPaths: {},
-      featureName: null,
-      revisionBaseline: null,
-      activeAgent: null,
-      taskCompletionInProgress: null,
-      taskReviewCount: 0,
-      pendingFeedback: null,
-    }
-    const s2: WorkflowState = { ...s1, sessionId: "s2" }
-    await Bun.write(
-      join(tmpDir, "workflow-state.json"),
-      JSON.stringify({ s1, s2 }),
-    )
-    const store2 = createSessionStateStore(tmpDir)
+    // Write two valid sessions as per-feature files
+    writePerFeatureState(tmpDir, "feat-1", makeState("s1", "feat-1"))
+    writePerFeatureState(tmpDir, "feat-2", makeState("s2", "feat-2"))
+
+    const store2 = createSessionStateStore(createFileSystemStateBackend(tmpDir))
     const result = await store2.load()
     expect(result.success).toBe(true)
     if (!result.success) return
@@ -486,46 +545,14 @@ describe("SessionStateStore — load", () => {
   })
 
   it("strips relative paths from fileAllowlist at load time (pre-fix migration)", async () => {
-    // Simulate a state from a pre-normalization-fix session where fileAllowlist
-    // had relative paths. The load-time migration should strip them because at
-    // load time we don't have the project directory to resolve them.
-    const staleState: WorkflowState = {
-      schemaVersion: SCHEMA_VERSION,
-      sessionId: "stale-allowlist",
+    writePerFeatureState(tmpDir, "test-feature", makeState("stale-allowlist", "test-feature", {
       mode: "INCREMENTAL",
       phase: "INTERFACES",
       phaseState: "DRAFT",
-      iterationCount: 0,
-      retryCount: 0,
-      approvedArtifacts: {},
-      conventions: null,
-      fileAllowlist: ["/absolute/path/ok.ts", "relative/path/bad.ts", "also/bad.ts"],
-      lastCheckpointTag: null,
       approvalCount: 1,
-      orchestratorSessionId: null,
-      intentBaseline: null,
-      modeDetectionNote: null,
-      discoveryReport: null,
-      implDag: null,
-      phaseApprovalCounts: {},
-      escapePending: false,
-      pendingRevisionSteps: null,
-      currentTaskId: null,
-      feedbackHistory: [],
-      userGateMessageReceived: false,
-      artifactDiskPaths: {},
-      featureName: "test-feature",
-      revisionBaseline: null,
-      activeAgent: null,
-      taskCompletionInProgress: null,
-      taskReviewCount: 0,
-      pendingFeedback: null,
-    }
-    await Bun.write(
-      join(tmpDir, "workflow-state.json"),
-      JSON.stringify({ "stale-allowlist": staleState }),
-    )
-    const store2 = createSessionStateStore(tmpDir)
+      fileAllowlist: ["/absolute/path/ok.ts", "relative/path/bad.ts", "also/bad.ts"] as any,
+    }))
+    const store2 = createSessionStateStore(createFileSystemStateBackend(tmpDir))
     const result = await store2.load()
     expect(result.success).toBe(true)
     const loaded = store2.get("stale-allowlist")
@@ -535,47 +562,534 @@ describe("SessionStateStore — load", () => {
   })
 
   it("preserves all absolute paths in fileAllowlist at load time", async () => {
-    const goodState: WorkflowState = {
-      schemaVersion: SCHEMA_VERSION,
-      sessionId: "good-allowlist",
+    writePerFeatureState(tmpDir, "test-feature", makeState("good-allowlist", "test-feature", {
       mode: "INCREMENTAL",
       phase: "IMPLEMENTATION",
       phaseState: "DRAFT",
-      iterationCount: 0,
-      retryCount: 0,
-      approvedArtifacts: {},
-      conventions: null,
-      fileAllowlist: ["/project/src/foo.ts", "/project/src/bar.ts"],
-      lastCheckpointTag: null,
       approvalCount: 2,
-      orchestratorSessionId: null,
-      intentBaseline: null,
-      modeDetectionNote: null,
-      discoveryReport: null,
-      implDag: null,
-      phaseApprovalCounts: {},
-      escapePending: false,
-      pendingRevisionSteps: null,
-      currentTaskId: null,
-      feedbackHistory: [],
-      userGateMessageReceived: false,
-      artifactDiskPaths: {},
-      featureName: "test-feature",
-      revisionBaseline: null,
-      activeAgent: null,
-      taskCompletionInProgress: null,
-      taskReviewCount: 0,
-      pendingFeedback: null,
-    }
-    await Bun.write(
-      join(tmpDir, "workflow-state.json"),
-      JSON.stringify({ "good-allowlist": goodState }),
-    )
-    const store2 = createSessionStateStore(tmpDir)
+      fileAllowlist: ["/project/src/foo.ts", "/project/src/bar.ts"],
+    }))
+    const store2 = createSessionStateStore(createFileSystemStateBackend(tmpDir))
     const result = await store2.load()
     expect(result.success).toBe(true)
     const loaded = store2.get("good-allowlist")
     expect(loaded).not.toBeNull()
     expect(loaded!.fileAllowlist).toEqual(["/project/src/foo.ts", "/project/src/bar.ts"])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Per-feature file storage (Phase 2a)
+// ---------------------------------------------------------------------------
+
+describe("SessionStateStore — per-feature file storage", () => {
+  it("create() does not write to disk (memory-only)", async () => {
+    await store.create("ephemeral-1")
+    // baseDir should have no subdirectories
+    const entries = readdirSync(tmpDir)
+    expect(entries).toEqual([])
+  })
+
+  it("update() with featureName writes to <baseDir>/<featureName>/workflow-state.json", async () => {
+    await store.create("s1")
+    await store.update("s1", (d) => {
+      d.featureName = "billing-engine"
+      d.mode = "GREENFIELD"
+      d.phase = "PLANNING"
+      d.phaseState = "DRAFT"
+    })
+    const filePath = join(tmpDir, "billing-engine", "workflow-state.json")
+    expect(existsSync(filePath)).toBe(true)
+    const content = JSON.parse(readFileSync(filePath, "utf-8")) as WorkflowState
+    expect(content.sessionId).toBe("s1")
+    expect(content.featureName).toBe("billing-engine")
+    expect(content.phase).toBe("PLANNING")
+  })
+
+  it("update() without featureName does not write to disk", async () => {
+    await store.create("no-feature")
+    await store.update("no-feature", (d) => {
+      d.iterationCount = 5
+    })
+    const entries = readdirSync(tmpDir)
+    expect(entries).toEqual([])
+  })
+
+  it("subsequent updates overwrite the same per-feature file", async () => {
+    await store.create("s1")
+    await store.update("s1", (d) => {
+      d.featureName = "my-feat"
+      d.mode = "GREENFIELD"
+      d.phase = "PLANNING"
+      d.phaseState = "DRAFT"
+    })
+    await store.update("s1", (d) => {
+      d.approvalCount = 42
+    })
+    const filePath = join(tmpDir, "my-feat", "workflow-state.json")
+    const content = JSON.parse(readFileSync(filePath, "utf-8")) as WorkflowState
+    expect(content.approvalCount).toBe(42)
+    // Only one feature directory
+    const entries = readdirSync(tmpDir)
+    expect(entries).toEqual(["my-feat"])
+  })
+
+  it("per-feature state survives a reload", async () => {
+    await store.create("s1")
+    await store.update("s1", (d) => {
+      d.featureName = "my-feat"
+      d.mode = "GREENFIELD"
+      d.phase = "PLANNING"
+      d.phaseState = "DRAFT"
+      d.approvalCount = 7
+    })
+    const store2 = createSessionStateStore(createFileSystemStateBackend(tmpDir))
+    await store2.load()
+    const loaded = store2.get("s1")
+    expect(loaded).not.toBeNull()
+    expect(loaded?.featureName).toBe("my-feat")
+    expect(loaded?.approvalCount).toBe(7)
+  })
+
+  it("session without featureName does NOT survive reload", async () => {
+    await store.create("ephemeral")
+    await store.update("ephemeral", (d) => {
+      d.iterationCount = 3
+    })
+    const store2 = createSessionStateStore(createFileSystemStateBackend(tmpDir))
+    await store2.load()
+    expect(store2.get("ephemeral")).toBeNull()
+  })
+
+  it("load() reads multiple per-feature state files", async () => {
+    writePerFeatureState(tmpDir, "billing", makeState("s1", "billing"))
+    writePerFeatureState(tmpDir, "auth", makeState("s2", "auth"))
+
+    const store2 = createSessionStateStore(createFileSystemStateBackend(tmpDir))
+    const result = await store2.load()
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    expect(result.count).toBe(2)
+    expect(store2.get("s1")?.featureName).toBe("billing")
+    expect(store2.get("s2")?.featureName).toBe("auth")
+  })
+
+  it("load() ignores subdirectories without workflow-state.json", async () => {
+    writePerFeatureState(tmpDir, "billing", makeState("s1", "billing"))
+    mkdirSync(join(tmpDir, "empty-dir"), { recursive: true })
+    mkdirSync(join(tmpDir, "no-state-dir"), { recursive: true })
+    writeFileSync(join(tmpDir, "no-state-dir", "other-file.txt"), "hello", "utf-8")
+
+    const store2 = createSessionStateStore(createFileSystemStateBackend(tmpDir))
+    const result = await store2.load()
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    expect(result.count).toBe(1)
+  })
+
+  it("load() discards per-feature state with wrong schemaVersion", async () => {
+    const dir = join(tmpDir, "bad-feature")
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(
+      join(dir, "workflow-state.json"),
+      JSON.stringify({ schemaVersion: 999, sessionId: "bad", featureName: "bad-feature" }),
+    )
+
+    const store2 = createSessionStateStore(createFileSystemStateBackend(tmpDir))
+    const result = await store2.load()
+    expect(result.success).toBe(true)
+    expect(store2.get("bad")).toBeNull()
+  })
+
+  it("load() skips corrupt per-feature JSON without failing", async () => {
+    // Write a valid state alongside a corrupt one
+    writePerFeatureState(tmpDir, "good-feat", makeState("s-good", "good-feat"))
+    const corruptDir = join(tmpDir, "corrupt-feat")
+    mkdirSync(corruptDir, { recursive: true })
+    writeFileSync(join(corruptDir, "workflow-state.json"), "{{not json!!", "utf-8")
+
+    const store2 = createSessionStateStore(createFileSystemStateBackend(tmpDir))
+    const result = await store2.load()
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    // Good state loaded, corrupt one skipped
+    expect(result.count).toBe(1)
+    expect(store2.get("s-good")).not.toBeNull()
+  })
+
+  it("load() skips per-feature file whose featureName doesn't match directory", async () => {
+    // Directory is "billing" but state says featureName is "auth" — inconsistent
+    writePerFeatureState(tmpDir, "billing", makeState("s-mismatch", "auth"))
+    // Also write a valid one for comparison
+    writePerFeatureState(tmpDir, "good-feat", makeState("s-good", "good-feat"))
+
+    const store2 = createSessionStateStore(createFileSystemStateBackend(tmpDir))
+    const result = await store2.load()
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    expect(result.count).toBe(1)
+    expect(store2.get("s-good")).not.toBeNull()
+    expect(store2.get("s-mismatch")).toBeNull()
+  })
+
+  it("load() returns StoreLoadError when backend.list() throws", async () => {
+    // Create a backend whose list() always throws
+    const failingBackend = {
+      async read() { return null },
+      async write() {},
+      async remove() {},
+      async list(): Promise<string[]> { throw new Error("disk on fire") },
+      async lock() { return { async release() {} } },
+    }
+    const store2 = createSessionStateStore(failingBackend)
+    const result = await store2.load()
+    expect(result.success).toBe(false)
+    if (result.success) return
+    expect(result.error).toContain("disk on fire")
+  })
+
+  it("load() applies field migrations to per-feature files", async () => {
+    // Write a v5 state as a per-feature file
+    const dir = join(tmpDir, "old-feature")
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(
+      join(dir, "workflow-state.json"),
+      JSON.stringify({
+        schemaVersion: 5,
+        sessionId: "v5-pf",
+        mode: null,
+        phase: "MODE_SELECT",
+        phaseState: "DRAFT",
+        iterationCount: 0,
+        retryCount: 0,
+        approvedArtifacts: {},
+        conventions: null,
+        fileAllowlist: [],
+        lastCheckpointTag: null,
+        approvalCount: 0,
+        orchestratorSessionId: null,
+        intentBaseline: null,
+        modeDetectionNote: null,
+        discoveryReport: null,
+        implDag: null,
+        escapePending: false,
+        pendingRevisionSteps: null,
+        featureName: "old-feature",
+      }),
+    )
+
+    const store2 = createSessionStateStore(createFileSystemStateBackend(tmpDir))
+    const result = await store2.load()
+    expect(result.success).toBe(true)
+    const loaded = store2.get("v5-pf")
+    expect(loaded).not.toBeNull()
+    expect(loaded?.schemaVersion).toBe(SCHEMA_VERSION)
+    expect(loaded?.currentTaskId).toBeNull()
+    expect(loaded?.feedbackHistory).toEqual([])
+    expect(loaded?.userGateMessageReceived).toBe(false)
+  })
+
+  it("delete() removes per-feature state file but preserves directory", async () => {
+    await store.create("s1")
+    await store.update("s1", (d) => {
+      d.featureName = "doomed"
+      d.mode = "GREENFIELD"
+      d.phase = "PLANNING"
+      d.phaseState = "DRAFT"
+    })
+    expect(existsSync(join(tmpDir, "doomed", "workflow-state.json"))).toBe(true)
+    await store.delete("s1")
+    expect(store.get("s1")).toBeNull()
+    // State file removed
+    expect(existsSync(join(tmpDir, "doomed", "workflow-state.json"))).toBe(false)
+    // Directory preserved (may contain artifacts)
+    expect(existsSync(join(tmpDir, "doomed"))).toBe(true)
+  })
+
+  it("delete() for session without featureName only removes from memory", async () => {
+    await store.create("mem-only")
+    await store.delete("mem-only")
+    expect(store.get("mem-only")).toBeNull()
+    // No files or directories created
+    const entries = readdirSync(tmpDir)
+    expect(entries).toEqual([])
+  })
+
+  it("concurrent updates to different features write independent files", async () => {
+    await store.create("s1")
+    await store.create("s2")
+    await store.update("s1", (d) => {
+      d.featureName = "feat-a"
+      d.mode = "GREENFIELD"
+      d.phase = "PLANNING"
+      d.phaseState = "DRAFT"
+    })
+    await store.update("s2", (d) => {
+      d.featureName = "feat-b"
+      d.mode = "REFACTOR"
+      d.phase = "PLANNING"
+      d.phaseState = "DRAFT"
+    })
+
+    // Fire concurrent updates to different features
+    const pa = store.update("s1", (d) => { d.approvalCount = 10 })
+    const pb = store.update("s2", (d) => { d.approvalCount = 20 })
+    await Promise.all([pa, pb])
+
+    // Both should persist independently
+    const store2 = createSessionStateStore(createFileSystemStateBackend(tmpDir))
+    await store2.load()
+    expect(store2.get("s1")?.approvalCount).toBe(10)
+    expect(store2.get("s2")?.approvalCount).toBe(20)
+  })
+
+  it("findByFeatureName works with per-feature storage", async () => {
+    await store.create("s1")
+    await store.update("s1", (d) => {
+      d.featureName = "find-me"
+      d.mode = "GREENFIELD"
+      d.phase = "PLANNING"
+      d.phaseState = "DRAFT"
+    })
+    const found = store.findByFeatureName("find-me")
+    expect(found).not.toBeNull()
+    expect(found?.sessionId).toBe("s1")
+    expect(store.findByFeatureName("nonexistent")).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Legacy single-file migration (Phase 2a)
+// ---------------------------------------------------------------------------
+
+describe("SessionStateStore — legacy migration", () => {
+  let legacyFile: string
+  let baseDir: string
+
+  beforeEach(() => {
+    legacyFile = join(tmpDir, "legacy", "workflow-state.json")
+    baseDir = join(tmpDir, "openartisan")
+    mkdirSync(join(tmpDir, "legacy"), { recursive: true })
+    mkdirSync(baseDir, { recursive: true })
+  })
+
+  it("migrates legacy single-file sessions with featureName to per-feature files", async () => {
+    const s1 = makeState("s1", "billing")
+    const s2 = makeState("s2", "auth")
+    writeLegacyState(legacyFile, { s1, s2 })
+
+    const backend = createFileSystemStateBackend(baseDir)
+    await migrateLegacyStateFile(backend, legacyFile)
+    const migStore = createSessionStateStore(backend)
+    const result = await migStore.load()
+
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    expect(result.count).toBe(2)
+    expect(migStore.get("s1")?.featureName).toBe("billing")
+    expect(migStore.get("s2")?.featureName).toBe("auth")
+
+    // Per-feature files created
+    expect(existsSync(join(baseDir, "billing", "workflow-state.json"))).toBe(true)
+    expect(existsSync(join(baseDir, "auth", "workflow-state.json"))).toBe(true)
+
+    // Legacy file deleted
+    expect(existsSync(legacyFile)).toBe(false)
+  })
+
+  it("legacy sessions without featureName are returned as memoryOnly", async () => {
+    const s1 = makeState("s1", "billing")
+    const s2 = makeState("s2", null) // no featureName
+    writeLegacyState(legacyFile, { s1, s2 })
+
+    const backend = createFileSystemStateBackend(baseDir)
+    const migration = await migrateLegacyStateFile(backend, legacyFile)
+
+    // s1 migrated to backend, s2 returned as memoryOnly
+    expect(migration.migrated).toEqual(["billing"])
+    expect(migration.memoryOnly).toHaveLength(1)
+    expect(migration.memoryOnly[0]?.id).toBe("s2")
+
+    // Only s1 has a per-feature file
+    expect(existsSync(join(baseDir, "billing", "workflow-state.json"))).toBe(true)
+    const entries = readdirSync(baseDir)
+    expect(entries).toEqual(["billing"])
+  })
+
+  it("handles missing legacy file gracefully", async () => {
+    const backend = createFileSystemStateBackend(baseDir)
+    const migration = await migrateLegacyStateFile(backend, "/nonexistent/file.json")
+    expect(migration.migrated).toEqual([])
+    expect(migration.memoryOnly).toEqual([])
+  })
+
+  it("handles corrupt legacy file gracefully", async () => {
+    writeFileSync(legacyFile, "{{not valid json!!", "utf-8")
+    const backend = createFileSystemStateBackend(baseDir)
+    const migration = await migrateLegacyStateFile(backend, legacyFile)
+    expect(migration.migrated).toEqual([])
+    expect(migration.memoryOnly).toEqual([])
+  })
+
+  it("applies field migrations during legacy migration + load", async () => {
+    const v5State = {
+      schemaVersion: 5,
+      sessionId: "v5-leg",
+      mode: null,
+      phase: "MODE_SELECT",
+      phaseState: "DRAFT",
+      iterationCount: 0,
+      retryCount: 0,
+      approvedArtifacts: {},
+      conventions: null,
+      fileAllowlist: [],
+      lastCheckpointTag: null,
+      approvalCount: 0,
+      orchestratorSessionId: null,
+      intentBaseline: null,
+      modeDetectionNote: null,
+      discoveryReport: null,
+      implDag: null,
+      escapePending: false,
+      pendingRevisionSteps: null,
+      featureName: "legacy-feat",
+    }
+    writeLegacyState(legacyFile, { "v5-leg": v5State })
+
+    const backend = createFileSystemStateBackend(baseDir)
+    await migrateLegacyStateFile(backend, legacyFile)
+    const migStore = createSessionStateStore(backend)
+    const result = await migStore.load()
+    expect(result.success).toBe(true)
+    const loaded = migStore.get("v5-leg")
+    expect(loaded).not.toBeNull()
+    expect(loaded?.schemaVersion).toBe(SCHEMA_VERSION)
+    expect(loaded?.currentTaskId).toBeNull()
+    expect(loaded?.feedbackHistory).toEqual([])
+    expect(loaded?.featureName).toBe("legacy-feat")
+  })
+
+  it("does not re-migrate if legacy file already gone", async () => {
+    // First migration
+    const s1 = makeState("s1", "billing")
+    writeLegacyState(legacyFile, { s1 })
+    const backend = createFileSystemStateBackend(baseDir)
+    await migrateLegacyStateFile(backend, legacyFile)
+    expect(existsSync(legacyFile)).toBe(false)
+
+    // Second migration — legacy file gone, no-op
+    const migration2 = await migrateLegacyStateFile(backend, legacyFile)
+    expect(migration2.migrated).toEqual([])
+
+    // Store still loads the per-feature file
+    const migStore = createSessionStateStore(backend)
+    const result = await migStore.load()
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    expect(result.count).toBe(1)
+    expect(migStore.get("s1")?.featureName).toBe("billing")
+  })
+
+  it("per-feature files take precedence over legacy file for same feature", async () => {
+    // Write a per-feature file with approvalCount=10
+    writePerFeatureState(baseDir, "billing", makeState("s1", "billing", { approvalCount: 10 }))
+    // Write a legacy file with same session but approvalCount=0
+    writeLegacyState(legacyFile, { s1: makeState("s1", "billing", { approvalCount: 0 }) })
+
+    const backend = createFileSystemStateBackend(baseDir)
+    await migrateLegacyStateFile(backend, legacyFile)
+    const migStore = createSessionStateStore(backend)
+    const result = await migStore.load()
+    expect(result.success).toBe(true)
+    // The per-feature file should win (migration skips existing features)
+    expect(migStore.get("s1")?.approvalCount).toBe(10)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// File-level locking (Phase 2b)
+// ---------------------------------------------------------------------------
+
+describe("SessionStateStore — file-level locking", () => {
+  it("creates and cleans up .lock file during update", async () => {
+    await store.create("s1")
+    await store.update("s1", (d) => {
+      d.featureName = "lock-test"
+      d.mode = "GREENFIELD"
+      d.phase = "PLANNING"
+      d.phaseState = "DRAFT"
+    })
+    // After update completes, lock file should be cleaned up
+    expect(existsSync(join(tmpDir, "lock-test", ".lock"))).toBe(false)
+    // State file should exist
+    expect(existsSync(join(tmpDir, "lock-test", "workflow-state.json"))).toBe(true)
+  })
+
+  it("creates and cleans up .lock file during delete", async () => {
+    await store.create("s1")
+    await store.update("s1", (d) => {
+      d.featureName = "del-lock"
+      d.mode = "GREENFIELD"
+      d.phase = "PLANNING"
+      d.phaseState = "DRAFT"
+    })
+    await store.delete("s1")
+    // Lock file should be cleaned up
+    expect(existsSync(join(tmpDir, "del-lock", ".lock"))).toBe(false)
+  })
+
+  it("concurrent updates to same feature are serialized via file lock", async () => {
+    await store.create("s1")
+    await store.update("s1", (d) => {
+      d.featureName = "contended"
+      d.mode = "GREENFIELD"
+      d.phase = "PLANNING"
+      d.phaseState = "DRAFT"
+    })
+
+    // Fire many concurrent updates to the same feature
+    const updates = Array.from({ length: 10 }, (_, i) =>
+      store.update("s1", (d) => { d.approvalCount = i + 1 }),
+    )
+    await Promise.all(updates)
+
+    // All should have applied without corruption
+    const final = store.get("s1")
+    expect(final?.approvalCount).toBeGreaterThanOrEqual(1)
+    expect(final?.approvalCount).toBeLessThanOrEqual(10)
+
+    // Verify disk state matches memory
+    const store2 = createSessionStateStore(createFileSystemStateBackend(tmpDir))
+    await store2.load()
+    expect(store2.get("s1")?.approvalCount).toBe(final?.approvalCount)
+  })
+
+  it("stale lock from dead PID is cleaned up automatically", async () => {
+    await store.create("s1")
+    await store.update("s1", (d) => {
+      d.featureName = "stale-lock"
+      d.mode = "GREENFIELD"
+      d.phase = "PLANNING"
+      d.phaseState = "DRAFT"
+    })
+
+    // Simulate a stale lock left by a dead process
+    const lockPath = join(tmpDir, "stale-lock", ".lock")
+    writeFileSync(lockPath, JSON.stringify({ pid: 999999, ts: Date.now() }), "utf-8")
+    expect(existsSync(lockPath)).toBe(true)
+
+    // Update should succeed — stale lock is auto-cleaned
+    await store.update("s1", (d) => { d.approvalCount = 42 })
+    expect(store.get("s1")?.approvalCount).toBe(42)
+    // Lock file cleaned up after update
+    expect(existsSync(lockPath)).toBe(false)
+  })
+
+  it("lock is not created for memory-only sessions (no featureName)", async () => {
+    await store.create("mem-only")
+    await store.update("mem-only", (d) => { d.iterationCount = 5 })
+    // No directories or lock files created
+    const entries = readdirSync(tmpDir)
+    expect(entries).toEqual([])
   })
 })

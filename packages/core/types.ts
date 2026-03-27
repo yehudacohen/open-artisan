@@ -108,8 +108,13 @@ export type ArtifactKey =
  *   v17: added cachedPriorState (cache for check_prior_workflow → select_mode)
  *   v18: added priorWorkflowChecked and sessionModel (enforce tool ordering and
  *        propagate parent model to subagents)
+ *   v19: added reviewArtifactHash and latestReviewResults (stale-artifact
+ *        detection in mark_satisfied, status file review rendering)
+ *   v20: storage format change — per-feature files (.openartisan/<featureName>/
+ *        workflow-state.json) instead of single-file (.opencode/workflow-state.json).
+ *        No new WorkflowState fields. Legacy single-file migrated on load().
  */
-export const SCHEMA_VERSION = 19
+export const SCHEMA_VERSION = 20
 
 export interface WorkflowState {
   /** Schema version for forward-compatibility. Must equal SCHEMA_VERSION. */
@@ -435,6 +440,83 @@ export interface ArtifactGraph {
 }
 
 // ---------------------------------------------------------------------------
+// Session registry
+// ---------------------------------------------------------------------------
+
+/**
+ * Tracks active session lifecycle and parent-child relationships.
+ *
+ * Replaces the ad-hoc `activeSession` wrapper and `childSessionParents` Map
+ * with a single cohesive interface. Feature mapping is NOT in the registry —
+ * use `store.get(sessionId)?.featureName` for that.
+ *
+ * Primary sessions get their own WorkflowState. Child sessions (subagent
+ * reviewers, orchestrator, discovery fleet) inherit the parent's tool policy.
+ */
+export interface SessionRegistry {
+  /** Register a primary session (will get its own WorkflowState). */
+  registerPrimary(sessionId: string): void
+
+  /** Register a child session that inherits from a parent. */
+  registerChild(sessionId: string, parentId: string): void
+
+  /** Unregister any session (primary or child). */
+  unregister(sessionId: string): void
+
+  /** Get the parent ID for a child session. null if primary or unknown. */
+  getParent(sessionId: string): string | null
+
+  /** True if the session is a registered child session. */
+  isChild(sessionId: string): boolean
+
+  /** Mark a session as the most recently active (updated on each tool call). */
+  setActive(sessionId: string): void
+
+  /** Get the most recently active primary session ID. */
+  getActiveId(): string | undefined
+
+  /** Count of all tracked sessions (primary + child). */
+  count(): number
+}
+
+// ---------------------------------------------------------------------------
+// State backend (persistence layer)
+// ---------------------------------------------------------------------------
+
+/**
+ * Low-level persistence backend for per-feature workflow state.
+ *
+ * Implementations handle storage I/O and cross-process locking.
+ * The SessionStateStore layer above handles in-memory caching, schema
+ * migration, validation, and in-process serialization.
+ *
+ * Built-in implementations:
+ * - FileSystemStateBackend: per-feature JSON files + lockfiles
+ *
+ * Future implementations could use SQLite, Redis, or JSON-RPC (bridge server).
+ */
+export interface StateBackend {
+  /** Read raw JSON for a feature. Returns null if not found. */
+  read(featureName: string): Promise<string | null>
+
+  /** Write raw JSON for a feature. Creates storage location if needed. */
+  write(featureName: string, data: string): Promise<void>
+
+  /** Remove stored state for a feature. No-op if not found. */
+  remove(featureName: string): Promise<void>
+
+  /** List all feature names that have persisted state. */
+  list(): Promise<string[]>
+
+  /**
+   * Acquire an exclusive lock for a feature.
+   * Returns a release function that must be called when done.
+   * Implementations may use lockfiles, database locks, etc.
+   */
+  lock(featureName: string): Promise<{ release(): Promise<void> }>
+}
+
+// ---------------------------------------------------------------------------
 // Session state store
 // ---------------------------------------------------------------------------
 
@@ -449,13 +531,19 @@ export interface StoreLoadError {
 }
 
 export interface SessionStateStore {
-  /** Get state for a session, or null if not found */
+  /**
+   * Get state for a session, or null if not found.
+   *
+   * IMPORTANT: Returns a direct reference to the internal state object for
+   * performance (called on every tool call). Do NOT mutate the returned object —
+   * use update() for all mutations. Treat the return value as read-only.
+   */
   get(sessionId: string): WorkflowState | null
 
   /**
    * Find a workflow state by feature name.
    * Searches all sessions for one with matching featureName.
-   * Returns the state if found, null otherwise.
+   * Returns a defensive clone of the state if found, null otherwise.
    */
   findByFeatureName(featureName: string): WorkflowState | null
 

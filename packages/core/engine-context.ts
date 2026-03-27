@@ -9,7 +9,7 @@
  * the OpenCode plugin factory.
  */
 
-import type { SessionStateStore, StateMachine, Orchestrator, ArtifactGraph } from "./types"
+import type { SessionStateStore, StateMachine, Orchestrator, ArtifactGraph, SessionRegistry } from "./types"
 import type { SubagentDispatcher } from "./subagent-dispatcher"
 import type { Logger, NotificationSink } from "./logger"
 
@@ -38,13 +38,9 @@ export interface EngineContext {
   promptExistingSession(sessionId: string, text: string): Promise<void>
 
   // ── Mutable session tracking ────────────────────────────────────────
-  // Maps are shared by reference. The activeSessionId uses a wrapper
-  // because primitives can't be shared by reference.
 
-  /** Most recently active primary session ID. Updated on every tool call. */
-  activeSession: { id: string | undefined }
-  /** Maps child session IDs to their parent session IDs (for tool guard policy inheritance). */
-  childSessionParents: Map<string, string>
+  /** Session lifecycle and parent-child tracking. */
+  sessions: SessionRegistry
   /** Last reprompt timestamps per session (for idle handler debouncing). */
   lastRepromptTimestamps: Map<string, number>
 }

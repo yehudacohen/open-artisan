@@ -201,3 +201,18 @@ export const MAX_SCOPE_CONTEXT_CHARS = 1500
  * Represents: conventions, plan, interfaces, impl_plan, tests (or subset for GREENFIELD).
  */
 export const MIN_COMPLETE_ARTIFACTS = 5
+
+// ---------------------------------------------------------------------------
+// File-level locking
+// ---------------------------------------------------------------------------
+
+/**
+ * Timeout for acquiring a file-level lock (ms).
+ * If the lock can't be acquired within this time, the operation fails.
+ */
+export const LOCK_TIMEOUT_MS = 10_000
+
+/**
+ * Polling interval while waiting for a file lock to be released (ms).
+ */
+export const LOCK_POLL_MS = 50

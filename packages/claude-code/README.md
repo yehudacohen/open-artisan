@@ -66,7 +66,7 @@ Simple commands use CLI flags:
 Complex commands accept JSON on stdin (avoids Bash quoting issues):
 ```bash
 echo '{"summary":"Plan ready","artifact_content":"# Plan\n..."}' | ./artisan request-review
-echo '{"task_id":"T1","summary":"Built auth module","tests_passing":true}' | ./artisan mark-task-complete
+echo '{"task_id":"T1","implementation_summary":"Built auth module","tests_passing":true}' | ./artisan mark-task-complete
 echo '{"criteria_met":[{"criterion":"All tests pass","met":true,"evidence":"bun test: 42/42"}]}' | ./artisan mark-satisfied
 echo '{"feedback_type":"approve","feedback_text":"Looks good"}' | ./artisan submit-feedback
 ```

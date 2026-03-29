@@ -15,7 +15,7 @@
  *
  * Complex commands accept JSON on stdin:
  *   echo '{"summary":"Plan ready","artifact_content":"..."}' | artisan request-review
- *   echo '{"task_id":"T1","summary":"Built auth","tests_passing":true}' | artisan mark-task-complete
+ *   echo '{"task_id":"T1","implementation_summary":"Built auth","tests_passing":true}' | artisan mark-task-complete
  *   echo '{"criteria_met":[...]}' | artisan mark-satisfied
  *   echo '{"feedback_type":"approve","feedback_text":"LGTM"}' | artisan submit-feedback
  */
@@ -272,7 +272,7 @@ Examples:
   artisan select-mode --mode GREENFIELD --feature-name my-feature
   artisan state
   echo '{"summary":"Done","artifact_description":"All code"}' | artisan request-review
-  echo '{"task_id":"T1","summary":"Built it","tests_passing":true}' | artisan mark-task-complete`)
+  echo '{"task_id":"T1","implementation_summary":"Built it","tests_passing":true}' | artisan mark-task-complete`)
     process.exit(0)
   }
 

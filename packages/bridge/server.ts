@@ -161,6 +161,9 @@ export function createBridgeServer(
    * that need to dispatch individual requests without the stdio readline loop.
    */
   async function receiveJSON(json: string): Promise<string | null> {
+    if (shuttingDown) {
+      return JSON.stringify({ jsonrpc: "2.0", error: { code: -32000, message: "Bridge is shutting down" }, id: null })
+    }
     const response = await rpcServer.receiveJSON(json)
     return response ? JSON.stringify(response) : null
   }

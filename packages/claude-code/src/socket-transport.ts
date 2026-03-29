@@ -93,18 +93,30 @@ export function createSocketTransport(
 
       server = createServer((connection) => {
         let buffer = ""
+        let processed = false
         const timeout = setTimeout(() => {
           connection.destroy()
         }, connectionTimeout)
 
         connection.on("data", (chunk) => {
+          if (processed) return // One request per connection — ignore further data
           buffer += chunk.toString()
+
+          // Buffer size guard — prevent unbounded memory growth
+          if (buffer.length > 1_048_576) { // 1MB
+            clearTimeout(timeout)
+            processed = true
+            connection.destroy()
+            return
+          }
+
           // Look for newline delimiter — process first complete line
           const newlineIdx = buffer.indexOf("\n")
           if (newlineIdx === -1) return
 
+          processed = true // Mark as processed — ignore further data events
           const line = buffer.slice(0, newlineIdx).trim()
-          buffer = buffer.slice(newlineIdx + 1)
+          buffer = "" // Release buffer memory
 
           if (!line) {
             clearTimeout(timeout)
@@ -200,9 +212,13 @@ export async function sendSocketRequest(
 
     const socket = connect({ path: socketPath })
     let buffer = ""
+    let settled = false
     const timer = setTimeout(() => {
-      socket.destroy()
-      reject(new Error(`Socket request timed out after ${timeout}ms`))
+      if (!settled) {
+        settled = true
+        socket.destroy()
+        resolve(null) // Timeout — treat as unavailable (consistent with error fallback)
+      }
     }, timeout)
 
     socket.on("connect", () => {
@@ -214,6 +230,8 @@ export async function sendSocketRequest(
     })
 
     socket.on("end", () => {
+      if (settled) return
+      settled = true
       clearTimeout(timer)
       const trimmed = buffer.trim()
       if (!trimmed) {
@@ -223,11 +241,13 @@ export async function sendSocketRequest(
       try {
         resolve(JSON.parse(trimmed))
       } catch {
-        reject(new Error(`Invalid JSON response: ${trimmed.slice(0, 200)}`))
+        resolve(null) // Invalid JSON — treat as unavailable
       }
     })
 
-    socket.on("error", (err) => {
+    socket.on("error", () => {
+      if (settled) return
+      settled = true
       clearTimeout(timer)
       resolve(null) // Socket error — graceful fallback
     })

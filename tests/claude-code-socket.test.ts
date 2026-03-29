@@ -195,4 +195,42 @@ describe("socket transport — client fallback", () => {
     })
     expect(result).toBeNull()
   })
+
+  it("returns null on timeout", async () => {
+    // Server that never responds (hangs dispatch)
+    const hangingDispatcher: JsonRpcDispatcher = () => new Promise(() => {}) // never resolves
+    const transport = createSocketTransport(hangingDispatcher, { socketPath })
+    await transport.start()
+    try {
+      const result = await sendSocketRequest(socketPath, {
+        jsonrpc: "2.0", method: "hang", id: 1,
+      }, 200) // 200ms timeout
+      expect(result).toBeNull()
+    } finally {
+      await transport.stop()
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Error handling
+// ---------------------------------------------------------------------------
+
+describe("socket transport — error handling", () => {
+  it("returns JSON-RPC error when dispatch throws", async () => {
+    const throwingDispatcher: JsonRpcDispatcher = async () => { throw new Error("boom") }
+    const transport = createSocketTransport(throwingDispatcher, { socketPath })
+    await transport.start()
+    try {
+      const response = await sendSocketRequest(socketPath, {
+        jsonrpc: "2.0", method: "fail", id: 1,
+      })
+      expect(response).not.toBeNull()
+      const r = response as any
+      expect(r.error.code).toBe(-32603)
+      expect(r.error.message).toBe("boom")
+    } finally {
+      await transport.stop()
+    }
+  })
 })

@@ -26,6 +26,7 @@ import { readFile } from "node:fs/promises"
 import { createHash } from "node:crypto"
 import type { Phase, WorkflowMode, ArtifactKey } from "./types"
 import { PHASE_TO_ARTIFACT } from "./artifacts"
+import { PHASE_ORDER } from "./constants"
 import { isInterfaceFile, isTestFile } from "./hooks/tool-guard"
 
 // ---------------------------------------------------------------------------
@@ -315,11 +316,8 @@ function buildAllSkippedMessage(skippedPhases: Phase[]): string {
  * MODE_SELECT, DISCOVERY, PLANNING always need work. DONE is the terminus.
  * The skippable phases are INTERFACES, TESTS, and IMPL_PLAN.
  */
-const FORWARD_PHASE_ORDER: Phase[] = [
-  "MODE_SELECT", "DISCOVERY", "PLANNING",
-  "INTERFACES", "TESTS", "IMPL_PLAN",
-  "IMPLEMENTATION", "DONE",
-]
+// Use the shared PHASE_ORDER from constants — same array, single source of truth
+const FORWARD_PHASE_ORDER = PHASE_ORDER
 
 /** Phases that can be auto-skipped on the forward pass based on fileAllowlist. */
 const FORWARD_SKIPPABLE: Set<Phase> = new Set(["INTERFACES", "TESTS", "IMPL_PLAN"])

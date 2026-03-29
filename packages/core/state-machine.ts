@@ -11,6 +11,7 @@ import {
   type StateMachine,
   type TransitionOutcome,
 } from "./types"
+import { PHASE_ORDER } from "./constants"
 
 // ---------------------------------------------------------------------------
 // Transition table
@@ -24,17 +25,6 @@ interface TableEntry {
   modePredicate: ModePredicate
   to: [Phase, PhaseState]
 }
-
-const PHASE_ORDER: Phase[] = [
-  "MODE_SELECT",
-  "DISCOVERY",
-  "PLANNING",
-  "INTERFACES",
-  "TESTS",
-  "IMPL_PLAN",
-  "IMPLEMENTATION",
-  "DONE",
-]
 
 function nextPhase(current: Phase): Phase {
   const idx = PHASE_ORDER.indexOf(current)

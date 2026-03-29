@@ -18,10 +18,10 @@ The workflow has 8 sequential phases. You advance by calling `artisan` commands 
 
 Each phase follows: **DRAFT → REVIEW → USER_GATE → (optional REVISE)**
 
-- **DRAFT**: Do the work, then call `./artisanrequest-review`
-- **REVIEW**: Self-evaluate against acceptance criteria, then call `./artisanmark-satisfied`
+- **DRAFT**: Do the work, then call `./artisan request-review`
+- **REVIEW**: Self-evaluate against acceptance criteria, then call `./artisan mark-satisfied`
 - **USER_GATE**: Present the artifact to the user. Wait for their response.
-- **REVISE**: Address feedback, then call `./artisanrequest-review` again
+- **REVISE**: Address feedback, then call `./artisan request-review` again
 
 ## Commands
 
@@ -33,32 +33,32 @@ All workflow commands go through the `artisan` CLI via Bash. Simple commands use
 ./artisan select-mode --mode GREENFIELD --feature-name my-feature
 
 # Submit artifact for review (text artifacts via stdin)
-echo '{"summary":"Plan ready","artifact_description":"The plan","artifact_content":"# Plan\n..."}' | ./artisanrequest-review
+echo '{"summary":"Plan ready","artifact_description":"The plan","artifact_content":"# Plan\n..."}' | ./artisan request-review
 
 # Submit artifact for review (file artifacts — list the files you created)
-echo '{"summary":"Interfaces done","artifact_description":"Type definitions","artifact_files":["src/types.ts","src/api.ts"]}' | ./artisanrequest-review
+echo '{"summary":"Interfaces done","artifact_description":"Type definitions","artifact_files":["src/types.ts","src/api.ts"]}' | ./artisan request-review
 
 # Self-review against acceptance criteria
-echo '{"criteria_met":[{"criterion":"All requirements addressed","met":true,"evidence":"Verified each requirement","severity":"blocking"}]}' | ./artisanmark-satisfied
+echo '{"criteria_met":[{"criterion":"All requirements addressed","met":true,"evidence":"Verified each requirement","severity":"blocking"}]}' | ./artisan mark-satisfied
 
 # User approval/revision (after the user responds at USER_GATE)
-echo '{"feedback_type":"approve","feedback_text":"Looks good"}' | ./artisansubmit-feedback
-echo '{"feedback_type":"revise","feedback_text":"Add error handling for the API calls"}' | ./artisansubmit-feedback
+echo '{"feedback_type":"approve","feedback_text":"Looks good"}' | ./artisan submit-feedback
+echo '{"feedback_type":"revise","feedback_text":"Add error handling for the API calls"}' | ./artisan submit-feedback
 ```
 
 ### IMPLEMENTATION phase (DAG tasks)
 ```bash
 # Complete a task (after implementing and running tests)
-echo '{"task_id":"T1","implementation_summary":"Built auth module","tests_passing":true}' | ./artisanmark-task-complete
+echo '{"task_id":"T1","implementation_summary":"Built auth module","tests_passing":true}' | ./artisan mark-task-complete
 
 # Propose going back to an earlier phase
-echo '{"target_phase":"PLANNING","reason":"The plan is missing critical requirements discovered during implementation"}' | ./artisanpropose-backtrack
+echo '{"target_phase":"PLANNING","reason":"The plan is missing critical requirements discovered during implementation"}' | ./artisan propose-backtrack
 ```
 
 ### Discovery (REFACTOR/INCREMENTAL only)
 ```bash
 ./artisan mark-scan-complete --scan-summary "Found 42 source files, 3 test frameworks"
-echo '{"analysis_summary":"Architecture follows MVC pattern with clean separation"}' | ./artisanmark-analyze-complete
+echo '{"analysis_summary":"Architecture follows MVC pattern with clean separation"}' | ./artisan mark-analyze-complete
 ```
 
 ### Status and control
@@ -73,7 +73,7 @@ echo '{"analysis_summary":"Architecture follows MVC pattern with clean separatio
 
 1. **You must use `artisan` commands to advance through phases.** There is no shortcut. The tool guard blocks file operations that don't belong in the current phase.
 
-2. **One task at a time during IMPLEMENTATION.** The DAG scheduler assigns you one task. Complete it, call `./artisanmark-task-complete`, get the next task. You cannot write to files that belong to a different task.
+2. **One task at a time during IMPLEMENTATION.** The DAG scheduler assigns you one task. Complete it, call `./artisan mark-task-complete`, get the next task. You cannot write to files that belong to a different task.
 
 3. **IMPL_PLAN must include a `Files:` field per task.** This tells the workflow which files each task will create. Example:
    ```markdown
@@ -88,7 +88,7 @@ echo '{"analysis_summary":"Architecture follows MVC pattern with clean separatio
 
 5. **At USER_GATE, wait for the user.** Present a clear summary of what was built. Do not call `submit-feedback` until the user responds. You can have casual conversation with the user at USER_GATE — not every message needs to be routed through `submit-feedback`.
 
-6. **If the reviewer rejects your work**, you'll enter REVISE state. Address the feedback, then call `./artisanrequest-review` again. If you discover a fundamental problem with an earlier phase, call `./artisanpropose-backtrack`.
+6. **If the reviewer rejects your work**, you'll enter REVISE state. Address the feedback, then call `./artisan request-review` again. If you discover a fundamental problem with an earlier phase, call `./artisan propose-backtrack`.
 
 7. **Self-review is your responsibility.** In this mode, `mark-satisfied` evaluates YOUR criteria assessment. Be honest and thorough — the user reviews at USER_GATE.
 

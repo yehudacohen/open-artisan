@@ -145,23 +145,31 @@ function main() {
   // Install workflow instructions
   installWorkflowInstructions(projectDir)
 
+  // Create project-local artisan wrapper script
+  const artisanCliPath = join(import.meta.dirname, "artisan.ts")
+  const wrapperPath = join(projectDir, "artisan")
+  const wrapperContent = `#!/usr/bin/env bash\nexec bun run "${artisanCliPath}" "$@"\n`
+  writeFileSync(wrapperPath, wrapperContent, { mode: 0o755 })
+  console.log("  ./artisan — CLI wrapper created (chmod +x)")
+
   // Summary
+  const serverPath = relative(projectDir, join(import.meta.dirname, "artisan-server.ts"))
   console.log(`
 Setup complete!
 
 To start using open-artisan:
   1. Start the server:
-     bun run ${relative(projectDir, join(import.meta.dirname, "artisan-server.ts"))} --project-dir "${projectDir}" --daemon
+     bun run ${serverPath} --project-dir "${projectDir}" --daemon
 
   2. Enable the workflow:
-     artisan enable
+     ./artisan enable
 
   3. Or use the /artisan skill in Claude Code:
      /artisan on
 
 To verify:
-  artisan ping
-  artisan state
+  ./artisan ping
+  ./artisan state
 `)
 }
 

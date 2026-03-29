@@ -56,19 +56,19 @@ The interface Claude uses to call workflow tools via Bash. Connects to the Unix 
 
 Simple commands use CLI flags:
 ```bash
-artisan select-mode --mode GREENFIELD --feature-name cloud-cost
-artisan state
-artisan ping
-artisan enable
-artisan disable
+./artisan select-mode --mode GREENFIELD --feature-name cloud-cost
+./artisan state
+./artisan ping
+./artisan enable
+./artisan disable
 ```
 
 Complex commands accept JSON on stdin (avoids Bash quoting issues):
 ```bash
-echo '{"summary":"Plan ready","artifact_content":"# Plan\n..."}' | artisan request-review
-echo '{"task_id":"T1","summary":"Built auth module","tests_passing":true}' | artisan mark-task-complete
-echo '{"criteria_met":[{"criterion":"All tests pass","met":true,"evidence":"bun test: 42/42"}]}' | artisan mark-satisfied
-echo '{"feedback_type":"approve","feedback_text":"Looks good"}' | artisan submit-feedback
+echo '{"summary":"Plan ready","artifact_content":"# Plan\n..."}' | ./artisan request-review
+echo '{"task_id":"T1","summary":"Built auth module","tests_passing":true}' | ./artisan mark-task-complete
+echo '{"criteria_met":[{"criterion":"All tests pass","met":true,"evidence":"bun test: 42/42"}]}' | ./artisan mark-satisfied
+echo '{"feedback_type":"approve","feedback_text":"Looks good"}' | ./artisan submit-feedback
 ```
 
 ### artisan-hook (`bin/artisan-hook.ts`)
@@ -93,7 +93,7 @@ User-invoked slash command for toggling the workflow:
 ### PreToolUse (every tool call)
 
 1. Check `.enabled` flag — if absent, allow all
-2. If Bash tool and command contains `artisan `: always allow (workflow commands bypass the guard)
+2. If Bash tool and command contains `./artisan `: always allow (workflow commands bypass the guard)
 3. Otherwise: call `guard.check` on the bridge
 4. If blocked: exit 2 (tool call prevented, reason shown to Claude)
 5. If allowed: exit 0 with `additionalContext` containing current phase/state
@@ -146,8 +146,8 @@ This means the review loop works (DRAFT -> REVIEW -> USER_GATE) but the quality 
 The workflow enforcement is opt-in per session:
 
 - `.openartisan/.enabled` file: when present, hooks are active
-- `artisan enable`: creates the file, starts the server
-- `artisan disable`: removes the file, stops the server
+- `./artisan enable`: creates the file, starts the server
+- `./artisan disable`: removes the file, stops the server
 - All hooks check this file first — when absent, they return permissive defaults
 
 This means Claude Code works normally when the workflow is disabled. No tool blocking, no prompt injection, no re-prompting. Enable it with `/artisan on` when you want the phased discipline.

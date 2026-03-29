@@ -110,7 +110,7 @@ export async function handlePreToolUse(input: HookInput): Promise<HookOutput> {
   // Also matches: echo '...' | artisan ..., bun run .../artisan.ts ...
   if (toolName.toLowerCase() === "bash") {
     const command = (toolInput.command ?? toolInput.cmd ?? "") as string
-    if (/(?:^|[|;&]\s*)(?:bun\s+run\s+\S*)?artisan\s/m.test(command.trimStart())) {
+    if (/(?:^|[|;&]\s*)(?:bun\s+run\s+\S*|\.\/)?artisan\s/m.test(command.trimStart())) {
       return ALLOW
     }
   }

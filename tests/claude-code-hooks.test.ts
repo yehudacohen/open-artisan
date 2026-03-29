@@ -252,3 +252,77 @@ describe("hook: PostToolUse", () => {
     expect(result.stderr).toBeNull()
   })
 })
+
+// ---------------------------------------------------------------------------
+// Hook CLI binary integration tests
+// ---------------------------------------------------------------------------
+
+describe("artisan-hook CLI binary", () => {
+  const HOOK_SCRIPT = join(REPO_ROOT, "packages", "claude-code", "bin", "artisan-hook.ts")
+
+  function runHook(command: string, stdin: object): string[] {
+    const { execSync } = require("node:child_process")
+    try {
+      const stdout = execSync(`bun run ${HOOK_SCRIPT} ${command}`, {
+        input: JSON.stringify(stdin),
+        encoding: "utf-8",
+        env: { ...process.env, CLAUDE_PROJECT_DIR: tmpDir },
+        timeout: 15_000,
+        stdio: ["pipe", "pipe", "pipe"],
+      })
+      return ["0", stdout.trim()]
+    } catch (err: any) {
+      const exitCode = String(err.status ?? "?")
+      const stderr = (err.stderr ?? "").trim()
+      const stdout = (err.stdout ?? "").trim()
+      return [exitCode, stdout, stderr]
+    }
+  }
+
+  it("pre-tool-use allows Read tool", () => {
+    const [code, stdout] = runHook("pre-tool-use", {
+      session_id: "hook-test-session",
+      cwd: tmpDir,
+      hook_event_name: "PreToolUse",
+      tool_name: "Read",
+      tool_input: { file_path: "/tmp/test.ts" },
+    })
+    expect(code).toBe("0")
+    expect(stdout).toContain("permissionDecision")
+    expect(stdout).toContain("allow")
+  })
+
+  it("pre-tool-use blocks Write during PLANNING", () => {
+    const [code, _stdout, stderr] = runHook("pre-tool-use", {
+      session_id: "hook-test-session",
+      cwd: tmpDir,
+      hook_event_name: "PreToolUse",
+      tool_name: "Write",
+      tool_input: { file_path: "/tmp/test.ts", content: "x" },
+    })
+    expect(code).toBe("2")
+    expect(stderr).toContain("blocked")
+  })
+
+  it("unknown hook command exits 0", () => {
+    const [code] = runHook("unknown-hook", {})
+    expect(code).toBe("0")
+  })
+
+  it("malformed stdin exits 0 (fail-open)", () => {
+    const { execSync } = require("node:child_process")
+    try {
+      const stdout = execSync(`echo "not json" | bun run ${HOOK_SCRIPT} pre-tool-use`, {
+        encoding: "utf-8",
+        env: { ...process.env, CLAUDE_PROJECT_DIR: tmpDir },
+        timeout: 15_000,
+        stdio: ["pipe", "pipe", "pipe"],
+      })
+      // Should exit 0 (allow) since malformed input → empty HookInput → disabled check or fallback
+      expect(true).toBe(true) // If we got here, exit code was 0
+    } catch (err: any) {
+      // Exit code 0 means no exception — if we get here, something else happened
+      expect(err.status).toBe(0)
+    }
+  })
+})

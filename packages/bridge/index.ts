@@ -1,7 +1,7 @@
 /**
  * packages/bridge/index.ts — Public API re-exports for the bridge server.
  */
-export { createBridgeServer, type MethodHandler, type BridgeContext } from "./server"
+export { createBridgeEngine, createBridgeServer, type BridgeEngine, type MethodHandler, type BridgeContext } from "./server"
 export * from "./protocol"
 export {
   handleInit,
@@ -16,5 +16,5 @@ export { handlePromptBuild, handlePromptCompaction } from "./methods/prompt"
 export { handleMessageProcess } from "./methods/message"
 export { handleIdleCheck } from "./methods/idle"
 export { handleToolExecute } from "./methods/tool-execute"
-export { checkPidFile, writePidFile, removePidFile } from "./pid-file"
+export { checkPidFile, writePidFile, removePidFile, PID_FILENAME } from "./pid-file"
 export { createBridgeLogger, adaptPinoToLogger } from "./structured-log"

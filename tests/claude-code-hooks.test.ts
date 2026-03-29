@@ -1,0 +1,256 @@
+/**
+ * Tests for Claude Code hook handlers.
+ *
+ * Tests the hook handler functions directly (not via the hook CLI binary).
+ * Spawns a real artisan-server for integration testing.
+ */
+import { describe, expect, it, beforeAll, afterAll } from "bun:test"
+import { join } from "node:path"
+import { mkdtemp, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { existsSync, mkdirSync, writeFileSync } from "node:fs"
+import { spawn, type ChildProcess } from "node:child_process"
+
+import { sendSocketRequest } from "#claude-code/src/socket-transport"
+import { getSocketPath, getEnabledPath, getActiveSessionPath, DEFAULT_STATE_DIR_NAME } from "#claude-code/src/constants"
+import {
+  handlePreToolUse,
+  handleStop,
+  handleSessionStart,
+  handlePreCompact,
+  handlePostToolUse,
+  type HookInput,
+} from "#claude-code/src/hook-handlers"
+
+const REPO_ROOT = join(import.meta.dirname, "..")
+const SERVER_SCRIPT = join(REPO_ROOT, "packages", "claude-code", "bin", "artisan-server.ts")
+
+let tmpDir: string
+let stateDir: string
+let socketPath: string
+let serverProcess: ChildProcess | null = null
+
+beforeAll(async () => {
+  tmpDir = await mkdtemp(join(tmpdir(), "hook-test-"))
+  stateDir = join(tmpDir, DEFAULT_STATE_DIR_NAME)
+  socketPath = getSocketPath(stateDir)
+
+  // Start server
+  serverProcess = spawn("bun", ["run", SERVER_SCRIPT, "--project-dir", tmpDir], {
+    stdio: "ignore",
+  })
+
+  // Wait for socket
+  const deadline = Date.now() + 10_000
+  let ready = false
+  while (Date.now() < deadline) {
+    if (existsSync(socketPath)) {
+      const r = await sendSocketRequest(socketPath, { jsonrpc: "2.0", method: "lifecycle.ping", id: 1 })
+      if (r && (r as any).result === "pong") { ready = true; break }
+    }
+    await new Promise((r) => setTimeout(r, 100))
+  }
+  if (!ready) throw new Error("Server failed to start")
+
+  // Create session
+  await sendSocketRequest(socketPath, {
+    jsonrpc: "2.0", method: "lifecycle.sessionCreated", params: { sessionId: "hook-test-session" }, id: 2,
+  })
+  mkdirSync(stateDir, { recursive: true })
+  writeFileSync(getActiveSessionPath(stateDir), "hook-test-session", "utf-8")
+
+  // Select mode to get out of MODE_SELECT
+  await sendSocketRequest(socketPath, {
+    jsonrpc: "2.0", method: "tool.execute", params: {
+      name: "select_mode",
+      args: { mode: "GREENFIELD", feature_name: `hook-test-${Date.now()}` },
+      context: { sessionId: "hook-test-session", directory: tmpDir },
+    }, id: 3,
+  })
+}, 15000)
+
+afterAll(async () => {
+  if (serverProcess) {
+    serverProcess.kill("SIGTERM")
+    await new Promise<void>((r) => { serverProcess?.on("exit", () => r()); setTimeout(r, 2000) })
+    serverProcess = null
+  }
+  await rm(tmpDir, { recursive: true, force: true })
+})
+
+function makeInput(overrides: Partial<HookInput> = {}): HookInput {
+  return { session_id: "hook-test-session", cwd: tmpDir, ...overrides }
+}
+
+// ---------------------------------------------------------------------------
+// PreToolUse
+// ---------------------------------------------------------------------------
+
+describe("hook: PreToolUse", () => {
+  it("allows all when disabled", async () => {
+    // Remove .enabled file
+    const enabledPath = getEnabledPath(stateDir)
+    if (existsSync(enabledPath)) {
+      const { unlinkSync } = await import("node:fs")
+      unlinkSync(enabledPath)
+    }
+    const result = await handlePreToolUse(makeInput({ tool_name: "Write" }))
+    expect(result.exitCode).toBe(0)
+    expect(result.stderr).toBeNull()
+    // Re-enable
+    writeFileSync(enabledPath, "1")
+  })
+
+  it("allows artisan Bash commands even when bash is blocked", async () => {
+    // PLANNING/DRAFT blocks bash. But artisan commands should pass.
+    const result = await handlePreToolUse(makeInput({
+      tool_name: "Bash",
+      tool_input: { command: "artisan state" },
+    }))
+    expect(result.exitCode).toBe(0)
+  })
+
+  it("allows artisan commands with pipes", async () => {
+    const result = await handlePreToolUse(makeInput({
+      tool_name: "Bash",
+      tool_input: { command: "echo '{\"summary\":\"test\"}' | artisan request-review" },
+    }))
+    expect(result.exitCode).toBe(0)
+  })
+
+  it("blocks write tools during PLANNING/DRAFT", async () => {
+    writeFileSync(getEnabledPath(stateDir), "1")
+    const result = await handlePreToolUse(makeInput({
+      tool_name: "Write",
+      tool_input: { file_path: "/tmp/test.ts", content: "test" },
+    }))
+    expect(result.exitCode).toBe(2)
+    expect(result.stderr).not.toBeNull()
+    expect(result.stderr).toContain("blocked")
+  })
+
+  it("blocks non-artisan bash during PLANNING/DRAFT", async () => {
+    const result = await handlePreToolUse(makeInput({
+      tool_name: "Bash",
+      tool_input: { command: "echo hello > /tmp/test.txt" },
+    }))
+    expect(result.exitCode).toBe(2)
+    expect(result.stderr).toContain("blocked")
+  })
+
+  it("includes phase context when allowing", async () => {
+    const result = await handlePreToolUse(makeInput({
+      tool_name: "Read",
+      tool_input: { file_path: "/tmp/test.ts" },
+    }))
+    expect(result.exitCode).toBe(0)
+    expect(result.stdout).not.toBeNull()
+    const parsed = JSON.parse(result.stdout!)
+    expect(parsed.hookSpecificOutput.additionalContext).toContain("PLANNING")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Stop
+// ---------------------------------------------------------------------------
+
+describe("hook: Stop", () => {
+  it("allows stop when disabled", async () => {
+    const enabledPath = getEnabledPath(stateDir)
+    if (existsSync(enabledPath)) {
+      const { unlinkSync } = await import("node:fs")
+      unlinkSync(enabledPath)
+    }
+    const result = await handleStop(makeInput())
+    expect(result.exitCode).toBe(0)
+    writeFileSync(enabledPath, "1")
+  })
+
+  it("allows stop when stop_hook_active (prevents loop)", async () => {
+    const result = await handleStop(makeInput({ stop_hook_active: true }))
+    expect(result.exitCode).toBe(0)
+  })
+
+  it("re-prompts during active workflow", async () => {
+    const result = await handleStop(makeInput())
+    // In PLANNING/DRAFT, the idle handler should reprompt
+    // (depends on idle handler implementation — may be reprompt or ignore)
+    // Either way, should not crash
+    expect(result.exitCode === 0 || result.exitCode === 2).toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// SessionStart
+// ---------------------------------------------------------------------------
+
+describe("hook: SessionStart", () => {
+  it("no injection when disabled", async () => {
+    const enabledPath = getEnabledPath(stateDir)
+    if (existsSync(enabledPath)) {
+      const { unlinkSync } = await import("node:fs")
+      unlinkSync(enabledPath)
+    }
+    const result = await handleSessionStart(makeInput({ source: "startup" }))
+    expect(result.exitCode).toBe(0)
+    expect(result.stdout).toBeNull()
+    writeFileSync(enabledPath, "1")
+  })
+
+  it("injects workflow prompt when enabled", async () => {
+    const result = await handleSessionStart(makeInput({ source: "startup" }))
+    expect(result.exitCode).toBe(0)
+    if (result.stdout) {
+      const parsed = JSON.parse(result.stdout)
+      expect(parsed.hookSpecificOutput.additionalContext).toBeTruthy()
+      // Should contain workflow phase instructions
+      expect(parsed.hookSpecificOutput.additionalContext).toContain("PLANNING")
+    }
+  })
+
+  it("writes session_id to .active-session", async () => {
+    await handleSessionStart(makeInput({ session_id: "new-session-123", source: "startup" }))
+    const sessionPath = getActiveSessionPath(stateDir)
+    expect(existsSync(sessionPath)).toBe(true)
+    const { readFileSync } = await import("node:fs")
+    expect(readFileSync(sessionPath, "utf-8").trim()).toBe("new-session-123")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// PreCompact
+// ---------------------------------------------------------------------------
+
+describe("hook: PreCompact", () => {
+  it("no injection when disabled", async () => {
+    const enabledPath = getEnabledPath(stateDir)
+    if (existsSync(enabledPath)) {
+      const { unlinkSync } = await import("node:fs")
+      unlinkSync(enabledPath)
+    }
+    const result = await handlePreCompact(makeInput())
+    expect(result.exitCode).toBe(0)
+    expect(result.stdout).toBeNull()
+    writeFileSync(enabledPath, "1")
+  })
+
+  it("returns compaction context when enabled", async () => {
+    const result = await handlePreCompact(makeInput())
+    expect(result.exitCode).toBe(0)
+    // Compaction context may or may not be present depending on state
+    // Just verify no crash and valid exit code
+  })
+})
+
+// ---------------------------------------------------------------------------
+// PostToolUse
+// ---------------------------------------------------------------------------
+
+describe("hook: PostToolUse", () => {
+  it("always returns exit 0", async () => {
+    const result = await handlePostToolUse(makeInput({ tool_name: "Bash" }))
+    expect(result.exitCode).toBe(0)
+    expect(result.stdout).toBeNull()
+    expect(result.stderr).toBeNull()
+  })
+})

@@ -63,12 +63,13 @@ async function main() {
   const handler = HANDLERS[command]!
   const output = await handler(input)
 
-  if (output.stdout) process.stdout.write(output.stdout)
-  if (output.stderr) process.stderr.write(output.stderr)
+  if (output.stdout) process.stdout.write(output.stdout + "\n")
+  if (output.stderr) process.stderr.write(output.stderr + "\n")
   process.exit(output.exitCode)
 }
 
-main().catch(() => {
-  // Any unhandled error — exit 0 to avoid blocking Claude
+main().catch((err) => {
+  // Log error for debugging, but exit 0 to avoid blocking Claude
+  process.stderr.write(`[artisan-hook] Error: ${err?.message ?? err}\n`)
   process.exit(0)
 })

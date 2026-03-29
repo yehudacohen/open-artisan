@@ -101,6 +101,8 @@ export const handleGuardCheck: MethodHandler = async (params, ctx) => {
   return {
     allowed: true,
     policyVersion: ctx.policyVersion,
+    phase: state.phase,
+    phaseState: state.phaseState,
   } satisfies GuardCheckResult
 }
 

@@ -200,12 +200,10 @@ describe("hook: SessionStart", () => {
   it("injects workflow prompt when enabled", async () => {
     const result = await handleSessionStart(makeInput({ source: "startup" }))
     expect(result.exitCode).toBe(0)
-    if (result.stdout) {
-      const parsed = JSON.parse(result.stdout)
-      expect(parsed.hookSpecificOutput.additionalContext).toBeTruthy()
-      // Should contain workflow phase instructions
-      expect(parsed.hookSpecificOutput.additionalContext).toContain("PLANNING")
-    }
+    expect(result.stdout).not.toBeNull()
+    const parsed = JSON.parse(result.stdout!)
+    expect(parsed.hookSpecificOutput.additionalContext).toBeTruthy()
+    expect(parsed.hookSpecificOutput.additionalContext).toContain("PLANNING")
   })
 
   it("writes session_id to .active-session", async () => {

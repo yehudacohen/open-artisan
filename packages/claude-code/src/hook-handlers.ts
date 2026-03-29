@@ -105,10 +105,12 @@ export async function handlePreToolUse(input: HookInput): Promise<HookOutput> {
   const toolName = input.tool_name ?? ""
   const toolInput = input.tool_input ?? {}
 
-  // Bash commands containing "artisan" are workflow commands — always allow
+  // Bash commands invoking the artisan CLI are workflow commands — always allow.
+  // Match: artisan at command position (start of line, after pipe, semicolon, &&, ||)
+  // Also matches: echo '...' | artisan ..., bun run .../artisan.ts ...
   if (toolName.toLowerCase() === "bash") {
     const command = (toolInput.command ?? toolInput.cmd ?? "") as string
-    if (/\bartisan\b/.test(command)) {
+    if (/(?:^|[|;&]\s*)(?:bun\s+run\s+\S*)?artisan\s/m.test(command.trimStart())) {
       return ALLOW
     }
   }
@@ -122,19 +124,14 @@ export async function handlePreToolUse(input: HookInput): Promise<HookOutput> {
 
   if (!result) return ALLOW // Server unavailable — graceful fallback
 
-  const guard = result as { allowed: boolean; reason?: string }
+  const guard = result as { allowed: boolean; reason?: string; phase?: string; phaseState?: string }
   if (guard.allowed) {
-    // Inject a brief state reminder as additional context
-    const stateResult = await bridgeCall(stateDir, "state.get", { sessionId })
-    const phase = stateResult ? (stateResult as any).phase : "?"
-    const phaseState = stateResult ? (stateResult as any).phaseState : "?"
-
     return {
       stdout: JSON.stringify({
         hookSpecificOutput: {
           hookEventName: "PreToolUse",
           permissionDecision: "allow",
-          additionalContext: `[Workflow: ${phase}/${phaseState}]`,
+          additionalContext: `[Workflow: ${guard.phase ?? "?"}/${guard.phaseState ?? "?"}]`,
         },
       }),
       stderr: null,

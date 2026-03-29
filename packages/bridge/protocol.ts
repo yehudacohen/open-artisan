@@ -106,6 +106,10 @@ export interface GuardCheckResult {
   allowed: boolean
   reason?: string
   policyVersion: number
+  /** Current phase (included so callers don't need a separate state.get call). */
+  phase?: string
+  /** Current phase sub-state. */
+  phaseState?: string
 }
 
 export interface GuardPolicyResult {

@@ -155,8 +155,19 @@ export function createBridgeServer(
     })
   }
 
+  /**
+   * Process a single JSON-RPC request string. Returns the response string
+   * (or null for notifications). Used by alternative transports (Unix socket)
+   * that need to dispatch individual requests without the stdio readline loop.
+   */
+  async function receiveJSON(json: string): Promise<string | null> {
+    const response = await rpcServer.receiveJSON(json)
+    return response ? JSON.stringify(response) : null
+  }
+
   return {
     start,
+    receiveJSON,
     get ctx() { return bridgeCtx },
     get initialized() { return engine !== null },
     get policyVersion() { return policyVersion },

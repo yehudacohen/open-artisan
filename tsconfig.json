@@ -9,13 +9,15 @@
     "paths": {
       "#plugin/*": ["./.opencode/plugins/open-artisan/*"],
       "#core/*": ["./packages/core/*"],
-      "#bridge/*": ["./packages/bridge/*"]
+      "#bridge/*": ["./packages/bridge/*"],
+      "#claude-code/*": ["./packages/claude-code/*"]
     }
   },
   "include": [
     ".opencode/plugins/open-artisan/**/*.ts",
     "packages/core/**/*.ts",
     "packages/bridge/**/*.ts",
+    "packages/claude-code/**/*.ts",
     "tests/**/*.ts"
   ]
 }

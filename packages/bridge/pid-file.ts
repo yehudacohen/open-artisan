@@ -8,7 +8,7 @@ import { join } from "node:path"
 import { existsSync } from "node:fs"
 import { writeFile, readFile, unlink, mkdir } from "node:fs/promises"
 
-const PID_FILENAME = ".bridge-pid"
+export const PID_FILENAME = ".bridge-pid"
 
 /**
  * Check if a process is still running.

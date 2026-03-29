@@ -19,7 +19,9 @@ let stateDir: string
 let socketPath: string
 let serverProcess: ChildProcess | null = null
 
-const SERVER_SCRIPT = join(import.meta.dirname, "..", "packages", "claude-code", "bin", "artisan-server.ts")
+// Resolve from repo root (tests/ is one level deep)
+const REPO_ROOT = join(import.meta.dirname, "..")
+const SERVER_SCRIPT = join(REPO_ROOT, "packages", "claude-code", "bin", "artisan-server.ts")
 
 beforeEach(async () => {
   tmpDir = await mkdtemp(join(tmpdir(), "artisan-server-test-"))

@@ -3,14 +3,14 @@
  */
 import { join } from "node:path"
 
+// Re-export PID_FILENAME from bridge — single source of truth
+export { PID_FILENAME } from "../../bridge/pid-file"
+
 /** Default directory for open-artisan state, relative to project root. */
 export const DEFAULT_STATE_DIR_NAME = ".openartisan"
 
 /** Socket filename within the state directory. */
 export const SOCKET_FILENAME = ".bridge.sock"
-
-/** PID filename within the state directory (shared with bridge). */
-export const PID_FILENAME = ".bridge-pid"
 
 /** Active session file within the state directory. */
 export const ACTIVE_SESSION_FILENAME = ".active-session"

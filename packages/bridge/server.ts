@@ -1,9 +1,11 @@
 /**
- * server.ts — Bridge server: JSON-RPC over stdio using the json-rpc-2.0 library.
+ * server.ts — Bridge engine and server factories.
  *
- * Reads newline-delimited JSON-RPC requests from stdin, dispatches via
- * JSONRPCServer, and writes responses to stdout. Holds the EngineContext
- * in memory after lifecycle.init.
+ * Two layers:
+ *   createBridgeEngine  — Transport-agnostic: BridgeContext + JSON-RPC dispatch.
+ *                         Used by both the stdio server and the socket server.
+ *   createBridgeServer  — Stdio transport: readline from stdin, write to stdout.
+ *                         Used by the bridge CLI entry point.
  */
 import { createInterface } from "node:readline"
 import type { Readable, Writable } from "node:stream"
@@ -56,21 +58,31 @@ export type MethodHandler = (
 ) => Promise<unknown>
 
 // ---------------------------------------------------------------------------
-// Bridge server factory
+// Bridge engine — transport-agnostic dispatch layer
 // ---------------------------------------------------------------------------
 
-export interface BridgeServerOptions {
-  input?: Readable
-  output?: Writable
+export interface BridgeEngine {
+  /** Process a single JSON-RPC request string. Returns response string or null. */
+  receiveJSON(json: string): Promise<string | null>
+  /** The shared bridge context (engine, capabilities, state). */
+  ctx: BridgeContext
+  /** Whether lifecycle.init has been called. */
+  initialized: boolean
+  /** Current policy version counter. */
+  policyVersion: number
 }
 
-export function createBridgeServer(
+/**
+ * Creates the bridge engine: BridgeContext + JSON-RPC method dispatch.
+ * Transport-agnostic — callers wire their own I/O (stdio, socket, HTTP).
+ *
+ * Used by:
+ * - createBridgeServer() for stdio transport
+ * - artisan-server.ts for Unix socket transport
+ */
+export function createBridgeEngine(
   handlers: Record<string, MethodHandler>,
-  opts?: BridgeServerOptions,
-) {
-  const input = opts?.input ?? process.stdin
-  const output = opts?.output ?? process.stdout
-
+): BridgeEngine {
   let policyVersion = 0
   let engine: EngineContext | null = null
   let shuttingDown = false
@@ -115,9 +127,6 @@ export function createBridgeServer(
       let requestCtx = bridgeCtx
 
       if (traceId && engine) {
-        // Create a shallow copy of the engine context with a child logger
-        // that has traceId bound. All core function calls through this
-        // engine will include the traceId in their log entries.
         const childLog = engine.log.child({ traceId })
         const scopedEngine = { ...engine, log: childLog }
         requestCtx = {
@@ -135,31 +144,6 @@ export function createBridgeServer(
     })
   }
 
-  function start() {
-    const rl = createInterface({ input, crlfDelay: Infinity })
-
-    rl.on("line", async (line: string) => {
-      if (shuttingDown) return
-      const trimmed = line.trim()
-      if (!trimmed) return
-
-      // Library handles JSON parsing, validation, dispatch, and error formatting
-      const response = await rpcServer.receiveJSON(trimmed)
-      if (response) {
-        output.write(JSON.stringify(response) + "\n")
-      }
-    })
-
-    rl.on("close", () => {
-      shuttingDown = true
-    })
-  }
-
-  /**
-   * Process a single JSON-RPC request string. Returns the response string
-   * (or null for notifications). Used by alternative transports (Unix socket)
-   * that need to dispatch individual requests without the stdio readline loop.
-   */
   async function receiveJSON(json: string): Promise<string | null> {
     if (shuttingDown) {
       return JSON.stringify({ jsonrpc: "2.0", error: { code: -32000, message: "Bridge is shutting down" }, id: null })
@@ -169,10 +153,60 @@ export function createBridgeServer(
   }
 
   return {
-    start,
     receiveJSON,
     get ctx() { return bridgeCtx },
     get initialized() { return engine !== null },
     get policyVersion() { return policyVersion },
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Bridge server — stdio transport wrapping the engine
+// ---------------------------------------------------------------------------
+
+export interface BridgeServerOptions {
+  input?: Readable
+  output?: Writable
+}
+
+/**
+ * Creates a bridge server with stdio transport.
+ * Wraps createBridgeEngine with readline input + stdout output.
+ *
+ * Used by the bridge CLI entry point (packages/bridge/cli.ts).
+ */
+export function createBridgeServer(
+  handlers: Record<string, MethodHandler>,
+  opts?: BridgeServerOptions,
+) {
+  const input = opts?.input ?? process.stdin
+  const output = opts?.output ?? process.stdout
+  const engine = createBridgeEngine(handlers)
+
+  function start() {
+    const rl = createInterface({ input, crlfDelay: Infinity })
+
+    rl.on("line", async (line: string) => {
+      if (engine.ctx.shuttingDown) return
+      const trimmed = line.trim()
+      if (!trimmed) return
+
+      const response = await engine.receiveJSON(trimmed)
+      if (response) {
+        output.write(response + "\n")
+      }
+    })
+
+    rl.on("close", () => {
+      engine.ctx.shuttingDown = true
+    })
+  }
+
+  return {
+    start,
+    receiveJSON: engine.receiveJSON,
+    get ctx() { return engine.ctx },
+    get initialized() { return engine.initialized },
+    get policyVersion() { return engine.policyVersion },
   }
 }

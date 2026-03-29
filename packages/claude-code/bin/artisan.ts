@@ -17,7 +17,7 @@
  *   echo '{"summary":"Plan ready","artifact_content":"..."}' | artisan request-review
  *   echo '{"task_id":"T1","summary":"Built auth","tests_passing":true}' | artisan mark-task-complete
  *   echo '{"criteria_met":[...]}' | artisan mark-satisfied
- *   echo '{"type":"approve","text":"LGTM"}' | artisan submit-feedback
+ *   echo '{"feedback_type":"approve","feedback_text":"LGTM"}' | artisan submit-feedback
  */
 
 import { join, resolve } from "node:path"
@@ -123,6 +123,7 @@ const TOOL_COMMANDS: Record<string, string> = {
   "check-prior-workflow": "check_prior_workflow",
   "resolve-human-gate": "resolve_human_gate",
   "propose-backtrack": "propose_backtrack",
+  "spawn-sub-workflow": "spawn_sub_workflow",
   "query-parent-workflow": "query_parent_workflow",
   "query-child-workflow": "query_child_workflow",
 }
@@ -153,7 +154,7 @@ async function handlePing(): Promise<void> {
 async function handleEnable(): Promise<void> {
   const stateDir = getStateDir()
   mkdirSync(stateDir, { recursive: true })
-  writeFileSync(getEnabledPath(stateDir), String(process.pid), "utf-8")
+  writeFileSync(getEnabledPath(stateDir), "1", "utf-8")
   console.log("open-artisan enabled.")
 
   // Check if server is running
@@ -197,30 +198,42 @@ async function handleToolCommand(command: string, cliArgs: string[]): Promise<vo
     for (let i = 0; i < cliArgs.length; i++) {
       const flag = cliArgs[i]!
       if (flag.startsWith("--")) {
-        const key = flag.slice(2).replace(/-/g, "_") // --feature-name → feature_name
-        const next = cliArgs[i + 1]
-        if (next && !next.startsWith("--")) {
-          // --key value
-          args[key] = parseValue(next)
-          i++
+        // Handle --key=value syntax
+        const eqIdx = flag.indexOf("=")
+        let key: string
+        let value: unknown
+        if (eqIdx !== -1) {
+          key = flag.slice(2, eqIdx).replace(/-/g, "_")
+          value = parseValue(flag.slice(eqIdx + 1))
         } else {
-          // --flag (boolean)
-          args[key] = true
+          key = flag.slice(2).replace(/-/g, "_")
+          const next = cliArgs[i + 1]
+          if (next && !next.startsWith("--")) {
+            value = parseValue(next)
+            i++
+          } else {
+            value = true // boolean flag
+          }
         }
+        args[key] = value
       }
     }
   }
 
   const result = await execTool(toolName, args)
+  // Tool-level errors start with "Error:" — print to stderr and exit 1
+  if (result.startsWith("Error:")) {
+    console.error(result)
+    process.exit(1)
+  }
   console.log(result)
 }
 
-/** Parse a CLI value — handle booleans and numbers. */
+/** Parse a CLI value — handle booleans only. Everything else stays a string.
+ *  Tool handlers handle their own type coercion (parseInt, etc.). */
 function parseValue(value: string): unknown {
   if (value === "true") return true
   if (value === "false") return false
-  const num = Number(value)
-  if (!isNaN(num) && value !== "") return num
   return value
 }
 

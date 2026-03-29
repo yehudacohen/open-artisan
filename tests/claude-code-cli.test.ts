@@ -65,17 +65,22 @@ beforeAll(async () => {
     stdio: "ignore",
   })
 
-  // Wait for socket
+  // Wait for socket — fail explicitly if server doesn't start
   const deadline = Date.now() + 10_000
+  let serverReady = false
   while (Date.now() < deadline) {
     if (existsSync(socketPath)) {
       const response = await sendSocketRequest(socketPath, {
         jsonrpc: "2.0", method: "lifecycle.ping", id: 1,
       })
-      if (response && (response as any).result === "pong") break
+      if (response && (response as any).result === "pong") {
+        serverReady = true
+        break
+      }
     }
     await new Promise((r) => setTimeout(r, 100))
   }
+  if (!serverReady) throw new Error("artisan-server failed to start within 10s")
 
   // Register a session and write active-session file
   await sendSocketRequest(socketPath, {

@@ -76,6 +76,14 @@ export function handleIdle(state: WorkflowState): IdleDecision {
     return { action: "ignore" }
   }
 
+  // REVIEW: the agent may be reading files and evaluating criteria before
+  // calling mark_satisfied. Don't reprompt on the first idle — only reprompt
+  // after the second stop (retryCount > 0) to distinguish "still working"
+  // from "actually stuck".
+  if (state.phaseState === "REVIEW" && state.retryCount === 0) {
+    return { action: "ignore" }
+  }
+
   // Check retry limit
   if (state.retryCount >= MAX_IDLE_RETRIES) {
     return {

@@ -42,10 +42,10 @@ The Hermes plugin lives inside the agent process. It can own a subprocess and co
 Python module that spawns the bridge server (`bun run packages/bridge/cli.ts`) as a subprocess and communicates via newline-delimited JSON-RPC 2.0 over stdin/stdout.
 
 ```python
-from hermes_adapter.bridge_client import BridgeClient
+from hermes_adapter.bridge_client import StdioBridgeClient
 
-bridge = BridgeClient(project_dir="/path/to/project")
-bridge.init()  # spawns subprocess, calls lifecycle.init
+bridge = StdioBridgeClient()
+bridge.start("/path/to/project")  # spawns subprocess, calls lifecycle.init
 
 result = bridge.call("tool.execute", {
     "name": "select_mode",
@@ -58,12 +58,12 @@ bridge.shutdown()
 
 - Thread-safe (lock on stdin/stdout access)
 - Auto-reconnect on subprocess death
-- Lazy init (subprocess spawned on first call)
+- Eager init in `on_session_start` (not lazy — every session uses the bridge)
 - Capabilities: `selfReview="agent-only"`, `orchestrator=False`, `discoveryFleet=False`
 
 ### Workflow Tools (`workflow_tools.py`)
 
-13 workflow tools registered in the `open-artisan` toolset via `registry.register()`. Each delegates to the bridge's `tool.execute` method.
+13 workflow tools registered in the `open-artisan` toolset via `ctx.register_tool()`. Each delegates to the bridge's `tool.execute` method.
 
 | Hermes Tool | Bridge Tool | Purpose |
 |------------|-------------|---------|
@@ -89,19 +89,22 @@ All handlers return JSON strings (Hermes handler contract). The `oa_` prefix avo
 Wrapper tools that replace Hermes's built-in file-write tools with guarded versions.
 
 ```python
-def make_guarded_handler(original_handler, tool_name, bridge):
-    def guarded(args, **kwargs):
-        result = bridge.call("guard.check", {
-            "sessionId": bridge.session_id,
-            "toolName": tool_name,
-            "args": args
+# register_guard_wrappers(ctx, bridge) wraps all guarded tools at once.
+# Each wrapper calls guard.check before delegating to the original handler:
+
+async def _guarded_handler(bridge, original_handler, tool_name, session_id, args):
+    result = bridge.call("guard.check", {
+        "sessionId": session_id,
+        "toolName": tool_name,
+        "args": args
+    })
+    if result and not result.get("allowed", True):
+        return json.dumps({
+            "error": result.get("reason", f"{tool_name} blocked by workflow guard"),
+            "phase": result.get("phase", ""),
+            "phaseState": result.get("phaseState", ""),
         })
-        if result and not result.get("allowed", True):
-            return json.dumps({
-                "error": result.get("reason", f"{tool_name} blocked by workflow guard")
-            })
-        return original_handler(args, **kwargs)
-    return guarded
+    return await original_handler(args)
 ```
 
 **Wrapped tools:**
@@ -171,7 +174,7 @@ The plugin is active whenever installed. To disable, either:
 - Remove from `~/.hermes/plugins/`
 - Add `"open-artisan"` to `disabled_toolsets` in Hermes config
 
-The bridge subprocess is spawned lazily on the first workflow tool call and stays alive for the session.
+The bridge subprocess is spawned eagerly in `on_session_start` and stays alive for the session.
 
 ## File Structure
 

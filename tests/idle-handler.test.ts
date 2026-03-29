@@ -94,8 +94,14 @@ describe("handleIdle — reprompt for active states", () => {
     expect(decision.message).toBeTruthy()
   })
 
-  it("reprompts in REVIEW state", () => {
+  it("ignores first idle in REVIEW state (agent may still be evaluating)", () => {
     const state = makeState({ phaseState: "REVIEW", retryCount: 0 })
+    const decision = handleIdle(state)
+    expect(decision.action).toBe("ignore")
+  })
+
+  it("reprompts in REVIEW state on second idle", () => {
+    const state = makeState({ phaseState: "REVIEW", retryCount: 1 })
     const decision = handleIdle(state)
     expect(decision.action).toBe("reprompt")
   })

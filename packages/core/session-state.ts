@@ -367,6 +367,33 @@ export function createSessionStateStore(backend: StateBackend): SessionStateStor
       }
     },
 
+    async migrateSession(oldSessionId: string, newSessionId: string): Promise<WorkflowState> {
+      const oldLockKey = lockKeyFor(oldSessionId)
+      return acquireInProcessLock(oldLockKey, async () => {
+        const oldState = memory.get(oldSessionId)
+        if (!oldState) {
+          throw new Error(`Session "${oldSessionId}" not found for migration`)
+        }
+        // Clone and update the sessionId
+        const migrated = cloneState(oldState)
+        migrated.sessionId = newSessionId
+        // Remove the old entry and insert the new one
+        memory.delete(oldSessionId)
+        // If the new session already has a fresh MODE_SELECT state, remove it
+        const existing = memory.get(newSessionId)
+        if (existing && existing.phase === "MODE_SELECT") {
+          memory.delete(newSessionId)
+        }
+        memory.set(newSessionId, migrated)
+        // Persist under the same featureName (file doesn't move, just sessionId changes)
+        await persistState(migrated)
+        if (_postUpdateCallback && _projectDir) {
+          try { _postUpdateCallback(migrated, _projectDir) } catch { /* non-fatal */ }
+        }
+        return cloneState(migrated)
+      }) as Promise<WorkflowState>
+    },
+
     async delete(sessionId: string): Promise<void> {
       const lockKey = lockKeyFor(sessionId)
       // Serialise through the in-process lock to prevent races with concurrent update().

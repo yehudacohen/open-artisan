@@ -333,6 +333,17 @@ describe("buildWorkflowSystemPrompt — acceptance criteria at REVIEW", () => {
     expect(prompt).toContain("Naming conventions documented")
   })
 
+  it("includes expected blocking criteria count at REVIEW", () => {
+    const prompt = buildWorkflowSystemPrompt(makeState({ phase: "PLANNING", phaseState: "REVIEW" }))
+    // Should include the exact count so the agent knows how many to submit
+    expect(prompt).toMatch(/You must provide exactly \*\*\d+\*\* blocking criteria/)
+  })
+
+  it("does NOT include criteria count at DRAFT (no mark_satisfied at DRAFT)", () => {
+    const prompt = buildWorkflowSystemPrompt(makeState({ phase: "PLANNING", phaseState: "DRAFT" }))
+    expect(prompt).not.toContain("You must provide exactly")
+  })
+
   it("does NOT inject full acceptance criteria at DRAFT state (preview only)", () => {
     const prompt = buildWorkflowSystemPrompt(makeState({ phase: "PLANNING", phaseState: "DRAFT" }))
     // Full criteria header should not appear

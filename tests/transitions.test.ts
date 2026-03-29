@@ -111,11 +111,20 @@ describe("computeMarkSatisfiedTransition", () => {
     expect(result.success).toBe(true)
   })
 
-  it("rejects empty criteria_met", () => {
+  it("rejects empty criteria_met as validation error (no state transition)", () => {
     const result = computeMarkSatisfiedTransition([], makeState(), sm)
-    expect(result.success).toBe(true) // evaluateMarkSatisfied returns passed=false, not an error
-    if (!result.success) return
-    expect(result.transition.responseMessage).toContain("empty")
+    expect(result.success).toBe(false) // empty criteria is a validation error, not a review fail
+    if (result.success) return
+    expect(result.error).toContain("empty")
+  })
+
+  it("rejects insufficient blocking criteria as validation error (no state transition)", () => {
+    // Submit fewer blocking criteria than the phase expects
+    const criteria = [{ criterion: "C1", met: true, evidence: "ok", severity: "blocking" as const }]
+    const result = computeMarkSatisfiedTransition(criteria, makeState(), sm)
+    expect(result.success).toBe(false) // insufficient criteria is a validation error, not a review fail
+    if (result.success) return
+    expect(result.error).toContain("blocking criteria submitted")
   })
 
   it("parses string scores to numbers", () => {

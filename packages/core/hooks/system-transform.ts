@@ -18,6 +18,7 @@ import { MAX_CONVENTIONS_CHARS, MAX_REPORT_CHARS } from "../constants"
 import { createImplDAG } from "../dag"
 import { nextSchedulerDecision } from "../scheduler"
 import { getPhaseToolPolicy } from "./tool-guard"
+import { countExpectedBlockingCriteria } from "../tools/mark-satisfied"
 
 // ---------------------------------------------------------------------------
 // Prompt file loader (cached)
@@ -459,7 +460,7 @@ ${designDocPath ? "For [D] design-invariant criteria, these are BINARY (met/not 
 4. Error and failure cases specified — what can fail, how failures surface, recovery strategy
 5. No "TBD" items — every ambiguity has been resolved with an explicit decision
 6. Data model described — key entities, relationships, constraints, lifecycle
-7. Integration points identified — external systems, APIs, databases, filesystem interactions
+7. Integration points identified — external systems, APIs, databases, filesystem interactions. For adapters or plugins that wrap an existing protocol: enumerate every protocol method/event and confirm each is either handled or explicitly out of scope with justification. Cross-reference the protocol spec or reference implementations to avoid silent omissions
 8. Deployment & infrastructure addressed — how the feature reaches production (infrastructure provisioning, credentials/secrets, environment configuration, CI/CD changes, DNS/routing). If no deployment is needed, this must be explicitly stated with justification. Plans that produce working code but ignore deployment are incomplete.
 ${allowlistBlock}
 [If the artifact is a pass-through:] Does the justification for why this phase is low-value hold up? Is the reason specific and verifiable, not vague? Would a reasonable engineer agree? Is the agent being lazy?
@@ -534,6 +535,7 @@ ${designDocPath ? "For [D] design-invariant criteria, these are BINARY (met/not 
 5. Expected test outcomes specified per task (which tests become green)
 6. Deployment tasks present — if the approved plan includes deployment/infrastructure requirements, the DAG must include corresponding human-gate tasks for provisioning and credentials, and integration tasks that verify deployment. A DAG that implements all code but omits deployment is incomplete.
 7. Integration seams covered — for every pair of tasks with a dependency edge, the handoff is explicitly owned. Check: who creates/configures the shared resource (queue, table, DI binding, config entry)? Who writes the glue code that connects producer to consumer? If the answer is ambiguous or "the other task," add an explicit integration task or expand one of the existing tasks to own it. No task should assume adjacent tasks handle boundary wiring.
+8. Protocol/API completeness — for adapter, plugin, or integration projects: every method, event, or lifecycle hook in the target protocol that affects correctness must be accounted for. Cross-reference the protocol definition (API docs, reference implementations, or protocol spec) and verify no required calls are omitted. If a protocol method used by reference implementations is intentionally skipped, the omission must be explicitly justified (e.g. "compaction not needed because X manages context internally"). Uncaught omissions here become structural bugs that surface late.
 [If the artifact is a pass-through:] Does the justification for why this phase is low-value hold up? Is the reason specific and verifiable, not vague? Would a reasonable engineer agree? Is the agent being lazy?
 
 ${qualityBlock}
@@ -643,6 +645,18 @@ export function buildWorkflowSystemPrompt(state: WorkflowState): string {
   const criteria = getAcceptanceCriteria(state.phase, state.phaseState, state.mode, designDocPath)
   if (criteria) {
     blocks.push(criteria)
+    // Inject the expected blocking criteria count so the agent knows exactly
+    // how many assessments to provide in mark_satisfied. Without this, the
+    // agent has to count numbered lines manually and often gets it wrong,
+    // wasting review iterations.
+    const expectedCount = countExpectedBlockingCriteria(criteria)
+    if (expectedCount > 0) {
+      blocks.push(
+        `**Required:** You must provide exactly **${expectedCount}** blocking criteria assessments ` +
+        `when calling \`mark_satisfied\`. Each must have \`criterion\`, \`met\` (boolean), ` +
+        `\`evidence\` (specific quote or file reference), and \`severity: "blocking"\`.`
+      )
+    }
   }
   const criteriaPreview = getAcceptanceCriteriaPreview(state.phase, state.phaseState, state.mode, designDocPath)
   if (criteriaPreview) {

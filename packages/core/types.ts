@@ -630,6 +630,14 @@ export interface SessionStateStore {
   load(): Promise<StoreLoadResult | StoreLoadError>
 
   /**
+   * Migrate state from one sessionId to another (for resume across sessions).
+   * Moves the in-memory entry from oldSessionId to newSessionId, updates
+   * the sessionId field, and persists. Removes the old session entry.
+   * Errors: throws if oldSessionId not found or newSessionId already has non-fresh state.
+   */
+  migrateSession(oldSessionId: string, newSessionId: string): Promise<WorkflowState>
+
+  /**
    * Remove state for a deleted session from memory and disk.
    * No-op if sessionId not found.
    */

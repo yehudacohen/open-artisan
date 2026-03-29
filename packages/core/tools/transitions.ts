@@ -70,6 +70,19 @@ export function computeMarkSatisfiedTransition(
     }
   }
 
+  // Reject empty criteria as a validation error — NOT a review fail.
+  // Without this check, empty criteria would flow through evaluateMarkSatisfied as
+  // passed:false → self_review_fail → REVISE, which is a state transition that
+  // should not happen for a malformed tool call.
+  if (!rawCriteria || rawCriteria.length === 0) {
+    return {
+      success: false,
+      error: "criteria_met is empty. You must evaluate every acceptance criterion " +
+        "for this phase and provide a non-empty array. Re-read the criteria and call " +
+        "mark_satisfied again with your per-criterion assessments.",
+    }
+  }
+
   // Parse scores (JSON-RPC may send as strings)
   const criteriaMet: MarkSatisfiedArgs["criteria_met"] = rawCriteria.map((c) => ({
     criterion: c.criterion,
@@ -94,6 +107,25 @@ export function computeMarkSatisfiedTransition(
 
   const criteriaText = getAcceptanceCriteria(state.phase, state.phaseState, state.mode, state.artifactDiskPaths?.design ?? null)
   const expectedBlocking = countExpectedBlockingCriteria(criteriaText)
+
+  // Reject insufficient blocking criteria as a validation error — NOT a review fail.
+  // Same pattern as the empty criteria check above: malformed tool calls must not
+  // trigger state transitions (self_review_fail → REVISE).
+  if (expectedBlocking > 0) {
+    const submittedBlockingCount = criteriaMet.filter((c) => {
+      const sev = c.severity ?? "blocking"
+      return sev === "blocking" || sev === "design-invariant"
+    }).length
+    if (submittedBlockingCount < expectedBlocking) {
+      return {
+        success: false,
+        error: `Only ${submittedBlockingCount} blocking criteria submitted, but this phase requires ${expectedBlocking}. ` +
+          `You must evaluate ALL blocking criteria independently. Re-read the acceptance criteria and call ` +
+          `mark_satisfied again with assessments for all ${expectedBlocking} blocking criteria.`,
+      }
+    }
+  }
+
   const iterationInfo = { current: state.iterationCount + 1, max: MAX_REVIEW_ITERATIONS }
   const result = evaluateMarkSatisfied({ criteria_met: criteriaMet }, expectedBlocking, iterationInfo)
 

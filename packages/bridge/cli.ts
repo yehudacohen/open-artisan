@@ -20,7 +20,7 @@ import { handleGuardCheck, handleGuardPolicy } from "./methods/guard"
 import { handlePromptBuild, handlePromptCompaction } from "./methods/prompt"
 import { handleMessageProcess } from "./methods/message"
 import { handleIdleCheck } from "./methods/idle"
-import { handleToolExecute } from "./methods/tool-execute"
+import { handleToolExecute, handleTaskGetReviewContext } from "./methods/tool-execute"
 
 const server = createBridgeServer({
   "lifecycle.init": handleInit,
@@ -36,6 +36,7 @@ const server = createBridgeServer({
   "message.process": handleMessageProcess,
   "idle.check": handleIdleCheck,
   "tool.execute": handleToolExecute,
+  "task.getReviewContext": handleTaskGetReviewContext,
 })
 
 server.start()

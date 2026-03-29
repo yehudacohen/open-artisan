@@ -95,8 +95,33 @@ async function call(method: string, params: Record<string, unknown> = {}): Promi
   return r.result
 }
 
+/** Ensure the session is registered with the bridge (idempotent). */
+async function ensureSession(): Promise<void> {
+  const socketPath = getSocketPath(getStateDir())
+  const sessionId = getSessionId()
+  await sendSocketRequest(socketPath, {
+    jsonrpc: "2.0",
+    method: "lifecycle.sessionCreated",
+    params: { sessionId },
+    id: Date.now(),
+  })
+}
+
 /** Call tool.execute with the given tool name and args. */
 async function execTool(name: string, args: Record<string, unknown> = {}): Promise<string> {
+  await ensureSession()
+
+  // For submit_feedback: the CLI is invoked directly by the user, so we
+  // must call message.process first to set userGateMessageReceived = true.
+  // Without this, submit_feedback is structurally blocked because the bridge
+  // thinks no user message has been received at USER_GATE.
+  if (name === "submit_feedback") {
+    await call("message.process", {
+      sessionId: getSessionId(),
+      parts: [{ type: "text", text: "(user invoked submit_feedback via CLI)" }],
+    })
+  }
+
   const result = await call("tool.execute", {
     name,
     args,
@@ -114,6 +139,7 @@ async function execTool(name: string, args: Record<string, unknown> = {}): Promi
 
 const TOOL_COMMANDS: Record<string, string> = {
   "select-mode": "select_mode",
+  "submit-task-review": "submit_task_review",
   "mark-scan-complete": "mark_scan_complete",
   "mark-analyze-complete": "mark_analyze_complete",
   "mark-satisfied": "mark_satisfied",
@@ -129,6 +155,7 @@ const TOOL_COMMANDS: Record<string, string> = {
 }
 
 async function handleState(): Promise<void> {
+  await ensureSession()
   const result = await call("state.get", { sessionId: getSessionId() })
   if (!result) {
     console.log("No active workflow session.")
@@ -220,6 +247,19 @@ async function handleToolCommand(command: string, cliArgs: string[]): Promise<vo
     }
   }
 
+  // Resolve --artifact-file: read file content into artifact_content.
+  // This avoids shell escaping issues when passing multiline content via stdin/flags.
+  const artifactFile = args.artifact_file as string | undefined
+  if (artifactFile) {
+    try {
+      args.artifact_content = readFileSync(artifactFile, "utf-8")
+    } catch (err) {
+      console.error(`Error: Cannot read artifact file "${artifactFile}": ${err instanceof Error ? err.message : String(err)}`)
+      process.exit(1)
+    }
+    delete args.artifact_file
+  }
+
   const result = await execTool(toolName, args)
   // Tool-level errors start with "Error:" — print to stderr and exit 1
   if (result.startsWith("Error:")) {
@@ -268,10 +308,13 @@ Workflow tools (accepts --flags or JSON on stdin):
   query-parent-workflow    Read parent workflow state
   query-child-workflow     Read child workflow state
 
+Options:
+  --artifact-file <path>   Read file content into artifact_content (avoids shell escaping)
+
 Examples:
   artisan select-mode --mode GREENFIELD --feature-name my-feature
   artisan state
-  echo '{"summary":"Done","artifact_description":"All code"}' | artisan request-review
+  artisan request-review --summary "Plan ready" --artifact-file .openartisan/feat/plan.md
   echo '{"task_id":"T1","implementation_summary":"Built it","tests_passing":true}' | artisan mark-task-complete`)
     process.exit(0)
   }

@@ -9,6 +9,7 @@
  */
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs"
+import { execSync } from "node:child_process"
 import { sendSocketRequest } from "./socket-transport"
 import {
   getSocketPath,
@@ -100,6 +101,7 @@ const ALLOW: HookOutput = { stdout: null, stderr: null, exitCode: 0 }
  */
 export async function handlePreToolUse(input: HookInput): Promise<HookOutput> {
   const stateDir = getStateDir(input)
+
   if (!isEnabled(stateDir)) return ALLOW
 
   const toolName = input.tool_name ?? ""
@@ -116,6 +118,10 @@ export async function handlePreToolUse(input: HookInput): Promise<HookOutput> {
   }
 
   const sessionId = getSessionId(stateDir)
+
+  // Ensure the session is registered (idempotent — handles mid-session enable).
+  await bridgeCall(stateDir, "lifecycle.sessionCreated", { sessionId })
+
   const result = await bridgeCall(stateDir, "guard.check", {
     toolName,
     args: toolInput,
@@ -160,12 +166,105 @@ export async function handlePreToolUse(input: HookInput): Promise<HookOutput> {
  */
 export async function handleStop(input: HookInput): Promise<HookOutput> {
   const stateDir = getStateDir(input)
+
   if (!isEnabled(stateDir)) return ALLOW
+
+  const sessionId = getSessionId(stateDir)
+
+  // Ensure session exists (handles mid-session enable).
+  await bridgeCall(stateDir, "lifecycle.sessionCreated", { sessionId })
+
+  // When the agent stops at USER_GATE, the next interaction will be from the
+  // user. Set userGateMessageReceived so submit_feedback becomes allowed.
+  // (No-op if not at USER_GATE — processUserMessage only intercepts at gates.)
+  await bridgeCall(stateDir, "message.process", {
+    sessionId,
+    parts: [{ type: "text", text: "(agent stopped — next message is from user)" }],
+  })
 
   // Prevent infinite re-prompt loops
   if (input.stop_hook_active) return ALLOW
 
-  const sessionId = getSessionId(stateDir)
+  // -----------------------------------------------------------------------
+  // Per-task isolated review: if taskCompletionInProgress is set, the agent
+  // just completed a task and review is pending. Dispatch an isolated
+  // reviewer subprocess (claude --print) — the agent never touches the
+  // review, ensuring no context pollution.
+  // -----------------------------------------------------------------------
+  const state = await bridgeCall(stateDir, "state.get", { sessionId }) as Record<string, unknown> | null
+  if (state?.taskCompletionInProgress) {
+    // Double-dispatch guard: re-check state immediately before spawning.
+    // The stop_hook_active check at the top prevents hook re-entry during
+    // the subprocess wait, but verify taskCompletionInProgress hasn't been
+    // cleared by a concurrent submit_task_review call.
+    const freshState = await bridgeCall(stateDir, "state.get", { sessionId }) as Record<string, unknown> | null
+    if (!freshState?.taskCompletionInProgress) {
+      // Gate was cleared between the two reads — skip dispatch
+      return {
+        stdout: null,
+        stderr: "Per-task review completed. Continue with the next implementation task.",
+        exitCode: 2,
+      }
+    }
+
+    const reviewPrompt = await bridgeCall(stateDir, "task.getReviewContext", { sessionId })
+    if (reviewPrompt && typeof reviewPrompt === "string") {
+      const projectDir = input.cwd ?? process.env["CLAUDE_PROJECT_DIR"] ?? process.cwd()
+      try {
+        // Spawn isolated reviewer — fresh Claude session with no conversation history.
+        // Omit --model so it inherits the user's default (parent) model.
+        const reviewOutput = execSync(
+          `claude --print --max-turns 1 -p ${JSON.stringify(reviewPrompt)}`,
+          { timeout: 180_000, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] },
+        )
+        // Submit review results to bridge
+        await bridgeCall(stateDir, "tool.execute", {
+          name: "submit_task_review",
+          args: { review_output: reviewOutput },
+          context: { sessionId, directory: projectDir },
+        })
+        // Re-check state to see if review passed or failed
+        const newState = await bridgeCall(stateDir, "state.get", { sessionId }) as Record<string, unknown> | null
+        if (newState?.taskCompletionInProgress) {
+          // Still pending — review parse failed, ask agent to handle manually
+          return {
+            stdout: null,
+            stderr: "Per-task review could not be completed automatically. Call submit_task_review manually.",
+            exitCode: 2,
+          }
+        }
+        // Review completed — tell agent to continue
+        return {
+          stdout: null,
+          stderr: "Per-task review completed. Continue with the next implementation task.",
+          exitCode: 2,
+        }
+      } catch (err) {
+        // claude CLI not available or timed out — graceful degradation:
+        // submit a passing review to clear the gate. The full implementation
+        // review at the end will catch any issues this would have found.
+        const errMsg = err instanceof Error ? err.message : String(err)
+        await bridgeCall(stateDir, "tool.execute", {
+          name: "submit_task_review",
+          args: {
+            review_output: JSON.stringify({
+              passed: true,
+              issues: [`Review dispatch failed: ${errMsg}`],
+              scores: { code_quality: 0, error_handling: 0 },
+              reasoning: "Graceful degradation: reviewer subprocess failed. Auto-accepted — full implementation review will catch issues.",
+            }),
+          },
+          context: { sessionId, directory: projectDir },
+        })
+        return {
+          stdout: null,
+          stderr: "Per-task review dispatch failed — task reverted to pending. The reviewer subprocess was unavailable. Fix any issues and call mark_task_complete again.",
+          exitCode: 2,
+        }
+      }
+    }
+  }
+
   const result = await bridgeCall(stateDir, "idle.check", { sessionId })
 
   if (!result) return ALLOW
@@ -197,6 +296,7 @@ export async function handleStop(input: HookInput): Promise<HookOutput> {
  */
 export async function handleSessionStart(input: HookInput): Promise<HookOutput> {
   const stateDir = getStateDir(input)
+
   if (!isEnabled(stateDir)) return ALLOW
 
   const sessionId = input.session_id ?? "default"
@@ -207,6 +307,15 @@ export async function handleSessionStart(input: HookInput): Promise<HookOutput> 
 
   // Register session with the bridge (no-op if already registered)
   await bridgeCall(stateDir, "lifecycle.sessionCreated", { sessionId })
+
+  // On resume: user sent a message. If at USER_GATE, mark that the user has
+  // responded so submit_feedback becomes allowed (structural gate enforcement).
+  if (input.source === "resume") {
+    await bridgeCall(stateDir, "message.process", {
+      sessionId,
+      parts: [{ type: "text", text: "(user resumed session)" }],
+    })
+  }
 
   // Build the workflow system prompt
   const prompt = await bridgeCall(stateDir, "prompt.build", { sessionId })

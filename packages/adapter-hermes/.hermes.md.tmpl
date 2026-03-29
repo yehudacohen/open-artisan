@@ -1,0 +1,85 @@
+# Open Artisan — Workflow Instructions
+
+You are operating under the **Open Artisan** phased workflow. Every coding task goes through sequential phases with structural enforcement. The tool guard blocks operations that don't belong in the current phase — this is not advisory, it is enforced.
+
+## Phases
+
+8 sequential phases, each with sub-states:
+
+```
+MODE_SELECT → DISCOVERY → PLANNING → INTERFACES → TESTS → IMPL_PLAN → IMPLEMENTATION → DONE
+```
+
+Each phase follows: **DRAFT → REVIEW → USER_GATE → (optional REVISE)**
+
+## Available Workflow Tools
+
+| Tool | Purpose |
+|------|---------|
+| `oa_select_mode` | Choose GREENFIELD, REFACTOR, or INCREMENTAL + set feature name |
+| `oa_mark_scan_complete` | Complete discovery scan (REFACTOR/INCREMENTAL) |
+| `oa_mark_analyze_complete` | Complete discovery analysis |
+| `oa_mark_satisfied` | Submit self-review criteria assessment |
+| `oa_request_review` | Submit artifact for review (`artifact_content` for text, `artifact_files` for files) |
+| `oa_submit_feedback` | Approve or request revision at USER_GATE |
+| `oa_mark_task_complete` | Complete a DAG task during IMPLEMENTATION |
+| `oa_check_prior_workflow` | Check for existing workflow state |
+| `oa_resolve_human_gate` | Flag a task requiring manual action |
+| `oa_propose_backtrack` | Go back to an earlier phase |
+| `oa_spawn_sub_workflow` | Delegate a DAG task to a child workflow |
+| `oa_query_parent_workflow` | Read parent workflow state (sub-workflows) |
+| `oa_query_child_workflow` | Read child workflow state (sub-workflows) |
+| `oa_state` | Show current workflow state |
+
+## Expected Behavior Per Sub-State
+
+### DRAFT
+Do the work for this phase. When done, call `oa_request_review`.
+
+### REVIEW
+Self-evaluate against the acceptance criteria shown in the per-turn prompt injection. Evaluate each criterion independently — do NOT assume quality, verify it. Call `oa_mark_satisfied` with your per-criterion assessment. Be honest — the user reviews at USER_GATE.
+
+### USER_GATE
+Present a clear artifact summary to the user. **STOP and wait for their response.** Do NOT call `oa_submit_feedback` until the user responds. Not every user message is artifact feedback — casual conversation is fine.
+
+### REVISE
+Address ALL feedback points. Call `oa_request_review` when done. No check-ins, no partial revisions.
+
+## What's Blocked Per Phase
+
+| Phase / Sub-State | Allowed | Blocked |
+|-------------------|---------|---------|
+| MODE_SELECT | Workflow tools only | All file writes, all shell execution |
+| DISCOVERY/SCAN | Read-only tools, workflow tools | All file writes |
+| DISCOVERY/ANALYZE | Read-only tools, workflow tools | All file writes |
+| DISCOVERY/CONVENTIONS | `.openartisan/` writes only | Project source writes |
+| PLANNING | Workflow tools only | All file writes, all shell execution |
+| INTERFACES | Interface/type files only (.py, .ts, .d.ts, .proto, etc.) | Implementation files |
+| TESTS | Test files only | Implementation files |
+| IMPL_PLAN | Workflow tools only | All file writes, all shell execution |
+| IMPLEMENTATION | Files listed in current task's `**Files:**` | Files belonging to other tasks |
+| DONE | All tools | Nothing blocked |
+
+`.env` writes are **always blocked** regardless of phase.
+
+## IMPLEMENTATION Phase Rules
+
+- One task at a time from the DAG. The current task is shown in the per-turn prompt injection.
+- Call `oa_mark_task_complete` after each task.
+- The IMPL_PLAN must include `**Files:**` per task — these are enforced by the guard.
+- You cannot write to files belonging to a different task.
+
+## Mode-Specific Rules
+
+### GREENFIELD
+No constraints beyond the standard phases. Discovery is skipped.
+
+### REFACTOR
+Full 6-scanner discovery. Existing tests must pass after each implementation task.
+
+### INCREMENTAL
+Full discovery. File allowlist enforced — you can only modify files explicitly approved during PLANNING. Do-no-harm policy: bash write operators (>, >>, tee, sed -i) are blocked.
+
+## Self-Review Responsibility
+
+`oa_mark_satisfied` evaluates YOUR criteria. There is no isolated reviewer in this mode — you are responsible for honest self-assessment. The user reviews at USER_GATE, so gaming the self-review only delays progress.

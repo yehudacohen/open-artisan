@@ -166,13 +166,13 @@ describe("buildTaskReviewPrompt — integration seam check", () => {
     expect(prompt).toContain("Integration seam check")
     expect(prompt).toContain("INTEGRATION_GAP")
     expect(prompt).toContain("not my responsibility")
-    expect(prompt).toContain("six checks")
+    expect(prompt).toContain("eight checks")
   })
 
-  it("says five checks when no adjacent tasks", () => {
+  it("says seven checks when no adjacent tasks", () => {
     const prompt = buildTaskReviewPrompt(makeRequest())
-    expect(prompt).toContain("five checks")
-    expect(prompt).not.toContain("six checks")
+    expect(prompt).toContain("seven checks")
+    expect(prompt).not.toContain("eight checks")
   })
 
   it("separates upstream and downstream tasks", () => {

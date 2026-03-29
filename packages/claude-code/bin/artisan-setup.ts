@@ -157,14 +157,20 @@ function main() {
   console.log(`
 Setup complete!
 
+IMPORTANT: Start a new Claude Code session for hooks to take effect.
+Claude Code caches hook settings at session start — changes made
+mid-session won't be active until you restart.
+
 To start using open-artisan:
-  1. Start the server:
+  1. Start a NEW Claude Code session (exit and re-enter)
+
+  2. Start the server:
      bun run ${serverPath} --project-dir "${projectDir}" --daemon
 
-  2. Enable the workflow:
+  3. Enable the workflow:
      ./artisan enable
 
-  3. Or use the /artisan skill in Claude Code:
+  4. Or use the /artisan skill in Claude Code:
      /artisan on
 
 To verify:

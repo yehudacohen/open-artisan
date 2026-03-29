@@ -22,9 +22,13 @@ import { SESSION_NOT_FOUND, INVALID_PARAMS } from "../protocol"
 import type { WorkflowState } from "../../core/types"
 
 import { resolve } from "node:path"
+import { readFileSync } from "node:fs"
 import { parseSelectModeArgs } from "../../core/tools/select-mode"
 import { processMarkScanComplete } from "../../core/tools/mark-scan-complete"
 import { processMarkTaskComplete } from "../../core/tools/mark-task-complete"
+import { buildTaskReviewPrompt, parseTaskReviewResult } from "../../core/task-review"
+import type { AdjacentTask } from "../../core/task-review"
+import { MAX_TASK_REVIEW_ITERATIONS } from "../../core/constants"
 import { processQueryParentWorkflow, processQueryChildWorkflow } from "../../core/tools/query-workflow"
 import {
   computeMarkSatisfiedTransition,
@@ -61,6 +65,50 @@ function subagentError(toolName: string, feature: string): string {
   )
 }
 
+/**
+ * Builds the isolated review prompt for a given task, including adjacent
+ * task context for integration seam checking.
+ *
+ * Shared by handleMarkTaskComplete (inline prompt) and
+ * handleTaskGetReviewContext (bridge method).
+ *
+ * Returns null if the task is not found in the DAG.
+ */
+function buildReviewContextForTask(
+  state: WorkflowState,
+  taskId: string,
+  directory: string,
+  implementationSummary?: string,
+): string | null {
+  const task = state.implDag?.find((t) => t.id === taskId)
+  if (!task) return null
+
+  // Compute adjacent tasks for integration seam checking
+  const adjacentTasks: AdjacentTask[] = []
+  if (state.implDag) {
+    for (const node of state.implDag) {
+      if (node.id === task.id) continue
+      if (task.dependencies.includes(node.id)) {
+        adjacentTasks.push({ id: node.id, description: node.description, category: node.category, status: node.status, direction: "upstream" })
+      }
+      if (node.dependencies.includes(task.id)) {
+        adjacentTasks.push({ id: node.id, description: node.description, category: node.category, status: node.status, direction: "downstream" })
+      }
+    }
+  }
+
+  return buildTaskReviewPrompt({
+    task,
+    implementationSummary: implementationSummary ?? "(see task files)",
+    mode: state.mode,
+    cwd: directory,
+    featureName: state.featureName,
+    conventions: state.conventions,
+    artifactDiskPaths: state.artifactDiskPaths as Record<string, string>,
+    adjacentTasks: adjacentTasks.length > 0 ? adjacentTasks : undefined,
+  })
+}
+
 // ---------------------------------------------------------------------------
 // Per-tool handlers
 // ---------------------------------------------------------------------------
@@ -90,7 +138,7 @@ const handleSelectMode: ToolHandler = async (args, toolCtx, ctx) => {
   if (isSubWorkflow && state.featureName) {
     featureName = state.featureName
   } else {
-    featureName = (args.feature_name as string)?.trim() ?? ""
+    featureName = ((args.feature_name ?? args.feature) as string)?.trim() ?? ""
     if (!featureName) {
       return "Error: feature_name is required."
     }
@@ -101,6 +149,18 @@ const handleSelectMode: ToolHandler = async (args, toolCtx, ctx) => {
       return "Error: feature_name must start with alphanumeric and contain only alphanumeric, dots, hyphens, and underscores."
     }
     if (featureName === "sub") return 'Error: "sub" is reserved.'
+  }
+
+  // Check for existing persisted state for this feature name.
+  // If prior state exists beyond MODE_SELECT, resume it under the current sessionId.
+  const priorState = store.findByFeatureName(featureName)
+  if (priorState && priorState.phase !== "MODE_SELECT" && priorState.sessionId !== toolCtx.sessionId) {
+    // Migrate the prior state to the current session
+    await store.migrateSession(priorState.sessionId, toolCtx.sessionId)
+    return (
+      `Resumed prior workflow for "${featureName}" at ${priorState.phase}/${priorState.phaseState}` +
+      (priorState.mode !== parsed.mode ? ` (keeping original mode ${priorState.mode}).` : ".")
+    )
   }
 
   const outcome = sm.transition("MODE_SELECT", "DRAFT", "mode_selected", parsed.mode)
@@ -200,7 +260,8 @@ const handleRequestReview: ToolHandler = async (args, toolCtx, ctx) => {
     return `Error: request_review can only be called in DRAFT or REVISE state (current: ${state.phase}/${state.phaseState}).`
   }
 
-  const outcome = sm.transition(state.phase, state.phaseState, "draft_complete", state.mode)
+  const event = state.phaseState === "REVISE" ? "revision_complete" : "draft_complete"
+  const outcome = sm.transition(state.phase, state.phaseState, event, state.mode)
   if (!outcome.success) return `Error: ${outcome.message}`
 
   // Write artifact to disk if content was provided
@@ -250,6 +311,16 @@ const handleSubmitFeedback: ToolHandler = async (args, toolCtx, ctx) => {
     return `Error: submit_feedback can only be called at USER_GATE or ESCAPE_HATCH (current: ${state.phaseState}).`
   }
 
+  // Structural enforcement: agent cannot self-approve. The user must have
+  // sent a message first (detected via message.process or session resume).
+  if (!state.userGateMessageReceived) {
+    return (
+      "Error: Waiting for user response. Present your artifact summary and " +
+      "wait for the user to respond before calling submit_feedback. " +
+      "The user must review and decide — you cannot self-approve."
+    )
+  }
+
   const feedbackType = args.feedback_type as string
   if (feedbackType === "approve") {
     if (state.phaseState === "ESCAPE_HATCH") {
@@ -286,16 +357,31 @@ const handleSubmitFeedback: ToolHandler = async (args, toolCtx, ctx) => {
       if (state.phase === "DISCOVERY" && artifactContent) {
         draft.conventions = artifactContent
       }
-      // Parse IMPL_PLAN into DAG at IMPL_PLAN approval
-      if (state.phase === "IMPL_PLAN" && artifactContent) {
-        const parseResult = parseImplPlan(artifactContent)
-        if (parseResult.success) {
-          const nodes = Array.from(parseResult.dag.tasks).map((t) => ({ ...t }))
-          draft.implDag = nodes
-          const firstReady = nodes.find((t) => t.status === "pending" && t.dependencies.length === 0)
-          draft.currentTaskId = firstReady?.id ?? null
-        } else {
-          draft.implDag = null
+      // Parse IMPL_PLAN into DAG at IMPL_PLAN approval.
+      // If artifact_content was not passed in the approve call, fall back to
+      // reading from the disk path written by request_review. This prevents
+      // the DAG from silently not being parsed when the user approves without
+      // re-passing the content.
+      if (state.phase === "IMPL_PLAN") {
+        let planContent = artifactContent
+        if (!planContent) {
+          const diskPath = state.artifactDiskPaths["impl_plan" as keyof typeof state.artifactDiskPaths] as string | undefined
+          if (diskPath) {
+            try {
+              planContent = readFileSync(diskPath, "utf-8")
+            } catch { /* non-fatal — DAG just won't be parsed */ }
+          }
+        }
+        if (planContent) {
+          const parseResult = parseImplPlan(planContent)
+          if (parseResult.success) {
+            const nodes = Array.from(parseResult.dag.tasks).map((t) => ({ ...t }))
+            draft.implDag = nodes
+            const firstReady = nodes.find((t) => t.status === "pending" && t.dependencies.length === 0)
+            draft.currentTaskId = firstReady?.id ?? null
+          } else {
+            draft.implDag = null
+          }
         }
       }
       // Capture file allowlist at PLANNING approval in INCREMENTAL mode
@@ -348,14 +434,19 @@ const handleMarkTaskComplete: ToolHandler = async (args, toolCtx, ctx) => {
     return `Error: mark_task_complete can only be called in DRAFT or REVISE state (current: ${state.phase}/${state.phaseState}).`
   }
 
+  // Re-entry guard: prevent concurrent task completions
+  if (state.taskCompletionInProgress) {
+    return `Error: Task "${state.taskCompletionInProgress}" is already awaiting review. Call submit_task_review first.`
+  }
+
   const result = processMarkTaskComplete(args as any, state.implDag, state.currentTaskId)
   if ("error" in result) return `Error: ${result.error}`
 
-  // Skip per-task review in bridge mode (requires SubagentDispatcher)
+  // Persist DAG changes and set review gate
   await store.update(toolCtx.sessionId, (draft) => {
     draft.implDag = result.updatedNodes
     draft.currentTaskId = result.nextTaskId
-    draft.taskReviewCount = 0
+    draft.taskCompletionInProgress = (args.task_id as string) ?? null
     // Orchestrator-driven artifact tracking (v22): accumulate expected files
     if (result.completedTaskFiles.length > 0) {
       const existing = new Set(draft.reviewArtifactFiles)
@@ -367,8 +458,93 @@ const handleMarkTaskComplete: ToolHandler = async (args, toolCtx, ctx) => {
     }
   })
 
-  // policyVersion bumped automatically by setPostUpdateHook on store.update
-  return result.responseMessage + "\n\n_Note: Per-task review skipped in bridge mode (requires SubagentDispatcher)._"
+  // Build the isolated review prompt for the adapter to dispatch.
+  // Use the freshly-updated state (with completed task) for context.
+  const updatedState = requireState(ctx, toolCtx.sessionId)
+  const taskId = args.task_id as string
+  const implSummary = (args.implementation_summary as string) ?? ""
+  const reviewPrompt = buildReviewContextForTask(updatedState, taskId, toolCtx.directory, implSummary)
+  if (!reviewPrompt) {
+    // Should not happen — task was just completed. Clear guard and return.
+    await store.update(toolCtx.sessionId, (draft) => {
+      draft.taskCompletionInProgress = null
+      draft.taskReviewCount = 0
+    })
+    return result.responseMessage
+  }
+
+  return (
+    result.responseMessage +
+    "\n\n**Per-task review required.** Spawn an isolated reviewer (e.g. `claude --print`) with the prompt below. " +
+    "The reviewer must have NO access to this conversation — only the prompt and project files. " +
+    "Then call `submit_task_review` with the reviewer's output.\n\n" +
+    "---\n\n" +
+    reviewPrompt
+  )
+}
+
+// ---- submit_task_review ----
+
+const handleSubmitTaskReview: ToolHandler = async (args, toolCtx, ctx) => {
+  const { store } = ctx.engine!
+  const state = requireState(ctx, toolCtx.sessionId)
+
+  if (!state.taskCompletionInProgress) {
+    return "Error: No task review is pending. Call mark_task_complete first."
+  }
+
+  const reviewOutput = (args.review_output as string)?.trim()
+  if (!reviewOutput) {
+    return "Error: review_output is required. Pass the raw output from the isolated reviewer."
+  }
+
+  const taskId = state.taskCompletionInProgress
+  const review = parseTaskReviewResult(reviewOutput)
+
+  // Parse failure — don't accept, ask agent to retry
+  if (!review.success) {
+    return `Error: Failed to parse review output: ${review.error}. Re-run the isolated reviewer and submit again.`
+  }
+
+  // Check iteration cap — force accept after MAX_TASK_REVIEW_ITERATIONS
+  const hitCap = state.taskReviewCount >= MAX_TASK_REVIEW_ITERATIONS
+  if (hitCap && !review.passed) {
+    // Force accept — too many review iterations. Full impl review will catch issues.
+    await store.update(toolCtx.sessionId, (draft) => {
+      draft.taskCompletionInProgress = null
+      draft.taskReviewCount = 0
+    })
+    return (
+      `Task "${taskId}" force-accepted after ${MAX_TASK_REVIEW_ITERATIONS} review iterations. ` +
+      `Issues will be caught in the full implementation review. Proceeding to next task.`
+    )
+  }
+
+  if (review.passed) {
+    // Review passed — clear gate, advance to next task
+    await store.update(toolCtx.sessionId, (draft) => {
+      draft.taskCompletionInProgress = null
+      draft.taskReviewCount = 0
+    })
+    return `Task "${taskId}" review passed. Proceeding to next task.`
+  }
+
+  // Review failed — revert task status and return issues
+  await store.update(toolCtx.sessionId, (draft) => {
+    const task = draft.implDag?.find((t) => t.id === taskId)
+    if (task) task.status = "pending"
+    draft.currentTaskId = taskId
+    draft.taskCompletionInProgress = null
+    draft.taskReviewCount = (draft.taskReviewCount ?? 0) + 1
+  })
+
+  const issuesList = review.issues.map((i) => `  - ${i}`).join("\n")
+  return (
+    `Task "${taskId}" review FAILED. ${review.issues.length} issue(s) found:\n${issuesList}\n\n` +
+    `${review.reasoning ? `Reviewer reasoning: ${review.reasoning}\n\n` : ""}` +
+    `Fix the issues and call mark_task_complete again. ` +
+    `(Review iteration ${state.taskReviewCount + 1}/${MAX_TASK_REVIEW_ITERATIONS})`
+  )
 }
 
 // ---- check_prior_workflow ----
@@ -518,12 +694,28 @@ const TOOL_HANDLERS: Record<string, ToolHandler> = {
   request_review: handleRequestReview,
   submit_feedback: handleSubmitFeedback,
   mark_task_complete: handleMarkTaskComplete,
+  submit_task_review: handleSubmitTaskReview,
   check_prior_workflow: handleCheckPriorWorkflow,
   resolve_human_gate: handleResolveHumanGate,
   propose_backtrack: handleProposeBacktrack,
   spawn_sub_workflow: handleSpawnSubWorkflow,
   query_parent_workflow: handleQueryParentWorkflow,
   query_child_workflow: handleQueryChildWorkflow,
+}
+
+// ---------------------------------------------------------------------------
+// task.getReviewContext — returns review prompt for pending task review
+// ---------------------------------------------------------------------------
+
+export const handleTaskGetReviewContext: MethodHandler = async (params, ctx) => {
+  const p = params as { sessionId?: string }
+  if (!p.sessionId) {
+    throw new JSONRPCErrorException("sessionId is required", INVALID_PARAMS)
+  }
+  const state = ctx.engine!.store.get(p.sessionId)
+  if (!state || !state.taskCompletionInProgress) return null
+
+  return buildReviewContextForTask(state, state.taskCompletionInProgress, ctx.projectDir ?? process.cwd())
 }
 
 // ---------------------------------------------------------------------------

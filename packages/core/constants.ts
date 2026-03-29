@@ -282,4 +282,5 @@ export const WORKFLOW_TOOL_NAMES = new Set([
   "spawn_sub_workflow",
   "query_parent_workflow",
   "query_child_workflow",
+  "submit_task_review",
 ])

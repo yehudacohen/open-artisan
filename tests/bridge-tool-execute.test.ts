@@ -7,7 +7,7 @@ import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 
 import { handleInit, handleSessionCreated } from "#bridge/methods/lifecycle"
-import { handleToolExecute } from "#bridge/methods/tool-execute"
+import { handleToolExecute, handleTaskGetReviewContext } from "#bridge/methods/tool-execute"
 import type { BridgeContext } from "#bridge/server"
 import type { EngineContext } from "#core/engine-context"
 
@@ -255,6 +255,7 @@ describe("tool.execute — submit_feedback", () => {
     await exec("select_mode", { mode: "GREENFIELD", feature_name: "rev-feat" })
     await ctx.engine!.store.update("s1", (d) => {
       d.phaseState = "USER_GATE"
+      d.userGateMessageReceived = true
     })
 
     const result = await exec("submit_feedback", {
@@ -262,6 +263,20 @@ describe("tool.execute — submit_feedback", () => {
       feedback_text: "Please change X",
     })
     expect(result).toContain("bridge mode")
+  })
+
+  it("blocks submit_feedback before user message at USER_GATE", async () => {
+    await exec("select_mode", { mode: "GREENFIELD", feature_name: "gate-feat" })
+    await ctx.engine!.store.update("s1", (d) => {
+      d.phaseState = "USER_GATE"
+      d.userGateMessageReceived = false
+    })
+
+    const result = await exec("submit_feedback", {
+      feedback_type: "approve",
+      feedback_text: "LGTM",
+    })
+    expect(result).toContain("Waiting for user response")
   })
 })
 
@@ -292,7 +307,7 @@ describe("tool.execute — check_prior_workflow", () => {
 })
 
 describe("tool.execute — mark_task_complete", () => {
-  it("completes a task and returns next scheduler decision", async () => {
+  it("completes a task and sets review pending", async () => {
     // Get to IMPLEMENTATION with a DAG
     await exec("select_mode", { mode: "GREENFIELD", feature_name: "mtc-feat" })
     await ctx.engine!.store.update("s1", (d) => {
@@ -311,11 +326,80 @@ describe("tool.execute — mark_task_complete", () => {
       tests_passing: true,
     })
     expect(result).toContain("T1")
-    expect(result).not.toContain("Error")
+    expect(result).toContain("Per-task review required")
+    expect(result).toContain("submit_task_review")
 
     const state = ctx.engine!.store.get("s1")
     expect(state?.implDag?.find((t) => t.id === "T1")?.status).toBe("complete")
-    expect(state?.currentTaskId).toBe("T2")
+    expect(state?.taskCompletionInProgress).toBe("T1")
+  })
+
+  it("submit_task_review advances on pass", async () => {
+    await exec("select_mode", { mode: "GREENFIELD", feature_name: "str-feat" })
+    await ctx.engine!.store.update("s1", (d) => {
+      d.phase = "IMPLEMENTATION"
+      d.phaseState = "DRAFT"
+      d.implDag = [
+        { id: "T1", description: "Setup", dependencies: [], expectedTests: [], expectedFiles: [], estimatedComplexity: "small", status: "complete" },
+        { id: "T2", description: "Core", dependencies: ["T1"], expectedTests: [], expectedFiles: [], estimatedComplexity: "medium", status: "pending" },
+      ]
+      d.currentTaskId = "T2"
+      d.taskCompletionInProgress = "T1"
+    })
+
+    const result = await exec("submit_task_review", {
+      review_output: JSON.stringify({ passed: true, issues: [], reasoning: "All checks pass" }),
+    })
+    expect(result).toContain("review passed")
+
+    const state = ctx.engine!.store.get("s1")
+    expect(state?.taskCompletionInProgress).toBeNull()
+    expect(state?.taskReviewCount).toBe(0)
+  })
+
+  it("submit_task_review reverts task on fail", async () => {
+    await exec("select_mode", { mode: "GREENFIELD", feature_name: "fail-feat" })
+    await ctx.engine!.store.update("s1", (d) => {
+      d.phase = "IMPLEMENTATION"
+      d.phaseState = "DRAFT"
+      d.implDag = [
+        { id: "T1", description: "Setup", dependencies: [], expectedTests: [], expectedFiles: [], estimatedComplexity: "small", status: "complete" },
+      ]
+      d.currentTaskId = null
+      d.taskCompletionInProgress = "T1"
+    })
+
+    const result = await exec("submit_task_review", {
+      review_output: JSON.stringify({ passed: false, issues: ["Tests fail"], reasoning: "test_main fails" }),
+    })
+    expect(result).toContain("FAILED")
+    expect(result).toContain("Tests fail")
+
+    const state = ctx.engine!.store.get("s1")
+    expect(state?.taskCompletionInProgress).toBeNull()
+    expect(state?.implDag?.find((t) => t.id === "T1")?.status).toBe("pending")
+    expect(state?.currentTaskId).toBe("T1")
+    expect(state?.taskReviewCount).toBe(1)
+  })
+
+  it("blocks re-entry when review is pending", async () => {
+    await exec("select_mode", { mode: "GREENFIELD", feature_name: "reentry-feat" })
+    await ctx.engine!.store.update("s1", (d) => {
+      d.phase = "IMPLEMENTATION"
+      d.phaseState = "DRAFT"
+      d.implDag = [
+        { id: "T1", description: "Setup", dependencies: [], expectedTests: [], expectedFiles: [], estimatedComplexity: "small", status: "pending" },
+      ]
+      d.currentTaskId = "T1"
+      d.taskCompletionInProgress = "T1"
+    })
+
+    const result = await exec("mark_task_complete", {
+      task_id: "T1",
+      implementation_summary: "test",
+      tests_passing: true,
+    })
+    expect(result).toContain("already awaiting review")
   })
 
   it("rejects when not in IMPLEMENTATION", async () => {
@@ -466,5 +550,339 @@ describe("tool.execute — agent-only mode", () => {
       criteria_met: [{ criterion: "OK", met: true, evidence: "good", severity: "blocking" }],
     })
     expect(result).toContain("SubagentDispatcher")
+  })
+
+  it("mark_satisfied rejects empty criteria without state transition", async () => {
+    await agentExec("select_mode", { mode: "GREENFIELD", feature_name: `ao-empty-${Date.now()}` })
+    await agentExec("request_review", { summary: "Plan", artifact_description: "Plan", artifact_content: "# Plan" })
+    // Confirm we're at REVIEW
+    const stateBefore = agentCtx.engine!.store.get("ao-session")
+    expect(stateBefore?.phaseState).toBe("REVIEW")
+
+    // Call mark_satisfied with empty criteria
+    const result = await agentExec("mark_satisfied", { criteria_met: [] })
+    expect(result).toContain("Error")
+    expect(result).toContain("empty")
+
+    // State must remain at REVIEW — not transition to REVISE
+    const stateAfter = agentCtx.engine!.store.get("ao-session")
+    expect(stateAfter?.phaseState).toBe("REVIEW")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// select_mode — feature alias and resume
+// ---------------------------------------------------------------------------
+
+describe("tool.execute — select_mode feature alias", () => {
+  it("accepts --feature as alias for --feature_name", async () => {
+    const result = await exec("select_mode", { mode: "GREENFIELD", feature: "alias-feat" })
+    expect(result).toContain("GREENFIELD")
+    expect(result).toContain("PLANNING")
+
+    const state = ctx.engine!.store.get("s1")
+    expect(state?.featureName).toBe("alias-feat")
+  })
+})
+
+describe("tool.execute — select_mode resume", () => {
+  it("resumes prior workflow state from a different session", async () => {
+    // Create a session with a feature that has progressed past MODE_SELECT
+    await handleSessionCreated({ sessionId: "old-session" }, ctx)
+    await ctx.engine!.store.update("old-session", (d) => {
+      d.featureName = "resume-feat"
+      d.mode = "GREENFIELD"
+      d.phase = "INTERFACES"
+      d.phaseState = "DRAFT"
+    })
+
+    // Now from session s1, call select_mode with the same feature name
+    const result = await exec("select_mode", { mode: "GREENFIELD", feature_name: "resume-feat" })
+    expect(result).toContain("Resumed")
+    expect(result).toContain("INTERFACES")
+
+    // The state should now be accessible under s1 with the old phase
+    const state = ctx.engine!.store.get("s1")
+    expect(state?.phase).toBe("INTERFACES")
+    expect(state?.phaseState).toBe("DRAFT")
+    expect(state?.featureName).toBe("resume-feat")
+  })
+
+  it("does not resume if prior state is at MODE_SELECT", async () => {
+    // Create a session with feature at MODE_SELECT (fresh)
+    await handleSessionCreated({ sessionId: "stale-session" }, ctx)
+    await ctx.engine!.store.update("stale-session", (d) => {
+      d.featureName = "stale-feat"
+    })
+
+    // Should NOT resume — should start fresh
+    const result = await exec("select_mode", { mode: "GREENFIELD", feature_name: "stale-feat" })
+    expect(result).toContain("PLANNING")
+    expect(result).not.toContain("Resumed")
+  })
+
+  it("does not resume when session matches (same sessionId)", async () => {
+    // Set up s1 with feature directly
+    await exec("select_mode", { mode: "GREENFIELD", feature_name: "same-sess" })
+    // Advance to INTERFACES manually
+    await ctx.engine!.store.update("s1", (d) => {
+      d.phase = "INTERFACES"
+      d.phaseState = "DRAFT"
+    })
+
+    // Create a new session s2 and call select_mode on same feature
+    await handleSessionCreated({ sessionId: "s2" }, ctx)
+    const result = await handleToolExecute({
+      name: "select_mode",
+      args: { mode: "GREENFIELD", feature_name: "same-sess" },
+      context: { sessionId: "s2", directory: tmpDir },
+    }, ctx) as string
+    expect(result).toContain("Resumed")
+    expect(result).toContain("INTERFACES")
+
+    // s2 should now have the migrated state
+    const state = ctx.engine!.store.get("s2")
+    expect(state?.phase).toBe("INTERFACES")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Quality score enforcement in submit_task_review
+// ---------------------------------------------------------------------------
+
+describe("tool.execute — submit_task_review quality scoring", () => {
+  it("reverts task when passed=true but code_quality below threshold", async () => {
+    await exec("select_mode", { mode: "GREENFIELD", feature_name: "qs-low-feat" })
+    await ctx.engine!.store.update("s1", (d) => {
+      d.phase = "IMPLEMENTATION"
+      d.phaseState = "DRAFT"
+      d.implDag = [
+        { id: "T1", description: "Setup", dependencies: [], expectedTests: [], expectedFiles: [], estimatedComplexity: "small", status: "complete" },
+      ]
+      d.currentTaskId = null
+      d.taskCompletionInProgress = "T1"
+    })
+
+    // passed=true but code_quality=7 (below 8 threshold) — should be overridden to fail
+    const result = await exec("submit_task_review", {
+      review_output: JSON.stringify({
+        passed: true,
+        issues: [],
+        scores: { code_quality: 7, error_handling: 10 },
+        reasoning: "Code quality is borderline",
+      }),
+    })
+    expect(result).toContain("FAILED")
+
+    const state = ctx.engine!.store.get("s1")
+    expect(state?.taskCompletionInProgress).toBeNull()
+    expect(state?.implDag?.find((t) => t.id === "T1")?.status).toBe("pending")
+    expect(state?.currentTaskId).toBe("T1")
+    expect(state?.taskReviewCount).toBe(1)
+  })
+
+  it("passes task when scores are exactly at threshold", async () => {
+    await exec("select_mode", { mode: "GREENFIELD", feature_name: "qs-pass-feat" })
+    await ctx.engine!.store.update("s1", (d) => {
+      d.phase = "IMPLEMENTATION"
+      d.phaseState = "DRAFT"
+      d.implDag = [
+        { id: "T1", description: "Setup", dependencies: [], expectedTests: [], expectedFiles: [], estimatedComplexity: "small", status: "complete" },
+      ]
+      d.currentTaskId = null
+      d.taskCompletionInProgress = "T1"
+    })
+
+    // Both scores exactly at 8 — should pass
+    const result = await exec("submit_task_review", {
+      review_output: JSON.stringify({
+        passed: true,
+        issues: [],
+        scores: { code_quality: 8, error_handling: 8 },
+        reasoning: "All checks pass, quality at threshold",
+      }),
+    })
+    expect(result).toContain("review passed")
+
+    const state = ctx.engine!.store.get("s1")
+    expect(state?.taskCompletionInProgress).toBeNull()
+    expect(state?.taskReviewCount).toBe(0)
+  })
+
+  it("graceful degradation with {0,0} scores reverts task (not infinite loop)", async () => {
+    await exec("select_mode", { mode: "GREENFIELD", feature_name: "gd-feat" })
+    await ctx.engine!.store.update("s1", (d) => {
+      d.phase = "IMPLEMENTATION"
+      d.phaseState = "DRAFT"
+      d.implDag = [
+        { id: "T1", description: "Setup", dependencies: [], expectedTests: [], expectedFiles: [], estimatedComplexity: "small", status: "complete" },
+      ]
+      d.currentTaskId = null
+      d.taskCompletionInProgress = "T1"
+      d.taskReviewCount = 0
+    })
+
+    // Simulate graceful degradation: passed=true but scores={0,0}
+    // parseTaskReviewResult should override to passed=false, reverting the task
+    const result = await exec("submit_task_review", {
+      review_output: JSON.stringify({
+        passed: true,
+        issues: ["Review dispatch failed: subprocess timed out"],
+        scores: { code_quality: 0, error_handling: 0 },
+        reasoning: "Graceful degradation",
+      }),
+    })
+    expect(result).toContain("FAILED")
+
+    const state = ctx.engine!.store.get("s1")
+    // Task reverted — NOT auto-accepted
+    expect(state?.implDag?.find((t) => t.id === "T1")?.status).toBe("pending")
+    expect(state?.currentTaskId).toBe("T1")
+    // Gate cleared — agent can retry
+    expect(state?.taskCompletionInProgress).toBeNull()
+    // Count incremented — will eventually hit force-accept cap
+    expect(state?.taskReviewCount).toBe(1)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// task.getReviewContext
+// ---------------------------------------------------------------------------
+
+describe("task.getReviewContext", () => {
+  let agentCtx: BridgeContext
+
+  beforeEach(async () => {
+    agentCtx = makeBridgeContext()
+    agentCtx.capabilities = { selfReview: "agent-only", orchestrator: false, discoveryFleet: false }
+    await handleInit({ projectDir: tmpDir, capabilities: { selfReview: "agent-only", orchestrator: false, discoveryFleet: false } }, agentCtx)
+    await handleSessionCreated({ sessionId: "rc-session" }, agentCtx)
+  })
+
+  it("returns review prompt when task review is pending", async () => {
+    await agentCtx.engine!.store.update("rc-session", (d) => {
+      d.mode = "GREENFIELD"
+      d.featureName = "rc-feat"
+      d.phase = "IMPLEMENTATION"
+      d.phaseState = "DRAFT"
+      d.implDag = [
+        { id: "T1", description: "Setup project", dependencies: [], expectedTests: ["tests/setup.test.ts"], expectedFiles: ["src/setup.ts"], estimatedComplexity: "small", status: "complete" },
+        { id: "T2", description: "Core logic", dependencies: ["T1"], expectedTests: [], expectedFiles: [], estimatedComplexity: "medium", status: "pending" },
+      ]
+      d.currentTaskId = "T2"
+      d.taskCompletionInProgress = "T1"
+    })
+
+    const result = await handleTaskGetReviewContext({ sessionId: "rc-session" }, agentCtx)
+    expect(result).not.toBeNull()
+    expect(typeof result).toBe("string")
+    expect(result as string).toContain("T1")
+    expect(result as string).toContain("Setup project")
+    // Should include adjacent task info (T2 is downstream of T1)
+    expect(result as string).toContain("T2")
+  })
+
+  it("returns null when no task review is pending", async () => {
+    await agentCtx.engine!.store.update("rc-session", (d) => {
+      d.mode = "GREENFIELD"
+      d.featureName = "rc-feat2"
+      d.phase = "IMPLEMENTATION"
+      d.phaseState = "DRAFT"
+      d.implDag = [
+        { id: "T1", description: "Setup", dependencies: [], expectedTests: [], expectedFiles: [], estimatedComplexity: "small", status: "pending" },
+      ]
+      d.currentTaskId = "T1"
+      d.taskCompletionInProgress = null
+    })
+
+    const result = await handleTaskGetReviewContext({ sessionId: "rc-session" }, agentCtx)
+    expect(result).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Re-entry clearance cycle and force-accept
+// ---------------------------------------------------------------------------
+
+describe("tool.execute — task review edge cases", () => {
+  it("allows mark_task_complete after review pass clears the gate", async () => {
+    await exec("select_mode", { mode: "GREENFIELD", feature_name: "cycle-feat" })
+    await ctx.engine!.store.update("s1", (d) => {
+      d.phase = "IMPLEMENTATION"
+      d.phaseState = "DRAFT"
+      d.implDag = [
+        { id: "T1", description: "First", dependencies: [], expectedTests: [], expectedFiles: [], estimatedComplexity: "small", status: "pending" },
+        { id: "T2", description: "Second", dependencies: ["T1"], expectedTests: [], expectedFiles: [], estimatedComplexity: "small", status: "pending" },
+      ]
+      d.currentTaskId = "T1"
+    })
+
+    // Complete T1
+    const r1 = await exec("mark_task_complete", { task_id: "T1", implementation_summary: "Built T1", tests_passing: true })
+    expect(r1).toContain("Per-task review required")
+
+    // Submit passing review
+    const r2 = await exec("submit_task_review", {
+      review_output: JSON.stringify({ passed: true, issues: [], scores: { code_quality: 9, error_handling: 9 }, reasoning: "Good" }),
+    })
+    expect(r2).toContain("review passed")
+
+    // Gate should be cleared — T2 should now be completable
+    const state = ctx.engine!.store.get("s1")
+    expect(state?.taskCompletionInProgress).toBeNull()
+    expect(state?.currentTaskId).toBe("T2")
+
+    // Complete T2 — should NOT hit re-entry guard
+    await ctx.engine!.store.update("s1", (d) => {
+      d.implDag![1]!.status = "pending"
+    })
+    const r3 = await exec("mark_task_complete", { task_id: "T2", implementation_summary: "Built T2", tests_passing: true })
+    expect(r3).toContain("Per-task review required")
+    expect(r3).not.toContain("already awaiting review")
+  })
+
+  it("force-accepts after MAX_TASK_REVIEW_ITERATIONS", async () => {
+    await exec("select_mode", { mode: "GREENFIELD", feature_name: "cap-feat" })
+    await ctx.engine!.store.update("s1", (d) => {
+      d.phase = "IMPLEMENTATION"
+      d.phaseState = "DRAFT"
+      d.implDag = [
+        { id: "T1", description: "Stubborn task", dependencies: [], expectedTests: [], expectedFiles: [], estimatedComplexity: "small", status: "complete" },
+      ]
+      d.currentTaskId = null
+      d.taskCompletionInProgress = "T1"
+      d.taskReviewCount = 10 // At the cap
+    })
+
+    // Submit failing review when at cap — should force-accept
+    const result = await exec("submit_task_review", {
+      review_output: JSON.stringify({ passed: false, issues: ["Still broken"], reasoning: "Won't pass" }),
+    })
+    expect(result).toContain("force-accepted")
+
+    const state = ctx.engine!.store.get("s1")
+    expect(state?.taskCompletionInProgress).toBeNull()
+    expect(state?.taskReviewCount).toBe(0)
+  })
+
+  it("passes implementation_summary to review prompt", async () => {
+    await exec("select_mode", { mode: "GREENFIELD", feature_name: "summary-feat" })
+    await ctx.engine!.store.update("s1", (d) => {
+      d.phase = "IMPLEMENTATION"
+      d.phaseState = "DRAFT"
+      d.implDag = [
+        { id: "T1", description: "Setup", dependencies: [], expectedTests: [], expectedFiles: [], estimatedComplexity: "small", status: "pending" },
+      ]
+      d.currentTaskId = "T1"
+    })
+
+    const result = await exec("mark_task_complete", {
+      task_id: "T1",
+      implementation_summary: "Built the auth module with JWT tokens",
+      tests_passing: true,
+    })
+    // The review prompt should include the actual summary, not "(see task files)"
+    expect(result).toContain("Built the auth module with JWT tokens")
+    expect(result).not.toContain("(see task files)")
   })
 })

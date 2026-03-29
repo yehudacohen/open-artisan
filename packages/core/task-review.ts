@@ -18,7 +18,7 @@
  * review is:
  *   - Scoped to a single DAG task (not the whole implementation)
  *   - Has a shorter, focused criteria list (5-6 items, not 12+)
- *   - Does NOT use quality scoring ([Q] criteria) — pass/fail only
+ *   - Uses [Q] quality scoring (code_quality, error_handling) with minimum threshold of 8/10
  *   - Does NOT have a rebuttal loop
  *   - Returns a simple pass/fail with issues list
  *
@@ -72,11 +72,18 @@ export interface TaskReviewRequest {
   stateDir?: string
 }
 
+export interface TaskReviewScores {
+  code_quality: number
+  error_handling: number
+}
+
 export interface TaskReviewSuccess {
   success: true
   passed: boolean
   /** Issues found (empty if passed) */
   issues: string[]
+  /** Quality scores (1-10 per dimension, minimum 8 to pass) */
+  scores: TaskReviewScores | null
   /** Raw reviewer reasoning */
   reasoning: string
 }
@@ -224,7 +231,19 @@ export function buildTaskReviewPrompt(req: TaskReviewRequest): string {
     lines.push("   task boundary is affected (e.g., 'INTEGRATION_GAP: T1→T2: queue config not created').")
   }
 
-  const totalChecks = (req.adjacentTasks && req.adjacentTasks.length > 0) ? "six" : "five"
+  const hasAdjacentTasks = req.adjacentTasks && req.adjacentTasks.length > 0
+  const totalChecks = hasAdjacentTasks ? "eight" : "seven"
+
+  // Quality scoring criteria
+  lines.push("")
+  lines.push("## Quality Scoring")
+  lines.push("")
+  lines.push("In addition to the pass/fail checks above, score the implementation on these dimensions (1-10):")
+  lines.push("- **[Q] Code quality** — naming clarity, structure, readability, idiomatic patterns. Minimum: 8/10.")
+  lines.push("- **[Q] Error handling** — edge cases covered, failure modes handled, no silent swallowing. Minimum: 8/10.")
+  lines.push("")
+  lines.push("If ANY quality score is below 8, the task FAILS regardless of other checks. Include specific")
+  lines.push("evidence for each score (cite file:line for low scores, explain what needs improvement).")
 
   lines.push("")
   lines.push("## Response Format")
@@ -233,15 +252,18 @@ export function buildTaskReviewPrompt(req: TaskReviewRequest): string {
   lines.push("```json")
   lines.push(JSON.stringify({
     passed: false,
-    issues: ["Test xyz.test.ts fails with error: ...", "Method foo() missing from BarService implementation", "STUB: src/stager.ts:42 returns hardcoded { rowsCopied: 0 }", "INTEGRATION_GAP: T1→T2: DI binding for FooService not registered"],
-    reasoning: "Tests pass but stub detection found hardcoded return values in integration task...",
+    issues: ["Test xyz.test.ts fails with error: ...", "STUB: src/stager.ts:42 returns hardcoded { rowsCopied: 0 }", "INTEGRATION_GAP: T1→T2: DI binding for FooService not registered"],
+    scores: { code_quality: 7, error_handling: 9 },
+    reasoning: "Tests pass but code quality score below threshold due to unclear naming in...",
   }, null, 2))
   lines.push("```")
   lines.push("")
-  lines.push(`Set \`passed\` to \`true\` ONLY if ALL ${totalChecks} checks pass. List specific issues in the \`issues\` array.`)
+  lines.push(`Set \`passed\` to \`true\` ONLY if ALL ${totalChecks} checks pass AND all quality scores are ≥ 8.`)
+  lines.push("List specific issues in the \`issues\` array.")
   lines.push("If tests fail, include the actual error output. If interfaces don't match, cite the specific mismatch.")
   lines.push("For stubs, prefix the issue with 'STUB:' and include the file path and line number.")
   lines.push("For integration gaps, prefix with 'INTEGRATION_GAP:' and identify the boundary.")
+  lines.push("For quality scores below 8, explain what needs improvement with file:line references.")
 
   return lines.join("\n")
 }
@@ -250,19 +272,47 @@ export function buildTaskReviewPrompt(req: TaskReviewRequest): string {
 // Result parser
 // ---------------------------------------------------------------------------
 
+const MIN_QUALITY_SCORE = 8
+
 export function parseTaskReviewResult(raw: string): TaskReviewResult {
   try {
     const json = extractJsonFromText(raw)
     const parsed = JSON.parse(json) as {
       passed: boolean
       issues: string[]
+      scores?: { code_quality?: number; error_handling?: number }
       reasoning: string
     }
 
+    const issues = Array.isArray(parsed.issues) ? parsed.issues.filter((i) => typeof i === "string") : []
+
+    // Parse quality scores
+    let scores: TaskReviewScores | null = null
+    if (parsed.scores && typeof parsed.scores === "object") {
+      scores = {
+        code_quality: typeof parsed.scores.code_quality === "number" ? parsed.scores.code_quality : 0,
+        error_handling: typeof parsed.scores.error_handling === "number" ? parsed.scores.error_handling : 0,
+      }
+      // Quality scores below minimum fail the review even if passed=true
+      if (scores.code_quality < MIN_QUALITY_SCORE) {
+        issues.push(`[Q] Code quality score ${scores.code_quality}/10 is below minimum ${MIN_QUALITY_SCORE}/10`)
+      }
+      if (scores.error_handling < MIN_QUALITY_SCORE) {
+        issues.push(`[Q] Error handling score ${scores.error_handling}/10 is below minimum ${MIN_QUALITY_SCORE}/10`)
+      }
+    }
+
+    // Override passed=true if quality scores are below threshold
+    const qualityFailed = scores !== null && (
+      scores.code_quality < MIN_QUALITY_SCORE || scores.error_handling < MIN_QUALITY_SCORE
+    )
+    const passed = parsed.passed === true && !qualityFailed
+
     return {
       success: true,
-      passed: parsed.passed === true,
-      issues: Array.isArray(parsed.issues) ? parsed.issues.filter((i) => typeof i === "string") : [],
+      passed,
+      issues,
+      scores,
       reasoning: typeof parsed.reasoning === "string" ? parsed.reasoning : "",
     }
   } catch (err) {

@@ -241,6 +241,22 @@ export const MAX_SUB_WORKFLOW_DEPTH = 3
 export const SUB_WORKFLOW_TIMEOUT_MS = 1_800_000
 
 // ---------------------------------------------------------------------------
+// Phase ordering — single source of truth
+// ---------------------------------------------------------------------------
+
+/**
+ * Canonical ordering of workflow phases. Used by propose_backtrack to validate
+ * that the target phase is earlier than the current, and by the scheduler to
+ * determine phase progression.
+ *
+ * Imported by: state-machine.ts (implicit), propose-backtrack.ts, transitions.ts
+ */
+export const PHASE_ORDER: import("./types").Phase[] = [
+  "MODE_SELECT", "DISCOVERY", "PLANNING", "INTERFACES",
+  "TESTS", "IMPL_PLAN", "IMPLEMENTATION", "DONE",
+]
+
+// ---------------------------------------------------------------------------
 // Workflow tool names — single source of truth
 // ---------------------------------------------------------------------------
 

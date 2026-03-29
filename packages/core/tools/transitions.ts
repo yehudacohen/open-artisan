@@ -22,7 +22,8 @@ import { evaluateMarkSatisfied, countExpectedBlockingCriteria } from "./mark-sat
 import { processMarkAnalyzeComplete } from "./mark-analyze-complete"
 import { getAcceptanceCriteria } from "../hooks/system-transform"
 import { PHASE_TO_ARTIFACT } from "../artifacts"
-import { MAX_REVIEW_ITERATIONS, MAX_FEEDBACK_CHARS } from "../constants"
+import { MAX_REVIEW_ITERATIONS, MAX_FEEDBACK_CHARS, PHASE_ORDER } from "../constants"
+import type { MarkAnalyzeCompleteArgs } from "./mark-analyze-complete"
 
 // ---------------------------------------------------------------------------
 // mark_satisfied — agent self-review (no isolated reviewer)
@@ -138,7 +139,7 @@ export interface MarkAnalyzeCompleteTransition {
  * Used in agent-only mode where the discovery fleet is not available.
  */
 export function computeMarkAnalyzeCompleteTransition(
-  args: { analysis_summary?: string },
+  args: MarkAnalyzeCompleteArgs,
   state: WorkflowState,
   sm: StateMachine,
 ): { success: true; transition: MarkAnalyzeCompleteTransition } | { success: false; error: string } {
@@ -146,7 +147,7 @@ export function computeMarkAnalyzeCompleteTransition(
     return { success: false, error: `mark_analyze_complete can only be called in DISCOVERY/ANALYZE (current: ${state.phase}/${state.phaseState}).` }
   }
 
-  const result = processMarkAnalyzeComplete(args as any)
+  const result = processMarkAnalyzeComplete(args)
   const outcome = sm.transition(state.phase, state.phaseState, "analyze_complete", state.mode)
   if (!outcome.success) return { success: false, error: outcome.message }
 
@@ -155,7 +156,7 @@ export function computeMarkAnalyzeCompleteTransition(
     transition: {
       nextPhase: outcome.nextPhase,
       nextPhaseState: outcome.nextPhaseState,
-      analysisSummary: args.analysis_summary?.trim() ?? null,
+      analysisSummary: args.analysis_summary?.trim() || null,
       responseMessage: result.responseMessage,
     },
   }
@@ -180,6 +181,7 @@ export function computeSubmitFeedbackReviseTransition(
   feedbackText: string,
   state: WorkflowState,
   sm: StateMachine,
+  now = Date.now(),
 ): { success: true; transition: SubmitFeedbackReviseTransition } | { success: false; error: string } {
   const outcome = sm.transition(state.phase, state.phaseState, "user_feedback", state.mode)
   if (!outcome.success) return { success: false, error: outcome.message }
@@ -192,7 +194,7 @@ export function computeSubmitFeedbackReviseTransition(
       feedbackEntry: {
         phase: state.phase,
         feedback: feedbackText.slice(0, MAX_FEEDBACK_CHARS),
-        timestamp: Date.now(),
+        timestamp: now,
       },
       responseMessage:
         `Revision requested. Transitioning to ${outcome.nextPhase}/${outcome.nextPhaseState}. ` +
@@ -204,11 +206,6 @@ export function computeSubmitFeedbackReviseTransition(
 // ---------------------------------------------------------------------------
 // propose_backtrack — direct backtrack (no orchestrator validation)
 // ---------------------------------------------------------------------------
-
-const PHASE_ORDER: Phase[] = [
-  "MODE_SELECT", "DISCOVERY", "PLANNING", "INTERFACES",
-  "TESTS", "IMPL_PLAN", "IMPLEMENTATION", "DONE",
-]
 
 export interface ProposeBacktrackTransition {
   targetPhase: Phase
@@ -226,6 +223,7 @@ export interface ProposeBacktrackTransition {
 export function computeProposeBacktrackTransition(
   args: { target_phase: string; reason: string },
   state: WorkflowState,
+  now = Date.now(),
 ): { success: true; transition: ProposeBacktrackTransition } | { success: false; error: string } {
   if (state.phaseState !== "DRAFT" && state.phaseState !== "REVISE") {
     return { success: false, error: `propose_backtrack can only be called from DRAFT or REVISE state (current: ${state.phase}/${state.phaseState}).` }
@@ -262,7 +260,7 @@ export function computeProposeBacktrackTransition(
       feedbackEntry: {
         phase: state.phase,
         feedback: `[propose_backtrack → ${args.target_phase}] ${args.reason.slice(0, MAX_FEEDBACK_CHARS - 50)}`,
-        timestamp: Date.now(),
+        timestamp: now,
       },
       responseMessage: `Backtrack accepted. Moved to ${args.target_phase}/DRAFT. ${args.reason}`,
     },

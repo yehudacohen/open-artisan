@@ -54,20 +54,7 @@ export type ProposeBacktrackOutcome =
   | ProposeBacktrackReject
   | ProposeBacktrackError
 
-// ---------------------------------------------------------------------------
-// Phase ordering (duplicated from state-machine.ts which doesn't export it)
-// ---------------------------------------------------------------------------
-
-const PHASE_ORDER: Phase[] = [
-  "MODE_SELECT",
-  "DISCOVERY",
-  "PLANNING",
-  "INTERFACES",
-  "TESTS",
-  "IMPL_PLAN",
-  "IMPLEMENTATION",
-  "DONE",
-]
+import { PHASE_ORDER } from "../constants"
 
 // ---------------------------------------------------------------------------
 // Handler

@@ -264,6 +264,7 @@ Workflow tools (accepts --flags or JSON on stdin):
   check-prior-workflow     Check for prior workflow state
   resolve-human-gate       Set human gate on a task
   propose-backtrack        Propose going to an earlier phase
+  spawn-sub-workflow       Delegate a DAG task to a child workflow
   query-parent-workflow    Read parent workflow state
   query-child-workflow     Read child workflow state
 

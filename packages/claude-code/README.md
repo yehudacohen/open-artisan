@@ -175,7 +175,7 @@ This:
 2. Merges hooks into `.claude/settings.json` (preserves existing config)
 3. Creates `/artisan` skill at `.claude/skills/artisan/SKILL.md`
 4. Places `CLAUDE-WORKFLOW.md` alongside CLAUDE.md
-5. Starts the server and verifies connectivity
+5. Creates `./artisan` CLI wrapper script
 
 ## File Structure
 

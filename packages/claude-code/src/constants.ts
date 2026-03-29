@@ -4,7 +4,7 @@
 import { join } from "node:path"
 
 // Re-export PID_FILENAME from bridge — single source of truth
-export { PID_FILENAME } from "../../bridge/pid-file"
+export { PID_FILENAME } from "#bridge/pid-file"
 
 /** Default directory for open-artisan state, relative to project root. */
 export const DEFAULT_STATE_DIR_NAME = ".openartisan"

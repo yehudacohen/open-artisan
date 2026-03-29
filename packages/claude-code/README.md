@@ -189,8 +189,6 @@ packages/claude-code/
   src/
     socket-transport.ts     Unix domain socket JSON-RPC transport
     hook-handlers.ts        PreToolUse, Stop, SessionStart, PreCompact handlers
-    session-tracker.ts      Session ID mapping (in-memory + file)
-    cli-parser.ts           Parse stdin JSON / CLI flags to tool params
     constants.ts            Socket path, timeouts, default responses
   templates/
     settings.json.tmpl      .claude/settings.json hooks template

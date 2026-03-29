@@ -1,0 +1,46 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bun run {{ARTISAN_HOOK_PATH}} pre-tool-use"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bun run {{ARTISAN_HOOK_PATH}} stop"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bun run {{ARTISAN_HOOK_PATH}} session-start"
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bun run {{ARTISAN_HOOK_PATH}} pre-compact"
+          }
+        ]
+      }
+    ]
+  }
+}

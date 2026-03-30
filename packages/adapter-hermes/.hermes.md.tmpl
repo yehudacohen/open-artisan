@@ -49,16 +49,22 @@ Address ALL feedback points. Call `oa_request_review` when done. No check-ins, n
 
 | Phase / Sub-State | Allowed | Blocked |
 |-------------------|---------|---------|
-| MODE_SELECT | Workflow tools only | All file writes, all shell execution |
-| DISCOVERY/SCAN | Read-only tools, workflow tools | All file writes |
-| DISCOVERY/ANALYZE | Read-only tools, workflow tools | All file writes |
-| DISCOVERY/CONVENTIONS | `.openartisan/` writes only | Project source writes |
-| PLANNING | Workflow tools only | All file writes, all shell execution |
+| MODE_SELECT | Workflow tools, read-only shell | File writes (edit_file, write_file, create_file) |
+| DISCOVERY/SCAN | Read-only tools, workflow tools | File writes, shell execution |
+| DISCOVERY/ANALYZE | Read-only tools, workflow tools | File writes, shell execution |
+| DISCOVERY/CONVENTIONS | `.openartisan/` writes only | Project source writes, shell execution |
+| PLANNING/DRAFT | Workflow tools only | File writes, shell execution |
+| PLANNING/REVIEW | `.openartisan/` writes, read-only shell | Project source writes |
+| PLANNING/USER_GATE | Read-only shell, workflow tools | File writes |
+| PLANNING/REVISE | `.openartisan/` writes, read-only shell | Project source writes |
 | INTERFACES | Interface/type files only (.py, .ts, .d.ts, .proto, etc.) | Implementation files |
 | TESTS | Test files only | Implementation files |
-| IMPL_PLAN | Workflow tools only | All file writes, all shell execution |
+| IMPL_PLAN/DRAFT | Workflow tools only | File writes, shell execution |
+| IMPL_PLAN/REVIEW | `.openartisan/` writes, read-only shell | Project source writes |
+| IMPL_PLAN/USER_GATE | Read-only shell, workflow tools | File writes |
+| IMPL_PLAN/REVISE | `.openartisan/` writes, read-only shell | Project source writes |
 | IMPLEMENTATION | Files listed in current task's `**Files:**` | Files belonging to other tasks |
-| DONE | All tools | Nothing blocked |
+| DONE | Read-only tools, workflow tools | File writes |
 
 `.env` writes are **always blocked** regardless of phase.
 

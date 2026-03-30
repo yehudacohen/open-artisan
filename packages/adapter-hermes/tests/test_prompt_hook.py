@@ -6,9 +6,12 @@ in the correct format, and bridge failures degrade gracefully.
 """
 from __future__ import annotations
 
+import json
+import subprocess
 import pytest
+from unittest.mock import patch, MagicMock
 
-from hermes_adapter.prompt_hook import create_prompt_hook
+from hermes_adapter.prompt_hook import create_prompt_hook, _dispatch_task_review, _auto_accept_review
 from hermes_adapter.types import BridgeError
 
 from conftest import MockBridgeClient
@@ -137,3 +140,204 @@ class TestPerPhaseContent:
         result = hook()
         assert "T3" in result["context"]
         assert "IMPLEMENTATION" in result["context"]
+
+
+# ---------------------------------------------------------------------------
+# USER_GATE detection
+# ---------------------------------------------------------------------------
+
+
+class TestUserGateDetection:
+    """Hook calls message.process at USER_GATE for structural enforcement."""
+
+    def test_calls_message_process_at_user_gate(self, started_bridge):
+        """When state is USER_GATE, hook should call message.process."""
+        started_bridge.set_response("state.get", {"phaseState": "USER_GATE"})
+        started_bridge.set_response("message.process", None)
+        started_bridge.set_response("prompt.build", "prompt text")
+        hook = create_prompt_hook(started_bridge, "s1")
+        hook()
+        msg_calls = started_bridge.get_calls("message.process")
+        assert len(msg_calls) == 1
+        assert msg_calls[0][1]["sessionId"] == "s1"
+
+    def test_does_not_call_message_process_at_draft(self, started_bridge):
+        """When state is DRAFT, hook should NOT call message.process."""
+        started_bridge.set_response("state.get", {"phaseState": "DRAFT"})
+        started_bridge.set_response("prompt.build", "prompt text")
+        hook = create_prompt_hook(started_bridge, "s1")
+        hook()
+        msg_calls = started_bridge.get_calls("message.process")
+        assert len(msg_calls) == 0
+
+    def test_state_get_failure_does_not_crash(self, started_bridge):
+        """If state.get fails, hook should still return prompt context."""
+        def raise_error(params):
+            raise BridgeError("state failed")
+
+        started_bridge.set_response_fn("state.get", raise_error)
+        started_bridge.set_response("prompt.build", "fallback prompt")
+        hook = create_prompt_hook(started_bridge, "s1")
+        result = hook()
+        assert result["context"] == "fallback prompt"
+
+
+# ---------------------------------------------------------------------------
+# Task review dispatch
+# ---------------------------------------------------------------------------
+
+
+class TestTaskReviewDispatch:
+    """Hook dispatches isolated reviewer when taskCompletionInProgress is set."""
+
+    def test_calls_task_get_review_context(self, started_bridge):
+        """When taskCompletionInProgress is set, should call task.getReviewContext."""
+        started_bridge.set_response("state.get", {"taskCompletionInProgress": "T1", "phaseState": "DRAFT"})
+        started_bridge.set_response("task.getReviewContext", None)  # No prompt = skip dispatch
+        started_bridge.set_response("prompt.build", "prompt")
+        hook = create_prompt_hook(started_bridge, "s1")
+        hook()
+        ctx_calls = started_bridge.get_calls("task.getReviewContext")
+        assert len(ctx_calls) == 1
+
+    def test_skips_dispatch_when_no_review_pending(self, started_bridge):
+        """When taskCompletionInProgress is None, should NOT call task.getReviewContext."""
+        started_bridge.set_response("state.get", {"taskCompletionInProgress": None, "phaseState": "DRAFT"})
+        started_bridge.set_response("prompt.build", "prompt")
+        hook = create_prompt_hook(started_bridge, "s1")
+        hook()
+        ctx_calls = started_bridge.get_calls("task.getReviewContext")
+        assert len(ctx_calls) == 0
+
+    def test_dispatch_failure_does_not_crash_hook(self, started_bridge):
+        """If task review dispatch fails, hook should still return prompt."""
+        def raise_on_review(params):
+            raise BridgeError("review context failed")
+
+        started_bridge.set_response("state.get", {"taskCompletionInProgress": "T1", "phaseState": "DRAFT"})
+        started_bridge.set_response_fn("task.getReviewContext", raise_on_review)
+        started_bridge.set_response("prompt.build", "still works")
+        hook = create_prompt_hook(started_bridge, "s1")
+        result = hook()
+        assert result["context"] == "still works"
+
+
+# ---------------------------------------------------------------------------
+# _dispatch_task_review subprocess tests
+# ---------------------------------------------------------------------------
+
+
+class TestDispatchTaskReviewSubprocess:
+    """Tests for the actual subprocess dispatch path in _dispatch_task_review."""
+
+    def test_successful_dispatch_submits_review(self, started_bridge):
+        """On successful subprocess, should call submit_task_review via tool.execute."""
+        started_bridge.set_response("task.getReviewContext", "Review prompt here")
+        started_bridge.set_response("tool.execute", "Task review passed")
+        state = {"taskCompletionInProgress": "T1"}
+
+        mock_result = MagicMock()
+        mock_result.stdout = json.dumps({"passed": True, "issues": [], "scores": {"code_quality": 9, "error_handling": 9}, "reasoning": "All good"})
+
+        with patch("hermes_adapter.prompt_hook.subprocess.run", return_value=mock_result):
+            _dispatch_task_review(started_bridge, "s1", state, "/tmp/project")
+
+        # Should have called tool.execute with submit_task_review
+        tool_calls = started_bridge.get_calls("tool.execute")
+        assert len(tool_calls) == 1
+        assert tool_calls[0][1]["name"] == "submit_task_review"
+        assert "review_output" in tool_calls[0][1]["args"]
+
+    def test_subprocess_not_found_calls_auto_accept(self, started_bridge):
+        """When claude CLI is not found, should call _auto_accept_review."""
+        started_bridge.set_response("task.getReviewContext", "Review prompt")
+        started_bridge.set_response("tool.execute", "ok")
+        state = {"taskCompletionInProgress": "T1"}
+
+        with patch("hermes_adapter.prompt_hook.subprocess.run", side_effect=FileNotFoundError("claude not found")):
+            _dispatch_task_review(started_bridge, "s1", state, "/tmp/project")
+
+        # Should have submitted auto-accept via tool.execute
+        tool_calls = started_bridge.get_calls("tool.execute")
+        assert len(tool_calls) == 1
+        args = tool_calls[0][1]["args"]
+        review = json.loads(args["review_output"])
+        assert review["passed"] is False
+        assert any("dispatch failed" in i.lower() for i in review["issues"])
+
+    def test_subprocess_timeout_calls_auto_accept(self, started_bridge):
+        """When subprocess times out, should call _auto_accept_review."""
+        started_bridge.set_response("task.getReviewContext", "Review prompt")
+        started_bridge.set_response("tool.execute", "ok")
+        state = {"taskCompletionInProgress": "T1"}
+
+        with patch("hermes_adapter.prompt_hook.subprocess.run", side_effect=subprocess.TimeoutExpired("claude", 180)):
+            _dispatch_task_review(started_bridge, "s1", state, "/tmp/project")
+
+        tool_calls = started_bridge.get_calls("tool.execute")
+        assert len(tool_calls) == 1
+        review = json.loads(tool_calls[0][1]["args"]["review_output"])
+        assert review["passed"] is False
+
+    def test_empty_reviewer_output_calls_auto_accept(self, started_bridge):
+        """When reviewer returns empty output, should call _auto_accept_review."""
+        started_bridge.set_response("task.getReviewContext", "Review prompt")
+        started_bridge.set_response("tool.execute", "ok")
+        state = {"taskCompletionInProgress": "T1"}
+
+        mock_result = MagicMock()
+        mock_result.stdout = ""
+
+        with patch("hermes_adapter.prompt_hook.subprocess.run", return_value=mock_result):
+            _dispatch_task_review(started_bridge, "s1", state, "/tmp/project")
+
+        tool_calls = started_bridge.get_calls("tool.execute")
+        assert len(tool_calls) == 1
+        review = json.loads(tool_calls[0][1]["args"]["review_output"])
+        assert review["passed"] is False
+
+    def test_no_review_context_skips_dispatch(self, started_bridge):
+        """When task.getReviewContext returns None, should skip dispatch entirely."""
+        started_bridge.set_response("task.getReviewContext", None)
+        state = {"taskCompletionInProgress": "T1"}
+
+        _dispatch_task_review(started_bridge, "s1", state, "/tmp/project")
+
+        # No tool.execute calls — dispatch was skipped
+        tool_calls = started_bridge.get_calls("tool.execute")
+        assert len(tool_calls) == 0
+
+
+# ---------------------------------------------------------------------------
+# _auto_accept_review tests
+# ---------------------------------------------------------------------------
+
+
+class TestAutoAcceptReview:
+    """Tests for the graceful degradation gate-clearing function."""
+
+    def test_submits_failing_review_to_clear_gate(self, started_bridge):
+        """Should submit a review with passed=False to clear taskCompletionInProgress."""
+        started_bridge.set_response("tool.execute", "ok")
+
+        _auto_accept_review(started_bridge, "s1", "/tmp/project", "subprocess timed out")
+
+        tool_calls = started_bridge.get_calls("tool.execute")
+        assert len(tool_calls) == 1
+        params = tool_calls[0][1]
+        assert params["name"] == "submit_task_review"
+        review = json.loads(params["args"]["review_output"])
+        assert review["passed"] is False
+        assert review["scores"]["code_quality"] == 0
+        assert review["scores"]["error_handling"] == 0
+        assert any("subprocess timed out" in i for i in review["issues"])
+
+    def test_passes_correct_context(self, started_bridge):
+        """Should pass sessionId and directory in context."""
+        started_bridge.set_response("tool.execute", "ok")
+
+        _auto_accept_review(started_bridge, "my-session", "/my/project", "reason")
+
+        params = tool_calls = started_bridge.get_calls("tool.execute")[0][1]
+        assert params["context"]["sessionId"] == "my-session"
+        assert params["context"]["directory"] == "/my/project"

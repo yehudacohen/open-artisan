@@ -16,7 +16,7 @@ import logging
 import subprocess
 from typing import Any
 
-from .types import BridgeClient, BridgeError
+from .types import BridgeClient
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +54,7 @@ def create_prompt_hook(
         try:
             state = bridge.call("state.get", {"sessionId": session_id})
             if not state or not isinstance(state, dict):
+                logger.debug("state.get returned non-dict: %s", type(state).__name__)
                 state = {}
 
             # Per-task isolated review: dispatch reviewer subprocess
@@ -69,8 +70,8 @@ def create_prompt_hook(
                     "sessionId": session_id,
                     "parts": [{"type": "text", "text": "(user message detected via pre_llm_call)"}],
                 })
-        except (BridgeError, Exception):
-            pass  # Non-fatal — don't block the LLM call
+        except Exception:
+            logger.debug("State/gate check failed in pre_llm_call hook", exc_info=True)
 
         # Build the workflow prompt for this turn
         try:
@@ -78,7 +79,8 @@ def create_prompt_hook(
             if result is None or not isinstance(result, str):
                 return {"context": ""}
             return {"context": result}
-        except (BridgeError, Exception):
+        except Exception:
+            logger.debug("prompt.build failed in pre_llm_call hook", exc_info=True)
             return {"context": ""}
 
     return hook
@@ -130,13 +132,13 @@ def _dispatch_task_review(
         })
         logger.info("Per-task review dispatched for task %s", state.get("taskCompletionInProgress"))
 
-    except (BridgeError, Exception) as e:
+    except Exception as e:
         logger.warning("Per-task review dispatch failed: %s", e)
         # Graceful degradation: auto-accept to clear the gate
         try:
             _auto_accept_review(bridge, session_id, project_dir, str(e))
-        except Exception:
-            pass  # Last resort — don't crash the hook
+        except Exception as inner_e:
+            logger.debug("Auto-accept fallback also failed: %s", inner_e)
 
 
 def _auto_accept_review(
@@ -153,16 +155,15 @@ def _auto_accept_review(
     the agent isn't permanently stuck. The agent will see the task is
     still pending and can re-attempt mark_task_complete.
     """
-    import json as _json
     bridge.call("tool.execute", {
         "name": "submit_task_review",
         "args": {
-            "review_output": _json.dumps({
-                "passed": True,
+            "review_output": json.dumps({
+                "passed": False,
                 "issues": [f"Review dispatch failed: {reason}"],
                 "scores": {"code_quality": 0, "error_handling": 0},
                 "reasoning": "Graceful degradation: reviewer subprocess failed. "
-                             "Auto-accepted — full implementation review will catch issues.",
+                             "Task reverted to pending — full implementation review will catch issues.",
             }),
         },
         "context": {"sessionId": session_id, "directory": project_dir},

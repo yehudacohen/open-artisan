@@ -248,10 +248,10 @@ export async function handleStop(input: HookInput): Promise<HookOutput> {
           name: "submit_task_review",
           args: {
             review_output: JSON.stringify({
-              passed: true,
+              passed: false,
               issues: [`Review dispatch failed: ${errMsg}`],
               scores: { code_quality: 0, error_handling: 0 },
-              reasoning: "Graceful degradation: reviewer subprocess failed. Auto-accepted — full implementation review will catch issues.",
+              reasoning: "Graceful degradation: reviewer subprocess failed. Task reverted to pending — full implementation review will catch issues.",
             }),
           },
           context: { sessionId, directory: projectDir },

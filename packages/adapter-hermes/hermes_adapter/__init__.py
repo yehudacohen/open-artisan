@@ -77,7 +77,7 @@ async def _on_session_start(
         bridge.start(ctx.project_dir)
         bridge.call("lifecycle.sessionCreated", {"sessionId": ctx.session_id})
         logger.info("Bridge started for session %s", ctx.session_id)
-    except BridgeError as e:
+    except Exception as e:
         logger.error("Failed to start bridge: %s", e)
 
 
@@ -90,14 +90,20 @@ async def _on_session_end(
     1. Calls lifecycle.sessionDeleted
     2. Calls bridge.shutdown()
 
+    Both steps are individually protected — lifecycle hooks must never crash Hermes.
+
     Args:
         ctx: Hermes plugin context.
         bridge: Bridge client to shut down.
     """
     try:
         bridge.call("lifecycle.sessionDeleted", {"sessionId": ctx.session_id})
-    except BridgeError:
-        pass  # Best-effort — bridge may already be dead
+    except Exception as e:
+        logger.debug("lifecycle.sessionDeleted failed (bridge may be dead): %s", e)
 
-    bridge.shutdown()
+    try:
+        bridge.shutdown()
+    except Exception as e:
+        logger.debug("bridge.shutdown failed: %s", e)
+
     logger.info("Bridge shut down for session %s", ctx.session_id)

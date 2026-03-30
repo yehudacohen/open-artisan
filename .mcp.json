@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "open-artisan": {
+      "type": "stdio",
+      "command": "bun",
+      "args": ["run", "packages/claude-code/bin/artisan-mcp.ts"]
+    }
+  }
+}

@@ -176,6 +176,98 @@ The plugin is active whenever installed. To disable, either:
 
 The bridge subprocess is spawned eagerly in `on_session_start` and stays alive for the session.
 
+## Robot-Artisan Mode (Automated Workflows)
+
+To run fully automated workflows without human approval at USER_GATE, pass `agent="robot-artisan"` when creating the session:
+
+```python
+# In your Hermes integration code:
+bridge.call("lifecycle.sessionCreated", {
+    "sessionId": session_id,
+    "agent": "robot-artisan"
+})
+```
+
+When `activeAgent` is `"robot-artisan"`, the `pre_llm_call` hook automatically:
+1. Detects USER_GATE state
+2. Spawns an isolated auto-approver subprocess (`claude --print`)
+3. Evaluates the artifact against phase-specific criteria
+4. Auto-approves if confidence >= 0.7, otherwise routes to REVISE with feedback
+
+**Requirements:**
+- `claude` CLI must be installed and on PATH (for the auto-approver subprocess)
+- If `claude` is not available, the hook falls back gracefully — the agent continues at USER_GATE and can be approved manually
+
+**Note:** Robot-artisan mode still enforces all structural guarantees. The auto-approver runs in an isolated subprocess with no access to the authoring conversation. It can reject artifacts that don't meet quality standards.
+
+## Per-Task Review
+
+During IMPLEMENTATION, each `oa_mark_task_complete` call triggers an isolated per-task review:
+
+1. Bridge sets `taskCompletionInProgress` gate (blocks further writes)
+2. The `pre_llm_call` hook detects the pending review
+3. Spawns `claude --print` subprocess with the review prompt (isolated context)
+4. Review checks: tests pass, interface alignment, regressions, conventions, stub detection, integration seams
+5. Quality scores: code_quality and error_handling (minimum 8/10)
+6. If review passes: task advances. If fails: task reverts to pending with issues.
+
+If `claude` CLI is unavailable, the review auto-accepts with a failing score (task reverts to pending). After 10 failed review iterations, the task is force-accepted — the full implementation review at `oa_request_review` will catch remaining issues.
+
+## Troubleshooting
+
+### Bridge subprocess not starting
+
+```
+BridgeError: Failed to spawn bridge subprocess: ...
+```
+
+**Causes:**
+- `bun` not installed or not on PATH
+- Bridge CLI not found at expected location
+
+**Fix:**
+```bash
+# Verify bun is installed
+bun --version
+
+# Set bridge CLI path explicitly
+export OPENARTISAN_BRIDGE_CLI=/path/to/packages/bridge/cli.ts
+
+# Re-run setup to verify
+python -m hermes_adapter --project-dir .
+```
+
+### Bridge subprocess dies mid-session
+
+The adapter auto-reconnects on the next tool call. If reconnection fails:
+
+```
+BridgeError: Bridge subprocess died and reconnect failed
+```
+
+**Fix:** Restart the Hermes session. The bridge state is persisted to `.openartisan/<feature>/workflow-state.json` and will be restored on restart.
+
+### Per-task review subprocess fails
+
+```
+Isolated reviewer (claude CLI) not available or timed out
+```
+
+**Causes:**
+- `claude` CLI not installed
+- Anthropic API key not configured
+- Review prompt too large (timeout after 3 minutes)
+
+**Behavior:** Task reverts to pending (graceful degradation). The agent can re-attempt `oa_mark_task_complete`. After 10 failures, the task is force-accepted.
+
+### Guard blocks unexpected tool
+
+```
+{"error": "writes blocked in PLANNING/DRAFT", "phase": "PLANNING", "phaseState": "DRAFT"}
+```
+
+This is expected. The workflow guard blocks file writes during planning phases. Check the blocked-per-phase table in `.hermes.md` for what's allowed in each phase/sub-state.
+
 ## File Structure
 
 ```

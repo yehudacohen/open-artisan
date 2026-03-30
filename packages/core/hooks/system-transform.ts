@@ -565,6 +565,8 @@ ${designDocPath ? "For [D] design-invariant criteria, these are BINARY (met/not 
 5. Consistent with all prior approved artifacts (plan, interfaces, conventions)
 6. No reimplementation of existing utils, dependency capabilities, or functions that exist elsewhere in the codebase
 7. If the artifact proposes or builds custom code, is there a well-supported open source package that would have been a better choice? (Consider: maintenance burden, community support, feature completeness)
+8. Documentation complete — every user-facing feature, configuration option, and operational mode has documentation (README, inline help, or equivalent). Failure modes and recovery procedures are documented. If a feature exists in code but is not documented, it is not shippable.
+9. Test coverage for new code — any functionality added during IMPLEMENTATION that was not in the original TESTS phase must have corresponding tests. Setup scripts, new tools, new dispatch paths, and new error handling all require tests. Untested code paths are not shippable.
 [If the artifact is a pass-through:] Does the justification for why this phase is low-value hold up? Is the reason specific and verifiable, not vague? Would a reasonable engineer agree? Is the agent being lazy?
 
 ${qualityBlock}

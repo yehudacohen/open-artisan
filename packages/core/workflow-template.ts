@@ -5,9 +5,14 @@
  * This ensures CLAUDE-WORKFLOW.md and .hermes.md.tmpl stay in sync.
  *
  * Each adapter has a different tool invocation style:
- * - Claude Code: `./artisan <command>` via Bash
+ * - Claude Code: `./artisan <command>` via Bash (or MCP tools)
  * - Hermes: `oa_<tool_name>` via registered tools
  * - Future adapters: custom invocation patterns
+ *
+ * TODO: Integrate into adapter setup scripts (artisan-setup.ts, hermes __main__.py)
+ * so templates are generated from this source instead of maintained separately.
+ * Currently exported but not called — will be wired in when setup scripts are
+ * refactored to use shared generation.
  */
 
 export interface TemplateConfig {

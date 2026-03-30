@@ -187,11 +187,12 @@ async function ephemeralAutoApprovePrompt(
 // ---------------------------------------------------------------------------
 
 export function parseAutoApproveResult(raw: string): AutoApproveResult {
-  const parsed = JSON.parse(raw) as {
-    approve: boolean
-    confidence: number
-    reasoning: string
-    feedback?: string
+  let parsed: { approve: boolean; confidence: number; reasoning: string; feedback?: string }
+  try {
+    const json = extractJsonFromText(raw)
+    parsed = JSON.parse(json)
+  } catch (err) {
+    return { success: false, error: `Failed to parse auto-approve response: ${err instanceof Error ? err.message : String(err)}` }
   }
 
   if (typeof parsed.approve !== "boolean") {

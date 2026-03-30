@@ -413,8 +413,11 @@ const handleSubmitFeedback: ToolHandler = async (args, toolCtx, ctx) => {
           expectedFiles: state.reviewArtifactFiles.length > 0 ? state.reviewArtifactFiles : undefined,
         },
       )
-    } catch {
+    } catch (err) {
       // Non-fatal — git checkpoint failure should not block the workflow
+      ctx.engine?.log.warn("Git checkpoint failed", {
+        detail: err instanceof Error ? err.message : String(err),
+      })
     }
 
     return `Approved. Transitioning to ${outcome.nextPhase}/${outcome.nextPhaseState}.`

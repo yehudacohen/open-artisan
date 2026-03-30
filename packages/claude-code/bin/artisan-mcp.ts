@@ -266,6 +266,30 @@ const TOOLS = [
     },
   },
   {
+    name: "oa_submit_task_review",
+    description: "Submit per-task isolated review results.",
+    bridgeName: "submit_task_review",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        review_output: { type: "string", description: "Raw JSON output from the isolated reviewer subprocess." },
+      },
+      required: ["review_output"],
+    },
+  },
+  {
+    name: "oa_submit_auto_approve",
+    description: "Submit auto-approval results for robot-artisan mode at USER_GATE.",
+    bridgeName: "submit_auto_approve",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        review_output: { type: "string", description: "Raw JSON output from the auto-approver subprocess." },
+      },
+      required: ["review_output"],
+    },
+  },
+  {
     name: "oa_state",
     description: "Show the current workflow state (phase, mode, task, approved artifacts).",
     bridgeName: "_state_get",

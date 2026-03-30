@@ -290,6 +290,18 @@ const TOOLS = [
     },
   },
   {
+    name: "oa_reset_task",
+    description: "Reset specific task(s) to pending for re-implementation and re-review.",
+    bridgeName: "reset_task",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        task_id: { type: "string", description: "Single task ID to reset." },
+        task_ids: { type: "array", items: { type: "string" }, description: "Multiple task IDs to reset." },
+      },
+    },
+  },
+  {
     name: "oa_state",
     description: "Show the current workflow state (phase, mode, task, approved artifacts).",
     bridgeName: "_state_get",

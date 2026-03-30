@@ -60,6 +60,7 @@ function makeMockClient() {
             { criterion: "Data model described", met: true, evidence: "mock", severity: "blocking" },
             { criterion: "Integration points identified", met: true, evidence: "mock", severity: "blocking" },
             { criterion: "Deployment & infrastructure addressed", met: true, evidence: "mock", severity: "blocking" },
+            { criterion: "User journey completeness", met: true, evidence: "mock", severity: "blocking" },
             { criterion: "[Q] Design excellence", met: true, evidence: "mock", severity: "blocking", score: 9 },
             { criterion: "[Q] Architectural cohesion", met: true, evidence: "mock", severity: "blocking", score: 9 },
             { criterion: "[Q] Vision alignment", met: true, evidence: "mock", severity: "blocking", score: 9 },
@@ -100,6 +101,7 @@ const GENERIC_CRITERIA = [
   { criterion: "Data model described", met: true, evidence: "mock", severity: "blocking" },
   { criterion: "Integration points identified", met: true, evidence: "mock", severity: "blocking" },
   { criterion: "Deployment & infrastructure addressed", met: true, evidence: "mock", severity: "blocking" },
+  { criterion: "User journey completeness", met: true, evidence: "mock", severity: "blocking" },
   { criterion: "[Q] Design excellence", met: true, evidence: "mock", severity: "blocking", score: "9" },
   { criterion: "[Q] Architectural cohesion", met: true, evidence: "mock", severity: "blocking", score: "9" },
   { criterion: "[Q] Vision alignment", met: true, evidence: "mock", severity: "blocking", score: "9" },
@@ -113,16 +115,20 @@ const GENERIC_CRITERIA = [
  * A valid IMPL_PLAN artifact that parseImplPlan can parse into a DAG.
  * Contains two tasks: T1 (no deps) and T2 (depends on T1).
  */
-const IMPL_PLAN_ARTIFACT = `## Task T1: Set up core module
+const IMPL_PLAN_ARTIFACT = `## Tasks
+
+### T1: Set up core module
 **Dependencies:** none
-**Expected tests:** tests/core.test.ts
 **Complexity:** small
+**Tests:** tests/core.test.ts
+
 Create the core module with basic exports.
 
-## Task T2: Add feature layer
+### T2: Add feature layer
 **Dependencies:** T1
-**Expected tests:** tests/feature.test.ts
 **Complexity:** medium
+**Tests:** tests/feature.test.ts
+
 Build the feature layer on top of core module.
 `
 
@@ -177,8 +183,8 @@ async function approvePhase(
     { criteria_met: GENERIC_CRITERIA },
     ctx,
   )
-  // mark_satisfied may succeed or redirect based on self-review — either way it should not hard-error
-  if (msResult.includes("Error:") && !msResult.includes("blocking criteria")) {
+  // mark_satisfied may fail with blocking criteria count mismatch — throw so driveToImplementation surfaces the issue
+  if (msResult.includes("Error:")) {
     throw new Error(`mark_satisfied failed: ${msResult}`)
   }
 
@@ -197,6 +203,11 @@ async function approvePhase(
     },
     ctx,
   )
+
+  // Check for errors — silent failures here leave session stuck at wrong phase
+  if (typeof sfResult === "string" && sfResult.includes("Error:")) {
+    throw new Error(`submit_feedback failed: ${sfResult}`)
+  }
 
   return sfResult
 }

@@ -766,6 +766,77 @@ const handleSubmitAutoApprove: ToolHandler = async (args, toolCtx, ctx) => {
   return `Auto-approve rejected (confidence: ${result.confidence.toFixed(2)}). ${t.responseMessage}`
 }
 
+// ---- reset_task ----
+
+const handleResetTask: ToolHandler = async (args, toolCtx, ctx) => {
+  const { store } = ctx.engine!
+  const state = requireState(ctx, toolCtx.sessionId)
+
+  if (state.phase !== "IMPLEMENTATION") {
+    return `Error: reset_task can only be called during IMPLEMENTATION (current: ${state.phase}).`
+  }
+  if (state.phaseState !== "DRAFT" && state.phaseState !== "REVISE") {
+    return `Error: reset_task can only be called in DRAFT or REVISE state (current: ${state.phaseState}).`
+  }
+  if (state.taskCompletionInProgress) {
+    return `Error: Task "${state.taskCompletionInProgress}" is awaiting review. Call submit_task_review first.`
+  }
+
+  const taskIds = args.task_ids as string[] | undefined
+  const taskId = args.task_id as string | undefined
+  const ids = taskIds ?? (taskId ? [taskId] : [])
+
+  if (ids.length === 0) {
+    return "Error: task_id (string) or task_ids (array) is required."
+  }
+  if (!state.implDag) {
+    return "Error: No implementation DAG found."
+  }
+
+  // Validate all task IDs exist
+  for (const id of ids) {
+    if (!state.implDag.find((t) => t.id === id)) {
+      return `Error: Task "${id}" not found in DAG.`
+    }
+  }
+
+  // Check no downstream dependencies are in-flight or complete
+  // (resetting a task that others depend on could break the DAG)
+  const resetSet = new Set(ids)
+  for (const node of state.implDag) {
+    if (resetSet.has(node.id)) continue
+    if (node.status === "complete" || node.status === "in-flight") {
+      const dependsOnReset = node.dependencies.some((d) => resetSet.has(d))
+      if (dependsOnReset) {
+        return (
+          `Error: Task "${node.id}" (${node.status}) depends on "${node.dependencies.find((d) => resetSet.has(d))}". ` +
+          `Reset dependent tasks too, or reset them in dependency order.`
+        )
+      }
+    }
+  }
+
+  await store.update(toolCtx.sessionId, (draft) => {
+    for (const id of ids) {
+      const task = draft.implDag?.find((t) => t.id === id)
+      if (task) {
+        task.status = "pending"
+      }
+    }
+    // Set currentTaskId to the first reset task (earliest in DAG order)
+    const dagOrder = draft.implDag?.map((t) => t.id) ?? []
+    const firstReset = dagOrder.find((id) => ids.includes(id))
+    if (firstReset) {
+      draft.currentTaskId = firstReset
+    }
+    draft.taskReviewCount = 0
+    draft.taskCompletionInProgress = null
+  })
+
+  const taskList = ids.join(", ")
+  return `Reset ${ids.length} task(s) to pending: ${taskList}. Current task: ${ids[0]}.`
+}
+
 // ---------------------------------------------------------------------------
 // Dispatch table
 // ---------------------------------------------------------------------------
@@ -780,6 +851,7 @@ const TOOL_HANDLERS: Record<string, ToolHandler> = {
   mark_task_complete: handleMarkTaskComplete,
   submit_task_review: handleSubmitTaskReview,
   submit_auto_approve: handleSubmitAutoApprove,
+  reset_task: handleResetTask,
   check_prior_workflow: handleCheckPriorWorkflow,
   resolve_human_gate: handleResolveHumanGate,
   propose_backtrack: handleProposeBacktrack,

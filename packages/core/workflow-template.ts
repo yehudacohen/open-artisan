@@ -36,25 +36,25 @@ const PHASES = [
 ]
 
 const TOOLS = [
-  { cli: "select-mode", tool: "select_mode", desc: "Choose mode + set feature name" },
-  { cli: "mark-scan-complete", tool: "mark_scan_complete", desc: "Complete discovery scan" },
+  { cli: "select-mode", tool: "select_mode", desc: "Choose GREENFIELD, REFACTOR, or INCREMENTAL + set feature name" },
+  { cli: "mark-scan-complete", tool: "mark_scan_complete", desc: "Complete discovery scan (REFACTOR/INCREMENTAL)" },
   { cli: "mark-analyze-complete", tool: "mark_analyze_complete", desc: "Complete discovery analysis" },
-  { cli: "mark-satisfied", tool: "mark_satisfied", desc: "Submit self-review criteria" },
-  { cli: "request-review", tool: "request_review", desc: "Submit artifact for review" },
-  { cli: "submit-feedback", tool: "submit_feedback", desc: "Approve or request revision" },
-  { cli: "mark-task-complete", tool: "mark_task_complete", desc: "Complete a DAG task" },
-  { cli: "check-prior-workflow", tool: "check_prior_workflow", desc: "Check for prior state" },
-  { cli: "resolve-human-gate", tool: "resolve_human_gate", desc: "Set human gate on task" },
-  { cli: "propose-backtrack", tool: "propose_backtrack", desc: "Go back to earlier phase" },
-  { cli: "spawn-sub-workflow", tool: "spawn_sub_workflow", desc: "Delegate task to child" },
-  { cli: "query-parent-workflow", tool: "query_parent_workflow", desc: "Read parent state" },
-  { cli: "query-child-workflow", tool: "query_child_workflow", desc: "Read child state" },
+  { cli: "mark-satisfied", tool: "mark_satisfied", desc: "Submit self-review criteria assessment" },
+  { cli: "request-review", tool: "request_review", desc: "Submit artifact for review (`artifact_content` for text, `artifact_files` for files)" },
+  { cli: "submit-feedback", tool: "submit_feedback", desc: "Approve or request revision at USER_GATE" },
+  { cli: "mark-task-complete", tool: "mark_task_complete", desc: "Complete a DAG task during IMPLEMENTATION" },
+  { cli: "check-prior-workflow", tool: "check_prior_workflow", desc: "Check for existing workflow state" },
+  { cli: "resolve-human-gate", tool: "resolve_human_gate", desc: "Flag a task requiring manual action" },
+  { cli: "propose-backtrack", tool: "propose_backtrack", desc: "Go back to an earlier phase" },
+  { cli: "spawn-sub-workflow", tool: "spawn_sub_workflow", desc: "Delegate a DAG task to a child workflow" },
+  { cli: "query-parent-workflow", tool: "query_parent_workflow", desc: "Read parent workflow state (sub-workflows)" },
+  { cli: "query-child-workflow", tool: "query_child_workflow", desc: "Read child workflow state (sub-workflows)" },
   { cli: "state", tool: "state", desc: "Show current workflow state" },
 ]
 
 function formatToolName(tool: typeof TOOLS[0], config: TemplateConfig): string {
   if (config.argStyle === "cli") {
-    return `\`${config.toolPrefix} ${tool.cli}\``
+    return `\`${config.toolPrefix.trimEnd()} ${tool.cli}\``
   }
   return `\`${config.toolPrefix}${tool.tool}\``
 }
@@ -94,20 +94,25 @@ export function generateWorkflowTemplate(config: TemplateConfig): string {
   }
   lines.push("")
 
-  // Sub-state behavior
+  // Sub-state behavior — use configured tool names
+  const tn = (tool: string) => {
+    const t = TOOLS.find((x) => x.tool === tool)
+    return t ? formatToolName(t, config) : `\`${tool}\``
+  }
+
   lines.push("## Expected Behavior Per Sub-State")
   lines.push("")
   lines.push("### DRAFT")
-  lines.push("Do the work for this phase. When done, call `request_review`.")
+  lines.push(`Do the work for this phase. When done, call ${tn("request_review")}.`)
   lines.push("")
   lines.push("### REVIEW")
-  lines.push("Self-evaluate against the acceptance criteria. Evaluate each criterion independently. Call `mark_satisfied` with your per-criterion assessment. Be honest — the user reviews at USER_GATE.")
+  lines.push(`Self-evaluate against the acceptance criteria shown in the per-turn prompt injection. Evaluate each criterion independently — do NOT assume quality, verify it. Call ${tn("mark_satisfied")} with your per-criterion assessment. Be honest — the user reviews at USER_GATE.`)
   lines.push("")
   lines.push("### USER_GATE")
-  lines.push("Present a clear artifact summary to the user. **STOP and wait for their response.** Do NOT call `submit_feedback` until the user responds.")
+  lines.push(`Present a clear artifact summary to the user. **STOP and wait for their response.** Do NOT call ${tn("submit_feedback")} until the user responds. Not every user message is artifact feedback — casual conversation is fine.`)
   lines.push("")
   lines.push("### REVISE")
-  lines.push("Address ALL feedback points. Call `request_review` when done. No check-ins, no partial revisions.")
+  lines.push(`Address ALL feedback points. Call ${tn("request_review")} when done. No check-ins, no partial revisions.`)
   lines.push("")
 
   // Blocked per phase table
@@ -115,7 +120,7 @@ export function generateWorkflowTemplate(config: TemplateConfig): string {
   lines.push("")
   lines.push("| Phase / Sub-State | Allowed | Blocked |")
   lines.push("|-------------------|---------|---------|")
-  lines.push("| MODE_SELECT | Workflow tools, read-only shell | File writes |")
+  lines.push("| MODE_SELECT | Workflow tools, read-only shell | File writes (edit_file, write_file, create_file) |")
   lines.push("| DISCOVERY/SCAN | Read-only tools, workflow tools | File writes, shell execution |")
   lines.push("| DISCOVERY/ANALYZE | Read-only tools, workflow tools | File writes, shell execution |")
   lines.push("| DISCOVERY/CONVENTIONS | `.openartisan/` writes only | Project source writes, shell execution |")
@@ -123,7 +128,7 @@ export function generateWorkflowTemplate(config: TemplateConfig): string {
   lines.push("| PLANNING/REVIEW | `.openartisan/` writes, read-only shell | Project source writes |")
   lines.push("| PLANNING/USER_GATE | Read-only shell, workflow tools | File writes |")
   lines.push("| PLANNING/REVISE | `.openartisan/` writes, read-only shell | Project source writes |")
-  lines.push("| INTERFACES | Interface/type files only | Implementation files |")
+  lines.push("| INTERFACES | Interface/type files only (.py, .ts, .d.ts, .proto, etc.) | Implementation files |")
   lines.push("| TESTS | Test files only | Implementation files |")
   lines.push("| IMPL_PLAN/DRAFT | Workflow tools only | File writes, shell execution |")
   lines.push("| IMPL_PLAN/REVIEW | `.openartisan/` writes, read-only shell | Project source writes |")
@@ -138,8 +143,8 @@ export function generateWorkflowTemplate(config: TemplateConfig): string {
   // Implementation rules
   lines.push("## IMPLEMENTATION Phase Rules")
   lines.push("")
-  lines.push("- One task at a time from the DAG. The current task is shown in the per-turn prompt.")
-  lines.push("- Call `mark_task_complete` after each task.")
+  lines.push("- One task at a time from the DAG. The current task is shown in the per-turn prompt injection.")
+  lines.push(`- Call ${tn("mark_task_complete")} after each task.`)
   lines.push("- The IMPL_PLAN must include `**Files:**` per task — these are enforced by the guard.")
   lines.push("- You cannot write to files belonging to a different task.")
   lines.push("")
@@ -160,7 +165,7 @@ export function generateWorkflowTemplate(config: TemplateConfig): string {
   // Self-review
   lines.push("## Self-Review Responsibility")
   lines.push("")
-  lines.push("`mark_satisfied` evaluates YOUR criteria. There is no isolated reviewer in agent-only mode — you are responsible for honest self-assessment. The user reviews at USER_GATE.")
+  lines.push(`${tn("mark_satisfied")} evaluates YOUR criteria. There is no isolated reviewer in agent-only mode — you are responsible for honest self-assessment. The user reviews at USER_GATE.`)
 
   return lines.join("\n")
 }

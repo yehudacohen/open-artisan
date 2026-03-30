@@ -469,6 +469,8 @@ No functionality duplicated from existing codebase or installed dependencies, an
 ${qualityBlock}
 ${designBlock}
 
+9. User journey completeness — Walk through the end user's experience from installation through daily use: setup/onboarding, configuration, all expected operational modes (including automation/unattended), error recovery, documentation, and integration with the user's existing workflow (version control, CI/CD, tooling). List any capability a reasonable user would expect from a solution like this that is not planned, and justify each omission. If reference implementations or competing solutions exist, compare feature sets and justify gaps. This criterion applies to all projects — libraries, adapters, plugins, services, and applications.
+
 **Suggestion criteria (non-blocking):**
 - [S] Non-functional requirements addressed (performance targets, security, scalability)
 - [S] Decisions documented with rationale (why this approach over alternatives)`

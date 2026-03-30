@@ -216,8 +216,22 @@ async function handleToolCommand(command: string, cliArgs: string[]): Promise<vo
     process.exit(1)
   }
 
-  // Try stdin JSON first, fall back to CLI flags
-  let args = await readStdinJson()
+  // Try --args-file first (bypass all shell escaping), then stdin JSON, then CLI flags
+  let args: Record<string, unknown> | null = null
+  const argsFileIdx = cliArgs.indexOf("--args-file")
+  if (argsFileIdx !== -1 && cliArgs[argsFileIdx + 1]) {
+    const argsFilePath = cliArgs[argsFileIdx + 1]!
+    try {
+      args = JSON.parse(readFileSync(argsFilePath, "utf-8"))
+    } catch (err) {
+      console.error(`Error: Cannot read/parse args file "${argsFilePath}": ${err instanceof Error ? err.message : String(err)}`)
+      process.exit(1)
+    }
+  }
+
+  if (!args) {
+    args = await readStdinJson()
+  }
 
   if (!args) {
     // Parse CLI flags into args object

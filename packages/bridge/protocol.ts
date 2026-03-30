@@ -46,6 +46,8 @@ export interface LifecycleInitParams {
 export interface LifecycleSessionParams {
   sessionId: string
   parentId?: string
+  /** Agent name driving this session (e.g. "artisan", "robot-artisan"). */
+  agent?: string
   traceId?: string
 }
 

@@ -35,7 +35,7 @@ import { handleGuardCheck, handleGuardPolicy } from "#bridge/methods/guard"
 import { handlePromptBuild, handlePromptCompaction } from "#bridge/methods/prompt"
 import { handleMessageProcess } from "#bridge/methods/message"
 import { handleIdleCheck } from "#bridge/methods/idle"
-import { handleToolExecute, handleTaskGetReviewContext } from "#bridge/methods/tool-execute"
+import { handleToolExecute, handleTaskGetReviewContext, handleAutoApproveContext } from "#bridge/methods/tool-execute"
 
 import { createSocketTransport } from "#claude-code/src/socket-transport"
 import { DEFAULT_STATE_DIR_NAME, getSocketPath, PID_FILENAME } from "#claude-code/src/constants"
@@ -137,6 +137,7 @@ async function main() {
     "idle.check": handleIdleCheck,
     "tool.execute": handleToolExecute,
     "task.getReviewContext": handleTaskGetReviewContext,
+    "task.getAutoApproveContext": handleAutoApproveContext,
   })
 
   // Initialize the engine with agent-only capabilities

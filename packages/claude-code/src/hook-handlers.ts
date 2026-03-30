@@ -265,6 +265,42 @@ export async function handleStop(input: HookInput): Promise<HookOutput> {
     }
   }
 
+  // -----------------------------------------------------------------------
+  // Robot-artisan auto-approval: when at USER_GATE with activeAgent
+  // "robot-artisan", dispatch an isolated auto-approver subprocess instead
+  // of waiting for human input.
+  // -----------------------------------------------------------------------
+  if (state?.phaseState === "USER_GATE" && state?.activeAgent === "robot-artisan") {
+    const approvePrompt = await bridgeCall(stateDir, "task.getAutoApproveContext", { sessionId })
+    if (approvePrompt && typeof approvePrompt === "string") {
+      const projectDir = input.cwd ?? process.env["CLAUDE_PROJECT_DIR"] ?? process.cwd()
+      try {
+        // First set userGateMessageReceived so submit_auto_approve works
+        await bridgeCall(stateDir, "message.process", {
+          sessionId,
+          parts: [{ type: "text", text: "(robot-artisan auto-approval)" }],
+        })
+        const approveOutput = execSync(
+          `claude --print --max-turns 1 -p ${JSON.stringify(approvePrompt)}`,
+          { timeout: 120_000, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] },
+        )
+        await bridgeCall(stateDir, "tool.execute", {
+          name: "submit_auto_approve",
+          args: { review_output: approveOutput },
+          context: { sessionId, directory: projectDir },
+        })
+        return {
+          stdout: null,
+          stderr: "Robot-artisan auto-approval completed. Continue with the workflow.",
+          exitCode: 2,
+        }
+      } catch (err) {
+        // Auto-approval failed — fall through to normal idle check
+        // Agent will see USER_GATE prompt and can present to user
+      }
+    }
+  }
+
   const result = await bridgeCall(stateDir, "idle.check", { sessionId })
 
   if (!result) return ALLOW

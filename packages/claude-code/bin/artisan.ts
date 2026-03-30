@@ -140,6 +140,7 @@ async function execTool(name: string, args: Record<string, unknown> = {}): Promi
 const TOOL_COMMANDS: Record<string, string> = {
   "select-mode": "select_mode",
   "submit-task-review": "submit_task_review",
+  "submit-auto-approve": "submit_auto_approve",
   "mark-scan-complete": "mark_scan_complete",
   "mark-analyze-complete": "mark_analyze_complete",
   "mark-satisfied": "mark_satisfied",

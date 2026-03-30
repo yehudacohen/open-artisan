@@ -18,6 +18,7 @@ import { createFileSystemStateBackend, migrateLegacyStateFile } from "../../core
 import { createStateMachine } from "../../core/state-machine"
 import { createArtifactGraph } from "../../core/artifacts"
 import { createSessionRegistry } from "../../core/session-registry"
+import { detectMode } from "../../core/mode-detect"
 import { setDefaultStateDir } from "../../core/logger"
 import { writeStatusFile } from "../../core/status-writer"
 import { checkPidFile, writePidFile, removePidFile } from "../pid-file"
@@ -181,7 +182,27 @@ export const handleSessionCreated: MethodHandler = async (params, ctx) => {
     // Already exists from a previous load — no-op
   }
 
-  log.debug("Session created", { detail: p.sessionId })
+  // Set active agent and run mode detection for fresh sessions
+  const needsUpdate = (p.agent && typeof p.agent === "string") || ctx.projectDir
+  if (needsUpdate) {
+    try {
+      await store.update(p.sessionId, (draft) => {
+        // Set active agent if provided (e.g. "robot-artisan" for automation mode)
+        if (p.agent && typeof p.agent === "string") {
+          draft.activeAgent = p.agent
+        }
+        // Auto-detect mode for fresh sessions at MODE_SELECT
+        if (draft.phase === "MODE_SELECT" && !draft.modeDetectionNote && ctx.projectDir) {
+          const detection = detectMode(ctx.projectDir)
+          draft.modeDetectionNote = `**Auto-detected:** ${detection.reasoning}\n\nSuggested mode: **${detection.suggestedMode}**`
+        }
+      })
+    } catch {
+      // Non-fatal — session may not exist yet if create was a no-op
+    }
+  }
+
+  log.debug("Session created", { detail: `${p.sessionId}${p.agent ? ` (agent: ${p.agent})` : ""}` })
   return null
 }
 

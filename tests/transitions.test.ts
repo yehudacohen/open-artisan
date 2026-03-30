@@ -67,7 +67,7 @@ function makeState(overrides: Partial<WorkflowState> = {}): WorkflowState {
 
 describe("computeMarkSatisfiedTransition", () => {
   it("passes with all blocking criteria met", () => {
-    const criteria = Array.from({ length: 15 }, (_, i) => ({
+    const criteria = Array.from({ length: 16 }, (_, i) => ({
       criterion: `C${i + 1}`, met: true, evidence: "ok", severity: "blocking" as const,
     }))
     const result = computeMarkSatisfiedTransition(criteria, makeState(), sm)
@@ -78,7 +78,7 @@ describe("computeMarkSatisfiedTransition", () => {
   })
 
   it("fails with unmet blocking criteria and routes to REVISE", () => {
-    const criteria = Array.from({ length: 15 }, (_, i) => ({
+    const criteria = Array.from({ length: 16 }, (_, i) => ({
       criterion: `C${i + 1}`, met: i !== 0, evidence: "check", severity: "blocking" as const,
     }))
     const result = computeMarkSatisfiedTransition(criteria, makeState(), sm)
@@ -104,7 +104,7 @@ describe("computeMarkSatisfiedTransition", () => {
   })
 
   it("allows in-memory phases without reviewArtifactFiles", () => {
-    const criteria = Array.from({ length: 15 }, (_, i) => ({
+    const criteria = Array.from({ length: 16 }, (_, i) => ({
       criterion: `C${i + 1}`, met: true, evidence: "ok", severity: "blocking" as const,
     }))
     const result = computeMarkSatisfiedTransition(criteria, makeState({ phase: "PLANNING", reviewArtifactFiles: [] }), sm)
@@ -128,7 +128,7 @@ describe("computeMarkSatisfiedTransition", () => {
   })
 
   it("parses string scores to numbers", () => {
-    const criteria = Array.from({ length: 15 }, (_, i) => ({
+    const criteria = Array.from({ length: 16 }, (_, i) => ({
       criterion: i === 0 ? "[Q] Quality" : `C${i + 1}`,
       met: true,
       evidence: "ok",
@@ -143,7 +143,7 @@ describe("computeMarkSatisfiedTransition", () => {
   })
 
   it("escalates after MAX_REVIEW_ITERATIONS", () => {
-    const criteria = Array.from({ length: 15 }, (_, i) => ({
+    const criteria = Array.from({ length: 16 }, (_, i) => ({
       criterion: `C${i + 1}`, met: i !== 0, evidence: "check", severity: "blocking" as const,
     }))
     const state = makeState({ iterationCount: 9 }) // next will be 10 = MAX
@@ -155,7 +155,7 @@ describe("computeMarkSatisfiedTransition", () => {
   })
 
   it("injects allowlist criterion for INCREMENTAL PLANNING", () => {
-    const criteria = Array.from({ length: 15 }, (_, i) => ({
+    const criteria = Array.from({ length: 16 }, (_, i) => ({
       criterion: `C${i + 1}`, met: true, evidence: "ok", severity: "blocking" as const,
     }))
     const state = makeState({ mode: "INCREMENTAL", phase: "PLANNING", fileAllowlist: ["/a.ts"] })

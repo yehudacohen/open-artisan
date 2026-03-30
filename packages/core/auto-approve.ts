@@ -81,7 +81,7 @@ export type AutoApproveResult = AutoApproveSuccess | AutoApproveError
 // Prompt builder
 // ---------------------------------------------------------------------------
 
-function buildAutoApprovePrompt(req: AutoApproveRequest): string {
+export function buildAutoApprovePrompt(req: AutoApproveRequest): string {
   const lines: string[] = []
 
   lines.push("# Auto-Approval Evaluation")
@@ -186,7 +186,7 @@ async function ephemeralAutoApprovePrompt(
 // Result parsing
 // ---------------------------------------------------------------------------
 
-function parseAutoApproveResult(raw: string): AutoApproveResult {
+export function parseAutoApproveResult(raw: string): AutoApproveResult {
   const parsed = JSON.parse(raw) as {
     approve: boolean
     confidence: number

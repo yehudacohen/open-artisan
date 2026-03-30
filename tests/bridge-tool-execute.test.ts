@@ -457,7 +457,7 @@ describe("tool.execute — agent-only mode", () => {
     await agentExec("request_review", { summary: "Plan", artifact_description: "Plan doc", artifact_content: "# Plan" })
 
     // PLANNING has many expected blocking criteria. Provide enough to satisfy the count check.
-    const criteria = Array.from({ length: 15 }, (_, i) => ({
+    const criteria = Array.from({ length: 16 }, (_, i) => ({
       criterion: `Criterion ${i + 1}`, met: true, evidence: "verified", severity: "blocking",
     }))
     const result = await agentExec("mark_satisfied", { criteria_met: criteria })
@@ -471,7 +471,7 @@ describe("tool.execute — agent-only mode", () => {
     await agentExec("request_review", { summary: "Plan", artifact_description: "Plan", artifact_content: "# Plan" })
 
     // Provide enough criteria but with one unmet blocking
-    const criteria = Array.from({ length: 15 }, (_, i) => ({
+    const criteria = Array.from({ length: 16 }, (_, i) => ({
       criterion: `Criterion ${i + 1}`,
       met: i !== 0, // first criterion is unmet
       evidence: i === 0 ? "Missing scope" : "verified",
@@ -503,7 +503,7 @@ describe("tool.execute — agent-only mode", () => {
     await agentExec("select_mode", { mode: "GREENFIELD", feature_name: `ao-rev-${Date.now()}` })
     await agentExec("request_review", { summary: "Plan", artifact_description: "Plan", artifact_content: "# Plan" })
     // mark_satisfied → pass → USER_GATE (provide enough criteria)
-    const passingCriteria = Array.from({ length: 15 }, (_, i) => ({
+    const passingCriteria = Array.from({ length: 16 }, (_, i) => ({
       criterion: `C${i + 1}`, met: true, evidence: "ok", severity: "blocking",
     }))
     await agentExec("mark_satisfied", { criteria_met: passingCriteria })
@@ -521,7 +521,7 @@ describe("tool.execute — agent-only mode", () => {
     await agentExec("select_mode", { mode: "GREENFIELD", feature_name: `ao-bt-${Date.now()}` })
     // Advance to PLANNING/REVIEW → USER_GATE → approve → INTERFACES/DRAFT
     await agentExec("request_review", { summary: "Plan", artifact_description: "Plan", artifact_content: "# Plan" })
-    const passingCriteria = Array.from({ length: 15 }, (_, i) => ({
+    const passingCriteria = Array.from({ length: 16 }, (_, i) => ({
       criterion: `C${i + 1}`, met: true, evidence: "ok", severity: "blocking",
     }))
     await agentExec("mark_satisfied", { criteria_met: passingCriteria })

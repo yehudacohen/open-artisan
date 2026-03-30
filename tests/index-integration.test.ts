@@ -52,6 +52,7 @@ function makeMockClient() {
             { criterion: "Data model described", met: true, evidence: "mock", severity: "blocking" },
             { criterion: "Integration points identified", met: true, evidence: "mock", severity: "blocking" },
             { criterion: "Deployment & infrastructure addressed", met: true, evidence: "mock", severity: "blocking" },
+            { criterion: "User journey completeness", met: true, evidence: "mock", severity: "blocking" },
             // [Q] Quality dimensions (scored 9/10 to pass threshold)
             { criterion: "[Q] Design excellence", met: true, evidence: "mock", severity: "blocking", score: 9 },
             { criterion: "[Q] Architectural cohesion", met: true, evidence: "mock", severity: "blocking", score: 9 },
@@ -129,9 +130,10 @@ describe("Plugin shape — returned object has all required keys", () => {
     expect(tools.submit_feedback).toBeDefined()
   })
 
-  it("WORKFLOW_TOOL_NAMES contains all 14 tool names", () => {
-    expect(WORKFLOW_TOOL_NAMES.size).toBe(14)
+  it("WORKFLOW_TOOL_NAMES contains all 15 tool names", () => {
+    expect(WORKFLOW_TOOL_NAMES.size).toBe(15)
     expect(WORKFLOW_TOOL_NAMES.has("submit_task_review")).toBe(true)
+    expect(WORKFLOW_TOOL_NAMES.has("submit_auto_approve")).toBe(true)
     expect(WORKFLOW_TOOL_NAMES.has("check_prior_workflow")).toBe(true)
     expect(WORKFLOW_TOOL_NAMES.has("select_mode")).toBe(true)
     expect(WORKFLOW_TOOL_NAMES.has("mark_task_complete")).toBe(true)
@@ -429,6 +431,7 @@ describe("End-to-end: GREENFIELD happy path through PLANNING", () => {
           { criterion: "Data model described", met: true, evidence: "Section 5 has ERD", severity: "blocking" },
           { criterion: "Integration points identified", met: true, evidence: "Section 6 lists APIs", severity: "blocking" },
           { criterion: "Deployment & infrastructure addressed", met: true, evidence: "Section 8 covers deployment pipeline and infra", severity: "blocking" },
+          { criterion: "User journey completeness", met: true, evidence: "Setup, onboarding, all modes covered", severity: "blocking" },
           // [Q] Quality dimensions — scored as strings (tool.schema has no .number())
           { criterion: "[Q] Design excellence", met: true, evidence: "Well-reasoned approach", severity: "blocking", score: "9" },
           { criterion: "[Q] Architectural cohesion", met: true, evidence: "All components fit together", severity: "blocking", score: "9" },

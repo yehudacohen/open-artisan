@@ -36,6 +36,9 @@ import {
   computeSubmitFeedbackReviseTransition,
   computeProposeBacktrackTransition,
 } from "../../core/tools/transitions"
+import { buildAutoApprovePrompt, parseAutoApproveResult, AUTO_APPROVE_CONFIDENCE_THRESHOLD } from "../../core/auto-approve"
+import { createGitCheckpoint } from "../../core/hooks/git-checkpoint"
+import type { AutoApproveResult } from "../../core/auto-approve"
 import { writeArtifact } from "../../core/artifact-store"
 import { parseImplPlan } from "../../core/impl-plan-parser"
 import { PHASE_TO_ARTIFACT } from "../../core/artifacts"
@@ -396,6 +399,24 @@ const handleSubmitFeedback: ToolHandler = async (args, toolCtx, ctx) => {
     })
 
     // policyVersion bumped automatically by setPostUpdateHook
+
+    // Git checkpoint: tag the approval in version control (non-fatal)
+    try {
+      const phaseCount = (state.phaseApprovalCounts[state.phase] ?? 0) + 1
+      await createGitCheckpoint(
+        { cwd: toolCtx.directory },
+        {
+          phase: state.phase,
+          approvalCount: phaseCount,
+          featureName: state.featureName,
+          fileAllowlist: state.mode === "INCREMENTAL" ? state.fileAllowlist : undefined,
+          expectedFiles: state.reviewArtifactFiles.length > 0 ? state.reviewArtifactFiles : undefined,
+        },
+      )
+    } catch {
+      // Non-fatal — git checkpoint failure should not block the workflow
+    }
+
     return `Approved. Transitioning to ${outcome.nextPhase}/${outcome.nextPhaseState}.`
   }
 
@@ -682,6 +703,66 @@ const handleQueryChildWorkflow: ToolHandler = async (args, toolCtx, ctx) => {
   return JSON.stringify(result, null, 2)
 }
 
+// ---- submit_auto_approve (must be before dispatch table) ----
+
+const handleSubmitAutoApprove: ToolHandler = async (args, toolCtx, ctx) => {
+  const { store, sm } = ctx.engine!
+  const state = requireState(ctx, toolCtx.sessionId)
+
+  if (state.phaseState !== "USER_GATE") {
+    return "Error: submit_auto_approve can only be called at USER_GATE."
+  }
+  if (state.activeAgent !== "robot-artisan") {
+    return "Error: submit_auto_approve requires robot-artisan mode."
+  }
+
+  const reviewOutput = (args.review_output as string)?.trim()
+  if (!reviewOutput) {
+    return "Error: review_output is required."
+  }
+
+  const result = parseAutoApproveResult(reviewOutput) as AutoApproveResult
+  if (!result.success) {
+    return `Error: Failed to parse auto-approve output: ${result.error}`
+  }
+
+  if (result.approve && result.confidence >= AUTO_APPROVE_CONFIDENCE_THRESHOLD) {
+    // Auto-approve: transition to next phase
+    const outcome = sm.transition(state.phase, state.phaseState, "user_approve", state.mode)
+    if (!outcome.success) return `Error: ${outcome.message}`
+
+    const phaseCount = (state.phaseApprovalCounts[state.phase] ?? 0) + 1
+    await store.update(toolCtx.sessionId, (draft) => {
+      draft.phase = outcome.nextPhase
+      draft.phaseState = outcome.nextPhaseState
+      draft.approvalCount++
+      draft.phaseApprovalCounts[state.phase] = phaseCount
+      draft.iterationCount = 0
+      draft.retryCount = 0
+      draft.userGateMessageReceived = false
+      draft.reviewArtifactHash = null
+      draft.latestReviewResults = null
+      draft.reviewArtifactFiles = []
+    })
+    return `Auto-approved (confidence: ${result.confidence.toFixed(2)}). Transitioning to ${outcome.nextPhase}/${outcome.nextPhaseState}.`
+  }
+
+  // Below confidence threshold — route to REVISE with feedback
+  const feedbackText = result.feedback || result.reasoning || "Auto-approver rejected — needs improvement."
+  const reviseResult = computeSubmitFeedbackReviseTransition(feedbackText, state, sm)
+  if (!reviseResult.success) return `Error: ${reviseResult.error}`
+  const t = reviseResult.transition
+  await store.update(toolCtx.sessionId, (draft) => {
+    draft.phase = t.nextPhase
+    draft.phaseState = t.nextPhaseState
+    draft.retryCount = 0
+    draft.reviewArtifactFiles = []
+    draft.pendingRevisionSteps = null
+    draft.feedbackHistory.push(t.feedbackEntry)
+  })
+  return `Auto-approve rejected (confidence: ${result.confidence.toFixed(2)}). ${t.responseMessage}`
+}
+
 // ---------------------------------------------------------------------------
 // Dispatch table
 // ---------------------------------------------------------------------------
@@ -695,6 +776,7 @@ const TOOL_HANDLERS: Record<string, ToolHandler> = {
   submit_feedback: handleSubmitFeedback,
   mark_task_complete: handleMarkTaskComplete,
   submit_task_review: handleSubmitTaskReview,
+  submit_auto_approve: handleSubmitAutoApprove,
   check_prior_workflow: handleCheckPriorWorkflow,
   resolve_human_gate: handleResolveHumanGate,
   propose_backtrack: handleProposeBacktrack,
@@ -716,6 +798,27 @@ export const handleTaskGetReviewContext: MethodHandler = async (params, ctx) => 
   if (!state || !state.taskCompletionInProgress) return null
 
   return buildReviewContextForTask(state, state.taskCompletionInProgress, ctx.projectDir ?? process.cwd())
+}
+
+// ---------------------------------------------------------------------------
+// task.getAutoApproveContext — returns auto-approve prompt for USER_GATE
+// ---------------------------------------------------------------------------
+
+export const handleAutoApproveContext: MethodHandler = async (params, ctx) => {
+  const p = params as { sessionId?: string }
+  if (!p.sessionId) {
+    throw new JSONRPCErrorException("sessionId is required", INVALID_PARAMS)
+  }
+  const state = ctx.engine!.store.get(p.sessionId)
+  if (!state || state.phaseState !== "USER_GATE" || state.activeAgent !== "robot-artisan") return null
+
+  return buildAutoApprovePrompt({
+    phase: state.phase,
+    mode: state.mode,
+    artifactDiskPaths: state.artifactDiskPaths as Record<string, string>,
+    featureName: state.featureName,
+    conventionsPath: state.artifactDiskPaths?.conventions ?? null,
+  })
 }
 
 // ---------------------------------------------------------------------------

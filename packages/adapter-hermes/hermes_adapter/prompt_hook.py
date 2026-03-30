@@ -63,13 +63,16 @@ def create_prompt_hook(
             if state.get("taskCompletionInProgress"):
                 _dispatch_task_review(bridge, session_id, state, project_dir)
 
-            # USER_GATE structural enforcement: signal that a user message
-            # has been received so submit_feedback becomes allowed.
+            # USER_GATE handling: either auto-approve (robot-artisan) or
+            # signal user message for structural enforcement.
             if state.get("phaseState") == "USER_GATE":
-                bridge.call("message.process", {
-                    "sessionId": session_id,
-                    "parts": [{"type": "text", "text": "(user message detected via pre_llm_call)"}],
-                })
+                if state.get("activeAgent") == "robot-artisan":
+                    _dispatch_auto_approve(bridge, session_id, project_dir)
+                else:
+                    bridge.call("message.process", {
+                        "sessionId": session_id,
+                        "parts": [{"type": "text", "text": "(user message detected via pre_llm_call)"}],
+                    })
         except Exception:
             logger.debug("State/gate check failed in pre_llm_call hook", exc_info=True)
 
@@ -168,3 +171,49 @@ def _auto_accept_review(
         },
         "context": {"sessionId": session_id, "directory": project_dir},
     })
+
+
+def _dispatch_auto_approve(
+    bridge: BridgeClient,
+    session_id: str,
+    project_dir: str,
+) -> None:
+    """Dispatch an isolated auto-approver for robot-artisan mode at USER_GATE.
+
+    Calls task.getAutoApproveContext for the prompt, spawns claude --print,
+    submits via submit_auto_approve. Falls back gracefully — if auto-approval
+    fails, the agent proceeds as normal at USER_GATE.
+    """
+    try:
+        # Set userGateMessageReceived so submit_auto_approve can work
+        bridge.call("message.process", {
+            "sessionId": session_id,
+            "parts": [{"type": "text", "text": "(robot-artisan auto-approval)"}],
+        })
+
+        approve_prompt = bridge.call("task.getAutoApproveContext", {"sessionId": session_id})
+        if not approve_prompt or not isinstance(approve_prompt, str):
+            return
+
+        try:
+            result = subprocess.run(
+                ["claude", "--print", "--max-turns", "1", "-p", approve_prompt],
+                capture_output=True, text=True, timeout=120,
+            )
+            approve_output = result.stdout
+        except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+            logger.warning("Auto-approve subprocess failed: %s", e)
+            return
+
+        if not approve_output.strip():
+            return
+
+        bridge.call("tool.execute", {
+            "name": "submit_auto_approve",
+            "args": {"review_output": approve_output},
+            "context": {"sessionId": session_id, "directory": project_dir},
+        })
+        logger.info("Robot-artisan auto-approval dispatched")
+
+    except Exception as e:
+        logger.warning("Auto-approval dispatch failed: %s", e)

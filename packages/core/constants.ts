@@ -283,4 +283,5 @@ export const WORKFLOW_TOOL_NAMES = new Set([
   "query_parent_workflow",
   "query_child_workflow",
   "submit_task_review",
+  "submit_auto_approve",
 ])

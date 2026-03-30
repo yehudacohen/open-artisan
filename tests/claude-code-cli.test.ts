@@ -149,7 +149,7 @@ describe("artisan CLI", () => {
   })
 
   it("mark-satisfied with stdin JSON", () => {
-    const criteria = Array.from({ length: 15 }, (_, i) => ({
+    const criteria = Array.from({ length: 16 }, (_, i) => ({
       criterion: `C${i + 1}`, met: true, evidence: "verified", severity: "blocking",
     }))
     const input = JSON.stringify({ criteria_met: criteria })

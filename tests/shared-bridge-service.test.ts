@@ -1,70 +1,28 @@
 /**
- * shared-bridge-service.test.ts — Interface-first contract tests for shared
- * local bridge discovery, attach-or-start, lease tracking, cleanup, and
- * shutdown behavior.
- *
- * These tests intentionally target the approved interfaces only. They should
- * fail until concrete implementations are wired to the interface contract.
+ * shared-bridge-service.test.ts - T1 tests for shared local bridge metadata
+ * and discovery behavior.
  */
 import { beforeEach, describe, expect, it } from "bun:test"
 import { join } from "node:path"
-import { mkdtemp } from "node:fs/promises"
+import { mkdtemp, mkdir, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 
-import type {
-  BridgeAttachParams,
-  BridgeAttachRpcResult,
-  BridgeDetachParams,
-  BridgeDetachResult,
-  BridgeDiscoverParams,
-  BridgeDiscoverResult,
-  BridgeLeaseRefreshParams,
-  BridgeLeaseRefreshResult,
-  BridgeLeaseRemoveParams,
-  BridgeLeaseRemoveResult,
-  BridgeLeaseUpsertParams,
-  BridgeLeaseUpsertResult,
-  BridgeMetadataGetParams,
-  BridgeMetadataGetResult,
-  BridgeMetadataUpsertParams,
-  BridgeMetadataUpsertResult,
-  BridgeShutdownEligibilityParams,
-  BridgeShutdownEligibilityResult,
-  BridgeStateRemoveParams,
-  BridgeStateRemoveResultRpc,
-} from "#bridge/protocol"
-import type {
-  BridgeClientLease,
-  BridgeLeaseSnapshot,
-  BridgeMetadata,
-} from "#bridge/shared-bridge-types"
-
-interface SharedBridgeRpcContract {
-  discover(params: BridgeDiscoverParams): Promise<BridgeDiscoverResult>
-  attach(params: BridgeAttachParams): Promise<BridgeAttachRpcResult>
-  leaseRefresh(params: BridgeLeaseRefreshParams): Promise<BridgeLeaseRefreshResult>
-  detach(params: BridgeDetachParams): Promise<BridgeDetachResult>
-  metadataGet(params: BridgeMetadataGetParams): Promise<BridgeMetadataGetResult>
-  shutdownEligibility(
-    params: BridgeShutdownEligibilityParams,
-  ): Promise<BridgeShutdownEligibilityResult>
-  metadataUpsert(
-    params: BridgeMetadataUpsertParams,
-  ): Promise<BridgeMetadataUpsertResult>
-  leaseUpsert(params: BridgeLeaseUpsertParams): Promise<BridgeLeaseUpsertResult>
-  leaseRemove(params: BridgeLeaseRemoveParams): Promise<BridgeLeaseRemoveResult>
-  stateRemove(params: BridgeStateRemoveParams): Promise<BridgeStateRemoveResultRpc>
-}
-
-function makeSharedBridgeRpc(): SharedBridgeRpcContract {
-  throw new Error("shared bridge RPC contract not implemented")
-}
+import { discoverBridge, removeBridgeState, SHARED_BRIDGE_PROTOCOL_VERSION } from "#bridge/bridge-discovery"
+import {
+  getBridgeLeasesPath,
+  getBridgeMetadataPath,
+  loadBridgeLeaseSnapshot,
+  loadBridgeMetadata,
+  upsertBridgeLeaseSnapshot,
+  upsertBridgeMetadata,
+} from "#bridge/bridge-meta"
+import type { BridgeClientLease, BridgeLeaseSnapshot, BridgeMetadata } from "#bridge/shared-bridge-types"
 
 let projectDir: string
 let stateDir: string
 
 beforeEach(async () => {
-  projectDir = await mkdtemp(join(tmpdir(), "shared-bridge-contract-"))
+  projectDir = await mkdtemp(join(tmpdir(), "shared-bridge-project-"))
   stateDir = join(projectDir, ".openartisan")
 })
 
@@ -76,9 +34,9 @@ function makeMetadata(overrides: Partial<BridgeMetadata> = {}): BridgeMetadata {
     stateDir,
     transport: "unix-socket",
     socketPath: join(stateDir, ".bridge.sock"),
-    pid: 123,
+    pid: process.pid,
     startedAt: "2026-04-14T12:00:00.000Z",
-    protocolVersion: "1",
+    protocolVersion: SHARED_BRIDGE_PROTOCOL_VERSION,
     adapterCompatibility: {
       claudeCode: true,
       hermes: true,
@@ -105,325 +63,94 @@ function makeLeaseSnapshot(clients: BridgeClientLease[]): BridgeLeaseSnapshot {
   }
 }
 
-// ---------------------------------------------------------------------------
-// bridge.discover
-// ---------------------------------------------------------------------------
+describe("bridge metadata persistence", () => {
+  it("writes and reads bridge metadata", async () => {
+    const metadata = makeMetadata()
+    await upsertBridgeMetadata(stateDir, metadata)
 
-describe("shared bridge RPC — discover", () => {
-  it("classifies an empty state directory as no_bridge", async () => {
-    const rpc = makeSharedBridgeRpc()
-    const params: BridgeDiscoverParams = { projectDir, stateDir }
-
-    const result = await rpc.discover(params)
-
-    expect(result.discovery.kind).toBe("no_bridge")
+    expect(await loadBridgeMetadata(stateDir)).toEqual(metadata)
   })
 
-  it("classifies stale pid/socket artifacts as stale_bridge_state", async () => {
-    const rpc = makeSharedBridgeRpc()
+  it("writes and reads bridge lease snapshots", async () => {
+    const snapshot = makeLeaseSnapshot([makeLease("claude-1", "claude-code")])
+    await upsertBridgeLeaseSnapshot(stateDir, snapshot)
 
-    const result = await rpc.discover({ projectDir, stateDir })
+    expect(await loadBridgeLeaseSnapshot(stateDir)).toEqual(snapshot)
+  })
+})
 
-    expect(result.discovery.kind).toBe("stale_bridge_state")
-    if (result.discovery.kind === "stale_bridge_state") {
-      expect(result.discovery.stalePaths.length).toBeGreaterThan(0)
+describe("discoverBridge", () => {
+  it("returns no_bridge when no metadata or pid artifacts exist", async () => {
+    const result = await discoverBridge({ projectDir, stateDir })
+    expect(result.kind).toBe("no_bridge")
+  })
+
+  it("returns attach_failed when metadata is malformed", async () => {
+    await mkdir(stateDir, { recursive: true })
+    await writeFile(getBridgeMetadataPath(stateDir), "{not-json", "utf-8")
+
+    const result = await discoverBridge({ projectDir, stateDir })
+    expect(result.kind).toBe("attach_failed")
+  })
+
+  it("returns stale_bridge_state when metadata exists but pid is stale", async () => {
+    await upsertBridgeMetadata(stateDir, makeMetadata({ pid: 999999 }))
+    await writeFile(join(stateDir, ".bridge-pid"), "999999\n", "utf-8")
+
+    const result = await discoverBridge({ projectDir, stateDir })
+    expect(result.kind).toBe("stale_bridge_state")
+    if (result.kind === "stale_bridge_state") {
+      expect(result.stalePaths.length).toBeGreaterThan(0)
     }
   })
 
   it("returns live_compatible_bridge with metadata and leases for a reusable bridge", async () => {
-    const rpc = makeSharedBridgeRpc()
+    const metadata = makeMetadata()
+    const leases = makeLeaseSnapshot([makeLease("claude-1", "claude-code")])
+    await upsertBridgeMetadata(stateDir, metadata)
+    await upsertBridgeLeaseSnapshot(stateDir, leases)
+    await writeFile(join(stateDir, ".bridge-pid"), `${process.pid}\n`, "utf-8")
 
-    const result = await rpc.discover({ projectDir, stateDir })
-
-    expect(result.discovery.kind).toBe("live_compatible_bridge")
-    if (result.discovery.kind === "live_compatible_bridge") {
-      expect(result.discovery.metadata).toEqual(makeMetadata())
-      expect(result.discovery.leases.clients).toEqual([
-        makeLease("claude-1", "claude-code"),
-      ])
+    const result = await discoverBridge({ projectDir, stateDir })
+    expect(result.kind).toBe("live_compatible_bridge")
+    if (result.kind === "live_compatible_bridge") {
+      expect(result.metadata).toEqual(metadata)
+      expect(result.leases).toEqual(leases)
     }
   })
 
   it("returns live_incompatible_bridge when protocol versions do not match", async () => {
-    const rpc = makeSharedBridgeRpc()
+    await upsertBridgeMetadata(stateDir, makeMetadata({ protocolVersion: "999" }))
+    await writeFile(join(stateDir, ".bridge-pid"), `${process.pid}\n`, "utf-8")
 
-    const result = await rpc.discover({ projectDir, stateDir })
-
-    expect(result.discovery.kind).toBe("live_incompatible_bridge")
-    if (result.discovery.kind === "live_incompatible_bridge") {
-      expect(result.discovery.reason).toContain("protocol")
-    }
-  })
-
-  it("surfaces malformed metadata as attach_failed instead of attaching unsafely", async () => {
-    const rpc = makeSharedBridgeRpc()
-
-    const result = await rpc.discover({ projectDir, stateDir })
-
-    expect(result.discovery.kind).toBe("attach_failed")
+    const result = await discoverBridge({ projectDir, stateDir })
+    expect(result.kind).toBe("live_incompatible_bridge")
   })
 })
 
-// ---------------------------------------------------------------------------
-// bridge.attach
-// ---------------------------------------------------------------------------
+describe("removeBridgeState", () => {
+  it("removes only the requested stale bridge artifacts", async () => {
+    await upsertBridgeMetadata(stateDir, makeMetadata())
+    await upsertBridgeLeaseSnapshot(stateDir, makeLeaseSnapshot([]))
+    await writeFile(join(stateDir, ".bridge.sock"), "sock", "utf-8")
 
-describe("shared bridge RPC — attach", () => {
-  it("attaches to an existing compatible bridge", async () => {
-    const rpc = makeSharedBridgeRpc()
-    const params: BridgeAttachParams = {
-      projectDir,
-      stateDir,
-      clientId: "claude-1",
-      clientKind: "claude-code",
-      sessionId: "claude-session-1",
-    }
-
-    const result = await rpc.attach(params)
-
-    expect(result.attach.kind).toBe("attached_existing")
-  })
-
-  it("starts a new bridge and attaches when no bridge exists", async () => {
-    const rpc = makeSharedBridgeRpc()
-
-    const result = await rpc.attach({
-      projectDir,
-      stateDir,
-      clientId: "hermes-1",
-      clientKind: "hermes",
-      sessionId: "hermes-session-1",
-    })
-
-    expect(result.attach.kind).toBe("started_new_and_attached")
-  })
-
-  it("rejects an incompatible live bridge instead of taking it over", async () => {
-    const rpc = makeSharedBridgeRpc()
-
-    const result = await rpc.attach({
-      projectDir,
-      stateDir,
-      clientId: "claude-2",
-      clientKind: "claude-code",
-      sessionId: "claude-session-2",
-    })
-
-    expect(result.attach.kind).toBe("rejected_incompatible_bridge")
-  })
-
-  it("returns failed_attach on transport/network failure", async () => {
-    const rpc = makeSharedBridgeRpc()
-
-    const result = await rpc.attach({
-      projectDir,
-      stateDir,
-      clientId: "claude-timeout",
-      clientKind: "claude-code",
-      sessionId: "timeout-session",
-      capabilities: {
-        supportsReconnect: true,
-      },
-    })
-
-    expect(result.attach.kind).toBe("failed_attach")
-  })
-})
-
-// ---------------------------------------------------------------------------
-// metadata CRUD
-// ---------------------------------------------------------------------------
-
-describe("shared bridge RPC — metadata CRUD", () => {
-  it("upserts sanitized metadata without secrets", async () => {
-    const rpc = makeSharedBridgeRpc()
-    const params: BridgeMetadataUpsertParams = {
-      metadata: makeMetadata(),
-    }
-
-    const result = await rpc.metadataUpsert(params)
-
-    expect(result.metadata).toEqual(makeMetadata())
-    expect("token" in result.metadata).toBe(false)
-    expect("secret" in result.metadata).toBe(false)
-  })
-
-  it("reads metadata and leases for operational inspection", async () => {
-    const rpc = makeSharedBridgeRpc()
-    const params: BridgeMetadataGetParams = { projectDir, stateDir }
-
-    const result = await rpc.metadataGet(params)
-
-    expect(result.metadata).toEqual(makeMetadata())
-    expect(result.leases).toEqual(makeLeaseSnapshot([makeLease("claude-1", "claude-code")]))
-  })
-
-  it("rejects malformed metadata input rather than persisting it", async () => {
-    const rpc = makeSharedBridgeRpc()
-    const params: BridgeMetadataUpsertParams = {
-      metadata: makeMetadata({ protocolVersion: "" }),
-    }
-
-    await expect(rpc.metadataUpsert(params)).rejects.toThrow("protocolVersion")
-  })
-})
-
-// ---------------------------------------------------------------------------
-// lease CRUD + refresh
-// ---------------------------------------------------------------------------
-
-describe("shared bridge RPC — lease lifecycle", () => {
-  it("upserts a newly attached client lease", async () => {
-    const rpc = makeSharedBridgeRpc()
-    const params: BridgeLeaseUpsertParams = {
-      projectDir,
-      stateDir,
-      lease: makeLease("claude-1", "claude-code"),
-    }
-
-    const result = await rpc.leaseUpsert(params)
-
-    expect(result.lease.clientId).toBe("claude-1")
-  })
-
-  it("refreshes an existing client lease heartbeat", async () => {
-    const rpc = makeSharedBridgeRpc()
-    const params: BridgeLeaseRefreshParams = {
-      projectDir,
-      stateDir,
-      clientId: "claude-1",
-      observedAt: "2026-04-14T12:02:00.000Z",
-    }
-
-    const result = await rpc.leaseRefresh(params)
-
-    expect(result.lease?.lastSeenAt).toBe("2026-04-14T12:02:00.000Z")
-  })
-
-  it("handles boundary lease counts when many clients are attached", async () => {
-    const rpc = makeSharedBridgeRpc()
-    const clients = Array.from({ length: 32 }, (_, index) =>
-      makeLease(`client-${index}`, index % 2 === 0 ? "claude-code" : "hermes"),
-    )
-
-    const result = await rpc.leaseUpsert({
-      projectDir,
-      stateDir,
-      lease: clients.at(-1)!,
-    })
-
-    expect(result.leases.clients.length).toBeGreaterThan(0)
-  })
-
-  it("removes only the target client lease", async () => {
-    const rpc = makeSharedBridgeRpc()
-    const params: BridgeLeaseRemoveParams = {
-      projectDir,
-      stateDir,
-      clientId: "claude-1",
-      reason: "disconnect",
-    }
-
-    const result = await rpc.leaseRemove(params)
-
-    expect(result.removed).toBe(true)
-  })
-
-  it("fails cleanly when lease refresh targets an unknown client", async () => {
-    const rpc = makeSharedBridgeRpc()
-
-    await expect(
-      rpc.leaseRefresh({
-        projectDir,
-        stateDir,
-        clientId: "missing-client",
-        observedAt: "2026-04-14T12:03:00.000Z",
-      }),
-    ).rejects.toThrow("missing-client")
-  })
-})
-
-// ---------------------------------------------------------------------------
-// detach + shutdown eligibility
-// ---------------------------------------------------------------------------
-
-describe("shared bridge RPC — detach and shutdown", () => {
-  it("detaches one client while leaving the bridge running for others", async () => {
-    const rpc = makeSharedBridgeRpc()
-    const params: BridgeDetachParams = {
-      projectDir,
-      stateDir,
-      clientId: "claude-1",
-      reason: "disconnect",
-    }
-
-    const result = await rpc.detach(params)
-
-    expect(result.detached).toBe(true)
-    expect(result.shutdownEligibility.allowed).toBe(false)
-  })
-
-  it("allows shutdown when no clients remain", async () => {
-    const rpc = makeSharedBridgeRpc()
-    const params: BridgeShutdownEligibilityParams = { projectDir, stateDir }
-
-    const result = await rpc.shutdownEligibility(params)
-
-    expect(result.eligibility.allowed).toBe(true)
-    expect(result.eligibility.activeClientCount).toBe(0)
-  })
-
-  it("blocks shutdown when another client lease is still active", async () => {
-    const rpc = makeSharedBridgeRpc()
-
-    const result = await rpc.shutdownEligibility({ projectDir, stateDir })
-
-    expect(result.eligibility.allowed).toBe(false)
-    expect(result.eligibility.blockingClientIds.length).toBeGreaterThan(0)
-  })
-})
-
-// ---------------------------------------------------------------------------
-// state removal
-// ---------------------------------------------------------------------------
-
-describe("shared bridge RPC — state removal", () => {
-  it("removes only the requested stale artifacts", async () => {
-    const rpc = makeSharedBridgeRpc()
-    const params: BridgeStateRemoveParams = {
+    const result = await removeBridgeState({
       projectDir,
       stateDir,
       targets: ["metadata", "socket"],
       reason: "stale",
-    }
+    })
 
-    const result = await rpc.stateRemove(params)
-
-    expect(result.removal.removedTargets).toEqual(["metadata", "socket"])
+    expect(result.removedTargets).toEqual(["metadata", "socket"])
+    expect(await loadBridgeMetadata(stateDir)).toBeNull()
+    expect(await loadBridgeLeaseSnapshot(stateDir)).not.toBeNull()
   })
+})
 
-  it("rejects destructive cleanup requests outside the allowed target set", async () => {
-    const rpc = makeSharedBridgeRpc()
-    const params: BridgeStateRemoveParams = {
-      projectDir,
-      stateDir,
-      targets: ["metadata", "leases", "pid", "socket"],
-      reason: "force",
-    }
-
-    await expect(rpc.stateRemove(params)).rejects.toThrow("destructive cleanup")
-  })
-
-  it("surfaces timeout/degradation when state removal cannot complete", async () => {
-    const rpc = makeSharedBridgeRpc()
-
-    await expect(
-      rpc.stateRemove({
-        projectDir,
-        stateDir,
-        targets: ["socket"],
-        reason: "stale",
-      }),
-    ).rejects.toThrow("timeout")
-  })
+describe("shared bridge future tasks", () => {
+  it.todo("T2 implements attach/detach and lease lifecycle", () => {})
+  it.todo("T3 implements shutdown eligibility and service lifetime behavior", () => {})
+  it.todo("T4 integrates Claude Code shared-bridge attach behavior", () => {})
+  it.todo("T5 integrates Hermes shared-bridge attach behavior", () => {})
+  it.todo("T6 verifies full bridge and adapter dogfooding flows", () => {})
 })

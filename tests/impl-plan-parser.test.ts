@@ -104,6 +104,37 @@ describe("parseImplPlan — happy path", () => {
   })
 })
 
+describe("parseImplPlan — ignores non-task section headings", () => {
+  it("does not parse plan section headings as DAG tasks", () => {
+    const plan = `
+# Shared Bridge Service Implementation Plan
+
+## Goal
+
+Build a shared local bridge.
+
+## Task List
+
+### T1 - not a valid task header without colon
+
+## Task T1: Bridge metadata and discovery
+**Dependencies:** none
+
+Implement metadata and discovery.
+
+## Validation Summary
+
+Only T1 should be parsed.
+`
+
+    const result = parseImplPlan(plan)
+    if (!result.success) throw new Error(result.errors.join("; "))
+    const tasks = Array.from(result.dag.tasks)
+    expect(tasks).toHaveLength(1)
+    expect(tasks[0]?.id).toBe("T1")
+  })
+})
+
 // ---------------------------------------------------------------------------
 // Dependency parsing variants
 // ---------------------------------------------------------------------------

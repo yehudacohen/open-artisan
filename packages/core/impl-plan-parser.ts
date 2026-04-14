@@ -21,7 +21,7 @@
  *   <description prose>
  *
  * Parser is tolerant of minor formatting variations:
- * - Task IDs may be bare ("T1"), labeled ("Task T1"), or slugified ("task-auth")
+ * - Task IDs may be labeled ("Task T1") or use task-shaped IDs like "T1" / "task-auth"
  * - Dependencies may be comma-separated or space-separated, "none" means empty
  * - Expected tests may be absent (treated as empty array)
  * - Files may be absent (treated as empty array)
@@ -60,12 +60,14 @@ export type ParseResult = ParseSuccess | ParseError
  *   ## Task T1 — description
  *   ### Task T2: description
  *
- * Requires: starts with # marks, optional "Task" keyword, then an alphanumeric ID
- * (no *, no whitespace in ID), then a separator.
- * Using a strict ID pattern [A-Za-z][A-Za-z0-9_-]* prevents matching bold Markdown
- * like "**Dependencies:**" as a task header.
+ * Requires either:
+ * - an explicit "Task" keyword before the ID, OR
+ * - a task-shaped ID without the keyword (`T1`, `T10`, `task-auth`)
+ * This prevents normal section headings like "## Goal" or "## Task List" from
+ * being misparsed as DAG tasks.
  */
-const TASK_HEADER_RE = /^#{1,3}\s+(?:Task\s+)?([A-Za-z][A-Za-z0-9_-]*)[:\s—–-]+(.+)/i
+const TASK_HEADER_WITH_LABEL_RE = /^#{1,3}\s+Task\s+([A-Za-z][A-Za-z0-9_-]*)(?:\s*[:—–-]\s*|\s+)(.+)/i
+const TASK_HEADER_BARE_RE = /^#{1,3}\s+((?:T\d+[A-Za-z0-9_-]*|task-[A-Za-z0-9_-]+))\s*[:—–]\s*(.+)/i
 
 /**
  * Matches "**Dependencies:** T1, T2" or "**Depends on:** T1".
@@ -157,7 +159,9 @@ function extractRawBlocks(text: string): RawBlock[] {
       continue
     }
 
-    const headerMatch = TASK_HEADER_RE.exec(line)
+    const labeledMatch = TASK_HEADER_WITH_LABEL_RE.exec(line)
+    const bareMatch = TASK_HEADER_BARE_RE.exec(line)
+    const headerMatch = labeledMatch ?? bareMatch
     if (headerMatch) {
       if (current) blocks.push(current)
       current = {

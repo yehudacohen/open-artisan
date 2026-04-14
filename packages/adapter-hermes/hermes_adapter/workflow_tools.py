@@ -107,6 +107,16 @@ def _handle_workflow_tool(
             tool_args = args
 
         bridge.ensure_session(session_id, project_dir)
+        if bridge_tool_name == "submit_feedback":
+            feedback_text = tool_args.get("feedback_text")
+            if isinstance(feedback_text, str) and feedback_text.strip():
+                bridge.call(
+                    "message.process",
+                    {
+                        "sessionId": session_id,
+                        "parts": [{"type": "text", "text": feedback_text}],
+                    },
+                )
         result = bridge.call(
             "tool.execute",
             {

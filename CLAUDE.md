@@ -118,3 +118,5 @@ Dispatches an ephemeral `workflow-reviewer` subagent in a fresh session that see
 - Errors/warnings always persist to `.openartisan/openartisan-errors.log` (JSON lines) regardless of debug flag
 - OpenCode SDK logs: `~/.local/share/opencode/log/`
 - Commit style: conventional prefixes (`feat:`, `fix:`, `docs:`, `refactor:`, `test:`)
+
+@include CLAUDE-WORKFLOW.md

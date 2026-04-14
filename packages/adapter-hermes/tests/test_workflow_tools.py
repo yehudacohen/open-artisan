@@ -120,6 +120,29 @@ class TestBridgeDelegation:
         assert params["name"] == "reset_task"
         assert params["args"]["task_ids"] == ["T3"]
 
+    def test_submit_feedback_relays_user_message_first(self, started_bridge):
+        """submit_feedback should relay the actual user text through message.process first."""
+        started_bridge.set_response(
+            "message.process", {"intercepted": True, "parts": []}
+        )
+        started_bridge.set_response(
+            "tool.execute", "Approved. Transitioning to PLANNING/DRAFT."
+        )
+
+        result = _handle_workflow_tool(
+            started_bridge,
+            "submit_feedback",
+            "test-session",
+            "/tmp/project",
+            {"feedback_type": "approve", "feedback_text": "approved"},
+        )
+
+        assert "Approved" in result
+        message_calls = started_bridge.get_calls("message.process")
+        assert len(message_calls) == 1
+        assert message_calls[0][1]["sessionId"] == "test-session"
+        assert message_calls[0][1]["parts"][0]["text"] == "approved"
+
     def test_returns_bridge_response_as_string(self, started_bridge):
         """Handler should return the bridge result as a string."""
         started_bridge.set_response("tool.execute", "Artifact submitted for review.")

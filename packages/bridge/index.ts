@@ -3,6 +3,7 @@
  */
 export { createBridgeEngine, createBridgeServer, type BridgeEngine, type MethodHandler, type BridgeContext } from "./server"
 export * from "./protocol"
+export * from "./shared-bridge-types"
 export {
   handleInit,
   handlePing,

@@ -8,7 +8,14 @@ goes through these types. Implementation modules import from here.
 from __future__ import annotations
 
 import json
-from typing import Any, Protocol, TypedDict, runtime_checkable
+from collections.abc import Callable
+from typing import Protocol, TypedDict, TypeAlias, runtime_checkable
+
+JsonPrimitive: TypeAlias = str | int | float | bool | None
+JsonValue: TypeAlias = JsonPrimitive | dict[str, "JsonValue"] | list["JsonValue"]
+JsonObject: TypeAlias = dict[str, JsonValue]
+ToolHandler: TypeAlias = Callable[..., str]
+HookCallback: TypeAlias = Callable[..., object]
 
 
 # ---------------------------------------------------------------------------
@@ -19,21 +26,92 @@ from typing import Any, Protocol, TypedDict, runtime_checkable
 class JsonRpcRequest(TypedDict):
     jsonrpc: str  # always "2.0"
     method: str
-    params: dict[str, Any]
+    params: JsonObject
     id: int
 
 
 class JsonRpcError(TypedDict, total=False):
     code: int
     message: str
-    data: Any
+    data: JsonValue
 
 
 class JsonRpcResponse(TypedDict, total=False):
     jsonrpc: str
-    result: Any
+    result: JsonValue
     error: JsonRpcError
     id: int
+
+
+class BridgeClientLease(TypedDict, total=False):
+    clientId: str
+    clientKind: str
+    sessionId: str
+    attachedAt: str
+    lastSeenAt: str
+    processInfo: JsonObject
+    shutdownIntent: bool
+
+
+class BridgeLeaseSnapshot(TypedDict):
+    bridgeInstanceId: str
+    clients: list[BridgeClientLease]
+
+
+class BridgeMetadata(TypedDict, total=False):
+    version: int
+    bridgeInstanceId: str
+    projectDir: str
+    stateDir: str
+    transport: str
+    socketPath: str
+    pid: int
+    startedAt: str
+    protocolVersion: str
+    adapterCompatibility: dict[str, bool]
+    lastHeartbeatAt: str
+
+
+class BridgeDiscoveryResult(TypedDict, total=False):
+    kind: str
+    reason: str
+    stalePaths: list[str]
+    previousPid: int
+    metadata: BridgeMetadata
+    leases: BridgeLeaseSnapshot
+
+
+class AttachBridgeResult(TypedDict, total=False):
+    kind: str
+    reason: str
+    metadata: BridgeMetadata
+    lease: BridgeClientLease
+    leases: BridgeLeaseSnapshot
+
+
+class BridgeShutdownEligibility(TypedDict, total=False):
+    allowed: bool
+    activeClientCount: int
+    blockingClientIds: list[str]
+    reason: str
+
+
+class AttachBridgeParams(TypedDict, total=False):
+    projectDir: str
+    stateDir: str
+    clientId: str
+    clientKind: str
+    sessionId: str
+    processInfo: JsonObject
+    capabilities: dict[str, bool]
+
+
+class DetachBridgeParams(TypedDict, total=False):
+    projectDir: str
+    stateDir: str
+    clientId: str
+    reason: str
+    requestedAt: str
 
 
 # ---------------------------------------------------------------------------
@@ -49,8 +127,22 @@ class BridgeClient(Protocol):
         """Spawn the bridge subprocess and send lifecycle.init."""
         ...
 
-    def call(self, method: str, params: dict[str, Any] | None = None) -> Any:
+    def call(self, method: str, params: JsonObject | None = None) -> JsonValue:
         """Send a JSON-RPC request and return the result. Raises on error."""
+        ...
+
+    def attach_or_start(self, params: AttachBridgeParams) -> AttachBridgeResult:
+        """Attach the current adapter client to a shared bridge or start one."""
+        ...
+
+    def detach_client(self, params: DetachBridgeParams) -> BridgeShutdownEligibility:
+        """Detach a client without assuming the bridge should fully shut down."""
+        ...
+
+    def discover_bridge(
+        self, project_dir: str, state_dir: str
+    ) -> BridgeDiscoveryResult:
+        """Inspect existing local bridge metadata and liveness for a project."""
         ...
 
     def shutdown(self) -> None:
@@ -93,7 +185,7 @@ class GuardBlockedError(TypedDict):
 class ToolDefinition(TypedDict):
     name: str
     description: str
-    parameters: dict[str, Any]
+    parameters: JsonObject
 
 
 class ToolRegistration(TypedDict):
@@ -102,8 +194,8 @@ class ToolRegistration(TypedDict):
     toolset: str
     name: str
     description: str
-    schema: dict[str, Any]
-    handler: Any  # async callable(args: dict) -> str
+    schema: JsonObject
+    handler: ToolHandler
 
 
 class HookRegistration(TypedDict, total=False):
@@ -111,7 +203,7 @@ class HookRegistration(TypedDict, total=False):
 
     name: str
     event: str
-    handler: Any  # callable or async callable
+    handler: HookCallback
 
 
 @runtime_checkable
@@ -132,10 +224,10 @@ class HermesContext(Protocol):
         self,
         name: str,
         toolset: str,
-        schema: dict[str, Any],
-        handler: Any,
-        check_fn: Any | None = None,
-        requires_env: list[Any] | None = None,
+        schema: JsonObject,
+        handler: ToolHandler,
+        check_fn: HookCallback | None = None,
+        requires_env: list[str] | None = None,
         is_async: bool = False,
         description: str = "",
         emoji: str = "",
@@ -143,11 +235,11 @@ class HermesContext(Protocol):
         """Register a tool with Hermes."""
         ...
 
-    def register_hook(self, hook_name: str, callback: Any) -> None:
+    def register_hook(self, hook_name: str, callback: HookCallback) -> None:
         """Register a lifecycle or LLM hook."""
         ...
 
-    def get_tool_handler(self, name: str) -> Any | None:
+    def get_tool_handler(self, name: str) -> ToolHandler | None:
         """Get the original handler for a built-in tool (for wrapping)."""
         ...
 

@@ -5,6 +5,25 @@
  * This file defines only the method-specific parameter and result types.
  */
 import type { Phase, PhaseState, WorkflowMode } from "../core/types"
+import type {
+  AttachBridgeResult,
+  AttachBridgeClientParams,
+  BridgeClientLease,
+  BridgeDiscoveryResult,
+  BridgeLeaseSnapshot,
+  BridgeMetadata,
+  BridgeShutdownEligibility,
+  DetachBridgeClientParams,
+  RefreshBridgeClientLeaseParams,
+  RemoveBridgeClientLeaseParams,
+  RemoveBridgeClientLeaseResult,
+  RemoveBridgeStateParams,
+  RemoveBridgeStateResult,
+  UpsertBridgeClientLeaseParams,
+  UpsertBridgeClientLeaseResult,
+  UpsertBridgeMetadataParams,
+  UpsertBridgeMetadataResult,
+} from "./shared-bridge-types"
 
 // ---------------------------------------------------------------------------
 // Application error codes (used with JSONRPCErrorException)
@@ -100,6 +119,52 @@ export interface ToolExecuteParams {
   traceId?: string
 }
 
+export interface BridgeDiscoverParams {
+  projectDir: string
+  stateDir: string
+  traceId?: string
+}
+
+export interface BridgeAttachParams extends AttachBridgeClientParams {
+  traceId?: string
+}
+
+export interface BridgeLeaseRefreshParams extends RefreshBridgeClientLeaseParams {
+  traceId?: string
+}
+
+export interface BridgeDetachParams extends DetachBridgeClientParams {
+  traceId?: string
+}
+
+export interface BridgeMetadataGetParams {
+  projectDir: string
+  stateDir: string
+  traceId?: string
+}
+
+export interface BridgeShutdownEligibilityParams {
+  projectDir: string
+  stateDir: string
+  traceId?: string
+}
+
+export interface BridgeMetadataUpsertParams extends UpsertBridgeMetadataParams {
+  traceId?: string
+}
+
+export interface BridgeLeaseUpsertParams extends UpsertBridgeClientLeaseParams {
+  traceId?: string
+}
+
+export interface BridgeLeaseRemoveParams extends RemoveBridgeClientLeaseParams {
+  traceId?: string
+}
+
+export interface BridgeStateRemoveParams extends RemoveBridgeStateParams {
+  traceId?: string
+}
+
 // ---------------------------------------------------------------------------
 // Method result types
 // ---------------------------------------------------------------------------
@@ -131,4 +196,42 @@ export interface IdleCheckResult {
 export interface MessageProcessResult {
   parts: Array<{ type: string; text?: string }>
   intercepted: boolean
+}
+
+export interface BridgeDiscoverResult {
+  discovery: BridgeDiscoveryResult
+}
+
+export interface BridgeAttachRpcResult {
+  attach: AttachBridgeResult
+}
+
+export interface BridgeLeaseRefreshResult {
+  lease?: BridgeClientLease
+  leases: BridgeLeaseSnapshot
+}
+
+export interface BridgeDetachResult {
+  detached: boolean
+  leases: BridgeLeaseSnapshot
+  shutdownEligibility: BridgeShutdownEligibility
+}
+
+export interface BridgeMetadataGetResult {
+  metadata?: BridgeMetadata
+  leases?: BridgeLeaseSnapshot
+}
+
+export interface BridgeShutdownEligibilityResult {
+  eligibility: BridgeShutdownEligibility
+}
+
+export interface BridgeMetadataUpsertResult extends UpsertBridgeMetadataResult {}
+
+export interface BridgeLeaseUpsertResult extends UpsertBridgeClientLeaseResult {}
+
+export interface BridgeLeaseRemoveResult extends RemoveBridgeClientLeaseResult {}
+
+export interface BridgeStateRemoveResultRpc {
+  removal: RemoveBridgeStateResult
 }

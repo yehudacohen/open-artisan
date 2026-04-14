@@ -27,7 +27,8 @@ function getProjectDir(): string {
     options: { "project-dir": { type: "string" } },
     strict: false,
   })
-  return resolve(values["project-dir"] ?? process.cwd())
+  const projectDir = values["project-dir"]
+  return resolve(typeof projectDir === "string" ? projectDir : process.cwd())
 }
 
 // ---------------------------------------------------------------------------

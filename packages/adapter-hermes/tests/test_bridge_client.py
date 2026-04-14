@@ -4,9 +4,11 @@ test_bridge_client.py — Tests for the stdio bridge client.
 Tests subprocess lifecycle, JSON-RPC round-trip, auto-reconnect,
 edge cases (death mid-call, malformed JSON), and thread safety.
 """
+
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import threading
 from unittest.mock import MagicMock, patch, PropertyMock
@@ -28,21 +30,55 @@ class TestSubprocessLifecycle:
     def test_start_spawns_subprocess(self, tmp_path):
         """start() should spawn a bridge subprocess and send lifecycle.init."""
         client = StdioBridgeClient()
-        with patch.object(client, "_spawn_process") as mock_spawn, \
-             patch.object(client, "_send_rpc", return_value="ready"):
+        with (
+            patch.object(client, "_spawn_process") as mock_spawn,
+            patch.object(client, "_send_rpc", return_value="ready"),
+        ):
             client.start(str(tmp_path))
             mock_spawn.assert_called_once()
 
     def test_start_sends_init(self, tmp_path):
         """start() should call lifecycle.init with correct params."""
         client = StdioBridgeClient()
-        with patch.object(client, "_spawn_process"), \
-             patch.object(client, "_send_rpc", return_value="ready") as mock_rpc:
+        with (
+            patch.object(client, "_spawn_process"),
+            patch.object(client, "_send_rpc", return_value="ready") as mock_rpc,
+        ):
             client.start(str(tmp_path))
             mock_rpc.assert_called_once()
             call_args = mock_rpc.call_args
             assert call_args[0][0] == "lifecycle.init"
             assert call_args[0][1]["projectDir"] == str(tmp_path)
+
+    def test_start_can_take_over_existing_bridge_when_enabled(self, tmp_path):
+        client = StdioBridgeClient()
+        state_dir = tmp_path / ".openartisan"
+        state_dir.mkdir()
+        (state_dir / ".bridge-pid").write_text("12345")
+        (state_dir / ".bridge.sock").write_text("")
+
+        with (
+            patch.dict(os.environ, {"OPENARTISAN_BRIDGE_TAKEOVER": "1"}, clear=False),
+            patch.object(client, "_spawn_process") as mock_spawn,
+            patch.object(client, "shutdown") as mock_shutdown,
+            patch.object(
+                client,
+                "_send_rpc",
+                side_effect=[
+                    BridgeError(
+                        "Bridge RPC error: Another bridge process is already running (PID 12345). Kill it or remove .bridge-pid manually."
+                    ),
+                    "ready",
+                ],
+            ) as mock_rpc,
+            patch("os.kill") as mock_kill,
+        ):
+            client.start(str(tmp_path))
+
+        mock_kill.assert_called_once_with(12345, 15)
+        mock_shutdown.assert_called_once()
+        assert mock_spawn.call_count == 2
+        assert mock_rpc.call_count == 2
 
     def test_shutdown_sends_lifecycle_shutdown(self):
         """shutdown() should send lifecycle.shutdown before killing the process."""
@@ -94,7 +130,9 @@ class TestJsonRpcRoundTrip:
         """call() should forward params to the bridge."""
         client = StdioBridgeClient()
         with patch.object(client, "_send_rpc", return_value="ok") as mock_rpc:
-            client.call("tool.execute", {"name": "select_mode", "args": {"mode": "GREENFIELD"}})
+            client.call(
+                "tool.execute", {"name": "select_mode", "args": {"mode": "GREENFIELD"}}
+            )
             args = mock_rpc.call_args[0]
             assert args[0] == "tool.execute"
             assert args[1]["name"] == "select_mode"
@@ -131,8 +169,10 @@ class TestAutoReconnect:
         client._process = MagicMock()
         client._process.poll.return_value = 1  # exited
 
-        with patch.object(client, "_spawn_process") as mock_spawn, \
-             patch.object(client, "_send_rpc", return_value="ready"):
+        with (
+            patch.object(client, "_spawn_process") as mock_spawn,
+            patch.object(client, "_send_rpc", return_value="ready"),
+        ):
             # The init call during reconnect
             with patch.object(client, "start"):
                 try:
@@ -147,8 +187,10 @@ class TestAutoReconnect:
         client._process = MagicMock()
         client._process.poll.return_value = None  # still running
 
-        with patch.object(client, "_spawn_process") as mock_spawn, \
-             patch.object(client, "_send_rpc", return_value="pong"):
+        with (
+            patch.object(client, "_spawn_process") as mock_spawn,
+            patch.object(client, "_send_rpc", return_value="pong"),
+        ):
             client.call("lifecycle.ping")
             mock_spawn.assert_not_called()
 

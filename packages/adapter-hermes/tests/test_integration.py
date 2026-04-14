@@ -4,6 +4,7 @@ test_integration.py — Integration tests for the Hermes adapter.
 Tests the full flow: session start → tool registration → mode selection →
 guard enforcement → phase progression. Also tests resume after crash.
 """
+
 from __future__ import annotations
 
 import json
@@ -17,7 +18,7 @@ from hermes_adapter.prompt_hook import create_prompt_hook
 from hermes_adapter.constants import WORKFLOW_TOOLS, GUARDED_TOOLS, TOOLSET_NAME
 from hermes_adapter.types import BridgeError
 
-from conftest import MockBridgeClient, MockHermesContext
+from .conftest import MockBridgeClient, MockHermesContext
 
 
 # ---------------------------------------------------------------------------
@@ -39,14 +40,16 @@ class TestFullRegistration:
 
         # Check workflow tools (13 + oa_state = 14)
         for hermes_name, _, _, _ in WORKFLOW_TOOLS:
-            assert hermes_name in mock_ctx.registered_tool_names, \
+            assert hermes_name in mock_ctx.registered_tool_names, (
                 f"Missing workflow tool: {hermes_name}"
+            )
         assert "oa_state" in mock_ctx.registered_tool_names
 
         # Check guard wrappers
         for tool_name in GUARDED_TOOLS:
-            assert tool_name in mock_ctx.registered_tool_names, \
+            assert tool_name in mock_ctx.registered_tool_names, (
                 f"Missing guard wrapper: {tool_name}"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -57,22 +60,20 @@ class TestFullRegistration:
 class TestSessionLifecycle:
     """on_session_start/end manage bridge lifecycle."""
 
-    @pytest.mark.asyncio
-    async def test_session_start_initializes_bridge(self, mock_ctx, mock_bridge):
+    def test_session_start_initializes_bridge(self, mock_ctx, mock_bridge):
         """on_session_start should call bridge.start and lifecycle.sessionCreated."""
         mock_bridge.set_response("lifecycle.sessionCreated", None)
-        await _on_session_start(mock_ctx, mock_bridge)
+        _on_session_start(mock_ctx, mock_bridge, session_id=mock_ctx.session_id)
         assert mock_bridge.is_alive
         session_calls = mock_bridge.get_calls("lifecycle.sessionCreated")
         assert len(session_calls) == 1
         assert session_calls[0][1]["sessionId"] == mock_ctx.session_id
 
-    @pytest.mark.asyncio
-    async def test_session_end_shuts_down_bridge(self, mock_ctx, mock_bridge):
+    def test_session_end_shuts_down_bridge(self, mock_ctx, mock_bridge):
         """on_session_end should call lifecycle.sessionDeleted and shutdown."""
         mock_bridge.start(mock_ctx.project_dir)
         mock_bridge.set_response("lifecycle.sessionDeleted", None)
-        await _on_session_end(mock_ctx, mock_bridge)
+        _on_session_end(mock_ctx, mock_bridge, session_id=mock_ctx.session_id)
         assert not mock_bridge.is_alive
 
 
@@ -88,25 +89,37 @@ class TestPhaseProgression:
     async def test_select_mode_then_guard_blocks_writes(self, started_bridge):
         """After selecting GREENFIELD mode (PLANNING/DRAFT), writes should be blocked."""
         # select_mode response
-        started_bridge.set_response("tool.execute", "Mode set to GREENFIELD. Transitioning to PLANNING/DRAFT.")
+        started_bridge.set_response(
+            "tool.execute", "Mode set to GREENFIELD. Transitioning to PLANNING/DRAFT."
+        )
 
         from hermes_adapter.workflow_tools import _handle_workflow_tool
-        result = await _handle_workflow_tool(
-            started_bridge, "select_mode", "s1", "/tmp/p",
+
+        result = _handle_workflow_tool(
+            started_bridge,
+            "select_mode",
+            "s1",
+            "/tmp/p",
             {"mode": "GREENFIELD", "feature_name": "test-feat"},
         )
         assert "GREENFIELD" in result
 
         # Now guard should block write_file in PLANNING/DRAFT
-        started_bridge.set_response("guard.check", {
-            "allowed": False,
-            "reason": "writes blocked in PLANNING/DRAFT",
-            "phase": "PLANNING",
-            "phaseState": "DRAFT",
-        })
+        started_bridge.set_response(
+            "guard.check",
+            {
+                "allowed": False,
+                "reason": "writes blocked in PLANNING/DRAFT",
+                "phase": "PLANNING",
+                "phaseState": "DRAFT",
+            },
+        )
         original = AsyncMock(return_value="should not run")
         guard_result = await _guarded_handler(
-            started_bridge, original, "write_file", "s1",
+            started_bridge,
+            original,
+            "write_file",
+            "s1",
             {"path": "src/main.py", "content": "hello"},
         )
         parsed = json.loads(guard_result)
@@ -116,15 +129,21 @@ class TestPhaseProgression:
     @pytest.mark.asyncio
     async def test_guard_allows_writes_in_implementation(self, started_bridge):
         """In IMPLEMENTATION/DRAFT, writes to allowed files should pass through."""
-        started_bridge.set_response("guard.check", {
-            "allowed": True,
-            "reason": "",
-            "phase": "IMPLEMENTATION",
-            "phaseState": "DRAFT",
-        })
+        started_bridge.set_response(
+            "guard.check",
+            {
+                "allowed": True,
+                "reason": "",
+                "phase": "IMPLEMENTATION",
+                "phaseState": "DRAFT",
+            },
+        )
         original = AsyncMock(return_value="file written successfully")
         result = await _guarded_handler(
-            started_bridge, original, "write_file", "s1",
+            started_bridge,
+            original,
+            "write_file",
+            "s1",
             {"path": "src/auth.py", "content": "def login(): ..."},
         )
         assert result == "file written successfully"
@@ -133,15 +152,19 @@ class TestPhaseProgression:
     @pytest.mark.asyncio
     async def test_state_check_returns_current_phase(self, started_bridge):
         """oa_state should return current workflow state."""
-        started_bridge.set_response("state.get", {
-            "phase": "INTERFACES",
-            "phaseState": "DRAFT",
-            "mode": "GREENFIELD",
-            "featureName": "test-feat",
-            "currentTaskId": None,
-        })
+        started_bridge.set_response(
+            "state.get",
+            {
+                "phase": "INTERFACES",
+                "phaseState": "DRAFT",
+                "mode": "GREENFIELD",
+                "featureName": "test-feat",
+                "currentTaskId": None,
+            },
+        )
         from hermes_adapter.workflow_tools import _handle_oa_state
-        result = await _handle_oa_state(started_bridge, "s1")
+
+        result = _handle_oa_state(started_bridge, "s1")
         parsed = json.loads(result)
         assert parsed["phase"] == "INTERFACES"
         assert parsed["mode"] == "GREENFIELD"
@@ -159,13 +182,17 @@ class TestResumeAfterCrash:
     async def test_bridge_recovers_after_death(self, started_bridge):
         """After bridge dies, next call should attempt reconnect."""
         # First call works
-        started_bridge.set_response("state.get", {"phase": "PLANNING", "phaseState": "DRAFT"})
+        started_bridge.set_response(
+            "state.get", {"phase": "PLANNING", "phaseState": "DRAFT"}
+        )
         from hermes_adapter.workflow_tools import _handle_oa_state
-        result1 = await _handle_oa_state(started_bridge, "s1")
+
+        result1 = _handle_oa_state(started_bridge, "s1")
         assert "PLANNING" in result1
 
         # Bridge "dies" — set response to raise error, then recover
         call_count = 0
+
         def flaky(params):
             nonlocal call_count
             call_count += 1
@@ -176,12 +203,12 @@ class TestResumeAfterCrash:
         started_bridge.set_response_fn("state.get", flaky)
 
         # First attempt after death — error
-        result2 = await _handle_oa_state(started_bridge, "s1")
+        result2 = _handle_oa_state(started_bridge, "s1")
         parsed = json.loads(result2)
         assert "error" in parsed
 
         # Second attempt — recovered
-        result3 = await _handle_oa_state(started_bridge, "s1")
+        result3 = _handle_oa_state(started_bridge, "s1")
         parsed3 = json.loads(result3)
         assert parsed3["phase"] == "PLANNING"
 
@@ -196,12 +223,16 @@ class TestPromptDuringWorkflow:
 
     def test_prompt_reflects_current_phase(self, started_bridge):
         """Prompt should change as workflow advances."""
-        started_bridge.set_response("prompt.build", "## PLANNING/DRAFT\nDraft your plan.")
+        started_bridge.set_response(
+            "prompt.build", "## PLANNING/DRAFT\nDraft your plan."
+        )
         hook = create_prompt_hook(started_bridge, "s1")
         r1 = hook()
         assert "PLANNING" in r1["context"]
 
         # "Advance" — bridge now returns INTERFACES prompt
-        started_bridge.set_response("prompt.build", "## INTERFACES/DRAFT\nDefine interfaces.")
+        started_bridge.set_response(
+            "prompt.build", "## INTERFACES/DRAFT\nDefine interfaces."
+        )
         r2 = hook()
         assert "INTERFACES" in r2["context"]

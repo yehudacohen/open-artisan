@@ -11,7 +11,7 @@ import { SESSION_NOT_FOUND, INVALID_PARAMS } from "../protocol"
 import { handleIdle } from "../../core/hooks/idle-handler"
 
 export const handleIdleCheck: MethodHandler = async (params, ctx) => {
-  const p = params as IdleCheckParams
+  const p = params as Partial<IdleCheckParams>
   if (!p.sessionId || typeof p.sessionId !== "string") {
     throw new JSONRPCErrorException("sessionId is required", INVALID_PARAMS)
   }

@@ -54,16 +54,19 @@ function parseCLIArgs(): { projectDir: string; daemon: boolean; stateDir?: strin
     strict: false, // ignore unknown args
   })
 
-  const projectDir = values["project-dir"]
-  if (!projectDir) {
+  const projectDirValue = values["project-dir"]
+  if (typeof projectDirValue !== "string" || projectDirValue.length === 0) {
     console.error("Usage: artisan-server --project-dir <path> [--state-dir <path>] [--daemon]")
     process.exit(1)
   }
 
+  const stateDirValue = values["state-dir"]
+  const daemon = values.daemon === true
+
   return {
-    projectDir: resolve(projectDir),
-    daemon: values.daemon ?? false,
-    stateDir: values["state-dir"] ? resolve(values["state-dir"]) : undefined,
+    projectDir: resolve(projectDirValue),
+    daemon,
+    ...(typeof stateDirValue === "string" ? { stateDir: resolve(stateDirValue) } : {}),
   }
 }
 

@@ -4,6 +4,7 @@ types.py — Type definitions and protocols for the Hermes adapter.
 Defines the contracts between components. All inter-component communication
 goes through these types. Implementation modules import from here.
 """
+
 from __future__ import annotations
 
 import json
@@ -13,6 +14,7 @@ from typing import Any, Protocol, TypedDict, runtime_checkable
 # ---------------------------------------------------------------------------
 # JSON-RPC types
 # ---------------------------------------------------------------------------
+
 
 class JsonRpcRequest(TypedDict):
     jsonrpc: str  # always "2.0"
@@ -37,6 +39,7 @@ class JsonRpcResponse(TypedDict, total=False):
 # ---------------------------------------------------------------------------
 # Bridge client protocol
 # ---------------------------------------------------------------------------
+
 
 @runtime_checkable
 class BridgeClient(Protocol):
@@ -64,6 +67,7 @@ class BridgeClient(Protocol):
 # Guard result types
 # ---------------------------------------------------------------------------
 
+
 class GuardCheckResult(TypedDict):
     allowed: bool
     reason: str
@@ -85,6 +89,7 @@ class GuardBlockedError(TypedDict):
 # mock that satisfies this protocol.
 # ---------------------------------------------------------------------------
 
+
 class ToolDefinition(TypedDict):
     name: str
     description: str
@@ -93,15 +98,17 @@ class ToolDefinition(TypedDict):
 
 class ToolRegistration(TypedDict):
     """What register_tool() expects."""
+
     toolset: str
     name: str
     description: str
-    parameters: dict[str, Any]
+    schema: dict[str, Any]
     handler: Any  # async callable(args: dict) -> str
 
 
 class HookRegistration(TypedDict, total=False):
     """What register_hook() expects."""
+
     name: str
     event: str
     handler: Any  # callable or async callable
@@ -123,17 +130,20 @@ class HermesContext(Protocol):
 
     def register_tool(
         self,
-        *,
-        toolset: str,
         name: str,
-        description: str,
-        parameters: dict[str, Any],
+        toolset: str,
+        schema: dict[str, Any],
         handler: Any,
+        check_fn: Any | None = None,
+        requires_env: list[Any] | None = None,
+        is_async: bool = False,
+        description: str = "",
+        emoji: str = "",
     ) -> None:
         """Register a tool with Hermes."""
         ...
 
-    def register_hook(self, *, event: str, handler: Any) -> None:
+    def register_hook(self, hook_name: str, callback: Any) -> None:
         """Register a lifecycle or LLM hook."""
         ...
 
@@ -145,6 +155,7 @@ class HermesContext(Protocol):
 # ---------------------------------------------------------------------------
 # Workflow state (subset returned by state.get)
 # ---------------------------------------------------------------------------
+
 
 class WorkflowStateSummary(TypedDict, total=False):
     phase: str
@@ -160,6 +171,7 @@ class WorkflowStateSummary(TypedDict, total=False):
 # Bridge communication error
 # ---------------------------------------------------------------------------
 
+
 class BridgeError(Exception):
     """Raised when bridge communication fails (subprocess died, parse error, timeout)."""
 
@@ -171,6 +183,7 @@ class BridgeError(Exception):
 # ---------------------------------------------------------------------------
 # Helper: structured error response for LLM consumption
 # ---------------------------------------------------------------------------
+
 
 def make_error_response(error: str, phase: str = "", phase_state: str = "") -> str:
     """Build a JSON error string that the LLM can parse."""

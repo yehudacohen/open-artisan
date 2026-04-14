@@ -4,6 +4,7 @@ test_setup.py — Tests for the Hermes adapter setup script (__main__.py).
 Verifies directory creation, template generation, bridge validation,
 and idempotency.
 """
+
 from __future__ import annotations
 
 import json
@@ -11,7 +12,12 @@ import pytest
 from pathlib import Path
 from unittest.mock import patch
 
-from hermes_adapter.__main__ import setup, _generate_hermes_template
+from hermes_adapter.__main__ import (
+    setup,
+    _generate_hermes_template,
+    _write_profile_env,
+    _install_plugin_into_profile,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -45,7 +51,9 @@ class TestGenerateTemplate:
     def test_fallback_when_template_missing(self):
         """If .hermes.md.tmpl is not found, return minimal fallback."""
         with patch("hermes_adapter.__main__.Path") as mock_path:
-            mock_path.return_value.resolve.return_value.parent.parent.__truediv__ = lambda self, x: Path("/nonexistent/.hermes.md.tmpl")
+            mock_path.return_value.resolve.return_value.parent.parent.__truediv__ = (
+                lambda self, x: Path("/nonexistent/.hermes.md.tmpl")
+            )
             # The function should not crash
             result = _generate_hermes_template()
             assert isinstance(result, str)
@@ -97,6 +105,39 @@ class TestSetup:
         setup(str(tmp_path))
         # If we get here, no crash occurred
 
+    def test_writes_profile_env_when_profile_provided(self, tmp_path):
+        profile_name = "oa-test-profile"
+        with (
+            patch(
+                "hermes_adapter.__main__._profile_root",
+                return_value=tmp_path / profile_name,
+            ),
+            patch(
+                "hermes_adapter.__main__.resolve_bridge_command",
+                return_value=["bun", "run", "/tmp/bridge/cli.ts"],
+            ),
+            patch("hermes_adapter.__main__._install_plugin_into_profile"),
+        ):
+            setup(str(tmp_path), profile_name)
+
+        env_path = tmp_path / profile_name / ".env"
+        assert env_path.is_file()
+        assert "OPENARTISAN_BRIDGE_CLI=/tmp/bridge/cli.ts" in env_path.read_text()
+
+    def test_installs_plugin_root_shim(self, tmp_path):
+        profile_name = "oa-profile"
+        with patch(
+            "hermes_adapter.__main__._profile_root",
+            return_value=tmp_path / profile_name,
+        ):
+            plugin_dir = _install_plugin_into_profile(profile_name)
+
+        assert (plugin_dir / "__init__.py").is_file()
+        assert (
+            "from .hermes_adapter import register"
+            in (plugin_dir / "__init__.py").read_text()
+        )
+
 
 # ---------------------------------------------------------------------------
 # Auto-approval dispatch
@@ -138,15 +179,19 @@ class TestAutoApprovalDispatch:
         from unittest.mock import MagicMock
 
         started_bridge.set_response("message.process", None)
-        started_bridge.set_response("task.getAutoApproveContext", "Review this artifact...")
+        started_bridge.set_response(
+            "task.getAutoApproveContext", "Review this artifact..."
+        )
         started_bridge.set_response("tool.execute", "ok")
 
         mock_result = MagicMock()
-        mock_result.stdout = json.dumps({
-            "approve": True, "confidence": 0.9, "reasoning": "Looks good"
-        })
+        mock_result.stdout = json.dumps(
+            {"approve": True, "confidence": 0.9, "reasoning": "Looks good"}
+        )
 
-        with patch("hermes_adapter.prompt_hook.subprocess.run", return_value=mock_result):
+        with patch(
+            "hermes_adapter.prompt_hook.subprocess.run", return_value=mock_result
+        ):
             _dispatch_auto_approve(started_bridge, "s1", "/tmp/project")
 
         tool_calls = started_bridge.get_calls("tool.execute")
@@ -161,8 +206,10 @@ class TestAutoApprovalDispatch:
         started_bridge.set_response("message.process", None)
         started_bridge.set_response("task.getAutoApproveContext", "Review prompt")
 
-        with patch("hermes_adapter.prompt_hook.subprocess.run",
-                   side_effect=FileNotFoundError("claude not found")):
+        with patch(
+            "hermes_adapter.prompt_hook.subprocess.run",
+            side_effect=FileNotFoundError("claude not found"),
+        ):
             _dispatch_auto_approve(started_bridge, "s1", "/tmp/project")
 
         # Should not have called tool.execute (subprocess failed)
@@ -177,8 +224,10 @@ class TestAutoApprovalDispatch:
         started_bridge.set_response("message.process", None)
         started_bridge.set_response("task.getAutoApproveContext", "Review prompt")
 
-        with patch("hermes_adapter.prompt_hook.subprocess.run",
-                   side_effect=sp.TimeoutExpired("claude", 120)):
+        with patch(
+            "hermes_adapter.prompt_hook.subprocess.run",
+            side_effect=sp.TimeoutExpired("claude", 120),
+        ):
             _dispatch_auto_approve(started_bridge, "s1", "/tmp/project")
 
         tool_calls = started_bridge.get_calls("tool.execute")

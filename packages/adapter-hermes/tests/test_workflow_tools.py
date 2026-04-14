@@ -1,9 +1,10 @@
 """
 test_workflow_tools.py — Tests for workflow tool registration and delegation.
 
-Verifies that all 13 workflow tools + oa_state are registered correctly,
+Verifies that all workflow tools + oa_state are registered correctly,
 delegate to the bridge with correct args, and pass through errors.
 """
+
 from __future__ import annotations
 
 import json
@@ -17,7 +18,7 @@ from hermes_adapter.workflow_tools import (
 from hermes_adapter.constants import WORKFLOW_TOOLS, TOOLSET_NAME
 from hermes_adapter.types import BridgeError
 
-from conftest import MockBridgeClient, MockHermesContext
+from .conftest import MockBridgeClient, MockHermesContext
 
 
 # ---------------------------------------------------------------------------
@@ -28,8 +29,8 @@ from conftest import MockBridgeClient, MockHermesContext
 class TestToolRegistration:
     """register_workflow_tools registers all tools with correct schemas."""
 
-    def test_registers_all_13_workflow_tools(self, mock_ctx, mock_bridge):
-        """Should register all 13 workflow tools from WORKFLOW_TOOLS."""
+    def test_registers_all_workflow_tools(self, mock_ctx, mock_bridge):
+        """Should register all workflow tools from WORKFLOW_TOOLS."""
         register_workflow_tools(mock_ctx, mock_bridge)
         for hermes_name, bridge_name, desc, schema in WORKFLOW_TOOLS:
             tool = mock_ctx.get_registered_tool(hermes_name)
@@ -44,10 +45,19 @@ class TestToolRegistration:
         assert tool is not None
         assert tool["toolset"] == TOOLSET_NAME
 
-    def test_total_tool_count_is_14(self, mock_ctx, mock_bridge):
-        """13 workflow tools + oa_state = 14 total."""
+    def test_total_tool_count_matches_workflow_tools_plus_state(
+        self, mock_ctx, mock_bridge
+    ):
+        """Total count should equal workflow tools plus oa_state."""
         register_workflow_tools(mock_ctx, mock_bridge)
-        assert len(mock_ctx.registered_tool_names) == 14
+        assert len(mock_ctx.registered_tool_names) == len(WORKFLOW_TOOLS) + 1
+
+    def test_registers_oa_reset_task(self, mock_ctx, mock_bridge):
+        """Should register the oa_reset_task workflow tool."""
+        register_workflow_tools(mock_ctx, mock_bridge)
+        tool = mock_ctx.get_registered_tool("oa_reset_task")
+        assert tool is not None
+        assert tool["toolset"] == TOOLSET_NAME
 
     def test_all_handlers_are_callable(self, mock_ctx, mock_bridge):
         """Every registered tool's handler should be callable."""
@@ -74,11 +84,10 @@ class TestToolRegistration:
 class TestBridgeDelegation:
     """Workflow tool handlers delegate to bridge tool.execute."""
 
-    @pytest.mark.asyncio
-    async def test_delegates_to_tool_execute(self, started_bridge):
+    def test_delegates_to_tool_execute(self, started_bridge):
         """_handle_workflow_tool should call tool.execute with correct args."""
         started_bridge.set_response("tool.execute", "Mode set to GREENFIELD.")
-        result = await _handle_workflow_tool(
+        result = _handle_workflow_tool(
             started_bridge,
             "select_mode",
             "test-session",
@@ -94,11 +103,27 @@ class TestBridgeDelegation:
         assert params["context"]["sessionId"] == "test-session"
         assert params["context"]["directory"] == "/tmp/project"
 
-    @pytest.mark.asyncio
-    async def test_returns_bridge_response_as_string(self, started_bridge):
+    def test_reset_task_delegates_task_ids(self, started_bridge):
+        """oa_reset_task should relay task_ids to bridge tool.execute."""
+        started_bridge.set_response("tool.execute", "Reset tasks: T3")
+        result = _handle_workflow_tool(
+            started_bridge,
+            "reset_task",
+            "test-session",
+            "/tmp/project",
+            {"task_ids": ["T3"]},
+        )
+        assert "T3" in result
+        calls = started_bridge.get_calls("tool.execute")
+        assert len(calls) == 1
+        params = calls[0][1]
+        assert params["name"] == "reset_task"
+        assert params["args"]["task_ids"] == ["T3"]
+
+    def test_returns_bridge_response_as_string(self, started_bridge):
         """Handler should return the bridge result as a string."""
         started_bridge.set_response("tool.execute", "Artifact submitted for review.")
-        result = await _handle_workflow_tool(
+        result = _handle_workflow_tool(
             started_bridge,
             "request_review",
             "s1",
@@ -107,12 +132,16 @@ class TestBridgeDelegation:
         )
         assert result == "Artifact submitted for review."
 
-    @pytest.mark.asyncio
-    async def test_returns_structured_result_as_json(self, started_bridge):
+    def test_returns_structured_result_as_json(self, started_bridge):
         """If bridge returns a dict, handler should JSON-serialize it."""
-        started_bridge.set_response("tool.execute", {"phase": "PLANNING", "approved": True})
-        result = await _handle_workflow_tool(
-            started_bridge, "check_prior_workflow", "s1", "/tmp/p",
+        started_bridge.set_response(
+            "tool.execute", {"phase": "PLANNING", "approved": True}
+        )
+        result = _handle_workflow_tool(
+            started_bridge,
+            "check_prior_workflow",
+            "s1",
+            "/tmp/p",
             {"feature_name": "feat"},
         )
         parsed = json.loads(result)
@@ -127,16 +156,18 @@ class TestBridgeDelegation:
 class TestOaState:
     """oa_state calls state.get directly, not tool.execute."""
 
-    @pytest.mark.asyncio
-    async def test_calls_state_get(self, started_bridge):
+    def test_calls_state_get(self, started_bridge):
         """oa_state should call state.get, not tool.execute."""
-        started_bridge.set_response("state.get", {
-            "phase": "PLANNING",
-            "phaseState": "DRAFT",
-            "mode": "GREENFIELD",
-            "featureName": "my-feat",
-        })
-        result = await _handle_oa_state(started_bridge, "test-session")
+        started_bridge.set_response(
+            "state.get",
+            {
+                "phase": "PLANNING",
+                "phaseState": "DRAFT",
+                "mode": "GREENFIELD",
+                "featureName": "my-feat",
+            },
+        )
+        result = _handle_oa_state(started_bridge, "test-session")
         # Should have called state.get
         state_calls = started_bridge.get_calls("state.get")
         assert len(state_calls) == 1
@@ -145,12 +176,11 @@ class TestOaState:
         tool_calls = started_bridge.get_calls("tool.execute")
         assert len(tool_calls) == 0
 
-    @pytest.mark.asyncio
-    async def test_returns_state_as_json(self, started_bridge):
+    def test_returns_state_as_json(self, started_bridge):
         """oa_state should return the state as a JSON string."""
         state = {"phase": "INTERFACES", "phaseState": "REVIEW", "mode": "GREENFIELD"}
         started_bridge.set_response("state.get", state)
-        result = await _handle_oa_state(started_bridge, "s1")
+        result = _handle_oa_state(started_bridge, "s1")
         parsed = json.loads(result)
         assert parsed["phase"] == "INTERFACES"
 
@@ -163,8 +193,7 @@ class TestOaState:
 class TestErrorPassthrough:
     """Bridge errors are returned as structured JSON, not raised."""
 
-    @pytest.mark.asyncio
-    async def test_bridge_error_returns_error_json(self, started_bridge):
+    def test_bridge_error_returns_error_json(self, started_bridge):
         """BridgeError should be caught and returned as error JSON."""
         started_bridge.set_response("tool.execute", None)
 
@@ -173,63 +202,74 @@ class TestErrorPassthrough:
 
         started_bridge.set_response_fn("tool.execute", raise_error)
 
-        result = await _handle_workflow_tool(
-            started_bridge, "select_mode", "s1", "/tmp/p",
+        result = _handle_workflow_tool(
+            started_bridge,
+            "select_mode",
+            "s1",
+            "/tmp/p",
             {"mode": "GREENFIELD", "feature_name": "feat"},
         )
         parsed = json.loads(result)
         assert "error" in parsed
 
-    @pytest.mark.asyncio
-    async def test_bridge_validation_error_passthrough(self, started_bridge):
+    def test_bridge_validation_error_passthrough(self, started_bridge):
         """Bridge validation errors (Error: ...) are passed through as-is."""
         started_bridge.set_response(
             "tool.execute",
             "Error: select_mode can only be called during MODE_SELECT.",
         )
-        result = await _handle_workflow_tool(
-            started_bridge, "select_mode", "s1", "/tmp/p",
+        result = _handle_workflow_tool(
+            started_bridge,
+            "select_mode",
+            "s1",
+            "/tmp/p",
             {"mode": "GREENFIELD", "feature_name": "feat"},
         )
         assert "Error:" in result
 
-    @pytest.mark.asyncio
-    async def test_missing_required_arg_returns_clean_error(self, started_bridge):
+    def test_missing_required_arg_returns_clean_error(self, started_bridge):
         """Missing required args (e.g. no mode) should relay bridge error cleanly."""
         started_bridge.set_response(
             "tool.execute",
             "Error: feature_name is required.",
         )
-        result = await _handle_workflow_tool(
-            started_bridge, "select_mode", "s1", "/tmp/p",
+        result = _handle_workflow_tool(
+            started_bridge,
+            "select_mode",
+            "s1",
+            "/tmp/p",
             {"mode": "GREENFIELD"},  # missing feature_name
         )
         assert "Error:" in result
         assert "feature_name" in result
 
-    @pytest.mark.asyncio
-    async def test_missing_mode_returns_clean_error(self, started_bridge):
+    def test_missing_mode_returns_clean_error(self, started_bridge):
         """Missing mode arg should relay bridge error cleanly."""
         started_bridge.set_response(
             "tool.execute",
             "Error: mode is required and must be one of: GREENFIELD, REFACTOR, INCREMENTAL.",
         )
-        result = await _handle_workflow_tool(
-            started_bridge, "select_mode", "s1", "/tmp/p",
+        result = _handle_workflow_tool(
+            started_bridge,
+            "select_mode",
+            "s1",
+            "/tmp/p",
             {"feature_name": "feat"},  # missing mode
         )
         assert "Error:" in result
         assert "mode" in result.lower()
 
-    @pytest.mark.asyncio
-    async def test_wrong_phase_error_includes_current_state(self, started_bridge):
+    def test_wrong_phase_error_includes_current_state(self, started_bridge):
         """Phase mismatch errors should include the current phase for LLM context."""
         started_bridge.set_response(
             "tool.execute",
             "Error: mark_scan_complete can only be called at DISCOVERY/SCAN (current: PLANNING/DRAFT).",
         )
-        result = await _handle_workflow_tool(
-            started_bridge, "mark_scan_complete", "s1", "/tmp/p",
+        result = _handle_workflow_tool(
+            started_bridge,
+            "mark_scan_complete",
+            "s1",
+            "/tmp/p",
             {"scan_summary": "found stuff"},
         )
         assert "PLANNING/DRAFT" in result

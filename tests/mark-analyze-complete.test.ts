@@ -14,6 +14,7 @@ describe("processMarkAnalyzeComplete", () => {
     const result = processMarkAnalyzeComplete({ analysis_summary: "Analysis done" })
     expect(result.responseMessage).toContain("CONVENTIONS")
     expect(result.responseMessage).toContain("request_review")
+    expect(result.responseMessage).toContain("Continue immediately")
   })
 
   it("includes conventions document structure guidance", () => {
@@ -41,6 +42,7 @@ describe("processMarkAnalyzeComplete", () => {
     const result = processMarkAnalyzeComplete({ analysis_summary: "" })
     expect(result.responseMessage).toContain("Warning: Empty analysis summary")
     expect(result.responseMessage).toContain("CONVENTIONS")
+    expect(result.responseMessage).toContain("do not wait for user input")
   })
 
   it("response message is a string", () => {

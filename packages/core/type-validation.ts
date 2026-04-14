@@ -58,7 +58,7 @@ export function validatePriorState(state: unknown): PriorState | null {
     intentBaseline,
     phase,
     artifactDiskPaths: validatedPaths,
-    approvedArtifacts: approvedArtifacts ? validatedApprovedArtifacts : undefined,
+    ...(approvedArtifacts ? { approvedArtifacts: validatedApprovedArtifacts } : {}),
   }
 }
 

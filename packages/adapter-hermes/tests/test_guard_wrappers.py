@@ -5,6 +5,7 @@ Verifies that wrapped tools call guard.check before delegating,
 block when the guard says no, pass through artisan commands, and
 handle bridge failures safely.
 """
+
 from __future__ import annotations
 
 import json
@@ -19,7 +20,7 @@ from hermes_adapter.guard_wrappers import (
 from hermes_adapter.constants import GUARDED_TOOLS
 from hermes_adapter.types import BridgeError
 
-from conftest import MockBridgeClient, MockHermesContext
+from .conftest import MockBridgeClient, MockHermesContext
 
 
 # ---------------------------------------------------------------------------
@@ -36,8 +37,9 @@ class TestWrapperRegistration:
             mock_ctx.set_original_handler(tool_name, AsyncMock(return_value="original"))
         register_guard_wrappers(mock_ctx, mock_bridge)
         for tool_name in GUARDED_TOOLS:
-            assert tool_name in mock_ctx.registered_tool_names, \
+            assert tool_name in mock_ctx.registered_tool_names, (
                 f"Wrapper not registered for {tool_name}"
+            )
 
     def test_skips_missing_original_handler(self, mock_ctx, mock_bridge):
         """If a built-in tool doesn't exist, skip wrapping (don't crash)."""
@@ -56,15 +58,21 @@ class TestGuardAllows:
     @pytest.mark.asyncio
     async def test_calls_original_when_allowed(self, started_bridge):
         """Original handler should be called when guard allows."""
-        started_bridge.set_response("guard.check", {
-            "allowed": True,
-            "reason": "",
-            "phase": "IMPLEMENTATION",
-            "phaseState": "DRAFT",
-        })
+        started_bridge.set_response(
+            "guard.check",
+            {
+                "allowed": True,
+                "reason": "",
+                "phase": "IMPLEMENTATION",
+                "phaseState": "DRAFT",
+            },
+        )
         original = AsyncMock(return_value="file written")
         result = await _guarded_handler(
-            started_bridge, original, "write_file", "s1",
+            started_bridge,
+            original,
+            "write_file",
+            "s1",
             {"path": "src/main.py", "content": "hello"},
         )
         original.assert_called_once()
@@ -73,9 +81,15 @@ class TestGuardAllows:
     @pytest.mark.asyncio
     async def test_passes_args_to_original(self, started_bridge):
         """Original handler should receive the original args."""
-        started_bridge.set_response("guard.check", {
-            "allowed": True, "reason": "", "phase": "IMPL", "phaseState": "DRAFT",
-        })
+        started_bridge.set_response(
+            "guard.check",
+            {
+                "allowed": True,
+                "reason": "",
+                "phase": "IMPL",
+                "phaseState": "DRAFT",
+            },
+        )
         original = AsyncMock(return_value="ok")
         args = {"path": "src/foo.py", "content": "bar"}
         await _guarded_handler(started_bridge, original, "write_file", "s1", args)
@@ -94,34 +108,50 @@ class TestGuardBlocks:
     @pytest.mark.asyncio
     async def test_returns_error_json_when_blocked(self, started_bridge):
         """Should return structured error JSON when guard blocks."""
-        started_bridge.set_response("guard.check", {
-            "allowed": False,
-            "reason": "writes blocked in PLANNING/DRAFT",
-            "phase": "PLANNING",
-            "phaseState": "DRAFT",
-        })
+        started_bridge.set_response(
+            "guard.check",
+            {
+                "allowed": False,
+                "reason": "writes blocked in PLANNING/DRAFT",
+                "phase": "PLANNING",
+                "phaseState": "DRAFT",
+            },
+        )
         original = AsyncMock(return_value="should not be called")
         result = await _guarded_handler(
-            started_bridge, original, "write_file", "s1",
+            started_bridge,
+            original,
+            "write_file",
+            "s1",
             {"path": "src/main.py", "content": "hello"},
         )
         parsed = json.loads(result)
         assert "error" in parsed
-        assert "PLANNING" in parsed.get("phase", "") or "blocked" in parsed["error"].lower()
+        assert (
+            "PLANNING" in parsed.get("phase", "")
+            or "blocked" in parsed["error"].lower()
+        )
         original.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_includes_phase_info_in_error(self, started_bridge):
         """Error JSON should include phase and phaseState from guard."""
-        started_bridge.set_response("guard.check", {
-            "allowed": False,
-            "reason": "blocked",
-            "phase": "INTERFACES",
-            "phaseState": "REVIEW",
-        })
+        started_bridge.set_response(
+            "guard.check",
+            {
+                "allowed": False,
+                "reason": "blocked",
+                "phase": "INTERFACES",
+                "phaseState": "REVIEW",
+            },
+        )
         original = AsyncMock()
         result = await _guarded_handler(
-            started_bridge, original, "edit_file", "s1", {},
+            started_bridge,
+            original,
+            "edit_file",
+            "s1",
+            {},
         )
         parsed = json.loads(result)
         assert parsed["phase"] == "INTERFACES"
@@ -146,7 +176,9 @@ class TestArtisanPassthrough:
 
     def test_detects_bun_invocation(self):
         """'bun run .../artisan.ts ...' should be recognized."""
-        assert _is_artisan_command("bun run packages/cli/artisan.ts select-mode") is True
+        assert (
+            _is_artisan_command("bun run packages/cli/artisan.ts select-mode") is True
+        )
 
     def test_detects_piped(self):
         """'echo ... | artisan ...' should be recognized."""
@@ -173,7 +205,10 @@ class TestArtisanPassthrough:
         """execute_command with artisan should skip guard.check entirely."""
         original = AsyncMock(return_value="state output")
         result = await _guarded_handler(
-            started_bridge, original, "execute_command", "s1",
+            started_bridge,
+            original,
+            "execute_command",
+            "s1",
             {"command": "./artisan state"},
         )
         # Guard should NOT have been called
@@ -195,27 +230,39 @@ class TestBridgeFailure:
     @pytest.mark.asyncio
     async def test_returns_error_on_bridge_failure(self, started_bridge):
         """Bridge communication failure should return error JSON, not allow writes."""
+
         def raise_error(params):
             raise BridgeError("Connection lost")
 
         started_bridge.set_response_fn("guard.check", raise_error)
         original = AsyncMock(return_value="should not run")
         result = await _guarded_handler(
-            started_bridge, original, "write_file", "s1",
+            started_bridge,
+            original,
+            "write_file",
+            "s1",
             {"path": "src/main.py"},
         )
         parsed = json.loads(result)
         assert "error" in parsed
-        assert "bridge" in parsed["error"].lower() or "unavailable" in parsed["error"].lower()
+        assert (
+            "bridge" in parsed["error"].lower()
+            or "unavailable" in parsed["error"].lower()
+        )
         original.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_bridge_failure_does_not_allow_writes(self, started_bridge):
         """Fail-closed: never silently allow writes when guard is unreachable."""
-        started_bridge.set_response_fn("guard.check", lambda p: (_ for _ in ()).throw(BridgeError("dead")))
+        started_bridge.set_response_fn(
+            "guard.check", lambda p: (_ for _ in ()).throw(BridgeError("dead"))
+        )
         original = AsyncMock()
         await _guarded_handler(
-            started_bridge, original, "create_file", "s1",
+            started_bridge,
+            original,
+            "create_file",
+            "s1",
             {"path": "new.py"},
         )
         original.assert_not_called()
@@ -233,12 +280,21 @@ class TestIncrementalBashRelay:
     @pytest.mark.asyncio
     async def test_execute_command_passes_command_to_guard(self, started_bridge):
         """guard.check must receive the full command string in args."""
-        started_bridge.set_response("guard.check", {
-            "allowed": True, "reason": "", "phase": "IMPLEMENTATION", "phaseState": "DRAFT",
-        })
+        started_bridge.set_response(
+            "guard.check",
+            {
+                "allowed": True,
+                "reason": "",
+                "phase": "IMPLEMENTATION",
+                "phaseState": "DRAFT",
+            },
+        )
         original = AsyncMock(return_value="ok")
         await _guarded_handler(
-            started_bridge, original, "execute_command", "s1",
+            started_bridge,
+            original,
+            "execute_command",
+            "s1",
             {"command": "echo hello > output.txt"},
         )
         guard_calls = started_bridge.get_calls("guard.check")
@@ -251,15 +307,21 @@ class TestIncrementalBashRelay:
     @pytest.mark.asyncio
     async def test_bash_redirect_blocked_in_incremental(self, started_bridge):
         """Bridge blocks '>' redirect in INCREMENTAL mode — wrapper relays the block."""
-        started_bridge.set_response("guard.check", {
-            "allowed": False,
-            "reason": "Bash write operator '>' blocked in INCREMENTAL mode",
-            "phase": "IMPLEMENTATION",
-            "phaseState": "DRAFT",
-        })
+        started_bridge.set_response(
+            "guard.check",
+            {
+                "allowed": False,
+                "reason": "Bash write operator '>' blocked in INCREMENTAL mode",
+                "phase": "IMPLEMENTATION",
+                "phaseState": "DRAFT",
+            },
+        )
         original = AsyncMock()
         result = await _guarded_handler(
-            started_bridge, original, "execute_command", "s1",
+            started_bridge,
+            original,
+            "execute_command",
+            "s1",
             {"command": "echo secret > /etc/passwd"},
         )
         parsed = json.loads(result)
@@ -270,15 +332,21 @@ class TestIncrementalBashRelay:
     @pytest.mark.asyncio
     async def test_tee_command_blocked_in_incremental(self, started_bridge):
         """Bridge blocks 'tee' in INCREMENTAL mode — wrapper relays the block."""
-        started_bridge.set_response("guard.check", {
-            "allowed": False,
-            "reason": "Bash write operator 'tee' blocked in INCREMENTAL mode",
-            "phase": "IMPLEMENTATION",
-            "phaseState": "DRAFT",
-        })
+        started_bridge.set_response(
+            "guard.check",
+            {
+                "allowed": False,
+                "reason": "Bash write operator 'tee' blocked in INCREMENTAL mode",
+                "phase": "IMPLEMENTATION",
+                "phaseState": "DRAFT",
+            },
+        )
         original = AsyncMock()
         result = await _guarded_handler(
-            started_bridge, original, "execute_command", "s1",
+            started_bridge,
+            original,
+            "execute_command",
+            "s1",
             {"command": "cat data.json | tee output.json"},
         )
         parsed = json.loads(result)
@@ -288,15 +356,21 @@ class TestIncrementalBashRelay:
     @pytest.mark.asyncio
     async def test_sed_inplace_blocked_in_incremental(self, started_bridge):
         """Bridge blocks 'sed -i' in INCREMENTAL mode — wrapper relays the block."""
-        started_bridge.set_response("guard.check", {
-            "allowed": False,
-            "reason": "Bash write operator 'sed -i' blocked in INCREMENTAL mode",
-            "phase": "IMPLEMENTATION",
-            "phaseState": "DRAFT",
-        })
+        started_bridge.set_response(
+            "guard.check",
+            {
+                "allowed": False,
+                "reason": "Bash write operator 'sed -i' blocked in INCREMENTAL mode",
+                "phase": "IMPLEMENTATION",
+                "phaseState": "DRAFT",
+            },
+        )
         original = AsyncMock()
         result = await _guarded_handler(
-            started_bridge, original, "execute_command", "s1",
+            started_bridge,
+            original,
+            "execute_command",
+            "s1",
             {"command": "sed -i 's/old/new/g' config.py"},
         )
         parsed = json.loads(result)
@@ -306,12 +380,21 @@ class TestIncrementalBashRelay:
     @pytest.mark.asyncio
     async def test_read_only_command_allowed_in_incremental(self, started_bridge):
         """Read-only commands should be allowed even in INCREMENTAL mode."""
-        started_bridge.set_response("guard.check", {
-            "allowed": True, "reason": "", "phase": "IMPLEMENTATION", "phaseState": "DRAFT",
-        })
+        started_bridge.set_response(
+            "guard.check",
+            {
+                "allowed": True,
+                "reason": "",
+                "phase": "IMPLEMENTATION",
+                "phaseState": "DRAFT",
+            },
+        )
         original = AsyncMock(return_value="file contents")
         result = await _guarded_handler(
-            started_bridge, original, "execute_command", "s1",
+            started_bridge,
+            original,
+            "execute_command",
+            "s1",
             {"command": "cat src/main.py"},
         )
         assert result == "file contents"
@@ -329,15 +412,21 @@ class TestEnvFileProtection:
     @pytest.mark.asyncio
     async def test_env_write_blocked(self, started_bridge):
         """Guard should block writes to .env files — wrapper relays the block."""
-        started_bridge.set_response("guard.check", {
-            "allowed": False,
-            "reason": ".env writes are always blocked",
-            "phase": "IMPLEMENTATION",
-            "phaseState": "DRAFT",
-        })
+        started_bridge.set_response(
+            "guard.check",
+            {
+                "allowed": False,
+                "reason": ".env writes are always blocked",
+                "phase": "IMPLEMENTATION",
+                "phaseState": "DRAFT",
+            },
+        )
         original = AsyncMock()
         result = await _guarded_handler(
-            started_bridge, original, "write_file", "s1",
+            started_bridge,
+            original,
+            "write_file",
+            "s1",
             {"path": ".env", "content": "SECRET=leaked"},
         )
         parsed = json.loads(result)
@@ -347,15 +436,21 @@ class TestEnvFileProtection:
     @pytest.mark.asyncio
     async def test_nested_env_write_blocked(self, started_bridge):
         """Guard should block writes to nested .env files too."""
-        started_bridge.set_response("guard.check", {
-            "allowed": False,
-            "reason": ".env writes are always blocked",
-            "phase": "IMPLEMENTATION",
-            "phaseState": "DRAFT",
-        })
+        started_bridge.set_response(
+            "guard.check",
+            {
+                "allowed": False,
+                "reason": ".env writes are always blocked",
+                "phase": "IMPLEMENTATION",
+                "phaseState": "DRAFT",
+            },
+        )
         original = AsyncMock()
         result = await _guarded_handler(
-            started_bridge, original, "create_file", "s1",
+            started_bridge,
+            original,
+            "create_file",
+            "s1",
             {"path": "config/.env.production", "content": "DB_PASS=x"},
         )
         parsed = json.loads(result)

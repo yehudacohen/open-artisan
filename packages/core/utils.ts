@@ -142,16 +142,16 @@ export function getNextActionForState(phase: string, phaseState: string): string
     return "Present the three workflow modes to the user (GREENFIELD, REFACTOR, INCREMENTAL) and ask them to select one using the `select_mode` tool."
   }
   if (phaseState === "SCAN") {
-    return "Continue scanning the codebase with read-only tools. Call `mark_scan_complete` when finished."
+    return "Continue scanning the codebase with read-only tools in this turn; do not wait for user input. Call `mark_scan_complete` when finished."
   }
   if (phaseState === "ANALYZE") {
-    return "Continue analyzing scan results. Synthesize findings into a coherent picture of the codebase. Call `mark_analyze_complete` when analysis is complete."
+    return "Continue analyzing scan results in this turn; do not wait for user input. Synthesize findings into a coherent picture of the codebase. Call `mark_analyze_complete` when analysis is complete."
   }
   if (phaseState === "DRAFT" || phaseState === "CONVENTIONS") {
-    return `Continue drafting the ${phase} artifact. Review the acceptance criteria and ensure full coverage. Call \`request_review\` when complete.`
+    return `Continue drafting the ${phase} artifact in this turn; do not wait for user input. Review the acceptance criteria and ensure full coverage. Call \`request_review\` when complete.`
   }
   if (phaseState === "REVIEW") {
-    return `Continue self-reviewing the ${phase} artifact against the acceptance criteria. Evaluate each criterion independently. Call \`mark_satisfied\` when done.`
+    return `Continue self-reviewing the ${phase} artifact in this turn; do not wait for user input. Evaluate each criterion independently against the acceptance criteria. Call \`mark_satisfied\` when done.`
   }
   if (phaseState === "USER_GATE") {
     return "The artifact is ready for user review. Present a clear summary to the user and WAIT for their response. Do not proceed until they respond."

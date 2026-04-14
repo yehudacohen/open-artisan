@@ -12,7 +12,7 @@ import { buildWorkflowSystemPrompt, buildSubagentContext } from "../../core/hook
 import { buildCompactionContext } from "../../core/hooks/compaction"
 
 export const handlePromptBuild: MethodHandler = async (params, ctx) => {
-  const p = params as PromptBuildParams
+  const p = params as Partial<PromptBuildParams>
   if (!p.sessionId || typeof p.sessionId !== "string") {
     throw new JSONRPCErrorException("sessionId is required", INVALID_PARAMS)
   }
@@ -40,7 +40,7 @@ export const handlePromptBuild: MethodHandler = async (params, ctx) => {
 }
 
 export const handlePromptCompaction: MethodHandler = async (params, ctx) => {
-  const p = params as PromptBuildParams
+  const p = params as Partial<PromptBuildParams>
   if (!p.sessionId || typeof p.sessionId !== "string") {
     throw new JSONRPCErrorException("sessionId is required", INVALID_PARAMS)
   }

@@ -366,7 +366,7 @@ describe("propose_backtrack — orchestrator receives correct input", () => {
     )
 
     expect(routeMock).toHaveBeenCalledTimes(1)
-    const callArgs = routeMock.mock.calls[0]?.[0]
+    const callArgs = (routeMock.mock.calls[0] as [Parameters<Orchestrator["route"]>[0]] | undefined)?.[0]
     expect(callArgs?.feedback).toBe(VALID_REASON)
     expect(callArgs?.currentPhase).toBe("TESTS")
     expect(callArgs?.currentPhaseState).toBe("DRAFT")
@@ -408,7 +408,7 @@ describe("propose_backtrack — orchestrator receives correct input", () => {
       orchestrator,
     )
 
-    const callArgs = routeMock.mock.calls[0]?.[0]
+    const callArgs = (routeMock.mock.calls[0] as [Parameters<Orchestrator["route"]>[0]] | undefined)?.[0]
     expect(callArgs?.mode).toBe("GREENFIELD")
   })
 })

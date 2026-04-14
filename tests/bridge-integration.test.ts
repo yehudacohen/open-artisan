@@ -32,7 +32,9 @@ class BridgeTestClient {
 
   private startReading() {
     const stdout = this.proc.stdout
-    if (!stdout) throw new Error("Bridge process has no stdout")
+    if (!stdout || typeof stdout === "number") {
+      throw new Error("Bridge process has no stdout")
+    }
 
     const reader = stdout.getReader()
     const readLoop = async () => {
@@ -78,7 +80,12 @@ class BridgeTestClient {
 
     return new Promise((resolve, reject) => {
       this.pending.set(id, { resolve, reject })
-      this.proc.stdin!.write(request)
+      const stdin = this.proc.stdin
+      if (!stdin || typeof stdin === "number") {
+        reject(new Error("Bridge process has no stdin"))
+        return
+      }
+      stdin.write(request)
 
       // Timeout after 10 seconds
       setTimeout(() => {
@@ -93,13 +100,15 @@ class BridgeTestClient {
   async shutdown(): Promise<void> {
     // Send shutdown request (don't await response — process may exit before responding)
     try {
+      const stdin = this.proc.stdin
+      if (!stdin || typeof stdin === "number") return
       const request = JSON.stringify({
         jsonrpc: "2.0",
         id: this.nextId++,
         method: "lifecycle.shutdown",
         params: {},
       }) + "\n"
-      this.proc.stdin!.write(request)
+      stdin.write(request)
     } catch {
       // stdin may already be closed
     }

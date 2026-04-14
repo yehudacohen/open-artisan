@@ -296,7 +296,7 @@ describe("SessionStateStore — invariant validation (G4)", () => {
     await store.create("session-cw")
     await expect(
       store.update("session-cw", (d) => {
-        d.childWorkflows = [{ taskId: "T1", featureName: "child", sessionId: null, status: "bogus" as any }]
+        d.childWorkflows = [{ taskId: "T1", featureName: "child", sessionId: null, status: "bogus" as any, delegatedAt: new Date().toISOString() }]
       }),
     ).rejects.toThrow(/childWorkflows\[0\]\.status/)
   })

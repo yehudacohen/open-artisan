@@ -1,6 +1,7 @@
 """
 constants.py — Schemas, toolset name, and bridge command for the Hermes adapter.
 """
+
 from __future__ import annotations
 
 import os
@@ -34,6 +35,7 @@ def resolve_bridge_command() -> list[str]:
         "Cannot find bridge CLI. Set OPENARTISAN_BRIDGE_CLI=/path/to/packages/bridge/cli.ts "
         "or install open-artisan in the monorepo."
     )
+
 
 # ---------------------------------------------------------------------------
 # Toolset name — groups all open-artisan tools in Hermes
@@ -164,13 +166,32 @@ WORKFLOW_TOOLS: list[tuple[str, str, str, dict]] = [
         },
     ),
     (
+        "oa_reset_task",
+        "reset_task",
+        "Reset one or more implementation DAG tasks back to pending by task ID.",
+        {
+            "type": "object",
+            "properties": {
+                "task_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": 'Task IDs to reset (for example: ["T3"]).',
+                },
+            },
+            "required": ["task_ids"],
+        },
+    ),
+    (
         "oa_request_review",
         "request_review",
         "Submit the current artifact for review.",
         {
             "type": "object",
             "properties": {
-                "summary": {"type": "string", "description": "Brief summary of the artifact."},
+                "summary": {
+                    "type": "string",
+                    "description": "Brief summary of the artifact.",
+                },
                 "artifact_description": {
                     "type": "string",
                     "description": "Description of what was produced.",
@@ -292,7 +313,10 @@ WORKFLOW_TOOLS: list[tuple[str, str, str, dict]] = [
         {
             "type": "object",
             "properties": {
-                "task_id": {"type": "string", "description": "Task ID of the delegated task."},
+                "task_id": {
+                    "type": "string",
+                    "description": "Task ID of the delegated task.",
+                },
             },
             "required": ["task_id"],
         },
@@ -320,6 +344,6 @@ GUARDED_TOOLS: list[str] = [
 
 # Regex to detect artisan commands — bypass bash guard for execute_command
 ARTISAN_COMMAND_RE = re.compile(
-    r"(?:^|[|;&]\s*)(?:bun\s+run\s+\S*|\.\/)?artisan\s",
+    r"(?:^|[|;&]\s*)(?:(?:bun\s+run\s+\S*(?:artisan(?:\.ts)?)?)|\.\/artisan|artisan)\s",
     re.MULTILINE,
 )

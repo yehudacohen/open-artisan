@@ -5,6 +5,7 @@ Provides mock implementations of BridgeClient and HermesContext that
 satisfy the Protocol contracts without requiring a real bridge subprocess
 or Hermes runtime.
 """
+
 from __future__ import annotations
 
 import json
@@ -40,6 +41,17 @@ class MockBridgeClient:
         self._started = True
         self._project_dir = project_dir
 
+    def ensure_started(self, project_dir: str) -> None:
+        self.start(project_dir)
+
+    def ensure_session(
+        self, session_id: str, project_dir: str, agent: str = "artisan"
+    ) -> None:
+        self.start(project_dir)
+        self._calls.append(
+            ("lifecycle.sessionCreated", {"sessionId": session_id, "agent": agent})
+        )
+
     def call(self, method: str, params: dict[str, Any] | None = None) -> Any:
         self._calls.append((method, params))
         if method in self._responses:
@@ -67,7 +79,9 @@ class MockBridgeClient:
         """Set a callable that receives params and returns a response."""
         self._responses[method] = fn
 
-    def get_calls(self, method: str | None = None) -> list[tuple[str, dict[str, Any] | None]]:
+    def get_calls(
+        self, method: str | None = None
+    ) -> list[tuple[str, dict[str, Any] | None]]:
         """Get recorded calls, optionally filtered by method."""
         if method is None:
             return list(self._calls)
@@ -112,25 +126,29 @@ class MockHermesContext:
 
     def register_tool(
         self,
-        *,
-        toolset: str,
         name: str,
-        description: str,
-        parameters: dict[str, Any],
+        toolset: str,
+        schema: dict[str, Any],
         handler: Any,
+        check_fn: Any = None,
+        requires_env: list[Any] | None = None,
+        is_async: bool = False,
+        description: str = "",
+        emoji: str = "",
     ) -> None:
         self._tools[name] = {
             "toolset": toolset,
             "name": name,
-            "description": description,
-            "parameters": parameters,
+            "description": description or schema.get("description", ""),
+            "parameters": schema.get("parameters", {}),
+            "schema": schema,
             "handler": handler,
         }
 
-    def register_hook(self, *, event: str, handler: Any) -> None:
-        if event not in self._hooks:
-            self._hooks[event] = []
-        self._hooks[event].append(handler)
+    def register_hook(self, hook_name: str, callback: Any) -> None:
+        if hook_name not in self._hooks:
+            self._hooks[hook_name] = []
+        self._hooks[hook_name].append(callback)
 
     def get_tool_handler(self, name: str) -> Any | None:
         return self._original_handlers.get(name)

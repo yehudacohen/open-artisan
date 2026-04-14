@@ -146,4 +146,4 @@ describe("artisan-server", () => {
       expect(r.result).toBe("pong")
     }
   }, 15000)
-}, { timeout: 20000 })
+})

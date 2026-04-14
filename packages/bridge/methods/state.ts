@@ -9,7 +9,7 @@ import { INVALID_PARAMS } from "../protocol"
 import type { StateGetParams } from "../protocol"
 
 export const handleStateGet: MethodHandler = async (params, ctx) => {
-  const p = params as StateGetParams
+  const p = params as Partial<StateGetParams>
   if (!p.sessionId || typeof p.sessionId !== "string") {
     throw new JSONRPCErrorException("sessionId is required", INVALID_PARAMS)
   }

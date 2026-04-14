@@ -247,8 +247,8 @@ async function runScannerSession(
     const session = await dispatcher.createSession({
       title: `Discovery: ${scannerName}${featureSlug}`,
       agent: "workflow-reviewer",
-      parentId: parentSessionId,
-      model: parentModel,
+      ...(parentSessionId ? { parentId: parentSessionId } : {}),
+      ...(parentModel ? { model: parentModel } : {}),
     })
 
     try {

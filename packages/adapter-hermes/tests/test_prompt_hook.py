@@ -4,6 +4,7 @@ test_prompt_hook.py — Tests for the pre_llm_call prompt injection hook.
 Verifies that prompt.build is called each turn, context is returned
 in the correct format, and bridge failures degrade gracefully.
 """
+
 from __future__ import annotations
 
 import json
@@ -11,10 +12,14 @@ import subprocess
 import pytest
 from unittest.mock import patch, MagicMock
 
-from hermes_adapter.prompt_hook import create_prompt_hook, _dispatch_task_review, _auto_accept_review
+from hermes_adapter.prompt_hook import (
+    create_prompt_hook,
+    _dispatch_task_review,
+    _auto_accept_review,
+)
 from hermes_adapter.types import BridgeError
 
-from conftest import MockBridgeClient
+from .conftest import MockBridgeClient
 
 
 # ---------------------------------------------------------------------------
@@ -27,7 +32,9 @@ class TestPromptHook:
 
     def test_returns_context_dict(self, started_bridge):
         """Hook should return {"context": "<prompt text>"}."""
-        started_bridge.set_response("prompt.build", "## Phase: PLANNING/DRAFT\nDraft your plan.")
+        started_bridge.set_response(
+            "prompt.build", "## Phase: PLANNING/DRAFT\nDraft your plan."
+        )
         hook = create_prompt_hook(started_bridge, "test-session")
         result = hook()
         assert isinstance(result, dict)
@@ -78,6 +85,7 @@ class TestPromptHookBridgeFailure:
 
     def test_returns_empty_context_on_bridge_error(self, started_bridge):
         """BridgeError should be caught — return empty context."""
+
         def raise_error(params):
             raise BridgeError("subprocess died")
 
@@ -88,6 +96,7 @@ class TestPromptHookBridgeFailure:
 
     def test_returns_empty_context_on_unexpected_error(self, started_bridge):
         """Any exception should be caught — never crash the LLM call."""
+
         def raise_unexpected(params):
             raise RuntimeError("unexpected")
 
@@ -125,7 +134,9 @@ class TestPerPhaseContent:
 
     def test_planning_prompt_contains_phase(self, started_bridge):
         """PLANNING phase prompt should mention the phase."""
-        started_bridge.set_response("prompt.build", "## Phase: PLANNING/DRAFT\nCreate your plan.")
+        started_bridge.set_response(
+            "prompt.build", "## Phase: PLANNING/DRAFT\nCreate your plan."
+        )
         hook = create_prompt_hook(started_bridge, "s1")
         result = hook()
         assert "PLANNING" in result["context"]
@@ -172,6 +183,7 @@ class TestUserGateDetection:
 
     def test_state_get_failure_does_not_crash(self, started_bridge):
         """If state.get fails, hook should still return prompt context."""
+
         def raise_error(params):
             raise BridgeError("state failed")
 
@@ -192,8 +204,12 @@ class TestTaskReviewDispatch:
 
     def test_calls_task_get_review_context(self, started_bridge):
         """When taskCompletionInProgress is set, should call task.getReviewContext."""
-        started_bridge.set_response("state.get", {"taskCompletionInProgress": "T1", "phaseState": "DRAFT"})
-        started_bridge.set_response("task.getReviewContext", None)  # No prompt = skip dispatch
+        started_bridge.set_response(
+            "state.get", {"taskCompletionInProgress": "T1", "phaseState": "DRAFT"}
+        )
+        started_bridge.set_response(
+            "task.getReviewContext", None
+        )  # No prompt = skip dispatch
         started_bridge.set_response("prompt.build", "prompt")
         hook = create_prompt_hook(started_bridge, "s1")
         hook()
@@ -202,7 +218,9 @@ class TestTaskReviewDispatch:
 
     def test_skips_dispatch_when_no_review_pending(self, started_bridge):
         """When taskCompletionInProgress is None, should NOT call task.getReviewContext."""
-        started_bridge.set_response("state.get", {"taskCompletionInProgress": None, "phaseState": "DRAFT"})
+        started_bridge.set_response(
+            "state.get", {"taskCompletionInProgress": None, "phaseState": "DRAFT"}
+        )
         started_bridge.set_response("prompt.build", "prompt")
         hook = create_prompt_hook(started_bridge, "s1")
         hook()
@@ -211,10 +229,13 @@ class TestTaskReviewDispatch:
 
     def test_dispatch_failure_does_not_crash_hook(self, started_bridge):
         """If task review dispatch fails, hook should still return prompt."""
+
         def raise_on_review(params):
             raise BridgeError("review context failed")
 
-        started_bridge.set_response("state.get", {"taskCompletionInProgress": "T1", "phaseState": "DRAFT"})
+        started_bridge.set_response(
+            "state.get", {"taskCompletionInProgress": "T1", "phaseState": "DRAFT"}
+        )
         started_bridge.set_response_fn("task.getReviewContext", raise_on_review)
         started_bridge.set_response("prompt.build", "still works")
         hook = create_prompt_hook(started_bridge, "s1")
@@ -237,9 +258,18 @@ class TestDispatchTaskReviewSubprocess:
         state = {"taskCompletionInProgress": "T1"}
 
         mock_result = MagicMock()
-        mock_result.stdout = json.dumps({"passed": True, "issues": [], "scores": {"code_quality": 9, "error_handling": 9}, "reasoning": "All good"})
+        mock_result.stdout = json.dumps(
+            {
+                "passed": True,
+                "issues": [],
+                "scores": {"code_quality": 9, "error_handling": 9},
+                "reasoning": "All good",
+            }
+        )
 
-        with patch("hermes_adapter.prompt_hook.subprocess.run", return_value=mock_result):
+        with patch(
+            "hermes_adapter.prompt_hook.subprocess.run", return_value=mock_result
+        ):
             _dispatch_task_review(started_bridge, "s1", state, "/tmp/project")
 
         # Should have called tool.execute with submit_task_review
@@ -254,7 +284,10 @@ class TestDispatchTaskReviewSubprocess:
         started_bridge.set_response("tool.execute", "ok")
         state = {"taskCompletionInProgress": "T1"}
 
-        with patch("hermes_adapter.prompt_hook.subprocess.run", side_effect=FileNotFoundError("claude not found")):
+        with patch(
+            "hermes_adapter.prompt_hook.subprocess.run",
+            side_effect=FileNotFoundError("claude not found"),
+        ):
             _dispatch_task_review(started_bridge, "s1", state, "/tmp/project")
 
         # Should have submitted auto-accept via tool.execute
@@ -271,7 +304,10 @@ class TestDispatchTaskReviewSubprocess:
         started_bridge.set_response("tool.execute", "ok")
         state = {"taskCompletionInProgress": "T1"}
 
-        with patch("hermes_adapter.prompt_hook.subprocess.run", side_effect=subprocess.TimeoutExpired("claude", 180)):
+        with patch(
+            "hermes_adapter.prompt_hook.subprocess.run",
+            side_effect=subprocess.TimeoutExpired("claude", 180),
+        ):
             _dispatch_task_review(started_bridge, "s1", state, "/tmp/project")
 
         tool_calls = started_bridge.get_calls("tool.execute")
@@ -288,7 +324,9 @@ class TestDispatchTaskReviewSubprocess:
         mock_result = MagicMock()
         mock_result.stdout = ""
 
-        with patch("hermes_adapter.prompt_hook.subprocess.run", return_value=mock_result):
+        with patch(
+            "hermes_adapter.prompt_hook.subprocess.run", return_value=mock_result
+        ):
             _dispatch_task_review(started_bridge, "s1", state, "/tmp/project")
 
         tool_calls = started_bridge.get_calls("tool.execute")
@@ -320,7 +358,9 @@ class TestAutoAcceptReview:
         """Should submit a review with passed=False to clear taskCompletionInProgress."""
         started_bridge.set_response("tool.execute", "ok")
 
-        _auto_accept_review(started_bridge, "s1", "/tmp/project", "subprocess timed out")
+        _auto_accept_review(
+            started_bridge, "s1", "/tmp/project", "subprocess timed out"
+        )
 
         tool_calls = started_bridge.get_calls("tool.execute")
         assert len(tool_calls) == 1

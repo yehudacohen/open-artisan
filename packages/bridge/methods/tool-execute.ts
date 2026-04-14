@@ -36,12 +36,20 @@ import {
   computeSubmitFeedbackReviseTransition,
   computeProposeBacktrackTransition,
 } from "../../core/tools/transitions"
-import { buildAutoApprovePrompt, parseAutoApproveResult, AUTO_APPROVE_CONFIDENCE_THRESHOLD } from "../../core/auto-approve"
+import { buildAutoApprovePrompt, parseAutoApproveResult } from "../../core/auto-approve"
 import { createGitCheckpoint } from "../../core/hooks/git-checkpoint"
 import type { AutoApproveResult } from "../../core/auto-approve"
 import { writeArtifact } from "../../core/artifact-store"
 import { parseImplPlan } from "../../core/impl-plan-parser"
 import { PHASE_TO_ARTIFACT } from "../../core/artifacts"
+import {
+  buildAutoApproveRequest,
+  buildRobotArtisanAutoApproveFailureFeedback,
+  computeAutoApproveTransition,
+  isRobotArtisanSession,
+} from "../../core/autonomous-user-gate"
+import { activateHumanGateTasks, resolveAwaitingHumanState } from "../../core/human-gate-policy"
+import { buildWorkflowSwitchMessage, parkCurrentWorkflowSession } from "../../core/session-switch"
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -92,10 +100,22 @@ function buildReviewContextForTask(
     for (const node of state.implDag) {
       if (node.id === task.id) continue
       if (task.dependencies.includes(node.id)) {
-        adjacentTasks.push({ id: node.id, description: node.description, category: node.category, status: node.status, direction: "upstream" })
+        adjacentTasks.push({
+          id: node.id,
+          description: node.description,
+          ...(node.category ? { category: node.category } : {}),
+          status: node.status,
+          direction: "upstream",
+        })
       }
       if (node.dependencies.includes(task.id)) {
-        adjacentTasks.push({ id: node.id, description: node.description, category: node.category, status: node.status, direction: "downstream" })
+        adjacentTasks.push({
+          id: node.id,
+          description: node.description,
+          ...(node.category ? { category: node.category } : {}),
+          status: node.status,
+          direction: "downstream",
+        })
       }
     }
   }
@@ -108,7 +128,7 @@ function buildReviewContextForTask(
     featureName: state.featureName,
     conventions: state.conventions,
     artifactDiskPaths: state.artifactDiskPaths as Record<string, string>,
-    adjacentTasks: adjacentTasks.length > 0 ? adjacentTasks : undefined,
+    ...(adjacentTasks.length > 0 ? { adjacentTasks } : {}),
   })
 }
 
@@ -126,14 +146,23 @@ type ToolHandler = (
 
 const handleSelectMode: ToolHandler = async (args, toolCtx, ctx) => {
   const { store, sm } = ctx.engine!
-  const state = requireState(ctx, toolCtx.sessionId)
+  const parsed = parseSelectModeArgs(args)
+  if ("error" in parsed) return `Error: ${parsed.error}`
 
-  if (state.phase !== "MODE_SELECT") {
+  let state = requireState(ctx, toolCtx.sessionId)
+
+  const requestedFeatureName = ((args.feature_name ?? args.feature) as string)?.trim() ?? ""
+  const switchingFeatures = state.phase !== "MODE_SELECT" && state.featureName !== null && requestedFeatureName !== "" && state.featureName !== requestedFeatureName
+
+  if (state.phase !== "MODE_SELECT" && !switchingFeatures) {
     return `Error: select_mode can only be called during MODE_SELECT (current: ${state.phase}).`
   }
 
-  const parsed = parseSelectModeArgs(args)
-  if ("error" in parsed) return `Error: ${parsed.error}`
+  if (switchingFeatures) {
+    await parkCurrentWorkflowSession(store, state)
+    await store.create(toolCtx.sessionId)
+    state = requireState(ctx, toolCtx.sessionId)
+  }
 
   // Sub-workflow sessions preserve their existing featureName
   const isSubWorkflow = state.parentWorkflow !== null
@@ -141,7 +170,7 @@ const handleSelectMode: ToolHandler = async (args, toolCtx, ctx) => {
   if (isSubWorkflow && state.featureName) {
     featureName = state.featureName
   } else {
-    featureName = ((args.feature_name ?? args.feature) as string)?.trim() ?? ""
+    featureName = requestedFeatureName
     if (!featureName) {
       return "Error: feature_name is required."
     }
@@ -160,6 +189,16 @@ const handleSelectMode: ToolHandler = async (args, toolCtx, ctx) => {
   if (priorState && priorState.phase !== "MODE_SELECT" && priorState.sessionId !== toolCtx.sessionId) {
     // Migrate the prior state to the current session
     await store.migrateSession(priorState.sessionId, toolCtx.sessionId)
+    if (switchingFeatures) {
+      return buildWorkflowSwitchMessage({
+        fromFeatureName: state.featureName,
+        toFeatureName: featureName,
+        toPhase: priorState.phase,
+        toPhaseState: priorState.phaseState,
+        resumed: true,
+        preservedMode: priorState.mode !== parsed.mode ? priorState.mode : null,
+      })
+    }
     return (
       `Resumed prior workflow for "${featureName}" at ${priorState.phase}/${priorState.phaseState}` +
       (priorState.mode !== parsed.mode ? ` (keeping original mode ${priorState.mode}).` : ".")
@@ -179,6 +218,15 @@ const handleSelectMode: ToolHandler = async (args, toolCtx, ctx) => {
   })
 
   // policyVersion bumped automatically by setPostUpdateHook on store.update
+  if (switchingFeatures) {
+    return buildWorkflowSwitchMessage({
+      fromFeatureName: state.featureName,
+      toFeatureName: featureName,
+      toPhase: outcome.nextPhase,
+      toPhaseState: outcome.nextPhaseState,
+      resumed: false,
+    })
+  }
   return `Mode set to ${parsed.mode}. Transitioning to ${outcome.nextPhase}/${outcome.nextPhaseState}.`
 }
 
@@ -259,8 +307,9 @@ const handleRequestReview: ToolHandler = async (args, toolCtx, ctx) => {
   const { store, sm } = ctx.engine!
   const state = requireState(ctx, toolCtx.sessionId)
 
-  if (state.phaseState !== "DRAFT" && state.phaseState !== "REVISE") {
-    return `Error: request_review can only be called in DRAFT or REVISE state (current: ${state.phase}/${state.phaseState}).`
+  const validReviewStates = new Set(["DRAFT", "CONVENTIONS", "REVISE"])
+  if (!validReviewStates.has(state.phaseState)) {
+    return `Error: request_review can only be called in DRAFT, CONVENTIONS, or REVISE state (current: ${state.phase}/${state.phaseState}).`
   }
 
   const event = state.phaseState === "REVISE" ? "revision_complete" : "draft_complete"
@@ -409,8 +458,8 @@ const handleSubmitFeedback: ToolHandler = async (args, toolCtx, ctx) => {
           phase: state.phase,
           approvalCount: phaseCount,
           featureName: state.featureName,
-          fileAllowlist: state.mode === "INCREMENTAL" ? state.fileAllowlist : undefined,
-          expectedFiles: state.reviewArtifactFiles.length > 0 ? state.reviewArtifactFiles : undefined,
+          ...(state.mode === "INCREMENTAL" ? { fileAllowlist: state.fileAllowlist } : {}),
+          ...(state.reviewArtifactFiles.length > 0 ? { expectedFiles: state.reviewArtifactFiles } : {}),
         },
       )
     } catch (err) {
@@ -621,18 +670,50 @@ const handleResolveHumanGate: ToolHandler = async (args, toolCtx, ctx) => {
     return `Error: Task "${taskId}" must be pending or human-gated (current: ${task.status}).`
   }
 
+  const activatedNodes = activateHumanGateTasks(state.implDag, taskId, {
+    whatIsNeeded: (args.what_is_needed as string) || task.description,
+    why: (args.why as string) || "Required for implementation.",
+    verificationSteps: (args.verification_steps as string) || "Verify the setup is complete.",
+    resolved: false,
+  })
+  const resolution = resolveAwaitingHumanState(activatedNodes, isRobotArtisanSession(state))
+
   await store.update(toolCtx.sessionId, (draft) => {
-    const dagTask = draft.implDag?.find((t) => t.id === taskId)
-    if (dagTask) {
-      dagTask.status = "human-gated"
-      dagTask.humanGate = {
-        whatIsNeeded: (args.what_is_needed as string) || task.description,
-        why: (args.why as string) || "Required for implementation.",
-        verificationSteps: (args.verification_steps as string) || "Verify the setup is complete.",
-        resolved: false,
-      }
+    draft.implDag = resolution.updatedNodes
+    if (resolution.action === "robot-abort") {
+      draft.currentTaskId = resolution.nextTask?.id ?? null
+      return
+    }
+    if (resolution.action === "user-gate") {
+      draft.phaseState = "USER_GATE"
+      draft.iterationCount = 0
+      draft.retryCount = 0
+      draft.userGateMessageReceived = false
+      draft.currentTaskId = null
     }
   })
+
+  if (resolution.action === "robot-abort") {
+    return (
+      `Human gate set for task "${taskId}".\n\n` +
+      `**Robot-artisan mode:** Auto-aborted ${resolution.abortedIds.length} human-gated task(s) and dependents.\n` +
+      `These tasks require human action that cannot be automated.\n\n` +
+      (resolution.nextTask
+        ? `**Next task ready:** ${resolution.nextTask.id} — ${resolution.nextTask.description}\nContinue with the next task.`
+        : `Call \`request_review\` to submit the partial implementation for review.`)
+    )
+  }
+
+  if (resolution.action === "user-gate") {
+    const gateList = resolution.humanGatedTasks
+      .map((gate) => `  - **${gate.id}:** ${gate.whatIsNeeded}`)
+      .join("\n")
+    return (
+      `Human gate set for task "${taskId}".\n\n` +
+      `**All remaining work is blocked behind human gates.** Auto-advancing to USER_GATE for user resolution.\n\n` +
+      `**Unresolved human gates:**\n${gateList}`
+    )
+  }
 
   return `Human gate set for task "${taskId}". The user will resolve it at USER_GATE.`
 }
@@ -726,18 +807,30 @@ const handleSubmitAutoApprove: ToolHandler = async (args, toolCtx, ctx) => {
 
   const result = parseAutoApproveResult(reviewOutput) as AutoApproveResult
   if (!result.success) {
-    return `Error: Failed to parse auto-approve output: ${result.error}`
+    const feedbackText = buildRobotArtisanAutoApproveFailureFeedback(result.error)
+    const reviseResult = computeSubmitFeedbackReviseTransition(feedbackText, state, sm)
+    if (!reviseResult.success) return `Error: ${reviseResult.error}`
+    const t = reviseResult.transition
+    await store.update(toolCtx.sessionId, (draft) => {
+      draft.phase = t.nextPhase
+      draft.phaseState = t.nextPhaseState
+      draft.retryCount = 0
+      draft.reviewArtifactFiles = []
+      draft.pendingRevisionSteps = null
+      draft.feedbackHistory.push(t.feedbackEntry)
+    })
+    return `Auto-approve failed. ${t.responseMessage}`
   }
 
-  if (result.approve && result.confidence >= AUTO_APPROVE_CONFIDENCE_THRESHOLD) {
-    // Auto-approve: transition to next phase
-    const outcome = sm.transition(state.phase, state.phaseState, "user_approve", state.mode)
-    if (!outcome.success) return `Error: ${outcome.message}`
+  const autoTransition = computeAutoApproveTransition(sm, state.phase, state.mode, result)
+  if (!autoTransition.success) return `Error: ${autoTransition.message}`
 
+  if (result.approve) {
+    // Auto-approve: transition to next phase
     const phaseCount = (state.phaseApprovalCounts[state.phase] ?? 0) + 1
     await store.update(toolCtx.sessionId, (draft) => {
-      draft.phase = outcome.nextPhase
-      draft.phaseState = outcome.nextPhaseState
+      draft.phase = autoTransition.nextPhase
+      draft.phaseState = autoTransition.nextPhaseState
       draft.approvalCount++
       draft.phaseApprovalCounts[state.phase] = phaseCount
       draft.iterationCount = 0
@@ -747,7 +840,7 @@ const handleSubmitAutoApprove: ToolHandler = async (args, toolCtx, ctx) => {
       draft.latestReviewResults = null
       draft.reviewArtifactFiles = []
     })
-    return `Auto-approved (confidence: ${result.confidence.toFixed(2)}). Transitioning to ${outcome.nextPhase}/${outcome.nextPhaseState}.`
+    return `Auto-approved (confidence: ${result.confidence.toFixed(2)}). Transitioning to ${autoTransition.nextPhase}/${autoTransition.nextPhaseState}.`
   }
 
   // Below confidence threshold — route to REVISE with feedback
@@ -887,13 +980,7 @@ export const handleAutoApproveContext: MethodHandler = async (params, ctx) => {
   const state = ctx.engine!.store.get(p.sessionId)
   if (!state || state.phaseState !== "USER_GATE" || state.activeAgent !== "robot-artisan") return null
 
-  return buildAutoApprovePrompt({
-    phase: state.phase,
-    mode: state.mode,
-    artifactDiskPaths: state.artifactDiskPaths as Record<string, string>,
-    featureName: state.featureName,
-    conventionsPath: state.artifactDiskPaths?.conventions ?? null,
-  })
+  return buildAutoApprovePrompt(buildAutoApproveRequest(state, p.sessionId))
 }
 
 // ---------------------------------------------------------------------------
@@ -901,7 +988,7 @@ export const handleAutoApproveContext: MethodHandler = async (params, ctx) => {
 // ---------------------------------------------------------------------------
 
 export const handleToolExecute: MethodHandler = async (params, ctx) => {
-  const p = params as ToolExecuteParams
+  const p = params as Partial<ToolExecuteParams>
   if (!p.name || typeof p.name !== "string") {
     throw new JSONRPCErrorException("name is required", INVALID_PARAMS)
   }
@@ -917,7 +1004,7 @@ export const handleToolExecute: MethodHandler = async (params, ctx) => {
   const toolCtx: ToolContext = {
     sessionId: p.context.sessionId,
     directory: p.context.directory ?? process.cwd(),
-    agent: p.context.agent,
+    ...(p.context.agent ? { agent: p.context.agent } : {}),
   }
 
   return handler(p.args ?? {}, toolCtx, ctx)

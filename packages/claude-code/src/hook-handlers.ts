@@ -10,6 +10,7 @@
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs"
 import { execSync } from "node:child_process"
+import { buildRobotArtisanAutoApproveFailureFeedback } from "#core/autonomous-user-gate"
 import { sendSocketRequest } from "./socket-transport"
 import {
   getSocketPath,
@@ -66,6 +67,15 @@ function getSessionId(stateDir: string): string {
   return "default"
 }
 
+function resolveSessionId(input: HookInput, stateDir: string): string {
+  return input.session_id ?? getSessionId(stateDir)
+}
+
+function persistActiveSessionId(stateDir: string, sessionId: string): void {
+  mkdirSync(stateDir, { recursive: true })
+  writeFileSync(getActiveSessionPath(stateDir), sessionId, "utf-8")
+}
+
 /** Send a JSON-RPC request to the bridge. Returns null if unavailable. */
 async function bridgeCall(
   stateDir: string,
@@ -117,7 +127,8 @@ export async function handlePreToolUse(input: HookInput): Promise<HookOutput> {
     }
   }
 
-  const sessionId = getSessionId(stateDir)
+  const sessionId = resolveSessionId(input, stateDir)
+  persistActiveSessionId(stateDir, sessionId)
 
   // Ensure the session is registered (idempotent — handles mid-session enable).
   await bridgeCall(stateDir, "lifecycle.sessionCreated", { sessionId })
@@ -169,7 +180,8 @@ export async function handleStop(input: HookInput): Promise<HookOutput> {
 
   if (!isEnabled(stateDir)) return ALLOW
 
-  const sessionId = getSessionId(stateDir)
+  const sessionId = resolveSessionId(input, stateDir)
+  persistActiveSessionId(stateDir, sessionId)
 
   // Ensure session exists (handles mid-session enable).
   await bridgeCall(stateDir, "lifecycle.sessionCreated", { sessionId })
@@ -295,8 +307,23 @@ export async function handleStop(input: HookInput): Promise<HookOutput> {
           exitCode: 2,
         }
       } catch (err) {
-        // Auto-approval failed — fall through to normal idle check
-        // Agent will see USER_GATE prompt and can present to user
+        const errMsg = err instanceof Error ? err.message : String(err)
+        const failureOutput = JSON.stringify({
+          approve: false,
+          confidence: 0,
+          reasoning: `Auto-approval subprocess failed: ${errMsg}`,
+          feedback: buildRobotArtisanAutoApproveFailureFeedback(errMsg),
+        })
+        await bridgeCall(stateDir, "tool.execute", {
+          name: "submit_auto_approve",
+          args: { review_output: failureOutput },
+          context: { sessionId, directory: projectDir },
+        })
+        return {
+          stdout: null,
+          stderr: "Robot-artisan auto-approval failed and was routed back to revision work. Continue autonomously.",
+          exitCode: 2,
+        }
       }
     }
   }
@@ -338,8 +365,7 @@ export async function handleSessionStart(input: HookInput): Promise<HookOutput> 
   const sessionId = input.session_id ?? "default"
 
   // Write session_id to .active-session for CLI to read
-  mkdirSync(stateDir, { recursive: true })
-  writeFileSync(getActiveSessionPath(stateDir), sessionId, "utf-8")
+  persistActiveSessionId(stateDir, sessionId)
 
   // Register session with the bridge (no-op if already registered)
   await bridgeCall(stateDir, "lifecycle.sessionCreated", { sessionId })
@@ -383,7 +409,8 @@ export async function handlePreCompact(input: HookInput): Promise<HookOutput> {
   const stateDir = getStateDir(input)
   if (!isEnabled(stateDir)) return ALLOW
 
-  const sessionId = getSessionId(stateDir)
+  const sessionId = resolveSessionId(input, stateDir)
+  persistActiveSessionId(stateDir, sessionId)
   const context = await bridgeCall(stateDir, "prompt.compaction", { sessionId })
   if (!context || typeof context !== "string") return ALLOW
 

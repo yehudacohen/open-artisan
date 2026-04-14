@@ -148,6 +148,35 @@ describe("hook: PreToolUse", () => {
     const parsed = JSON.parse(result.stdout!)
     expect(parsed.hookSpecificOutput.additionalContext).toContain("PLANNING")
   })
+
+  it("prefers live session_id over stale .active-session", async () => {
+    writeFileSync(getActiveSessionPath(stateDir), "stale-session", "utf-8")
+
+    await sendSocketRequest(socketPath, {
+      jsonrpc: "2.0", method: "lifecycle.sessionCreated", params: { sessionId: "fresh-session" }, id: 30,
+    })
+    await sendSocketRequest(socketPath, {
+      jsonrpc: "2.0", method: "tool.execute", params: {
+        name: "select_mode",
+        args: { mode: "GREENFIELD", feature_name: `fresh-hook-test-${Date.now()}` },
+        context: { sessionId: "fresh-session", directory: tmpDir },
+      }, id: 31,
+    })
+
+    const result = await handlePreToolUse({
+      session_id: "fresh-session",
+      cwd: tmpDir,
+      tool_name: "Read",
+      tool_input: { file_path: "/tmp/test.ts" },
+    })
+
+    expect(result.exitCode).toBe(0)
+    const parsed = JSON.parse(result.stdout!)
+    expect(parsed.hookSpecificOutput.additionalContext).toContain("PLANNING")
+
+    const { readFileSync } = await import("node:fs")
+    expect(readFileSync(getActiveSessionPath(stateDir), "utf-8").trim()).toBe("fresh-session")
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -237,6 +266,14 @@ describe("hook: PreCompact", () => {
     expect(result.exitCode).toBe(0)
     // Compaction context may or may not be present depending on state
     // Just verify no crash and valid exit code
+  })
+
+  it("prefers live session_id over stale .active-session", async () => {
+    writeFileSync(getActiveSessionPath(stateDir), "stale-session", "utf-8")
+    const result = await handlePreCompact(makeInput({ session_id: "hook-test-session" }))
+    expect(result.exitCode).toBe(0)
+    const { readFileSync } = await import("node:fs")
+    expect(readFileSync(getActiveSessionPath(stateDir), "utf-8").trim()).toBe("hook-test-session")
   })
 })
 

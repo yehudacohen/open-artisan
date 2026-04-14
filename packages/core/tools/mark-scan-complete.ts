@@ -36,7 +36,7 @@ export function processMarkScanComplete(args: MarkScanCompleteArgs): MarkScanCom
     return {
       responseMessage:
         "Warning: Empty scan summary provided. A meaningful summary helps track what was discovered. " +
-        "Transitioning to ANALYZE state. Call `mark_analyze_complete` when analysis is complete.",
+        "Transitioning to ANALYZE state. Continue immediately with analysis in this turn; do not wait for user input. Call `mark_analyze_complete` when analysis is complete.",
     }
   }
   return {
@@ -48,6 +48,7 @@ function buildScanCompleteMessage(summary: string): string {
   return (
     `Scan complete. Summary recorded:\n\n${summary.slice(0, MAX_SUMMARY_CHARS)}${summary.length > MAX_SUMMARY_CHARS ? "..." : ""}\n\n` +
     `Transitioning to ANALYZE state. ` +
+    `Continue immediately with analysis in this turn; do not wait for user input. ` +
     `Now synthesize your scan findings into a coherent picture of the codebase — ` +
     `architecture, conventions, patterns, dependencies, and potential risks. ` +
     `When analysis is complete, call \`mark_analyze_complete\`.`

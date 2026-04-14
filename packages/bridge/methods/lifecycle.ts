@@ -18,6 +18,7 @@ import { createFileSystemStateBackend, migrateLegacyStateFile } from "../../core
 import { createStateMachine } from "../../core/state-machine"
 import { createArtifactGraph } from "../../core/artifacts"
 import { createSessionRegistry } from "../../core/session-registry"
+import { normalizeAgentName } from "../../core/agent-policy"
 import { detectMode } from "../../core/mode-detect"
 import { setDefaultStateDir } from "../../core/logger"
 import { writeStatusFile } from "../../core/status-writer"
@@ -44,7 +45,7 @@ const noopNotify: NotificationSink = {
 }
 
 export const handleInit: MethodHandler = async (params, ctx) => {
-  const p = params as LifecycleInitParams
+  const p = params as Partial<LifecycleInitParams>
   if (!p.projectDir || typeof p.projectDir !== "string") {
     throw new JSONRPCErrorException("projectDir is required", INVALID_PARAMS)
   }
@@ -161,7 +162,7 @@ export const handleShutdown: MethodHandler = async (_params, ctx) => {
 }
 
 export const handleSessionCreated: MethodHandler = async (params, ctx) => {
-  const p = params as LifecycleSessionParams
+  const p = params as Partial<LifecycleSessionParams>
   if (!p.sessionId || typeof p.sessionId !== "string") {
     throw new JSONRPCErrorException("sessionId is required", INVALID_PARAMS)
   }
@@ -186,10 +187,11 @@ export const handleSessionCreated: MethodHandler = async (params, ctx) => {
   const needsUpdate = (p.agent && typeof p.agent === "string") || ctx.projectDir
   if (needsUpdate) {
     try {
+      const normalizedAgent = normalizeAgentName(p.agent)
       await store.update(p.sessionId, (draft) => {
         // Set active agent if provided (e.g. "robot-artisan" for automation mode)
-        if (p.agent && typeof p.agent === "string") {
-          draft.activeAgent = p.agent
+        if (normalizedAgent) {
+          draft.activeAgent = normalizedAgent
         }
         // Auto-detect mode for fresh sessions at MODE_SELECT
         if (draft.phase === "MODE_SELECT" && !draft.modeDetectionNote && ctx.projectDir) {
@@ -207,7 +209,7 @@ export const handleSessionCreated: MethodHandler = async (params, ctx) => {
 }
 
 export const handleSessionDeleted: MethodHandler = async (params, ctx) => {
-  const p = params as LifecycleSessionParams
+  const p = params as Partial<LifecycleSessionParams>
   if (!p.sessionId || typeof p.sessionId !== "string") {
     throw new JSONRPCErrorException("sessionId is required", INVALID_PARAMS)
   }
@@ -215,13 +217,15 @@ export const handleSessionDeleted: MethodHandler = async (params, ctx) => {
   const { store, sessions, log } = ctx.engine!
 
   sessions.unregister(p.sessionId)
-  try {
-    await store.delete(p.sessionId)
-  } catch (e) {
-    log.warn("Failed to delete session state", {
-      detail: e instanceof Error ? e.message : String(e),
-    })
+
+  const state = store.get(p.sessionId)
+  if (!state) {
+    return null
   }
+
+  log.debug("Session detached (state preserved)", {
+    detail: `${p.sessionId}${state.featureName ? ` feature=${state.featureName}` : ""}`,
+  })
 
   return null
 }

@@ -114,6 +114,7 @@ describe("Sub-workflow lifecycle — spawn → delegate → complete → unblock
     const dag1 = createImplDAG(Array.from(parentAfterSpawn.implDag!))
     const decision1 = nextSchedulerDecision(dag1)
     expect(decision1.action).toBe("blocked")
+    if (decision1.action !== "blocked") throw new Error("Expected blocked scheduler decision")
     expect(decision1.message).toContain("delegated")
 
     // 5. Verify child can be queried

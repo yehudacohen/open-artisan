@@ -97,6 +97,10 @@ describe("processUserMessage — at USER_GATE, approval signals", () => {
     "yes!",
     "approved.",
     "lgtm!",
+    "ok, approved",
+    "yes and proceed",
+    "approved, thanks",
+    "yes please",
   ]
 
   for (const msg of approvalMessages) {
@@ -115,6 +119,9 @@ describe("processUserMessage — ambiguous approval phrases are treated as feedb
     "I approve this change",      // full sentence — treated as feedback for safety
     "I don't approve of this",
     "approved but I have concerns",
+    "approved, but I have one concern",
+    "approved, please fix the missing test",
+    "yes, but add logging first",
   ]
 
   for (const msg of ambiguousMessages) {

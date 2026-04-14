@@ -98,6 +98,15 @@ function createMockStore(initialStates?: Map<string, WorkflowState>): SessionSta
     async load() {
       return { success: true as const, count: memory.size }
     },
+    async migrateSession(oldSessionId: string, newSessionId: string) {
+      const current = memory.get(oldSessionId)
+      if (!current) throw new Error(`Session "${oldSessionId}" not found`)
+      const migrated = structuredClone(current)
+      migrated.sessionId = newSessionId
+      memory.set(newSessionId, migrated)
+      memory.delete(oldSessionId)
+      return structuredClone(migrated)
+    },
     findByFeatureName(featureName: string) {
       for (const state of memory.values()) {
         if (state.featureName === featureName) return structuredClone(state)
@@ -108,12 +117,13 @@ function createMockStore(initialStates?: Map<string, WorkflowState>): SessionSta
 }
 
 function createMockLogger(): Logger {
-  return {
-    error: mock(() => {}),
-    warn: mock(() => {}),
-    info: mock(() => {}),
-    debug: mock(() => {}),
-  }
+    return {
+      error: mock(() => {}),
+      warn: mock(() => {}),
+      info: mock(() => {}),
+      debug: mock(() => {}),
+      child: mock(() => createMockLogger()),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -193,11 +203,11 @@ describe("cascadeAutoSkip", () => {
     // which will fail since the shell is a mock. This should trigger the catch
     // block and return null.
     const state = freshState({
-      revisionBaseline: { type: "git-sha", sha: "abc123" },
-      pendingRevisionSteps: [
-        { phase: "IMPLEMENTATION" as Phase, artifact: "implementation" },
-      ],
-    })
+        revisionBaseline: { type: "git-sha", sha: "abc123" },
+        pendingRevisionSteps: [
+        { phase: "IMPLEMENTATION" as Phase, phaseState: "REVISE", artifact: "implementation", instructions: "Retry implementation." },
+        ],
+      })
     const store = createMockStore(new Map([[SID, state]]))
     // The mock shell doesn't have a git command, so the function will:
     // 1. Try to call hasArtifactChanged
@@ -240,7 +250,7 @@ describe("cascadeAutoSkip", () => {
         phaseState: "REVISE",
         revisionBaseline: { type: "content-hash", hash: "will-not-match" },
         pendingRevisionSteps: [
-          { phase: "INTERFACES" as Phase, artifact: "interfaces" },
+          { phase: "INTERFACES" as Phase, phaseState: "REVISE", artifact: "interfaces", instructions: "Redo interfaces." },
         ],
       })
       const store = createMockStore(new Map([[SID, state]]))
@@ -362,13 +372,11 @@ describe("cascadeAutoSkip", () => {
         store: createMockStore(),
         sm: createStateMachine(),
         log: createMockLogger(),
-        shell: {},
       }
       // Should not throw — validates the type contract
       expect(deps.store).toBeDefined()
       expect(deps.sm).toBeDefined()
       expect(deps.log).toBeDefined()
-      expect(deps.shell).toBeDefined()
     })
 
     it("uses sm.transition for state machine transitions (contract)", () => {

@@ -13,6 +13,7 @@
 import type { WorkflowState, Phase, PhaseState } from "../types"
 import { getNextActionForState } from "../utils"
 import { MAX_IDLE_RETRIES } from "../constants"
+import { buildRobotArtisanIdleReprompt } from "../autonomous-user-gate"
 
 // ---------------------------------------------------------------------------
 // Idle decision
@@ -47,7 +48,9 @@ export function handleIdle(state: WorkflowState): IdleDecision {
       return { action: "ignore" }
     }
     // Robot-artisan at USER_GATE: re-prompt so the workflow doesn't stall.
-    // The reprompt message tells the agent to call submit_feedback to proceed.
+    // This path should now be rare because auto-approval approvals advance inline
+    // and auto-approval rejections transition directly to REVISE. If we are still
+    // here, the agent needs to recover the gate rather than wait for a human.
     if (state.retryCount >= MAX_IDLE_RETRIES) {
       return {
         action: "escalate",
@@ -58,12 +61,7 @@ export function handleIdle(state: WorkflowState): IdleDecision {
     return {
       action: "reprompt",
       retryCount: nextRetry,
-      message:
-        `Robot-artisan stalled at ${state.phase}/USER_GATE. ` +
-        `The auto-approver result was not acted on. ` +
-        `Call \`submit_feedback\` with \`feedback_type: "approve"\` and ` +
-        `\`feedback_text: "Auto-approved by robot-artisan"\` to proceed. ` +
-        `(Retry ${nextRetry}/${MAX_IDLE_RETRIES})`,
+      message: buildRobotArtisanIdleReprompt(state.phase, nextRetry, MAX_IDLE_RETRIES),
     }
   }
 

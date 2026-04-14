@@ -12,7 +12,12 @@
  * This hook is a "hint injector" — it doesn't mutate state, it guides the agent.
  */
 import type { WorkflowState, Phase, PhaseState } from "../types"
-import { APPROVAL_WORDS, APPROVAL_PREFIX_RE } from "../vocabulary"
+import {
+  APPROVAL_DISQUALIFIER_RE,
+  APPROVAL_FILLER_WORDS,
+  APPROVAL_PREFIX_RE,
+  APPROVAL_WORDS,
+} from "../vocabulary"
 
 export interface ChatMessageInput {
   sessionId: string
@@ -42,7 +47,27 @@ function looksLikeApproval(text: string): boolean {
   // Exact match against known approval tokens
   if (APPROVAL_WORDS.has(trimmed)) return true
   // Prefix match: starts with an approval signal and nothing substantive follows
-  return APPROVAL_PREFIX_RE.test(trimmed)
+  if (APPROVAL_PREFIX_RE.test(trimmed)) return true
+
+  const normalized = trimmed.replace(/[.!?]/g, "").trim()
+
+  // Accept short approval + non-substantive tail patterns like
+  // "approved, thanks" or "yes please", but reject substantive follow-ups.
+  const prefixMatch = normalized.match(/^(approve[sd]?|accept|lgtm|looks good|ship it|yes|y|ok|okay|good|perfect|done|continue|proceed|next|go ahead|go|sure|yep|yeah|do it)(?:\s*[,;]\s*|\s+)(.+)$/i)
+  if (prefixMatch) {
+    const tail = prefixMatch[2]?.trim() ?? ""
+    if (tail && !APPROVAL_DISQUALIFIER_RE.test(tail) && APPROVAL_FILLER_WORDS.has(tail)) {
+      return true
+    }
+  }
+
+  // Allow short combinations of approval-only tokens, e.g. "ok, approved"
+  const segments = trimmed
+    .split(/(?:,|;|\band\b|\s+\/\s+)/i)
+    .map((segment) => segment.trim())
+    .filter(Boolean)
+
+  return segments.length > 1 && segments.every((segment) => APPROVAL_PREFIX_RE.test(segment))
 }
 
 // ---------------------------------------------------------------------------

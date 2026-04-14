@@ -78,6 +78,15 @@ describe("handleIdle — ignore at expected idle states", () => {
     const state = makeState({ phase: "MODE_SELECT", phaseState: "DRAFT", mode: null })
     expect(handleIdle(state).action).toBe("ignore")
   })
+
+  it("reprompts robot-artisan at USER_GATE", () => {
+    const state = makeState({ phaseState: "USER_GATE", activeAgent: "robot-artisan", retryCount: 0 })
+    const decision = handleIdle(state)
+    expect(decision.action).toBe("reprompt")
+    if (decision.action !== "reprompt") return
+    expect(decision.message).toContain("Do not wait for user input")
+    expect(decision.message).not.toContain("submit_feedback")
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -118,6 +127,7 @@ describe("handleIdle — reprompt for active states", () => {
     expect(decision.action).toBe("reprompt")
     if (decision.action !== "reprompt") return
     expect(decision.message).toContain("mark_scan_complete")
+    expect(decision.message).toContain("do not wait for user input")
   })
 
   // G12: ANALYZE sub-state was previously falling through to generic message
@@ -127,6 +137,7 @@ describe("handleIdle — reprompt for active states", () => {
     expect(decision.action).toBe("reprompt")
     if (decision.action !== "reprompt") return
     expect(decision.message).toContain("mark_analyze_complete")
+    expect(decision.message).toContain("do not wait for user input")
   })
 
   it("increments retryCount on each reprompt", () => {
@@ -177,5 +188,3 @@ describe("handleIdle — pure function", () => {
     expect(state.retryCount).toBe(retryBefore)
   })
 })
-
-

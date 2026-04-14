@@ -36,7 +36,7 @@ export function processMarkAnalyzeComplete(args: MarkAnalyzeCompleteArgs): MarkA
     return {
       responseMessage:
         "Warning: Empty analysis summary provided. A meaningful summary helps guide conventions drafting. " +
-        "Transitioning to CONVENTIONS state. Call `request_review` when conventions document is complete.",
+        "Transitioning to CONVENTIONS state. Continue immediately with conventions drafting in this turn; do not wait for user input. Call `request_review` when conventions document is complete.",
     }
   }
   return {
@@ -48,6 +48,7 @@ function buildAnalyzeCompleteMessage(summary: string): string {
   return (
     `Analysis complete. Summary recorded:\n\n${summary.slice(0, MAX_SUMMARY_CHARS)}${summary.length > MAX_SUMMARY_CHARS ? "..." : ""}\n\n` +
     `Transitioning to CONVENTIONS state. ` +
+    `Continue immediately with conventions drafting in this turn; do not wait for user input. ` +
     `Now draft the full conventions document covering:\n` +
     `  1. Naming conventions (files, functions, types, variables)\n` +
     `  2. Architecture patterns and module structure\n` +

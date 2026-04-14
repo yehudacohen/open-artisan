@@ -138,12 +138,16 @@ describe("lifecycle.sessionCreated", () => {
 })
 
 describe("lifecycle.sessionDeleted", () => {
-  it("removes session state and unregisters", async () => {
+  it("preserves session state and only unregisters the client", async () => {
     await handleInit({ projectDir: tmpDir }, ctx)
     await handleSessionCreated({ sessionId: "s1" }, ctx)
+    await ctx.engine!.store.update("s1", (d) => {
+      d.featureName = "persisted-feature"
+      d.phase = "PLANNING"
+    })
     expect(ctx.engine!.store.get("s1")).not.toBeNull()
     await handleSessionDeleted({ sessionId: "s1" }, ctx)
-    expect(ctx.engine!.store.get("s1")).toBeNull()
+    expect(ctx.engine!.store.get("s1")?.featureName).toBe("persisted-feature")
   })
 })
 

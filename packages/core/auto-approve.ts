@@ -172,8 +172,8 @@ async function ephemeralAutoApprovePrompt(
   const session = await dispatcher.createSession({
     title: "auto-approve",
     agent: "auto-approver",
-    parentId: parentSessionId,
-    model: parentModel,
+    ...(parentSessionId ? { parentId: parentSessionId } : {}),
+    ...(parentModel ? { model: parentModel } : {}),
   })
   try {
     return await session.prompt(prompt)

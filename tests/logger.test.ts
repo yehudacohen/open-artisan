@@ -141,7 +141,10 @@ describe("NotificationSink — toast calls", () => {
     const log = createLogger({ toast: toastMock }, tempDir)
     log.error("test error", { detail: "details here" })
     expect(toastMock).toHaveBeenCalledTimes(1)
-    const [title, message, level] = toastMock.mock.calls[0] as [string, string, string]
+    const firstCall = toastMock.mock.calls[0] as unknown as [string, string, string] | undefined
+    const title = firstCall?.[0]
+    const message = firstCall?.[1]
+    const level = firstCall?.[2]
     expect(title).toBe("Workflow Error")
     expect(message).toContain("test error")
     expect(message).toContain("details here")
@@ -153,7 +156,8 @@ describe("NotificationSink — toast calls", () => {
     const log = createLogger({ toast: toastMock }, tempDir)
     log.warn("test warning")
     expect(toastMock).toHaveBeenCalledTimes(1)
-    const [, , level] = toastMock.mock.calls[0] as [string, string, string]
+    const firstCall = toastMock.mock.calls[0] as unknown as [string, string, string] | undefined
+    const level = firstCall?.[2]
     expect(level).toBe("warning")
   })
 
@@ -162,7 +166,8 @@ describe("NotificationSink — toast calls", () => {
     const log = createLogger({ toast: toastMock }, tempDir)
     log.info("test info")
     expect(toastMock).toHaveBeenCalledTimes(1)
-    const [, , level] = toastMock.mock.calls[0] as [string, string, string]
+    const firstCall = toastMock.mock.calls[0] as unknown as [string, string, string] | undefined
+    const level = firstCall?.[2]
     expect(level).toBe("info")
   })
 

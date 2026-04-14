@@ -127,15 +127,21 @@ describe("getNextActionForState", () => {
   })
 
   it("returns mark_scan_complete for SCAN", () => {
-    expect(getNextActionForState("DISCOVERY", "SCAN")).toContain("mark_scan_complete")
+    const result = getNextActionForState("DISCOVERY", "SCAN")
+    expect(result).toContain("mark_scan_complete")
+    expect(result).toContain("do not wait for user input")
   })
 
   it("returns mark_analyze_complete for ANALYZE", () => {
-    expect(getNextActionForState("DISCOVERY", "ANALYZE")).toContain("mark_analyze_complete")
+    const result = getNextActionForState("DISCOVERY", "ANALYZE")
+    expect(result).toContain("mark_analyze_complete")
+    expect(result).toContain("do not wait for user input")
   })
 
   it("returns request_review for DRAFT", () => {
-    expect(getNextActionForState("PLANNING", "DRAFT")).toContain("request_review")
+    const result = getNextActionForState("PLANNING", "DRAFT")
+    expect(result).toContain("request_review")
+    expect(result).toContain("do not wait for user input")
   })
 
   it("returns request_review for CONVENTIONS", () => {
@@ -143,7 +149,9 @@ describe("getNextActionForState", () => {
   })
 
   it("returns mark_satisfied for REVIEW", () => {
-    expect(getNextActionForState("INTERFACES", "REVIEW")).toContain("mark_satisfied")
+    const result = getNextActionForState("INTERFACES", "REVIEW")
+    expect(result).toContain("mark_satisfied")
+    expect(result).toContain("do not wait for user input")
   })
 
   it("returns wait instruction for USER_GATE", () => {

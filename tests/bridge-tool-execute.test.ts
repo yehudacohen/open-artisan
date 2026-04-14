@@ -108,10 +108,25 @@ describe("tool.execute — select_mode", () => {
 
   it("rejects when not in MODE_SELECT", async () => {
     await exec("select_mode", { mode: "GREENFIELD", feature_name: "my-feat" })
-    // Now at PLANNING — can't select mode again
-    const result = await exec("select_mode", { mode: "GREENFIELD", feature_name: "other" })
+    // Same feature remains bound to the existing workflow
+    const result = await exec("select_mode", { mode: "GREENFIELD", feature_name: "my-feat" })
     expect(result).toContain("Error")
     expect(result).toContain("MODE_SELECT")
+  })
+
+  it("switches to a different feature by parking the current workflow", async () => {
+    await exec("select_mode", { mode: "GREENFIELD", feature_name: "my-feat" })
+    const result = await exec("select_mode", { mode: "REFACTOR", feature_name: "other" })
+    expect(result).toContain("Switched to new workflow \"other\"")
+
+    const current = ctx.engine!.store.get("s1")
+    expect(current?.featureName).toBe("other")
+    expect(current?.phase).toBe("DISCOVERY")
+
+    const parked = ctx.engine!.store.findByFeatureName("my-feat")
+    expect(parked?.featureName).toBe("my-feat")
+    expect(parked?.phase).toBe("PLANNING")
+    expect(parked?.sessionId).not.toBe("s1")
   })
 
   it("rejects missing feature_name", async () => {
@@ -567,6 +582,78 @@ describe("tool.execute — agent-only mode", () => {
     // State must remain at REVIEW — not transition to REVISE
     const stateAfter = agentCtx.engine!.store.get("ao-session")
     expect(stateAfter?.phaseState).toBe("REVIEW")
+  })
+
+  it("allows request_review from DISCOVERY/CONVENTIONS", async () => {
+    await exec("select_mode", { mode: "GREENFIELD", feature_name: `conv-${Date.now()}` })
+    await ctx.engine!.store.update("s1", (d) => {
+      d.phase = "DISCOVERY"
+      d.phaseState = "CONVENTIONS"
+    })
+
+    const result = await exec("request_review", {
+      summary: "Conventions",
+      artifact_description: "Conventions doc",
+      artifact_content: "# Conventions\n",
+    })
+
+    expect(result).toContain("Transitioning to DISCOVERY/REVIEW")
+    expect(ctx.engine!.store.get("s1")?.phaseState).toBe("REVIEW")
+  })
+})
+
+describe("tool.execute — submit_auto_approve", () => {
+  it("routes invalid auto-approve output to REVISE", async () => {
+    const agentCtx = makeBridgeContext()
+    await handleInit({ projectDir: tmpDir }, agentCtx)
+    await handleSessionCreated({ sessionId: "robot-session", agent: "robot-artisan" }, agentCtx)
+    await agentCtx.engine!.store.update("robot-session", (d) => {
+      d.mode = "GREENFIELD"
+      d.phase = "PLANNING"
+      d.phaseState = "USER_GATE"
+    })
+
+    const result = await handleToolExecute({
+      name: "submit_auto_approve",
+      args: { review_output: "not-json" },
+      context: { sessionId: "robot-session", directory: tmpDir },
+    }, agentCtx) as string
+
+    expect(result).toContain("Auto-approve failed")
+    const state = agentCtx.engine!.store.get("robot-session")
+    expect(state?.phaseState).toBe("REVISE")
+  })
+})
+
+describe("tool.execute — resolve_human_gate", () => {
+  it("auto-advances to USER_GATE when all remaining work is human-gated", async () => {
+    await ctx.engine!.store.update("s1", (d) => {
+      d.phase = "IMPLEMENTATION"
+      d.phaseState = "DRAFT"
+      d.implDag = [
+        {
+          id: "T1",
+          description: "Provision infrastructure",
+          dependencies: [],
+          expectedTests: [],
+          expectedFiles: [],
+          estimatedComplexity: "small",
+          status: "pending",
+          category: "human-gate",
+        },
+      ]
+    })
+
+    const result = await exec("resolve_human_gate", {
+      task_id: "T1",
+      what_is_needed: "Provision the bucket",
+      why: "Uploads need it",
+      verification_steps: "Run aws s3 ls",
+    })
+
+    expect(result).toContain("USER_GATE")
+    const state = ctx.engine!.store.get("s1")
+    expect(state?.phaseState).toBe("USER_GATE")
   })
 })
 

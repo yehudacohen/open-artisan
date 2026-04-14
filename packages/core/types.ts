@@ -97,7 +97,7 @@ export type ArtifactKey =
  *   v12: added TaskCategory/HumanGateInfo on implDag nodes, "human-gated" TaskStatus,
  *        for stub detection, human gate mechanism, and plan structuring
  *   v13: added activeAgent (tracks which agent file is driving the session —
- *        "artisan", "robot-artisan", or null for non-artisan agents like Plan/Build)
+ *        "artisan", "robot-artisan", or null until an agent is detected)
  *   v14: added taskCompletionInProgress (re-entry guard for mark_task_complete —
  *        prevents concurrent per-task review + DAG mutations from corrupting state)
  *   v15: added taskReviewCount (per-task review iteration cap — prevents infinite
@@ -306,9 +306,9 @@ export interface WorkflowState {
    * Used by the tool guard to go dormant for non-artisan agents (Plan, Build)
    * and by robot-artisan mode for auto-approval at USER_GATE.
    *
-   * Values: "artisan", "robot-artisan", or null (unknown / non-artisan agent).
-   * null means the plugin has not yet detected which agent is active — the tool
-   * guard defaults to ACTIVE in this case so existing sessions aren't broken.
+   * Values: "artisan", "robot-artisan", or null (unknown / not yet detected).
+   * Unknown sessions stay dormant until an artisan agent is detected or the
+   * workflow is explicitly activated via a workflow tool call.
    */
   activeAgent: string | null
 

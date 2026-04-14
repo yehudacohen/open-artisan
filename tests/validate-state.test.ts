@@ -769,7 +769,7 @@ describe("validateWorkflowState — v22 implDag expectedFiles", () => {
         id: "T1", description: "d", dependencies: [], expectedTests: [],
         estimatedComplexity: "small", status: "pending",
         // No expectedFiles — should be valid (optional)
-      }],
+      } as any],
     }))
     expect(err).toBeNull()
   })

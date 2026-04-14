@@ -176,4 +176,4 @@ describe("artisan CLI", () => {
     const stderr = runCliError(["bogus-command"])
     expect(stderr).toContain("Unknown command")
   })
-}, { timeout: 30000 })
+})

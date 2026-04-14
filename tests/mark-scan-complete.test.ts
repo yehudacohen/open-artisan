@@ -14,6 +14,7 @@ describe("processMarkScanComplete", () => {
     const result = processMarkScanComplete({ scan_summary: "Scanned everything" })
     expect(result.responseMessage).toContain("ANALYZE")
     expect(result.responseMessage).toContain("mark_analyze_complete")
+    expect(result.responseMessage).toContain("Continue immediately")
   })
 
   it("truncates long summaries at 500 chars", () => {
@@ -34,6 +35,7 @@ describe("processMarkScanComplete", () => {
     const result = processMarkScanComplete({ scan_summary: "" })
     expect(result.responseMessage).toContain("Warning: Empty scan summary")
     expect(result.responseMessage).toContain("ANALYZE")
+    expect(result.responseMessage).toContain("do not wait for user input")
   })
 
   it("response message is a string", () => {

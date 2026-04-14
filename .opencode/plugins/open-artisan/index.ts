@@ -31,11 +31,7 @@ import { createSessionStateStore, setPostUpdateHook } from "../../../packages/co
 import { createFileSystemStateBackend, migrateLegacyStateFile } from "../../../packages/core/state-backend-fs"
 import { createSessionRegistry } from "../../../packages/core/session-registry"
 import { createStateMachine } from "../../../packages/core/state-machine"
-import { getPhaseToolPolicy } from "../../../packages/core/hooks/tool-guard"
-import { buildWorkflowSystemPrompt, buildSubagentContext } from "../../../packages/core/hooks/system-transform"
-import { buildUserGateHint, processUserMessage } from "../../../packages/core/hooks/chat-message"
-import { handleIdle } from "../../../packages/core/hooks/idle-handler"
-import { buildCompactionContext } from "../../../packages/core/hooks/compaction"
+import { detectActiveAgent, ensureState, wrapExecuteMap } from "../../../packages/core/tool-runtime"
 import { createGitCheckpoint } from "../../../packages/core/hooks/git-checkpoint"
 import { detectMode } from "../../../packages/core/mode-detect"
 import { compareIntentsWithLLM } from "../../../packages/core/intent-comparison"
@@ -70,6 +66,7 @@ import { dispatchSelfReview, dispatchRebuttal } from "../../../packages/core/sel
 import { createOpenCodeSubagentDispatcher } from "./opencode-subagent-dispatcher"
 import { getAcceptanceCriteria } from "../../../packages/core/hooks/system-transform"
 import { runDiscoveryFleet } from "../../../packages/core/discovery/index"
+import { createPluginHooks } from "./plugin-hooks"
 import { parseImplPlan } from "../../../packages/core/impl-plan-parser"
 import { createImplDAG, type TaskCategory, type HumanGateInfo } from "../../../packages/core/dag"
 import { nextSchedulerDecision, resolveHumanGate } from "../../../packages/core/scheduler"
@@ -82,18 +79,24 @@ import { writeStatusFile } from "../../../packages/core/status-writer"
 import { computeFastForward, computeForwardSkip } from "../../../packages/core/fast-forward"
 import { cascadeAutoSkip } from "../../../packages/core/cascade-auto-skip"
 import { dispatchAutoApproval } from "../../../packages/core/auto-approve"
+import {
+  buildAutoApproveRequest,
+  buildRobotArtisanAutoApproveFailureFeedback,
+  computeAutoApproveTransition,
+  isRobotArtisanSession,
+} from "../../../packages/core/autonomous-user-gate"
+import { activateHumanGateTasks, resolveAwaitingHumanState } from "../../../packages/core/human-gate-policy"
+import { parkCurrentWorkflowSession } from "../../../packages/core/session-switch"
+import { buildWorkflowSwitchMessage } from "../../../packages/core/session-switch"
 import { createHash } from "node:crypto"
-import type { WorkflowMode, WorkflowState, SessionStateStore, ArtifactKey, RevisionStep, MarkSatisfiedArgs, CriterionResult } from "../../../packages/core/types"
+import type { WorkflowMode, WorkflowState, SessionStateStore, ArtifactKey, RevisionStep, MarkSatisfiedArgs, CriterionResult, Phase } from "../../../packages/core/types"
 import { VALID_PHASE_STATES } from "../../../packages/core/types"
 import type { PluginClient } from "./client-types"
 import { resolveSessionId } from "../../../packages/core/utils"
 import {
   MAX_REVIEW_ITERATIONS,
   MAX_TASK_REVIEW_ITERATIONS,
-  MAX_INTENT_BASELINE_CHARS,
   MAX_FEEDBACK_CHARS,
-  IDLE_COOLDOWN_MS,
-  MAX_IDLE_RETRIES,
 } from "../../../packages/core/constants"
 
 /** Returns a 16-char SHA-256 hex fingerprint of the given text. */
@@ -172,21 +175,21 @@ async function findPriorWorkflowState(
   log?: Logger,
 ): Promise<{ intentBaseline: string | null; phase: string; artifactDiskPaths: Record<string, string>; approvedArtifacts?: Record<string, string> } | null> {
   try {
-    log?.info("findPriorWorkflowState", { featureName, action: "searching" })
+    log?.info("findPriorWorkflowState", { detail: `feature=${featureName} action=searching` })
     
     const state = store.findByFeatureName(featureName)
     if (!state) {
-      log?.info("findPriorWorkflowState", { featureName, result: "not found" })
+      log?.info("findPriorWorkflowState", { detail: `feature=${featureName} result=not-found` })
       return null
     }
 
     // Validate and extract state fields
     const validated = validatePriorState(state)
-    log?.info("findPriorWorkflowState", { featureName, result: "found", phase: validated?.phase })
+    log?.info("findPriorWorkflowState", { detail: `feature=${featureName} result=found phase=${validated?.phase ?? "unknown"}` })
     return validated
   } catch (err) {
     const errorMsg = err instanceof Error ? err.message : String(err)
-    log?.error("findPriorWorkflowState", { featureName, error: errorMsg })
+    log?.error("findPriorWorkflowState", { detail: `feature=${featureName} error=${errorMsg}` })
     return null
   }
 }
@@ -257,57 +260,6 @@ interface ToolExecuteContext {
 }
 
 /**
- * Known artisan agent names. Only these agents activate the full workflow.
- * Non-artisan agents (Plan, Build, or unknown) cause the plugin to go dormant.
- */
-export const ARTISAN_AGENT_NAMES = new Set(["artisan", "robot-artisan"])
-
-/**
- * Lazily ensures workflow state exists for a session. If `session.created`
- * event was missed (e.g. plugin loaded after the session was already created),
- * this creates fresh state on first tool call instead of returning an error.
- */
-async function ensureState(
-  store: SessionStateStore,
-  sessionId: string,
-  notify?: NotificationSink,
-): Promise<WorkflowState> {
-  const existing = store.get(sessionId)
-  if (existing) return existing
-  // State doesn't exist — likely missed session.created event. Create it now.
-  try {
-    notify?.toast("Workflow initialized", "Session state created (missed startup event)", "info")
-  } catch { /* ignore */ }
-  return store.create(sessionId)
-}
-
-/**
- * Detects the active agent from the tool execute context and persists it
- * to state.activeAgent if changed. Called at the top of every custom tool's
- * execute() handler — the first tool call in a session captures the agent
- * and subsequent calls short-circuit if already set.
- *
- * context.agent is only available inside custom tool execute() — NOT in
- * tool.execute.before hooks or session.created events.
- */
-async function detectAgent(
-  store: SessionStateStore,
-  sessionId: string,
-  context: ToolExecuteContext,
-): Promise<void> {
-  const agentName = context.agent
-  if (!agentName) return // Agent not in context — can't detect
-
-  const state = store.get(sessionId)
-  if (!state) return
-  if (state.activeAgent === agentName) return // Already set — no-op
-
-  await store.update(sessionId, (draft) => {
-    draft.activeAgent = agentName
-  })
-}
-
-/**
  * Logs a state transition as a TUI toast notification so the user can see
  * workflow phase changes in real time. Falls back to console.log in test
  * environments or if the TUI API is unavailable.
@@ -328,49 +280,6 @@ function logTransition(
 
 // Re-export for consumers who import from index.ts (G19)
 export { resolveSessionId }
-
-/**
- * Wraps a tool execute function so any uncaught exception is converted to an
- * error string rather than propagating to the OpenCode runtime. Without this,
- * a store.update() validation failure or disk I/O error inside a tool handler
- * would surface as an "internal server error" instead of a readable message.
- *
- * Also logs the error to the persistent error log for post-mortem tracing.
- */
-function safeToolExecute<A, C>(
-  toolName: string,
-  fn: (args: A, context: C) => Promise<string>,
-  logFn: Logger,
-): (args: A, context: C) => Promise<string> {
-  return async (args: A, context: C): Promise<string> => {
-    try {
-      return await fn(args, context)
-    } catch (e) {
-      const message = e instanceof Error ? e.message : String(e)
-      const stack = e instanceof Error ? e.stack : undefined
-      logFn.error(`Unexpected error in ${toolName}`, { detail: stack ?? message })
-      return `Error: Unexpected internal error in ${toolName}: ${message}`
-    }
-  }
-}
-
-/**
- * Wraps every tool's execute() function in a safety net so that unexpected
- * exceptions (store.update validation failures, disk I/O errors, etc.) are
- * caught and returned as error strings. Without this, an unhandled throw
- * from any tool handler would surface as an "internal server error" in
- * the OpenCode runtime.
- */
-function wrapToolMap<T extends Record<string, { execute: (...args: any[]) => Promise<string>; [key: string]: unknown }>>(
-  tools: T,
-  logFn: Logger,
-): T {
-  for (const [name, def] of Object.entries(tools)) {
-    const original = def.execute
-    def.execute = safeToolExecute(name, original.bind(def), logFn)
-  }
-  return tools
-}
 
 // WORKFLOW_TOOL_NAMES imported from packages/core/constants.ts (single source of truth)
 export { WORKFLOW_TOOL_NAMES } from "../../../packages/core/constants"
@@ -508,9 +417,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
     }
   }
 
-  // Idle re-prompt debounce: tracks the last re-prompt timestamp per session
-  // to prevent cascading re-prompts when the user interrupts tool calls.
-  // IDLE_COOLDOWN_MS is imported from constants.ts
+  // Idle re-prompt debounce: tracks the last re-prompt timestamp per session.
   const lastRepromptTimestamps = new Map<string, number>()
 
   // Active session tracking: stores the most recently active primary session ID.
@@ -544,579 +451,14 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
   }
 
   return {
-    // -------------------------------------------------------------------------
-    // event hook — handles session lifecycle events and idle re-prompts
-    // -------------------------------------------------------------------------
-
-    event: async ({ event }: { event: { type: string; properties?: Record<string, unknown> } }) => {
-      const { store, log, sessions, lastRepromptTimestamps, notify } = ctx
-      try {
-      // Session created: initialize fresh workflow state.
-      // SDK type: { type: "session.created", properties: { info: Session } }
-      // The session ID lives at properties.info.id
-      if (event.type === "session.created") {
-        const info = event.properties?.["info"] as { id?: string; parentID?: string } | undefined
-        const sessionId = info?.id
-        if (!sessionId) return
-
-        // Child sessions (Task subagents spawned by the agent, or plugin ephemeral
-        // sessions like self-review/task-review) should NOT get workflow state.
-        // They inherit the parent's tool policy via the session registry.
-        // This prevents:
-        //   - Subagents landing in MODE_SELECT with blocked tools
-        //   - Wasted detectMode() scans for ephemeral sessions
-        //   - State mutation races when multiple subagents modify the DAG
-        if (info?.parentID) {
-          sessions.registerChild(sessionId, info.parentID)
-          return
-        }
-
-        sessions.registerPrimary(sessionId)
-        try {
-          await store.create(sessionId)
-        } catch {
-          // Already exists from a previous load — no-op
-        }
-
-        // G7: Run mode detection and store in the dedicated modeDetectionNote field.
-        // This is separate from intentBaseline (which holds the user's actual task).
-        // modeDetectionNote is shown in the MODE_SELECT system prompt only.
-        try {
-          const cwd = (info as any)?.path?.cwd ?? (info as any)?.path ?? process.cwd()
-          const detectionResult = await detectMode(typeof cwd === "string" ? cwd : process.cwd())
-          await store.update(sessionId, (draft) => {
-            draft.modeDetectionNote = buildModeDetectionNote(detectionResult)
-          })
-        } catch {
-          // Non-fatal — mode detection is advisory only
-        }
-        return
-      }
-
-      // Session deleted: clean up state.
-      // SDK type: { type: "session.deleted", properties: { info: Session } }
-      if (event.type === "session.deleted") {
-        const info = event.properties?.["info"] as { id?: string } | undefined
-        const sessionId = info?.id
-        if (!sessionId) return
-        // Clean up session registry (works for both primary and child sessions)
-        sessions.unregister(sessionId)
-        try {
-          await store.delete(sessionId)
-        } catch (e) {
-          log.warn("Failed to delete session state", { detail: e instanceof Error ? e.message : String(e), sessionId })
-        }
-        return
-      }
-
-      // Session idle: re-prompt if agent stopped prematurely.
-      // SDK type: { type: "session.idle", properties: { sessionID: string } }
-      if (event.type === "session.idle") {
-        const sessionId = (
-          (event.properties?.["sessionID"] as string | undefined) ??
-          (event.properties?.["sessionId"] as string | undefined) ??
-          (event.properties?.["session_id"] as string | undefined)
-        )
-        if (!sessionId) return
-
-        const state = store.get(sessionId)
-        if (!state) return
-
-        // Agent-aware dormancy: skip idle re-prompts for non-artisan agents
-        if (state.activeAgent !== null && !ARTISAN_AGENT_NAMES.has(state.activeAgent)) return
-
-        // Debounce: ignore idle events that arrive within 10 seconds of the
-        // last re-prompt. This prevents a cascade when the user interrupts a
-        // tool call — the abort triggers idle, we re-prompt, the LLM retries,
-        // the user interrupts again, idle fires again, etc. The cooldown gives
-        // the user time to type or take action.
-        const now = Date.now()
-        const lastReprompt = lastRepromptTimestamps.get(sessionId) ?? 0
-        if (now - lastReprompt < IDLE_COOLDOWN_MS) return
-
-        // Proactive timeout check: when the agent is idle and there are delegated
-        // sub-workflows, check for timeouts. This catches timeouts even when
-        // mark_task_complete hasn't been called (e.g., all work is delegated).
-        if (state.childWorkflows.length > 0 && state.phase === "IMPLEMENTATION") {
-          const timedOut = findTimedOutChildren(state)
-          if (timedOut.length > 0) {
-            try {
-              await store.update(sessionId, (draft) => {
-                for (const to of timedOut) {
-                  const aborted = applyDelegationTimeout(draft, to.taskId)
-                  log.warn("Idle timeout: sub-workflow timed out", {
-                    detail: `task=${to.taskId} feature=${to.featureName} elapsed=${Math.round(to.elapsedMs / 60000)}min aborted=[${aborted.join(",")}]`,
-                  })
-                }
-              })
-              const timeoutMsg = timedOut.map(
-                (to) => `Sub-workflow "${to.featureName}" for task "${to.taskId}" timed out after ${Math.round(to.elapsedMs / 60000)} minutes. The task and its dependents have been aborted.`,
-              ).join("\n")
-              await ctx.promptExistingSession(sessionId,
-                `**Sub-workflow timeout detected:**\n${timeoutMsg}\n\n` +
-                `Implement the timed-out task(s) directly or spawn a smaller sub-workflow.`,
-              )
-            } catch (err) {
-              log.warn("Failed to handle idle timeout", { detail: err instanceof Error ? err.message : String(err) })
-            }
-            return // Timeout message replaces normal idle reprompt
-          }
-        }
-
-        const decision = handleIdle(state)
-        if (decision.action === "ignore") return
-
-        if (decision.action === "escalate") {
-          // Hard escalation: toast + in-session prompt telling the agent to
-          // stop and ask the user for help. The agent's response will be
-          // visible in the conversation, making the stall impossible to miss.
-          log.warn(`Idle escalation: agent stopped ${state.retryCount} times at ${state.phase}/${state.phaseState}`, { sessionId })
-          try {
-            notify.toast("Workflow Stalled", decision.message, "warning")
-          } catch { /* ignore */ }
-          // Reset retry count so the agent gets fresh attempts after user input
-          try {
-            await store.update(sessionId, (draft) => { draft.retryCount = 0 })
-          } catch (e) {
-            log.warn("Failed to reset retryCount on escalation", { detail: e instanceof Error ? e.message : String(e), sessionId })
-          }
-          try {
-            await ctx.promptExistingSession(sessionId,
-              `WORKFLOW STALLED: You have stopped ${state.retryCount} times during ${state.phase}/${state.phaseState} ` +
-              `without completing the current step. Stop what you are doing and ask the user for guidance. ` +
-              `Explain what you were trying to do and where you got stuck.`)
-          } catch { /* ignore if API shape differs */ }
-          return
-        }
-
-        // Reprompt — only increment retry count AFTER the prompt succeeds,
-        // so failed prompts don't consume retry budget.
-        log.warn(`Idle reprompt ${decision.retryCount}/${MAX_IDLE_RETRIES} at ${state.phase}/${state.phaseState}`, { sessionId })
-        try {
-          lastRepromptTimestamps.set(sessionId, Date.now())
-          await ctx.promptExistingSession(sessionId, decision.message)
-          await store.update(sessionId, (draft) => {
-            draft.retryCount = decision.retryCount
-          })
-        } catch { /* ignore if API shape differs */ }
-      }
-      } catch (e) {
-        // Top-level safety net — hooks must never throw to the OpenCode runtime.
-        // Errors here cause "internal server error" retries if left unhandled.
-        log.error("Unhandled error in event hook", { detail: e instanceof Error ? e.stack ?? e.message : String(e) })
-      }
-    },
-
-    // -------------------------------------------------------------------------
-    // chat.message hook — official OpenCode API for intercepting user messages.
-    // Two responsibilities:
-    //   1. Capture the first user message as intentBaseline (for O_DIVERGE later)
-    //   2. At USER_GATE, inject routing instructions so the agent knows whether to
-    //      call submit_feedback with approve or revise.
-    // The sessionID comes from the extended input shape (the core passes extra fields).
-    // -------------------------------------------------------------------------
-
-    "chat.message": async (
-      input: { sessionID?: string; sessionId?: string; session_id?: string; messageID?: string; [key: string]: unknown },
-      output: { message: { sessionID?: string; sessionId?: string; id?: string }; parts: Array<{ type: string; text?: string; id?: string; sessionID?: string; messageID?: string }> },
-    ) => {
-      const { store, log, notify } = ctx
-      try {
-      // Resolve sessionID — probe all casing variants the SDK may use
-      const sessionId = (
-        (input.sessionID as string | undefined) ??
-        (input.sessionId as string | undefined) ??
-        (input.session_id as string | undefined) ??
-        (output.message?.sessionID as string | undefined) ??
-        (output.message?.sessionId as string | undefined)
-      )
-      if (!sessionId) return
-      const state = store.get(sessionId)
-      if (!state) return
-
-      // Agent-aware dormancy: skip chat.message processing for non-artisan agents
-      if (state.activeAgent !== null && !ARTISAN_AGENT_NAMES.has(state.activeAgent)) return
-
-      // DONE → MODE_SELECT auto-reset: when a user sends a new message after a
-      // completed workflow, reset the state so a fresh workflow cycle can begin.
-      // This prevents the agent from working outside the workflow framework after
-      // the first workflow completes. The user's message becomes the new intent.
-      if (state.phase === "DONE") {
-        const textContent = (output.parts as Array<{ type: string; text?: string }>)
-          .filter((p) => p.type === "text" && p.text)
-          .map((p) => p.text!)
-          .join(" ")
-          .trim()
-        await store.update(sessionId, (draft) => {
-          draft.phase = "MODE_SELECT"
-          draft.phaseState = "DRAFT"
-          draft.iterationCount = 0
-          draft.retryCount = 0
-          draft.intentBaseline = textContent ? textContent.slice(0, MAX_INTENT_BASELINE_CHARS) : null
-          draft.userGateMessageReceived = false
-          draft.currentTaskId = null
-          draft.implDag = null
-          draft.feedbackHistory = []
-          draft.pendingRevisionSteps = null
-          draft.escapePending = false
-          draft.taskCompletionInProgress = null
-          draft.taskReviewCount = 0
-          draft.pendingFeedback = null
-          draft.revisionBaseline = null
-          draft.reviewArtifactFiles = []
-          draft.userMessages = textContent ? [textContent] : []
-          // Preserve: mode, approvedArtifacts, conventions, fileAllowlist,
-          // featureName, artifactDiskPaths, activeAgent, phaseApprovalCounts,
-          // lastCheckpointTag, approvalCount — these carry forward from the
-          // previous workflow cycle for context.
-        })
-        logTransition(
-          { phase: "DONE", phaseState: "DRAFT" },
-          { phase: "MODE_SELECT", phaseState: "DRAFT" },
-          "new workflow cycle — user sent new work",
-          notify,
-        )
-        return // Don't inject USER_GATE routing hints — we're now at MODE_SELECT
-      }
-
-      // Resolve messageID from input — required for v2 Part objects
-      const messageId = (input.messageID as string | undefined) ?? (output.message?.id as string | undefined) ?? ""
-
-      // Collect all user messages for self-review context
-      const textContent = (output.parts as Array<{ type: string; text?: string }>)
-        .filter((p) => p.type === "text" && p.text)
-        .map((p) => p.text!)
-        .join(" ")
-        .trim()
-
-      if (textContent) {
-        await store.update(sessionId, (draft) => {
-          // Append to userMessages array
-          draft.userMessages.push(textContent)
-          
-          // Capture first real user message as intent baseline (for O_DIVERGE later).
-          // intentBaseline is null until the first real user message arrives.
-          // After capture, only O_INTENT_UPDATE (in the escape hatch path) may update it.
-          if (!draft.intentBaseline) {
-            draft.intentBaseline = textContent.slice(0, MAX_INTENT_BASELINE_CHARS)
-          }
-        })
-      }
-
-      // Only inject routing hint at USER_GATE
-      if (state.phaseState !== "USER_GATE") return
-
-      const result = processUserMessage(state, output.parts as Array<{ type: string; text?: string }>)
-      if (result.intercepted) {
-        // Prepend routing note as a v2-compliant Part object.
-        // v2 requires every Part to carry id, sessionID, and messageID (PartBase).
-        // We generate a synthetic id prefixed with "prt_oa_" so it's identifiable in logs.
-        const injectedText = result.parts[0]?.text ?? ""
-        if (injectedText) {
-          output.parts.splice(0, 0, {
-            type: "text",
-            text: injectedText,
-            id: `prt_oa_routing_${Date.now()}`,
-            sessionID: sessionId,
-            messageID: messageId,
-          })
-        }
-
-        // Mark that a real user message was received at USER_GATE.
-        // submit_feedback(approve) checks this flag to prevent the agent
-        // from self-approving without actual user input.
-        await store.update(sessionId, (draft) => {
-          draft.userGateMessageReceived = true
-        })
-      }
-      } catch (e) {
-        log.error("Unhandled error in chat.message hook", { detail: e instanceof Error ? e.stack ?? e.message : String(e) })
-      }
-    },
-
-    // -------------------------------------------------------------------------
-     // System prompt injection via experimental transform.
-     // Injects the phase header + phase-specific prompt + sub-state context.
-     // At USER_GATE also appends the routing hint for the agent.
-     // -------------------------------------------------------------------------
-
-    "experimental.chat.system.transform": async (
-      input: { sessionID?: string; sessionId?: string; session_id?: string; model?: unknown },
-      output: { system: string[] },
-    ) => {
-      const { store, log, sessions, designDocPath } = ctx
-      try {
-      const sessionId = (input.sessionID ?? input.sessionId ?? input.session_id) as string | undefined
-      if (!sessionId) return
-
-      // Child session handling: two types, same as the tool guard (Phase 2d).
-      // 1. Ephemeral (self-review, orchestrator, discovery) — inject subagent context
-      //    from parent's state. No workflow prompt.
-      // 2. Sub-workflow (has its own WorkflowState) — skip subagent context, fall
-      //    through to inject its own workflow prompt so it can drive MODE_SELECT → DONE.
-      const parentSessionId = sessions.getParent(sessionId)
-      if (parentSessionId) {
-        const childState = store.get(sessionId)
-        if (!childState) {
-          // Ephemeral child — inject subagent context from parent
-          const parentState = store.get(parentSessionId)
-          if (parentState) {
-            output.system.push(buildSubagentContext(parentState))
-          }
-          return
-        }
-        // Sub-workflow child — fall through to inject its own workflow prompt below
-      }
-
-      const state = store.get(sessionId)
-      if (!state) return
-
-      // Extract full model config (modelID + providerID) from input.model
-      const modelConfig = extractModelConfig(input.model)
-      // Always log model detection for debugging
-      if (input.model) {
-        log.debug("Session model detected", { detail: `input.model: ${JSON.stringify(input.model)}, extracted: ${JSON.stringify(modelConfig)}` })
-      }
-      if (modelConfig) {
-        // Compare by fields to avoid unnecessary store updates
-        const current = state.sessionModel
-        const changed = !current
-          || typeof current === "string"
-          || current.modelID !== modelConfig.modelID
-          || (current.providerID ?? undefined) !== (modelConfig.providerID ?? undefined)
-        if (changed) {
-          await store.update(sessionId, (draft) => {
-            draft.sessionModel = modelConfig
-          })
-        }
-      } else if (input.model) {
-        log.warn("Failed to extract model config", { detail: `input.model type: ${typeof input.model}, value: ${JSON.stringify(input.model).slice(0, 200)}` })
-      }
-
-      // Agent-aware dormancy: if the active agent is NOT an artisan agent,
-      // skip workflow prompt injection entirely. The plugin should be invisible
-      // to non-artisan agents (Plan, Build). activeAgent === null means "not yet
-      // detected" — default to ACTIVE for backward compatibility.
-      if (state.activeAgent !== null && !ARTISAN_AGENT_NAMES.has(state.activeAgent)) {
-        return // DORMANT — non-artisan agent, no workflow prompt injection
-      }
-
-      const promptBlock = buildWorkflowSystemPrompt(state)
-      // Append the workflow block after existing system parts to preserve
-      // OpenCode's own system block positions (applyCaching expects its
-      // blocks at index 0-1 for cache_control breakpoints).
-      output.system.push(promptBlock)
-
-      // At USER_GATE, append a routing hint as an additional system block
-      if (state.phaseState === "USER_GATE") {
-        const hint = buildUserGateHint(state.phase, state.phaseState)
-        output.system.push(hint)
-      }
-      } catch (e) {
-        log.error("Unhandled error in system.transform hook", { detail: e instanceof Error ? e.stack ?? e.message : String(e) })
-      }
-    },
-
-    // -------------------------------------------------------------------------
-    // Tool guard — phase-gated tool restrictions
-    // -------------------------------------------------------------------------
-
-    "tool.execute.before": async (input: { sessionID?: string; sessionId?: string; session_id?: string; tool: string; args?: Record<string, unknown> }) => {
-      const { store, log, sessions } = ctx
-      try {
-      const sessionId = (input.sessionID ?? input.sessionId ?? input.session_id) as string | undefined
-      if (!sessionId) return
-
-      // Child session handling: two types of children.
-      // 1. Ephemeral (self-review, orchestrator, discovery) — workflow tools BLOCKED.
-      //    These inherit the parent's tool policy.
-      // 2. Sub-workflow (has its own WorkflowState via spawn_sub_workflow) — workflow
-      //    tools ALLOWED. The child drives its own workflow independently.
-      const parentId = sessions.getParent(sessionId)
-      if (parentId) {
-        // Sub-workflow check: if the child session has its own WorkflowState,
-        // it's a sub-workflow (Phase 3) — skip child blocking and let it run
-        // its own workflow. Fall through to normal tool guard logic below.
-        const childState = store.get(sessionId)
-        if (!childState) {
-          // Ephemeral child — apply parent's policy, block workflow tools.
-          if (PASSTHROUGH_TOOL_NAMES.has(input.tool.toLowerCase())) return
-
-          if (WORKFLOW_TOOL_NAMES.has(input.tool)) {
-            throw new Error(
-              `[Workflow] Tool "${input.tool}" cannot be called from a subagent session. ` +
-              `Only the parent session can call workflow control tools (mark_task_complete, request_review, etc.). ` +
-              `Complete your implementation work and report results back to the parent session.`,
-            )
-          }
-          // Use the parent's state for tool policy enforcement
-          const parentState = store.get(parentId)
-          if (!parentState) return // Parent state gone — allow through (graceful degradation)
-          // Resolve per-task expected files for the parent's current task.
-          // Resolve relative paths to absolute using the project directory.
-          const parentCwd = projectRoot
-          const rawParentTaskFiles = parentState.currentTaskId && parentState.implDag
-            ? parentState.implDag.find((t) => t.id === parentState.currentTaskId)?.expectedFiles
-            : undefined
-          const parentTaskFiles = rawParentTaskFiles?.map((f) => f.startsWith("/") ? f : resolve(parentCwd, f))
-          const policy = getPhaseToolPolicy(
-            parentState.phase,
-            parentState.phaseState,
-            parentState.mode,
-            parentState.fileAllowlist,
-            parentTaskFiles,
-          )
-          // Apply the same blocked/predicate checks using the parent's policy
-          const toolName = input.tool.toLowerCase()
-          if (policy.blocked.some((blocked) => toolName.includes(blocked))) {
-            throw new Error(
-              `[Workflow] Tool "${input.tool}" is blocked in ${parentState.phase}/${parentState.phaseState}. ` +
-              `Allowed: ${policy.allowedDescription}`,
-            )
-          }
-          if (policy.bashCommandPredicate && toolName.includes("bash")) {
-            const command = (input.args?.["command"] ?? input.args?.["cmd"] ?? input.args?.["script"] ?? "") as string
-            if (command && !policy.bashCommandPredicate(command)) {
-              throw new Error(
-                `[Workflow] Bash command blocked in INCREMENTAL mode — file-write operators (>, >>, tee, sed -i) are not allowed.`,
-              )
-            }
-          }
-          const WRITE_LIKE_TOKENS_CHILD = ["write", "edit", "patch", "create", "overwrite"]
-          if (policy.writePathPredicate && WRITE_LIKE_TOKENS_CHILD.some((t) => toolName.includes(t))) {
-            const filePath = (
-              input.args?.["filePath"] ?? input.args?.["path"] ?? input.args?.["file"] ??
-              input.args?.["filename"] ?? input.args?.["target"] ?? input.args?.["destination"]
-            ) as string | undefined
-            if (filePath && !policy.writePathPredicate(filePath)) {
-              throw new Error(
-                `[Workflow] Writing to "${filePath}" is blocked in ${parentState.phase}/${parentState.phaseState}. ` +
-                `${policy.allowedDescription}`,
-              )
-            }
-          }
-          return
-        }
-        // Sub-workflow child: has its own WorkflowState — fall through to
-        // normal tool guard logic below (uses the child's own state, not parent's).
-      }
-
-      const state = store.get(sessionId)
-      if (!state) return
-
-      // Track the most recently active primary session ID for orchestrator parentID.
-      sessions.setActive(sessionId)
-
-      // Agent-aware dormancy: if the active agent is NOT an artisan agent
-      // (e.g. Plan, Build, or any unknown agent), skip ALL tool blocking.
-      // The plugin should be invisible to non-artisan agents.
-      // activeAgent === null means "not yet detected" — default to ACTIVE
-      // for backward compatibility (existing sessions before schema v13).
-      if (state.activeAgent !== null && !ARTISAN_AGENT_NAMES.has(state.activeAgent)) {
-        return // DORMANT — non-artisan agent, skip tool guard entirely
-      }
-
-      // Never block our own workflow tools regardless of phase — they are the
-      // only way the agent can signal state transitions.
-      if (WORKFLOW_TOOL_NAMES.has(input.tool)) return
-
-      // Never block OpenCode infrastructure tools (todowrite, glob, read, etc.)
-      // These are agent plumbing, not file operations. The substring match on
-      // "write"/"edit" would otherwise false-positive on tools like "todowrite".
-      if (PASSTHROUGH_TOOL_NAMES.has(input.tool.toLowerCase())) return
-
-      // Resolve per-task expected files for the current task.
-      // Task expectedFiles are relative paths from the IMPL_PLAN; resolve to
-      // absolute so they match the absolute fileAllowlist and tool input paths.
-      const rawTaskFiles = state.currentTaskId && state.implDag
-        ? state.implDag.find((t) => t.id === state.currentTaskId)?.expectedFiles
-        : undefined
-      const currentTaskFiles = rawTaskFiles?.map((f) => f.startsWith("/") ? f : resolve(projectRoot, f))
-      const policy = getPhaseToolPolicy(
-        state.phase,
-        state.phaseState,
-        state.mode,
-        state.fileAllowlist,
-        currentTaskFiles,
-      )
-
-      const toolName = input.tool.toLowerCase()
-
-      // Check blocked tools (substring match — catches "file_write", "bash_exec", etc.)
-      if (policy.blocked.some((blocked) => toolName.includes(blocked))) {
-        throw new Error(
-          `[Workflow] Tool "${input.tool}" is blocked in ${state.phase}/${state.phaseState}. ` +
-          `Allowed: ${policy.allowedDescription}`,
-        )
-      }
-
-      // Check bash command predicate (INCREMENTAL mode: block file-write operators)
-      if (policy.bashCommandPredicate && toolName.includes("bash")) {
-        const command = (input.args?.["command"] ?? input.args?.["cmd"] ?? input.args?.["script"] ?? "") as string
-        if (command && !policy.bashCommandPredicate(command)) {
-          throw new Error(
-            `[Workflow] Bash command blocked in INCREMENTAL mode — file-write operators (>, >>, tee, sed -i) are not allowed. ` +
-            `Use write/edit tools instead so the file allowlist can be enforced.`,
-          )
-        }
-      }
-
-      // Check write path predicate for write/edit tools.
-      // Catches: write, edit, patch, create, overwrite, and any namespaced variants
-      // (file_write, write_file, str_replace_editor, apply_patch, etc.)
-      const WRITE_LIKE_TOKENS = ["write", "edit", "patch", "create", "overwrite"]
-      if (policy.writePathPredicate && WRITE_LIKE_TOKENS.some((t) => toolName.includes(t))) {
-        // Probe all common argument names used by different tool implementations
-        const filePath = (
-          input.args?.["filePath"] ??
-          input.args?.["path"] ??
-          input.args?.["file"] ??
-          input.args?.["filename"] ??
-          input.args?.["target"] ??
-          input.args?.["destination"]
-        ) as string | undefined
-        if (filePath && !policy.writePathPredicate(filePath)) {
-          throw new Error(
-            `[Workflow] Writing to "${filePath}" is blocked in ${state.phase}/${state.phaseState}. ` +
-            `${policy.allowedDescription}`,
-          )
-        }
-      }
-      } catch (e) {
-        // Re-throw intentional tool blocks — these are the mechanism for enforcing
-        // phase-gated tool restrictions. Only swallow truly unexpected errors.
-        if (e instanceof Error && e.message.startsWith("[Workflow]")) throw e
-        log.error("Unhandled error in tool.execute.before hook", { detail: e instanceof Error ? e.stack ?? e.message : String(e) })
-        // Swallow — failing open is safer than blocking all tools on an internal error
-      }
-    },
-
-    // -------------------------------------------------------------------------
-    // Compaction resilience — preserve state across context window reductions
-    // -------------------------------------------------------------------------
-
-    "experimental.session.compacting": async (
-      input: { sessionID?: string; sessionId?: string; session_id?: string },
-      output: { context?: string[] },
-    ) => {
-      const { store } = ctx
-      try {
-      const sessionId = (input.sessionID ?? input.sessionId ?? input.session_id) as string | undefined
-      if (!sessionId) return
-      const state = store.get(sessionId)
-      if (!state) return
-
-      // Agent-aware dormancy: skip compaction context for non-artisan agents
-      if (state.activeAgent !== null && !ARTISAN_AGENT_NAMES.has(state.activeAgent)) return
-
-      const contextBlock = buildCompactionContext(state)
-      // Ensure output.context exists — runtime may not initialize it
-      output.context ??= []
-      output.context.push(contextBlock)
-      } catch (e) {
-        log.error("Unhandled error in compacting hook", { detail: e instanceof Error ? e.stack ?? e.message : String(e) })
-      }
-    },
+    ...createPluginHooks({
+      ctx,
+      projectRoot,
+      passthroughToolNames: PASSTHROUGH_TOOL_NAMES,
+      buildModeDetectionNote,
+      extractModelConfig,
+      logTransition,
+    }),
 
     // -------------------------------------------------------------------------
     // Custom tools — "tool" (singular) with tool() helper and tool.schema.*
@@ -1126,7 +468,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
     // unhandled exceptions to the OpenCode runtime.
     // -------------------------------------------------------------------------
 
-    tool: wrapToolMap({
+    tool: wrapExecuteMap({
       // -----------------------------------------------------------------------
       // check_prior_workflow — run before select_mode to validate intent alignment
       // -----------------------------------------------------------------------
@@ -1151,7 +493,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             ),
         },
         async execute(
-          args: { feature_name?: string; user_intent?: string },
+          args: { feature_name: string; user_intent?: string | undefined },
           context: ToolExecuteContext,
         ) {
           const { store, log, subagentDispatcher } = ctx
@@ -1215,8 +557,8 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
           const comparisonResult = await compareIntentsWithLLM({
             currentIntent,
             priorIntent,
-            priorPlanPath,
             dispatcher: subagentDispatcher,
+            ...(priorPlanPath ? { priorPlanPath } : {}),
             ...(state?.sessionModel != null ? { parentModel: state.sessionModel } : {}),
           })
 
@@ -1224,11 +566,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
 
           // Handle ERROR case first
           if (classification === "ERROR") {
-            log.error("check_prior_workflow", { 
-              featureName, 
-              error: "LLM comparison failed", 
-              detail: explanation 
-            })
+            log.error("check_prior_workflow", { detail: `feature=${featureName} classification=ERROR reason=${explanation}` })
             return (
               `Error: Could not compare intents with prior workflow.\n` +
               `Reason: ${explanation}\n\n` +
@@ -1237,12 +575,10 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
           }
 
           // Log successful comparison
-          log.info("check_prior_workflow", { 
-            featureName, 
-            classification, 
-            currentIntent: currentIntent.slice(0, 100),
-            priorIntent: priorIntent.slice(0, 100)
-          })
+          log.info(
+            "check_prior_workflow",
+            { detail: `feature=${featureName} classification=${classification} current=${currentIntent.slice(0, 100)} prior=${priorIntent.slice(0, 100)}` },
+          )
 
           // Cache the prior state for select_mode to avoid redundant file reads
           await store.update(sessionId, (draft) => {
@@ -1320,14 +656,14 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
           const sessionId = resolveSessionId(context)
           if (!sessionId) return "Error: Could not determine session ID from tool context."
 
-          const state = await ensureState(store, sessionId, notify)
-          await detectAgent(store, sessionId, context)
+          let state = await ensureState(store, sessionId, notify)
+          await detectActiveAgent(store, sessionId, context)
 
           // If at DONE, reset to MODE_SELECT to allow starting a fresh workflow.
           // This handles the case where the user wants to start a new workflow
           // after a prior one completed, without needing to send a chat message first.
           if (state.phase === "DONE") {
-            const updatedState = await store.update(sessionId, (draft) => {
+            await store.update(sessionId, (draft) => {
               draft.phase = "MODE_SELECT"
               draft.phaseState = "DRAFT"
               draft.iterationCount = 0
@@ -1345,13 +681,8 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
               draft.revisionBaseline = null
               draft.reviewArtifactFiles = []
             })
-            log.info("Auto-reset DONE -> MODE_SELECT for fresh workflow", { sessionId })
-            // Use the returned state instead of mutating the stale reference
-            return await this.execute(args, context)
-          }
-
-          if (state.phase !== "MODE_SELECT") {
-            return `Error: Mode already selected (current phase: ${state.phase}).`
+            log.info("Auto-reset DONE -> MODE_SELECT for fresh workflow", { detail: `session=${sessionId}` })
+            state = store.get(sessionId) ?? state
           }
 
           const parsed = parseSelectModeArgs(args)
@@ -1378,13 +709,24 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             }
           }
 
+          const switchingFeatures = !isSubWorkflow && state.phase !== "MODE_SELECT" && state.featureName !== null && featureName !== null && state.featureName !== featureName
+
+          if (state.phase !== "MODE_SELECT" && !switchingFeatures) {
+            return `Error: Mode already selected (current phase: ${state.phase}).`
+          }
+
+          if (switchingFeatures) {
+            await parkCurrentWorkflowSession(store, state)
+            await store.create(sessionId)
+            state = store.get(sessionId) ?? await ensureState(store, sessionId, notify)
+          }
+
           // Check if feature directory exists - enforce check_prior_workflow before proceeding
           // (skip for sub-workflows — they're new sessions, not continuations)
           const featureDir = join(context.directory || process.cwd(), ".openartisan", featureName)
           if (!isSubWorkflow && existsSync(featureDir) && !state.priorWorkflowChecked) {
             log.warn("select_mode blocked without check_prior_workflow", {
-              featureName,
-              detail: "Feature directory exists but check_prior_workflow was not called first",
+              detail: `feature=${featureName} reason=missing-check_prior_workflow`,
             })
             return (
               `Error: Prior workflow artifacts detected for "${featureName}". ` +
@@ -1402,7 +744,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             if (!priorState) {
               priorState = await findPriorWorkflowState(store, featureName, log)
             } else {
-              log.info("select_mode using cached prior state", { featureName })
+              log.info("select_mode using cached prior state", { detail: `feature=${featureName}` })
             }
           }
           
@@ -1430,8 +772,8 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
               const comparisonResult = await compareIntentsWithLLM({
                 currentIntent,
                 priorIntent,
-                priorPlanPath,
                 dispatcher: subagentDispatcher,
+                ...(priorPlanPath ? { priorPlanPath } : {}),
                 ...(state.sessionModel != null ? { parentModel: state.sessionModel } : {}),
               })
 
@@ -1455,9 +797,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                 )
 
                 log.info("select_mode fast-forward", {
-                  featureName,
-                  targetPhase: ffResult.targetPhase,
-                  skippedPhases: ffResult.skippedPhases,
+                  detail: `feature=${featureName} target=${ffResult.targetPhase} skipped=${ffResult.skippedPhases.join(",")}`,
                 })
 
                 // Detect design doc
@@ -1485,6 +825,17 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                 const designDocNote = featureDesignDocPath
                   ? ` Design document detected at \`${featureDesignDocPath}\`.`
                   : ""
+
+                if (switchingFeatures) {
+                  return buildWorkflowSwitchMessage({
+                    fromFeatureName: state.featureName,
+                    toFeatureName: featureName,
+                    toPhase: updatedState.phase,
+                    toPhaseState: updatedState.phaseState,
+                    resumed: true,
+                    preservedMode: updatedState.mode !== mode ? updatedState.mode : null,
+                  }) + designDocNote
+                }
 
                 return (
                   `Mode: ${mode}\n` +
@@ -1533,6 +884,16 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             ? ` Design document detected at \`${featureDesignDocPath}\` — it will be used as a constraint for all subsequent phases.`
             : ""
 
+          if (switchingFeatures) {
+            return buildWorkflowSwitchMessage({
+              fromFeatureName: state.featureName,
+              toFeatureName: featureName,
+              toPhase: outcome.nextPhase,
+              toPhaseState: outcome.nextPhaseState,
+              resumed: false,
+            }) + designDocNote
+          }
+
           return buildSelectModeResponse(mode) + ` Artifacts will be written to \`.openartisan/${featureName}/\`.` + designDocNote
         },
       }),
@@ -1555,7 +916,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
           if (!sessionId) return "Error: Could not determine session ID from tool context."
 
           const state = await ensureState(store, sessionId, notify)
-          await detectAgent(store, sessionId, context)
+          await detectActiveAgent(store, sessionId, context)
 
           if (state.phase !== "DISCOVERY" || state.phaseState !== "SCAN") {
             return `Error: mark_scan_complete can only be called in DISCOVERY/SCAN (current: ${state.phase}/${state.phaseState}).`
@@ -1594,7 +955,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
           if (!sessionId) return "Error: Could not determine session ID from tool context."
 
           const state = await ensureState(store, sessionId, notify)
-          await detectAgent(store, sessionId, context)
+          await detectActiveAgent(store, sessionId, context)
 
           if (state.phase !== "DISCOVERY" || state.phaseState !== "ANALYZE") {
             return `Error: mark_analyze_complete can only be called in DISCOVERY/ANALYZE (current: ${state.phase}/${state.phaseState}).`
@@ -1715,7 +1076,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
           if (!sessionId) return "Error: Could not determine session ID from tool context."
 
           const state = await ensureState(store, sessionId, notify)
-          await detectAgent(store, sessionId, context)
+          await detectActiveAgent(store, sessionId, context)
 
           if (state.phaseState !== "REVIEW") {
             return `Error: mark_satisfied can only be called in REVIEW state (current: ${state.phaseState}).`
@@ -1855,16 +1216,32 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                 unmetCriteria: [{
                   criterion: "Isolated reviewer could not evaluate",
                   met: false,
-                  evidence: `Reviewer failed: ${reviewResult.errors?.join("; ") || "unknown error"}. Re-evaluate your work against all criteria, address any issues you find, and re-submit for review.`,
+                  evidence: `Reviewer failed: ${reviewResult.error || "unknown error"}. Re-evaluate your work against all criteria, address any issues you find, and re-submit for review.`,
                   severity: "blocking" as const,
                 }],
-                metCount: 0,
-                totalBlocking: expectedBlocking,
+                responseMessage: `Review iteration ${iterationInfo.current} of ${iterationInfo.max}. Isolated reviewer failed and forced a revision cycle.`,
               }
             }
 
             if (reviewResult?.success) {
-              const reviewerCriteria = ensureAllowlistCriterion(reviewResult.criteriaResults, state) as CriterionResult[]
+              const reviewerCriteria = ensureAllowlistCriterion(
+                reviewResult.criteriaResults.map((criterion) => ({
+                  criterion: criterion.criterion,
+                  met: criterion.met,
+                  evidence: criterion.evidence,
+                  ...(criterion.severity === "blocking" || criterion.severity === "suggestion"
+                    ? { severity: criterion.severity }
+                    : {}),
+                  ...(typeof criterion.score === "number" ? { score: criterion.score } : {}),
+                })),
+                state,
+              ).map((criterion) => ({
+                criterion: criterion.criterion,
+                met: criterion.met,
+                evidence: criterion.evidence,
+                severity: criterion.severity ?? "blocking",
+                ...(typeof criterion.score === "number" ? { score: criterion.score } : {}),
+              })) as CriterionResult[]
               if (reviewerCriteria.length !== reviewResult.criteriaResults.length) {
                 reviewResult = {
                   ...reviewResult,
@@ -2028,19 +1405,62 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
           const currentState = store.get(sessionId)
           if (
             outcome.nextPhaseState === "USER_GATE" &&
-            currentState?.activeAgent === "robot-artisan"
+            currentState != null && isRobotArtisanSession(currentState)
           ) {
-            try {
-              const autoResult = await dispatchAutoApproval(subagentDispatcher, {
-                phase: state.phase,
-                mode: state.mode,
-                artifactDiskPaths: state.artifactDiskPaths,
-                featureName: state.featureName,
-                conventionsPath: state.artifactDiskPaths["conventions"] ?? null,
-                ...(sessionId != null ? { parentSessionId: sessionId } : {}),
-                ...(state.sessionModel != null ? { parentModel: state.sessionModel } : {}),
-                isEscalation: hitIterationCap,
+            const routeAutoApprovalFailureToRevise = async (failureFeedback: string): Promise<string | null> => {
+              const reviseOutcome = computeAutoApproveTransition(sm, state.phase, state.mode, { approve: false })
+              if (!reviseOutcome.success) {
+                log.warn("Robot-artisan: failed to route auto-approval failure to revise", { detail: reviseOutcome.message })
+                return null
+              }
+
+              let autoRevisionBaseline: WorkflowState["revisionBaseline"] = null
+              try {
+                autoRevisionBaseline = await captureRevisionBaseline(
+                  state.phase,
+                  currentState ?? state,
+                  context.directory || process.cwd(),
+                )
+              } catch (baselineErr) {
+                const errMsg = baselineErr instanceof Error ? baselineErr.message : String(baselineErr)
+                log.debug("Robot-artisan: failed to capture failure baseline", { detail: errMsg })
+              }
+
+              logTransition(
+                { phase: state.phase, phaseState: outcome.nextPhaseState },
+                reviseOutcome,
+                "auto-approve/failure",
+                notify,
+              )
+
+              await store.update(sessionId, (draft) => {
+                draft.phase = reviseOutcome.nextPhase
+                draft.phaseState = reviseOutcome.nextPhaseState
+                draft.pendingRevisionSteps = []
+                draft.revisionBaseline = autoRevisionBaseline
+                draft.retryCount = 0
+                draft.reviewArtifactHash = null
+                draft.reviewArtifactFiles = []
+                draft.feedbackHistory.push({
+                  phase: state.phase,
+                  feedback: failureFeedback.slice(0, MAX_FEEDBACK_CHARS),
+                  timestamp: Date.now(),
+                })
               })
+
+              return (
+                `**Auto-approve failed** (robot-artisan mode).\n\n` +
+                `${failureFeedback}\n\n` +
+                `Transitioned to **${reviseOutcome.nextPhase}/${reviseOutcome.nextPhaseState}**. ` +
+                `Revise the current artifact and call \`request_review\` when done.`
+              )
+            }
+
+            try {
+              const autoResult = await dispatchAutoApproval(
+                subagentDispatcher,
+                buildAutoApproveRequest(state, sessionId, hitIterationCap),
+              )
 
               if (autoResult.success) {
                 if (autoResult.approve) {
@@ -2049,7 +1469,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                   // session would sit silently at USER_GATE waiting for the agent to act.
                   log.info("Robot-artisan: auto-approved inline", { detail: `confidence: ${autoResult.confidence.toFixed(2)}` })
 
-                  const approveOutcome = sm.transition(state.phase, outcome.nextPhaseState, "user_approve", state.mode)
+                  const approveOutcome = computeAutoApproveTransition(sm, state.phase, state.mode, autoResult)
                   if (!approveOutcome.success) {
                     // SM rejected the transition — fall through to normal USER_GATE behavior
                     log.warn("Robot-artisan: inline approval SM transition failed", { detail: approveOutcome.message })
@@ -2115,23 +1535,77 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                     )
                   }
                 } else {
-                  // Auto-approve rejected: return revision feedback for the agent to address.
-                  // Stay at USER_GATE — the agent must revise and re-submit.
+                  // Auto-approve rejected: transition directly into REVISE so
+                  // robot-artisan stays autonomous instead of waiting at a
+                  // pseudo-human gate for submit_feedback.
                   log.info("Robot-artisan: auto-approve rejected", { detail: `confidence: ${autoResult.confidence.toFixed(2)}` })
+
+                  const reviseOutcome = computeAutoApproveTransition(sm, state.phase, state.mode, autoResult)
+                  if (!reviseOutcome.success) {
+                    log.warn("Robot-artisan: inline revise SM transition failed", { detail: reviseOutcome.message })
+                  } else {
+                    let autoRevisionBaseline: WorkflowState["revisionBaseline"] = null
+                    try {
+                      autoRevisionBaseline = await captureRevisionBaseline(
+                        state.phase,
+                        currentState ?? state,
+                        context.directory || process.cwd(),
+                      )
+                    } catch (baselineErr) {
+                      const errMsg = baselineErr instanceof Error ? baselineErr.message : String(baselineErr)
+                      log.debug("Robot-artisan: failed to capture auto-revise baseline", { detail: errMsg })
+                    }
+
+                    logTransition(
+                      { phase: state.phase, phaseState: outcome.nextPhaseState },
+                      reviseOutcome,
+                      "auto-approve/revise",
+                      notify,
+                    )
+
+                    await store.update(sessionId, (draft) => {
+                      draft.phase = reviseOutcome.nextPhase
+                      draft.phaseState = reviseOutcome.nextPhaseState
+                      draft.pendingRevisionSteps = []
+                      draft.revisionBaseline = autoRevisionBaseline
+                      draft.retryCount = 0
+                      draft.reviewArtifactHash = null
+                      draft.reviewArtifactFiles = []
+                      draft.feedbackHistory.push({
+                        phase: state.phase,
+                        feedback: (autoResult.feedback ?? autoResult.reasoning).slice(0, MAX_FEEDBACK_CHARS),
+                        timestamp: Date.now(),
+                      })
+                    })
+
+                    return (
+                      `**Auto-approve rejected** (robot-artisan mode, confidence: ${autoResult.confidence.toFixed(2)}).\n\n` +
+                      `${autoResult.reasoning}\n\n` +
+                      `**Required revisions:**\n${autoResult.feedback ?? "Address quality issues and re-submit."}\n\n` +
+                      `Transitioned to **${reviseOutcome.nextPhase}/${reviseOutcome.nextPhaseState}**. ` +
+                      `Revise the current artifact and call \`request_review\` when done.`
+                    )
+                  }
+
                   return (
                     `**Auto-approve rejected** (robot-artisan mode, confidence: ${autoResult.confidence.toFixed(2)}).\n\n` +
                     `${autoResult.reasoning}\n\n` +
-                    `**Required revisions:**\n${autoResult.feedback ?? "Address quality issues and re-submit."}\n\n` +
-                    `Call \`submit_feedback\` with \`feedback_type: "revise"\` and the revision feedback in \`feedback_text\` to re-enter REVISE.`
+                    `**Required revisions:**\n${autoResult.feedback ?? "Address quality issues and re-submit."}`
                   )
                 }
               }
-              // autoResult.success === false — fall through to normal USER_GATE behavior
-              log.warn("Robot-artisan: auto-approval failed, falling back to manual", { detail: autoResult.error })
+              if (!autoResult.success) {
+                const failureMessage = buildRobotArtisanAutoApproveFailureFeedback(autoResult.error)
+                log.warn("Robot-artisan: auto-approval failed, routing to revise", { detail: autoResult.error })
+                const failureResult = await routeAutoApprovalFailureToRevise(failureMessage)
+                if (failureResult) return failureResult
+              }
             } catch (autoErr) {
-              // Non-fatal — fall through to normal USER_GATE behavior
               const errMsg = autoErr instanceof Error ? autoErr.message : String(autoErr)
               log.warn("Robot-artisan: auto-approval dispatch error", { detail: errMsg })
+              const failureMessage = buildRobotArtisanAutoApproveFailureFeedback(errMsg)
+              const failureResult = await routeAutoApprovalFailureToRevise(failureMessage)
+              if (failureResult) return failureResult
             }
           }
 
@@ -2199,7 +1673,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
           if (!sessionId) return "Error: Could not determine session ID from tool context."
 
           const state = await ensureState(store, sessionId, notify)
-          await detectAgent(store, sessionId, context)
+          await detectActiveAgent(store, sessionId, context)
 
           if (state.phase !== "IMPLEMENTATION") {
             return `Error: mark_task_complete can only be called during the IMPLEMENTATION phase (current: ${state.phase}).`
@@ -2254,7 +1728,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                     adjacentTasks.push({
                       id: dep.id,
                       description: dep.description,
-                      category: dep.category,
+                      ...(dep.category ? { category: dep.category } : {}),
                       status: dep.status,
                       direction: "upstream",
                     })
@@ -2266,7 +1740,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                     adjacentTasks.push({
                       id: t.id,
                       description: t.description,
-                      category: t.category,
+                      ...(t.category ? { category: t.category } : {}),
                       status: t.status,
                       direction: "downstream",
                     })
@@ -2286,7 +1760,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                   ...(state.sessionModel != null ? { parentModel: state.sessionModel } : {}),
                   conventions: state.conventions,
                   artifactDiskPaths: state.artifactDiskPaths,
-                  adjacentTasks: adjacentTasks.length > 0 ? adjacentTasks : undefined,
+                  ...(adjacentTasks.length > 0 ? { adjacentTasks } : {}),
                   stateDir,
                 })
               } catch (reviewErr) {
@@ -2434,98 +1908,48 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             // If all remaining tasks are blocked behind human gates, handle based on agent mode.
             if (result.awaitingHuman) {
               const currentState = store.get(sessionId)
-
-              // Robot-artisan mode: auto-abort human-gated tasks and their dependents
-              // instead of waiting for human resolution. The robot can't provision
-              // infrastructure or configure credentials — it aborts those tasks and
-              // continues with any remaining non-blocked work, or proceeds to review.
-              if (currentState?.activeAgent === "robot-artisan" && currentState.implDag) {
-                const dag = createImplDAG(Array.from(currentState.implDag))
-                const humanGated = Array.from(dag.tasks).filter(
-                  (t) => t.status === "human-gated" && (!t.humanGate || !t.humanGate.resolved),
-                )
-                const abortedIds: string[] = []
-
-                for (const gate of humanGated) {
-                  // Abort the gate task itself
-                  gate.status = "aborted"
-                  abortedIds.push(gate.id)
-                  // Abort all dependents (transitively)
-                  for (const dep of dag.getDependents(gate.id)) {
-                    if (dep.status !== "complete" && dep.status !== "aborted") {
-                      dep.status = "aborted"
-                      abortedIds.push(dep.id)
-                    }
-                  }
-                }
-
-                const updatedNodes = Array.from(dag.tasks).map((t) => ({
-                  ...t,
-                  ...(t.humanGate ? { humanGate: { ...t.humanGate } } : {}),
-                }))
-
-                // Check if there's remaining non-blocked work
-                const remaining = updatedNodes.filter(
-                  (t) => t.status !== "complete" && t.status !== "aborted" && t.status !== "human-gated",
+              if (currentState?.implDag) {
+                const humanGateResolution = resolveAwaitingHumanState(
+                  result.updatedNodes,
+                  isRobotArtisanSession(currentState),
                 )
 
-                if (remaining.length > 0) {
-                  // More work to do — stay in DRAFT with updated DAG
-                  const nextReady = remaining.find(
-                    (t) => t.status === "pending" && t.dependencies.every(
-                      (dep) => updatedNodes.find((d) => d.id === dep)?.status === "complete",
-                    ),
-                  )
+                if (humanGateResolution.action === "robot-abort") {
                   await store.update(sessionId, (draft) => {
-                    draft.implDag = updatedNodes
-                    draft.currentTaskId = nextReady?.id ?? null
+                    draft.implDag = humanGateResolution.updatedNodes
+                    draft.currentTaskId = humanGateResolution.nextTask?.id ?? null
                   })
                   log.info("Robot-artisan: auto-aborted human gates", {
-                    detail: `${abortedIds.length} tasks aborted: ${abortedIds.join(", ")}`,
+                    detail: `${humanGateResolution.abortedIds.length} tasks aborted: ${humanGateResolution.abortedIds.join(", ")}`,
                   })
                   return (
                     result.responseMessage + "\n\n" +
-                    `**Robot-artisan mode:** Auto-aborted ${humanGated.length} human-gated task(s) and ` +
-                    `${abortedIds.length - humanGated.length} dependent(s): ${abortedIds.join(", ")}.\n` +
+                    `**Robot-artisan mode:** Auto-aborted ${humanGateResolution.humanGatedCount} human-gated task(s) and ` +
+                    `${humanGateResolution.abortedIds.length - humanGateResolution.humanGatedCount} dependent(s): ${humanGateResolution.abortedIds.join(", ")}.\n` +
                     `These tasks require human action that cannot be automated.\n\n` +
-                    (nextReady
-                      ? `**Next task ready:** ${nextReady.id} — ${nextReady.description}\nContinue with this task.`
+                    (humanGateResolution.nextTask
+                      ? `**Next task ready:** ${humanGateResolution.nextTask.id} — ${humanGateResolution.nextTask.description}\nContinue with this task.`
                       : `No more ready tasks. Call \`request_review\` to submit the partial implementation.`)
                   )
-                } else {
-                  // All remaining work is human-gated or aborted — proceed to review
+                }
+
+                if (humanGateResolution.action === "user-gate") {
+                  log.info("Auto-advancing to USER_GATE for human gate resolution")
                   await store.update(sessionId, (draft) => {
-                    draft.implDag = updatedNodes
+                    draft.implDag = humanGateResolution.updatedNodes
+                    draft.phaseState = "USER_GATE"
+                    draft.iterationCount = 0
+                    draft.retryCount = 0
+                    draft.userGateMessageReceived = false
                     draft.currentTaskId = null
                   })
-                  log.info("Robot-artisan: all remaining tasks human-gated, proceeding to review", {
-                    detail: `${abortedIds.length} tasks aborted`,
-                  })
-                  return (
-                    result.responseMessage + "\n\n" +
-                    `**Robot-artisan mode:** Auto-aborted ${abortedIds.length} human-gated task(s) and dependents.\n` +
-                    `All remaining work requires human action. Call \`request_review\` to submit the partial implementation for review.`
+                  logTransition(
+                    currentState,
+                    { phase: currentState.phase, phaseState: "USER_GATE" },
+                    "mark_task_complete/awaiting-human",
+                    notify,
                   )
                 }
-              }
-
-              // Artisan mode (or unknown): advance to USER_GATE for human resolution
-              log.info("Auto-advancing to USER_GATE for human gate resolution")
-              if (currentState && (currentState.phaseState === "DRAFT" || currentState.phaseState === "REVISE")) {
-                // Transition through REVIEW → USER_GATE (skipping self-review since
-                // the implementation isn't complete — we're just presenting human gates)
-                await store.update(sessionId, (draft) => {
-                  draft.phaseState = "USER_GATE"
-                  draft.iterationCount = 0
-                  draft.retryCount = 0
-                  draft.userGateMessageReceived = false
-                })
-                logTransition(
-                  currentState,
-                  { phase: currentState.phase, phaseState: "USER_GATE" },
-                  "mark_task_complete/awaiting-human",
-                  notify,
-                )
               }
             }
 
@@ -2579,7 +2003,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
           if (!sessionId) return "Error: Could not determine session ID from tool context."
 
           const state = await ensureState(store, sessionId, notify)
-          await detectAgent(store, sessionId, context)
+          await detectActiveAgent(store, sessionId, context)
 
           if (state.phase !== "IMPLEMENTATION") {
             return `Error: resolve_human_gate can only be called during IMPLEMENTATION (current: ${state.phase}).`
@@ -2611,18 +2035,15 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             )
           }
 
-          // Update the task in the DAG
+          const activatedNodes = activateHumanGateTasks(state.implDag, args.task_id, {
+            whatIsNeeded: args.what_is_needed,
+            why: args.why,
+            verificationSteps: args.verification_steps,
+            resolved: false,
+          })
+
           await store.update(sessionId, (draft) => {
-            const dagTask = draft.implDag?.find((t) => t.id === args.task_id)
-            if (dagTask) {
-              dagTask.status = "human-gated"
-              dagTask.humanGate = {
-                whatIsNeeded: args.what_is_needed,
-                why: args.why,
-                verificationSteps: args.verification_steps,
-                resolved: false,
-              }
-            }
+            draft.implDag = activatedNodes
           })
 
           log.info("Human gate activated", { detail: `${args.task_id}: ${args.what_is_needed}` })
@@ -2633,70 +2054,56 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             const dag = createImplDAG(updatedState.implDag)
             const decision = nextSchedulerDecision(dag)
             if (decision.action === "awaiting-human") {
-              // Robot-artisan mode: auto-abort human gates instead of advancing to USER_GATE
-              if (updatedState.activeAgent === "robot-artisan") {
-                const humanGated = Array.from(dag.tasks).filter(
-                  (t) => t.status === "human-gated" && (!t.humanGate || !t.humanGate.resolved),
-                )
-                const abortedIds: string[] = []
-                for (const gate of humanGated) {
-                  gate.status = "aborted"
-                  abortedIds.push(gate.id)
-                  for (const dep of dag.getDependents(gate.id)) {
-                    if (dep.status !== "complete" && dep.status !== "aborted") {
-                      dep.status = "aborted"
-                      abortedIds.push(dep.id)
-                    }
-                  }
-                }
-                const updatedNodes = Array.from(dag.tasks).map((t) => ({
-                  ...t,
-                  ...(t.humanGate ? { humanGate: { ...t.humanGate } } : {}),
-                }))
+              const humanGateResolution = resolveAwaitingHumanState(
+                updatedState.implDag,
+                isRobotArtisanSession(updatedState),
+              )
+
+              if (humanGateResolution.action === "robot-abort") {
                 await store.update(sessionId, (draft) => {
-                  draft.implDag = updatedNodes
-                  draft.currentTaskId = null
+                  draft.implDag = humanGateResolution.updatedNodes
+                  draft.currentTaskId = humanGateResolution.nextTask?.id ?? null
                 })
                 log.info("Robot-artisan: auto-aborted human gates from resolve_human_gate", {
-                  detail: `${abortedIds.length} tasks aborted`,
+                  detail: `${humanGateResolution.abortedIds.length} tasks aborted`,
                 })
                 return (
                   `Human gate activated for task "${args.task_id}".\n\n` +
-                  `**Robot-artisan mode:** Auto-aborted ${abortedIds.length} human-gated task(s) and dependents.\n` +
+                  `**Robot-artisan mode:** Auto-aborted ${humanGateResolution.abortedIds.length} human-gated task(s) and dependents.\n` +
                   `These tasks require human action that cannot be automated.\n\n` +
-                  `Call \`request_review\` to submit the partial implementation for review.`
+                  (humanGateResolution.nextTask
+                    ? `**Next task ready:** ${humanGateResolution.nextTask.id} — ${humanGateResolution.nextTask.description}\nContinue with this task.`
+                    : `Call \`request_review\` to submit the partial implementation for review.`)
                 )
               }
 
-              // Artisan mode: auto-advance to USER_GATE for human resolution
-              await store.update(sessionId, (draft) => {
-                draft.implDag = Array.from(dag.tasks).map((t) => ({
-                  ...t,
-                  ...(t.humanGate ? { humanGate: { ...t.humanGate } } : {}),
-                }))
-                draft.phaseState = "USER_GATE"
-                draft.iterationCount = 0
-                draft.retryCount = 0
-                draft.userGateMessageReceived = false
-                draft.currentTaskId = null
-              })
-              logTransition(
-                updatedState,
-                { phase: updatedState.phase, phaseState: "USER_GATE" },
-                "resolve_human_gate/awaiting-human",
-                notify,
-              )
+              if (humanGateResolution.action === "user-gate") {
+                await store.update(sessionId, (draft) => {
+                  draft.implDag = humanGateResolution.updatedNodes
+                  draft.phaseState = "USER_GATE"
+                  draft.iterationCount = 0
+                  draft.retryCount = 0
+                  draft.userGateMessageReceived = false
+                  draft.currentTaskId = null
+                })
+                logTransition(
+                  updatedState,
+                  { phase: updatedState.phase, phaseState: "USER_GATE" },
+                  "resolve_human_gate/awaiting-human",
+                  notify,
+                )
 
-              const gateList = decision.humanGatedTasks
-                .map((g) => `  - **${g.id}:** ${g.whatIsNeeded}`)
-                .join("\n")
-              return (
-                `Human gate activated for task "${args.task_id}".\n\n` +
-                `**All remaining work is blocked behind human gates.** ` +
-                `Auto-advancing to USER_GATE for user resolution.\n\n` +
-                `**Unresolved human gates:**\n${gateList}\n\n` +
-                `Present these gates to the user and wait for their confirmation.`
-              )
+                const gateList = humanGateResolution.humanGatedTasks
+                  .map((g) => `  - **${g.id}:** ${g.whatIsNeeded}`)
+                  .join("\n")
+                return (
+                  `Human gate activated for task "${args.task_id}".\n\n` +
+                  `**All remaining work is blocked behind human gates.** ` +
+                  `Auto-advancing to USER_GATE for user resolution.\n\n` +
+                  `**Unresolved human gates:**\n${gateList}\n\n` +
+                  `Present these gates to the user and wait for their confirmation.`
+                )
+              }
             }
 
             // Persist auto-transitioned human-gate tasks from scheduler
@@ -2773,7 +2180,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
           if (!sessionId) return "Error: Could not determine session ID from tool context."
 
           const state = await ensureState(store, sessionId, notify)
-          await detectAgent(store, sessionId, context)
+          await detectActiveAgent(store, sessionId, context)
 
           const validStates = ["DRAFT", "CONVENTIONS", "REVISE", "REVIEW"]
           if (!validStates.includes(state.phaseState)) {
@@ -2927,9 +2334,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             }
           }
 
-          const event = state.phaseState === "REVISE" ? "revision_complete"
-                      : state.phaseState === "REVIEW" ? "self_review_pass"
-                      : "draft_complete"
+          const event = state.phaseState === "REVISE" ? "revision_complete" : "draft_complete"
           const outcome = sm.transition(state.phase, state.phaseState, event, state.mode)
           if (!outcome.success) return `Error: ${outcome.message}`
 
@@ -3069,7 +2474,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
           if (!sessionId) return "Error: Could not determine session ID from tool context."
 
           const state = await ensureState(store, sessionId, notify)
-          await detectAgent(store, sessionId, context)
+          await detectActiveAgent(store, sessionId, context)
 
           if (state.phaseState !== "USER_GATE" && state.phaseState !== "ESCAPE_HATCH") {
             return `Error: submit_feedback can only be called at USER_GATE or ESCAPE_HATCH (current: ${state.phaseState}).`
@@ -3708,7 +3113,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
           if (!sessionId) return "Error: Could not determine session ID from tool context."
 
           const state = await ensureState(store, sessionId, notify)
-          await detectAgent(store, sessionId, context)
+          await detectActiveAgent(store, sessionId, context)
 
           const outcome = await handleProposeBacktrack(
             { target_phase: args.target_phase as Phase, reason: args.reason },
@@ -3823,7 +3228,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
           if (!sessionId) return "Error: Could not determine session ID from tool context."
 
           const state = await ensureState(store, sessionId, notify)
-          await detectAgent(store, sessionId, context)
+          await detectActiveAgent(store, sessionId, context)
 
           // Core validation (pure — no side effects)
           const result = processSpawnSubWorkflow(args, state)

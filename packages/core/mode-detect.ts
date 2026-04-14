@@ -12,7 +12,7 @@
  * The user can always override by calling select_mode with REFACTOR.
  */
 import { execSync } from "node:child_process"
-import { readdirSync } from "node:fs"
+import { readdirSync, type Dirent } from "node:fs"
 import { join, extname } from "node:path"
 import type { ModeDetectionResult, WorkflowMode } from "./types"
 import { SOURCE_EXTENSIONS } from "./constants"
@@ -39,7 +39,7 @@ const EXCLUDED_DIRS = new Set([
  */
 function walkSourceFiles(dir: string, base: string): string[] {
   const results: string[] = []
-  let entries: ReturnType<typeof readdirSync>
+  let entries: Dirent[]
   try {
     entries = readdirSync(dir, { withFileTypes: true })
   } catch {

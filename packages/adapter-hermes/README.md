@@ -9,8 +9,8 @@ Hermes Agent (Python host)
   |
   |-- Plugin: open-artisan (~/.hermes/plugins/open-artisan/)
   |     |
-  |     |-- register(ctx) entry point
-  |     |     |-- 13 workflow tools (oa_select_mode, oa_request_review, etc.)
+    |     |-- register(ctx) entry point
+    |     |     |-- workflow tools (oa_select_mode, oa_request_review, oa_reset_task, etc.)
   |     |     |-- Wrapper tools replacing write_file, edit_file, execute_command
   |     |     |-- pre_llm_call hook -> prompt.build (per-turn injection)
   |     |     |-- on_session_start/end hooks -> lifecycle management
@@ -63,7 +63,7 @@ bridge.shutdown()
 
 ### Workflow Tools (`workflow_tools.py`)
 
-13 workflow tools registered in the `open-artisan` toolset via `ctx.register_tool()`. Each delegates to the bridge's `tool.execute` method.
+Workflow tools registered in the `open-artisan` toolset via `ctx.register_tool()`. Each delegates to the bridge's `tool.execute` method.
 
 | Hermes Tool | Bridge Tool | Purpose |
 |------------|-------------|---------|
@@ -72,6 +72,7 @@ bridge.shutdown()
 | `oa_mark_analyze_complete` | `mark_analyze_complete` | Complete discovery analysis |
 | `oa_mark_satisfied` | `mark_satisfied` | Submit self-review criteria |
 | `oa_mark_task_complete` | `mark_task_complete` | Complete a DAG task |
+| `oa_reset_task` | `reset_task` | Reset one or more DAG tasks back to pending |
 | `oa_request_review` | `request_review` | Submit artifact for review |
 | `oa_submit_feedback` | `submit_feedback` | Approve or request revision |
 | `oa_check_prior_workflow` | `check_prior_workflow` | Check for prior state |
@@ -163,10 +164,20 @@ pip install -e packages/adapter-hermes/
 
 ### Project setup:
 ```bash
-python -m hermes_adapter.setup --project-dir /path/to/project
+python -m hermes_adapter --project-dir /path/to/project
 ```
 
 This creates `.openartisan/` and `.hermes.md` (project-level workflow instructions).
+
+### Recommended profile setup:
+```bash
+python -m hermes_adapter --project-dir /path/to/project --profile openartisan
+```
+
+This also:
+- installs/updates the `open-artisan` plugin in the Hermes profile
+- writes `OPENARTISAN_BRIDGE_CLI` into `~/.hermes/profiles/<profile>/.env`
+- creates the plugin root `__init__.py` shim Hermes requires
 
 ## Configuration
 
@@ -234,8 +245,26 @@ bun --version
 export OPENARTISAN_BRIDGE_CLI=/path/to/packages/bridge/cli.ts
 
 # Re-run setup to verify
-python -m hermes_adapter --project-dir .
+python -m hermes_adapter --project-dir . --profile openartisan
 ```
+
+### Another bridge process is already running
+
+If Hermes is attaching to a repo already used by another Open Artisan client,
+you may see:
+
+```text
+Bridge RPC error: Another bridge process is already running (PID ...)
+```
+
+To let Hermes take over the repo bridge for its session:
+
+```bash
+export OPENARTISAN_BRIDGE_TAKEOVER=1
+```
+
+With takeover enabled, the Hermes adapter will stop the existing bridge PID,
+clear the stale bridge pid/socket files, and retry bridge init once.
 
 ### Bridge subprocess dies mid-session
 

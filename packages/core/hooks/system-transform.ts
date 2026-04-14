@@ -838,15 +838,18 @@ function buildSubStateContext(state: WorkflowState): string {
   switch (state.phaseState) {
     case "SCAN":
       lines.push("You are scanning the codebase. Use read-only tools only (glob, grep, read, list).")
+      lines.push("Continue immediately in this turn; do not wait for user input.")
       lines.push("When finished, call `mark_scan_complete`.")
       break
     case "ANALYZE":
       lines.push("You are analyzing the scan results. Synthesize your findings.")
+      lines.push("Continue immediately in this turn; do not wait for user input.")
       lines.push("When analysis is complete, call `mark_analyze_complete` to transition to CONVENTIONS state.")
       lines.push("Do NOT start drafting until you have called `mark_analyze_complete`.")
       break
     case "CONVENTIONS":
       lines.push("You are drafting the conventions document.")
+      lines.push("Continue immediately in this turn; do not wait for user input.")
       lines.push("When the draft is complete, call `request_review`.")
       // Inject discovery fleet report reference if available
       if (state.discoveryReport) {

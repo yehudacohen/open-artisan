@@ -192,6 +192,31 @@ describe("Event hook — session lifecycle", () => {
     )
     expect(result).toContain("GREENFIELD")
   })
+
+  it("ignores idle events for stale non-active sessions", async () => {
+    const staleSessionId = `int-test-${Date.now()}-stale`
+    const activeSessionId = `int-test-${Date.now()}-active`
+
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: staleSessionId } } },
+    })
+    await plugin.tool.select_mode.execute(
+      { mode: "REFACTOR", feature_name: `stale-feature-${Date.now()}` },
+      { directory: tempDir, sessionId: staleSessionId },
+    )
+
+    ;(client.session.prompt as ReturnType<typeof mock>).mockClear()
+
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: activeSessionId, agent: "Build" } } },
+    })
+
+    await plugin.event({
+      event: { type: "session.idle", properties: { sessionID: staleSessionId } },
+    })
+
+    expect(client.session.prompt).not.toHaveBeenCalled()
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -242,13 +267,40 @@ describe("select_mode tool — full integration", () => {
     expect(result).toContain("DISCOVERY")
   })
 
+  it("switches to a different feature in the same session by parking the current workflow", async () => {
+    const sid = `int-test-${Date.now()}-switch`
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: sid } } },
+    })
+
+    await plugin.tool.select_mode.execute(
+      { mode: "GREENFIELD", feature_name: "feature-one" },
+      { directory: tempDir, sessionId: sid },
+    )
+
+    const result = await plugin.tool.select_mode.execute(
+      { mode: "REFACTOR", feature_name: "feature-two" },
+      { directory: tempDir, sessionId: sid },
+    )
+
+    expect(result).toContain("DISCOVERY")
+    const current = plugin._testStore.get(sid)
+    expect(current.featureName).toBe("feature-two")
+    expect(current.phase).toBe("DISCOVERY")
+
+    const parked = plugin._testStore.findByFeatureName("feature-one")
+    expect(parked?.featureName).toBe("feature-one")
+    expect(parked?.phase).toBe("PLANNING")
+    expect(parked?.sessionId).not.toBe(sid)
+  })
+
   it("calling select_mode twice returns error", async () => {
     await plugin.tool.select_mode.execute(
       { mode: "GREENFIELD", feature_name: "test-feature" },
       { directory: tempDir, sessionId },
     )
     const result2 = await plugin.tool.select_mode.execute(
-      { mode: "REFACTOR", feature_name: "test-refactor" },
+      { mode: "REFACTOR", feature_name: "test-feature" },
       { directory: tempDir, sessionId },
     )
     expect(result2).toContain("Error")
@@ -392,6 +444,272 @@ describe("experimental.chat.system.transform — injects workflow prompt", () =>
     await plugin["experimental.chat.system.transform"]({ sessionID: "truly-unknown-session-system" }, output)
     expect(output.system.length).toBe(1)
     expect(output.system[0]).toBe("original")
+  })
+
+  it("stays dormant for non-artisan sessions detected at startup", async () => {
+    const sid = `int-test-${Date.now()}-build-dormant`
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: sid, agent: "Build" } } },
+    })
+
+    const output = { system: ["original"] }
+    await plugin["experimental.chat.system.transform"]({ sessionID: sid, agent: "Build" }, output)
+
+    expect(output.system).toEqual(["original"])
+    const state = plugin._testStore.get(sid)
+    expect(state.activeAgent).toBe("build")
+  })
+
+  it("activates immediately for artisan sessions detected at startup", async () => {
+    const sid = `int-test-${Date.now()}-artisan-active`
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: sid, agent: "artisan" } } },
+    })
+
+    const output = { system: ["original"] }
+    await plugin["experimental.chat.system.transform"]({ sessionID: sid, agent: "artisan" }, output)
+
+    expect(output.system.length).toBeGreaterThanOrEqual(2)
+    expect(output.system[output.system.length - 1]).toContain("STRUCTURED WORKFLOW")
+    expect(output.system[output.system.length - 1]).toContain("MODE_SELECT")
+  })
+
+  it("goes dormant when the user explicitly exits artisan mode", async () => {
+    const sid = `int-test-${Date.now()}-manual-dormant`
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: sid, agent: "artisan" } } },
+    })
+
+    await plugin.tool.select_mode.execute(
+      { mode: "REFACTOR", feature_name: "manual-dormant" },
+      { directory: tempDir, sessionId: sid, agent: "artisan" },
+    )
+
+    await plugin["chat.message"](
+      { sessionID: sid },
+      {
+        message: { sessionID: sid, id: "msg-1" },
+        parts: [{ type: "text", text: "we're in plan mode now, disable workflow" }],
+      },
+    )
+
+    const output = { system: ["original"] }
+    await plugin["experimental.chat.system.transform"]({ sessionID: sid }, output)
+
+    expect(output.system).toEqual(["original"])
+    const state = plugin._testStore.get(sid)
+    expect(state.activeAgent).toBe("build")
+  })
+
+  it("goes dormant when chat.message detects a non-artisan agent", async () => {
+    const sid = `int-test-${Date.now()}-auto-build-dormant`
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: sid, agent: "artisan" } } },
+    })
+
+    await plugin.tool.select_mode.execute(
+      { mode: "REFACTOR", feature_name: "auto-build-dormant" },
+      { directory: tempDir, sessionId: sid, agent: "artisan" },
+    )
+
+    await plugin["chat.message"](
+      { sessionID: sid, agent: "Build" },
+      {
+        message: { sessionID: sid, id: "msg-2" },
+        parts: [{ type: "text", text: "continuing work" }],
+      },
+    )
+
+    const output = { system: ["original"] }
+    await plugin["experimental.chat.system.transform"]({ sessionID: sid, agent: "Build" }, output)
+
+    expect(output.system).toEqual(["original"])
+    const state = plugin._testStore.get(sid)
+    expect(state.activeAgent).toBe("build")
+  })
+})
+
+describe("robot-artisan autonomy", () => {
+  it("moves directly to REVISE when the auto-approver rejects", async () => {
+    let promptCallCount = 0
+    ;(client.session.prompt as ReturnType<typeof mock>).mockImplementation(async () => {
+      promptCallCount += 1
+      if (promptCallCount === 1) {
+        return {
+          data: { parts: [{ type: "text", text: JSON.stringify({
+            classification: "tactical",
+            reasoning: "mock",
+            satisfied: true,
+            criteria_results: [
+              { criterion: "All user requirements explicitly addressed", met: true, evidence: "mock", severity: "blocking" },
+              { criterion: "Scope boundaries explicit", met: true, evidence: "mock", severity: "blocking" },
+              { criterion: "Architecture described", met: true, evidence: "mock", severity: "blocking" },
+              { criterion: "Error and failure cases specified", met: true, evidence: "mock", severity: "blocking" },
+              { criterion: "No TBD items", met: true, evidence: "mock", severity: "blocking" },
+              { criterion: "Data model described", met: true, evidence: "mock", severity: "blocking" },
+              { criterion: "Integration points identified", met: true, evidence: "mock", severity: "blocking" },
+              { criterion: "Deployment & infrastructure addressed", met: true, evidence: "mock", severity: "blocking" },
+              { criterion: "User journey completeness", met: true, evidence: "mock", severity: "blocking" },
+              { criterion: "[Q] Design excellence", met: true, evidence: "mock", severity: "blocking", score: 9 },
+              { criterion: "[Q] Architectural cohesion", met: true, evidence: "mock", severity: "blocking", score: 9 },
+              { criterion: "[Q] Vision alignment", met: true, evidence: "mock", severity: "blocking", score: 9 },
+              { criterion: "[Q] Completeness", met: true, evidence: "mock", severity: "blocking", score: 9 },
+              { criterion: "[Q] Readiness for execution", met: true, evidence: "mock", severity: "blocking", score: 9 },
+              { criterion: "[Q] Security standards", met: true, evidence: "mock", severity: "blocking", score: 9 },
+              { criterion: "[Q] Operational excellence", met: true, evidence: "mock", severity: "blocking", score: 9 },
+            ],
+          }) }] },
+        }
+      }
+
+      return {
+        data: {
+          parts: [{
+            type: "text",
+            text: JSON.stringify({
+              approve: false,
+              confidence: 0.25,
+              reasoning: "Deployment coverage is incomplete.",
+              feedback: "Add the missing deployment and rollback details.",
+            }),
+          }],
+        },
+      }
+    })
+
+    const sid = `int-test-${Date.now()}-robot-auto-revise`
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: sid, agent: "robot-artisan" } } },
+    })
+    const ctx = { directory: tempDir, sessionId: sid, agent: "robot-artisan" }
+
+    await plugin.tool.select_mode.execute(
+      { mode: "GREENFIELD", feature_name: "robot-auto-revise" },
+      ctx,
+    )
+    await plugin.tool.request_review.execute(
+      { summary: "Plan", artifact_description: "Plan doc", artifact_content: "# Plan" },
+      ctx,
+    )
+
+    const result = await plugin.tool.mark_satisfied.execute(
+      {
+        criteria_met: [
+          { criterion: "All user requirements explicitly addressed", met: true, evidence: "mock", severity: "blocking" },
+          { criterion: "Scope boundaries explicit", met: true, evidence: "mock", severity: "blocking" },
+          { criterion: "Architecture described", met: true, evidence: "mock", severity: "blocking" },
+          { criterion: "Error and failure cases specified", met: true, evidence: "mock", severity: "blocking" },
+          { criterion: "No TBD items", met: true, evidence: "mock", severity: "blocking" },
+          { criterion: "Data model described", met: true, evidence: "mock", severity: "blocking" },
+          { criterion: "Integration points identified", met: true, evidence: "mock", severity: "blocking" },
+          { criterion: "Deployment & infrastructure addressed", met: true, evidence: "mock", severity: "blocking" },
+          { criterion: "User journey completeness", met: true, evidence: "mock", severity: "blocking" },
+          { criterion: "[Q] Design excellence", met: true, evidence: "mock", severity: "blocking", score: "9" },
+          { criterion: "[Q] Architectural cohesion", met: true, evidence: "mock", severity: "blocking", score: "9" },
+          { criterion: "[Q] Vision alignment", met: true, evidence: "mock", severity: "blocking", score: "9" },
+          { criterion: "[Q] Completeness", met: true, evidence: "mock", severity: "blocking", score: "9" },
+          { criterion: "[Q] Readiness for execution", met: true, evidence: "mock", severity: "blocking", score: "9" },
+          { criterion: "[Q] Security standards", met: true, evidence: "mock", severity: "blocking", score: "9" },
+          { criterion: "[Q] Operational excellence", met: true, evidence: "mock", severity: "blocking", score: "9" },
+        ],
+      },
+      ctx,
+    )
+
+    expect(result).toContain("Auto-approve rejected")
+    expect(result).toContain("Transitioned to **PLANNING/REVISE**")
+
+    const state = plugin._testStore.get(sid)
+    expect(state.phase).toBe("PLANNING")
+    expect(state.phaseState).toBe("REVISE")
+    expect(state.feedbackHistory[state.feedbackHistory.length - 1]?.feedback).toContain("Add the missing deployment")
+  })
+
+  it("moves directly to REVISE when auto-approval fails", async () => {
+    let promptCallCount = 0
+    ;(client.session.prompt as ReturnType<typeof mock>).mockImplementation(async () => {
+      promptCallCount += 1
+      if (promptCallCount === 1) {
+        return {
+          data: { parts: [{ type: "text", text: JSON.stringify({
+            classification: "tactical",
+            reasoning: "mock",
+            satisfied: true,
+            criteria_results: [
+              { criterion: "All user requirements explicitly addressed", met: true, evidence: "mock", severity: "blocking" },
+              { criterion: "Scope boundaries explicit", met: true, evidence: "mock", severity: "blocking" },
+              { criterion: "Architecture described", met: true, evidence: "mock", severity: "blocking" },
+              { criterion: "Error and failure cases specified", met: true, evidence: "mock", severity: "blocking" },
+              { criterion: "No TBD items", met: true, evidence: "mock", severity: "blocking" },
+              { criterion: "Data model described", met: true, evidence: "mock", severity: "blocking" },
+              { criterion: "Integration points identified", met: true, evidence: "mock", severity: "blocking" },
+              { criterion: "Deployment & infrastructure addressed", met: true, evidence: "mock", severity: "blocking" },
+              { criterion: "User journey completeness", met: true, evidence: "mock", severity: "blocking" },
+              { criterion: "[Q] Design excellence", met: true, evidence: "mock", severity: "blocking", score: 9 },
+              { criterion: "[Q] Architectural cohesion", met: true, evidence: "mock", severity: "blocking", score: 9 },
+              { criterion: "[Q] Vision alignment", met: true, evidence: "mock", severity: "blocking", score: 9 },
+              { criterion: "[Q] Completeness", met: true, evidence: "mock", severity: "blocking", score: 9 },
+              { criterion: "[Q] Readiness for execution", met: true, evidence: "mock", severity: "blocking", score: 9 },
+              { criterion: "[Q] Security standards", met: true, evidence: "mock", severity: "blocking", score: 9 },
+              { criterion: "[Q] Operational excellence", met: true, evidence: "mock", severity: "blocking", score: 9 },
+            ],
+          }) }] },
+        }
+      }
+
+      return {
+        data: {
+          parts: [{ type: "text", text: "not valid json" }],
+        },
+      }
+    })
+
+    const sid = `int-test-${Date.now()}-robot-auto-failure`
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: sid, agent: "robot-artisan" } } },
+    })
+    const ctx = { directory: tempDir, sessionId: sid, agent: "robot-artisan" }
+
+    await plugin.tool.select_mode.execute(
+      { mode: "GREENFIELD", feature_name: "robot-auto-failure" },
+      ctx,
+    )
+    await plugin.tool.request_review.execute(
+      { summary: "Plan", artifact_description: "Plan doc", artifact_content: "# Plan" },
+      ctx,
+    )
+
+    const result = await plugin.tool.mark_satisfied.execute(
+      {
+        criteria_met: [
+          { criterion: "All user requirements explicitly addressed", met: true, evidence: "mock", severity: "blocking" },
+          { criterion: "Scope boundaries explicit", met: true, evidence: "mock", severity: "blocking" },
+          { criterion: "Architecture described", met: true, evidence: "mock", severity: "blocking" },
+          { criterion: "Error and failure cases specified", met: true, evidence: "mock", severity: "blocking" },
+          { criterion: "No TBD items", met: true, evidence: "mock", severity: "blocking" },
+          { criterion: "Data model described", met: true, evidence: "mock", severity: "blocking" },
+          { criterion: "Integration points identified", met: true, evidence: "mock", severity: "blocking" },
+          { criterion: "Deployment & infrastructure addressed", met: true, evidence: "mock", severity: "blocking" },
+          { criterion: "User journey completeness", met: true, evidence: "mock", severity: "blocking" },
+          { criterion: "[Q] Design excellence", met: true, evidence: "mock", severity: "blocking", score: "9" },
+          { criterion: "[Q] Architectural cohesion", met: true, evidence: "mock", severity: "blocking", score: "9" },
+          { criterion: "[Q] Vision alignment", met: true, evidence: "mock", severity: "blocking", score: "9" },
+          { criterion: "[Q] Completeness", met: true, evidence: "mock", severity: "blocking", score: "9" },
+          { criterion: "[Q] Readiness for execution", met: true, evidence: "mock", severity: "blocking", score: "9" },
+          { criterion: "[Q] Security standards", met: true, evidence: "mock", severity: "blocking", score: "9" },
+          { criterion: "[Q] Operational excellence", met: true, evidence: "mock", severity: "blocking", score: "9" },
+        ],
+      },
+      ctx,
+    )
+
+    expect(result).toContain("Auto-approve failed")
+    expect(result).toContain("Transitioned to **PLANNING/REVISE**")
+
+    const state = plugin._testStore.get(sid)
+    expect(state.phase).toBe("PLANNING")
+    expect(state.phaseState).toBe("REVISE")
+    expect(state.feedbackHistory[state.feedbackHistory.length - 1]?.feedback).toContain("could not complete")
   })
 })
 

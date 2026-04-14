@@ -44,7 +44,7 @@ async function ephemeralIntentCheckPrompt(
   const session = await dispatcher.createSession({
     title: "intent-check",
     agent: "workflow-reviewer",
-    model: parentModel,
+    ...(parentModel ? { model: parentModel } : {}),
   })
   try {
     return await session.prompt(prompt)

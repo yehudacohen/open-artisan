@@ -10,7 +10,7 @@ import { SESSION_NOT_FOUND, INVALID_PARAMS } from "../protocol"
 import { processUserMessage } from "../../core/hooks/chat-message"
 
 export const handleMessageProcess: MethodHandler = async (params, ctx) => {
-  const p = params as MessageProcessParams
+  const p = params as Partial<MessageProcessParams>
   if (!p.sessionId || typeof p.sessionId !== "string") {
     throw new JSONRPCErrorException("sessionId is required", INVALID_PARAMS)
   }

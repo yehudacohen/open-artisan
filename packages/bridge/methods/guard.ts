@@ -14,7 +14,7 @@ import { WORKFLOW_TOOL_NAMES } from "../../core/constants"
 import type { Phase, PhaseState, WorkflowMode } from "../../core/types"
 
 export const handleGuardCheck: MethodHandler = async (params, ctx) => {
-  const p = params as GuardCheckParams
+  const p = params as Partial<GuardCheckParams>
   if (!p.sessionId || typeof p.sessionId !== "string") {
     throw new JSONRPCErrorException("sessionId is required", INVALID_PARAMS)
   }
@@ -107,7 +107,7 @@ export const handleGuardCheck: MethodHandler = async (params, ctx) => {
 }
 
 export const handleGuardPolicy: MethodHandler = async (params, ctx) => {
-  const p = params as GuardPolicyParams
+  const p = params as Partial<GuardPolicyParams>
   if (!p.phase || !p.phaseState) {
     throw new JSONRPCErrorException("phase and phaseState are required", INVALID_PARAMS)
   }

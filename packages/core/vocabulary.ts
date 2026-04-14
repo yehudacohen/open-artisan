@@ -31,6 +31,26 @@ export const APPROVAL_WORDS = new Set([
  */
 export const APPROVAL_PREFIX_RE = /^(approve[sd]?|accept|lgtm|looks good|ship it|yes|y|ok|okay|good|perfect|done|continue|proceed|next|go ahead|go|sure|yep|yeah|do it)[.!?\s]*$/i
 
+/**
+ * Lightweight non-substantive tails that often accompany approval, e.g.
+ * "approved, thanks" or "yes please". These should not force a revise path.
+ */
+export const APPROVAL_FILLER_WORDS = new Set([
+  "thanks",
+  "thank you",
+  "thx",
+  "please",
+  "sounds good",
+  "sgtm",
+  "works for me",
+])
+
+/**
+ * Conjunctions/phrases that usually introduce substantive follow-up feedback.
+ * If they appear after an approval signal, we should treat the message as revise.
+ */
+export const APPROVAL_DISQUALIFIER_RE = /\b(but|however|except|although|though|concern|issue|question|change|revise|fix|missing)\b/i
+
 // ---------------------------------------------------------------------------
 // Abort keywords — used at escape hatch for abort detection
 // ---------------------------------------------------------------------------

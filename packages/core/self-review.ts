@@ -213,8 +213,8 @@ async function ephemeralReviewPrompt(
   const session = await dispatcher.createSession({
     title,
     agent: "workflow-reviewer",
-    parentId: parentSessionId,
-    model: parentModel,
+    ...(parentSessionId ? { parentId: parentSessionId } : {}),
+    ...(parentModel ? { model: parentModel } : {}),
   })
   try {
     return await session.prompt(prompt)

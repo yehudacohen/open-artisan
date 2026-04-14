@@ -5,6 +5,7 @@ Wraps Hermes built-in tools (write_file, edit_file, create_file, patch_file,
 execute_command) with a guard.check call to the bridge. If the guard blocks,
 returns a structured error JSON instead of calling the original handler.
 """
+
 from __future__ import annotations
 
 import json
@@ -28,6 +29,9 @@ def register_guard_wrappers(
         ctx: Hermes plugin context for tool registration.
         bridge: Active bridge client for guard.check calls.
     """
+    if not hasattr(ctx, "get_tool_handler"):
+        return
+
     for tool_name in GUARDED_TOOLS:
         original = ctx.get_tool_handler(tool_name)
         if original is None:
@@ -38,13 +42,21 @@ def register_guard_wrappers(
         _tool_name = tool_name
         _original = original
         ctx.register_tool(
-            toolset=TOOLSET_NAME,
             name=tool_name,
-            description=f"(guarded) {tool_name}",
-            parameters={"type": "object", "properties": {}},
+            toolset=TOOLSET_NAME,
+            schema={
+                "name": tool_name,
+                "description": f"(guarded) {tool_name}",
+                "parameters": {"type": "object", "properties": {}},
+            },
             handler=lambda args, _tn=_tool_name, _oh=_original: _guarded_handler(
-                bridge, _oh, _tn, ctx.session_id, args,
+                bridge,
+                _oh,
+                _tn,
+                ctx.session_id,
+                args,
             ),
+            description=f"(guarded) {tool_name}",
         )
 
 
@@ -81,11 +93,14 @@ async def _guarded_handler(
 
     # Call guard.check
     try:
-        result = bridge.call("guard.check", {
-            "sessionId": session_id,
-            "toolName": tool_name,
-            "args": args,
-        })
+        result = bridge.call(
+            "guard.check",
+            {
+                "sessionId": session_id,
+                "toolName": tool_name,
+                "args": args,
+            },
+        )
     except BridgeError:
         # Fail-closed: never silently allow writes when guard is unreachable
         return make_error_response(
@@ -104,7 +119,11 @@ async def _guarded_handler(
         return await original_handler(args)
 
     # Blocked — return structured error
-    reason = result.get("reason", f"Tool '{tool_name}' blocked by workflow guard.") if isinstance(result, dict) else f"Tool '{tool_name}' blocked."
+    reason = (
+        result.get("reason", f"Tool '{tool_name}' blocked by workflow guard.")
+        if isinstance(result, dict)
+        else f"Tool '{tool_name}' blocked."
+    )
     phase = result.get("phase", "") if isinstance(result, dict) else ""
     phase_state = result.get("phaseState", "") if isinstance(result, dict) else ""
     return make_error_response(reason, phase, phase_state)

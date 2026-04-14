@@ -7,6 +7,11 @@ import { join } from "node:path"
 import { mkdtemp, mkdir, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 
+import {
+  attachOrStartBridgeClient,
+  detachBridgeClient,
+  evaluateBridgeShutdownEligibility,
+} from "#bridge/bridge-clients"
 import { discoverBridge, removeBridgeState, SHARED_BRIDGE_PROTOCOL_VERSION } from "#bridge/bridge-discovery"
 import {
   getBridgeLeasesPath,
@@ -16,6 +21,7 @@ import {
   upsertBridgeLeaseSnapshot,
   upsertBridgeMetadata,
 } from "#bridge/bridge-meta"
+import { createBridgeLeaseStore, refreshBridgeClientLease, removeBridgeClientLease, upsertBridgeClientLease } from "#bridge/bridge-leases"
 import type { BridgeClientLease, BridgeLeaseSnapshot, BridgeMetadata } from "#bridge/shared-bridge-types"
 
 let projectDir: string
@@ -147,8 +153,120 @@ describe("removeBridgeState", () => {
   })
 })
 
+describe("shared bridge attach and lease lifecycle", () => {
+  it("creates an in-memory lease store that can upsert, refresh, and remove clients", () => {
+    const store = createBridgeLeaseStore("bridge-1")
+    store.upsert(makeLease("claude-1", "claude-code"))
+    store.upsert(makeLease("hermes-1", "hermes"))
+    expect(store.snapshot().clients).toHaveLength(2)
+    expect(store.refresh("claude-1", "2026-04-14T12:02:00.000Z")?.lastSeenAt).toBe("2026-04-14T12:02:00.000Z")
+    expect(store.remove("hermes-1")).toBe(true)
+    expect(store.snapshot().clients).toHaveLength(1)
+  })
+
+  it("upserts and refreshes persisted bridge leases", async () => {
+    const upserted = await upsertBridgeClientLease({
+      projectDir,
+      stateDir,
+      lease: makeLease("claude-1", "claude-code"),
+    })
+    expect(upserted.leases.clients).toHaveLength(1)
+
+    const refreshed = await refreshBridgeClientLease({
+      projectDir,
+      stateDir,
+      clientId: "claude-1",
+      observedAt: "2026-04-14T12:03:00.000Z",
+    })
+    expect(refreshed.lease?.lastSeenAt).toBe("2026-04-14T12:03:00.000Z")
+  })
+
+  it("attaches to an existing compatible bridge instead of starting a new one", async () => {
+    const metadata = makeMetadata()
+    await upsertBridgeMetadata(stateDir, metadata)
+    await upsertBridgeLeaseSnapshot(stateDir, makeLeaseSnapshot([]))
+    await writeFile(join(stateDir, ".bridge-pid"), `${process.pid}\n`, "utf-8")
+
+    const result = await attachOrStartBridgeClient({
+      projectDir,
+      stateDir,
+      clientId: "claude-1",
+      clientKind: "claude-code",
+      sessionId: "claude-session-1",
+    })
+
+    expect(result.kind).toBe("attached_existing")
+    if (result.kind !== "attached_existing") throw new Error("Expected attached_existing")
+    expect(result.leases.clients).toHaveLength(1)
+  })
+
+  it("starts a new bridge and attaches when no bridge exists", async () => {
+    const result = await attachOrStartBridgeClient({
+      projectDir,
+      stateDir,
+      clientId: "hermes-1",
+      clientKind: "hermes",
+      sessionId: "hermes-session-1",
+    })
+
+    expect(result.kind).toBe("started_new_and_attached")
+    expect(await loadBridgeMetadata(stateDir)).not.toBeNull()
+  })
+
+  it("detaches one client without removing the others", async () => {
+    await upsertBridgeLeaseSnapshot(stateDir, makeLeaseSnapshot([
+      makeLease("claude-1", "claude-code"),
+      makeLease("hermes-1", "hermes"),
+    ]))
+
+    const result = await detachBridgeClient({
+      projectDir,
+      stateDir,
+      clientId: "claude-1",
+      reason: "disconnect",
+    })
+
+    expect(result.detached).toBe(true)
+    expect(result.leases.clients).toHaveLength(1)
+    expect(result.shutdownEligibility.allowed).toBe(false)
+    expect(result.shutdownEligibility.blockingClientIds).toEqual(["hermes-1"])
+  })
+
+  it("removes a client lease directly", async () => {
+    await upsertBridgeLeaseSnapshot(stateDir, makeLeaseSnapshot([makeLease("claude-1", "claude-code")]))
+    const result = await removeBridgeClientLease({
+      projectDir,
+      stateDir,
+      clientId: "claude-1",
+      reason: "shutdown",
+    })
+    expect(result.removed).toBe(true)
+    expect(result.leases.clients).toHaveLength(0)
+  })
+})
+
+describe("shared bridge shutdown eligibility", () => {
+  it("does not allow shutdown while another client remains attached", () => {
+    const eligibility = evaluateBridgeShutdownEligibility(
+      makeLeaseSnapshot([
+        makeLease("claude-1", "claude-code"),
+        makeLease("hermes-1", "hermes"),
+      ]),
+      "claude-1",
+    )
+
+    expect(eligibility.allowed).toBe(false)
+    expect(eligibility.blockingClientIds).toEqual(["hermes-1"])
+  })
+
+  it("allows shutdown when no active clients remain", () => {
+    const eligibility = evaluateBridgeShutdownEligibility(makeLeaseSnapshot([]))
+    expect(eligibility.allowed).toBe(true)
+    expect(eligibility.activeClientCount).toBe(0)
+  })
+})
+
 describe("shared bridge future tasks", () => {
-  it.todo("T2 implements attach/detach and lease lifecycle", () => {})
   it.todo("T3 implements shutdown eligibility and service lifetime behavior", () => {})
   it.todo("T4 integrates Claude Code shared-bridge attach behavior", () => {})
   it.todo("T5 integrates Hermes shared-bridge attach behavior", () => {})

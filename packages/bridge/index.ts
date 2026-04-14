@@ -4,6 +4,10 @@
 export { createBridgeEngine, createBridgeServer, type BridgeEngine, type MethodHandler, type BridgeContext } from "./server"
 export * from "./protocol"
 export * from "./shared-bridge-types"
+export * from "./bridge-meta"
+export * from "./bridge-discovery"
+export * from "./bridge-leases"
+export * from "./bridge-clients"
 export {
   handleInit,
   handlePing,

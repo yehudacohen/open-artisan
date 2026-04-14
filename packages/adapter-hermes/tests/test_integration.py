@@ -51,6 +51,17 @@ class TestFullRegistration:
                 f"Missing guard wrapper: {tool_name}"
             )
 
+    def test_register_lifecycle_hooks_preserve_runtime_session_id(self, mock_ctx):
+        """Registered session hooks should forward Hermes runtime kwargs."""
+        register(mock_ctx)
+
+        start_hooks = mock_ctx.get_registered_hooks("on_session_start")
+        assert len(start_hooks) == 1
+
+        start_hooks[0](session_id="runtime-session")
+        state_tool = mock_ctx.get_registered_tool("oa_state")
+        assert state_tool is not None
+
 
 # ---------------------------------------------------------------------------
 # Session lifecycle

@@ -40,8 +40,12 @@ def register(ctx: HermesContext) -> None:
     _bridge = StdioBridgeClient()
 
     # Register lifecycle hooks
-    ctx.register_hook("on_session_start", lambda **_: _on_session_start(ctx, _bridge))
-    ctx.register_hook("on_session_end", lambda **_: _on_session_end(ctx, _bridge))
+    ctx.register_hook(
+        "on_session_start", lambda **kwargs: _on_session_start(ctx, _bridge, **kwargs)
+    )
+    ctx.register_hook(
+        "on_session_end", lambda **kwargs: _on_session_end(ctx, _bridge, **kwargs)
+    )
 
     # Register workflow tools + oa_state
     register_workflow_tools(ctx, _bridge)

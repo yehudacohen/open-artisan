@@ -185,7 +185,7 @@ const handleSelectMode: ToolHandler = async (args, toolCtx, ctx) => {
 
   // Check for existing persisted state for this feature name.
   // If prior state exists beyond MODE_SELECT, resume it under the current sessionId.
-  const priorState = store.findByFeatureName(featureName)
+  const priorState = await store.findPersistedByFeatureName(featureName)
   if (priorState && priorState.phase !== "MODE_SELECT" && priorState.sessionId !== toolCtx.sessionId) {
     // Migrate the prior state to the current session
     await store.migrateSession(priorState.sessionId, toolCtx.sessionId)
@@ -627,7 +627,7 @@ const handleCheckPriorWorkflow: ToolHandler = async (args, toolCtx, ctx) => {
   const featureName = (args.feature_name as string)?.trim()
   if (!featureName) return "Error: feature_name is required."
 
-  const priorState = store.findByFeatureName(featureName)
+  const priorState = await store.findPersistedByFeatureName(featureName)
   if (!priorState) {
     await store.update(toolCtx.sessionId, (draft) => {
       draft.priorWorkflowChecked = true

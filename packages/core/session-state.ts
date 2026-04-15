@@ -287,6 +287,21 @@ export function createSessionStateStore(backend: StateBackend): SessionStateStor
       return null
     },
 
+    async findPersistedByFeatureName(featureName: string): Promise<WorkflowState | null> {
+      for (const state of memory.values()) {
+        if (state.featureName === featureName) {
+          return cloneState(state)
+        }
+      }
+
+      const raw = await backend.read(featureName)
+      if (!raw) return null
+
+      const state = parseAndMigrate(raw)
+      if (!state || state.featureName !== featureName) return null
+      return cloneState(state)
+    },
+
     async create(sessionId: string): Promise<WorkflowState> {
       if (memory.has(sessionId)) {
         throw new Error(`Session "${sessionId}" already exists`)

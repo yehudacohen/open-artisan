@@ -319,6 +319,29 @@ describe("tool.execute — check_prior_workflow", () => {
     expect(result).toContain("Prior workflow found")
     expect(result).toContain("PLANNING")
   })
+
+  it("finds persisted prior workflow state after a fresh bridge init", async () => {
+    await handleSessionCreated({ sessionId: "writer" }, ctx)
+    await ctx.engine!.store.update("writer", (d) => {
+      d.featureName = "persisted-feat"
+      d.mode = "INCREMENTAL"
+      d.phase = "DISCOVERY"
+      d.phaseState = "SCAN"
+    })
+
+    const freshCtx = makeBridgeContext()
+    await handleInit({ projectDir: tmpDir }, freshCtx)
+    await handleSessionCreated({ sessionId: "reader" }, freshCtx)
+
+    const result = await handleToolExecute({
+      name: "check_prior_workflow",
+      args: { feature_name: "persisted-feat" },
+      context: { sessionId: "reader", directory: tmpDir },
+    }, freshCtx) as string
+
+    expect(result).toContain("Prior workflow found")
+    expect(result).toContain("DISCOVERY")
+  })
 })
 
 describe("tool.execute — mark_task_complete", () => {

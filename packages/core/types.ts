@@ -607,6 +607,13 @@ export interface SessionStateStore {
   findByFeatureName(featureName: string): WorkflowState | null
 
   /**
+   * Find a workflow state by feature name, falling back to persisted storage.
+   * Use this for cross-client resume flows where another process may have written
+   * the feature state after this store instance was loaded.
+   */
+  findPersistedByFeatureName(featureName: string): Promise<WorkflowState | null>
+
+  /**
    * Create a fresh state for a new session and persist it.
    * Errors: throws if sessionId already exists.
    */

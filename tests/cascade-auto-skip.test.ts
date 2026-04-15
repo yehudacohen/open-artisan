@@ -113,6 +113,12 @@ function createMockStore(initialStates?: Map<string, WorkflowState>): SessionSta
       }
       return null
     },
+    async findPersistedByFeatureName(featureName: string) {
+      for (const state of memory.values()) {
+        if (state.featureName === featureName) return structuredClone(state)
+      }
+      return null
+    },
   }
 }
 

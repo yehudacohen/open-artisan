@@ -195,8 +195,8 @@ async function findPriorWorkflowState(
 ): Promise<{ intentBaseline: string | null; phase: string; artifactDiskPaths: Record<string, string>; approvedArtifacts?: Record<string, string> } | null> {
   try {
     log?.info("findPriorWorkflowState", { detail: `feature=${featureName} action=searching` })
-    
-    const state = store.findByFeatureName(featureName)
+
+    const state = await store.findPersistedByFeatureName(featureName)
     if (!state) {
       log?.info("findPriorWorkflowState", { detail: `feature=${featureName} result=not-found` })
       return null

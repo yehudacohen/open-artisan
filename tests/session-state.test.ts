@@ -1093,6 +1093,24 @@ describe("SessionStateStore — per-feature file storage", () => {
     expect(found?.sessionId).toBe("s1")
     expect(store.findByFeatureName("nonexistent")).toBeNull()
   })
+
+  it("findPersistedByFeatureName reads persisted state not loaded in memory", async () => {
+    await store.create("s1")
+    await store.update("s1", (d) => {
+      d.featureName = "persisted-find-me"
+      d.mode = "GREENFIELD"
+      d.phase = "INTERFACES"
+      d.phaseState = "DRAFT"
+    })
+
+    const freshStore = createSessionStateStore(createFileSystemStateBackend(tmpDir))
+    const found = await freshStore.findPersistedByFeatureName("persisted-find-me")
+
+    expect(found).not.toBeNull()
+    expect(found?.sessionId).toBe("s1")
+    expect(found?.phase).toBe("INTERFACES")
+    expect(await freshStore.findPersistedByFeatureName("missing-feature")).toBeNull()
+  })
 })
 
 // ---------------------------------------------------------------------------

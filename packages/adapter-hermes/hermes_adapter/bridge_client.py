@@ -43,6 +43,7 @@ _RUNNING_BRIDGE_RE = re.compile(
 )
 _SHARED_BRIDGE_PROTOCOL_VERSION = "1"
 _ALLOWED_DETACH_REASONS = {"shutdown", "disconnect", "stale", "force"}
+_NO_RESPONSE_SOCKET_METHODS = {"lifecycle.sessionCreated", "lifecycle.sessionDeleted"}
 
 
 def _metadata_path(state_dir: str) -> Path:
@@ -72,7 +73,9 @@ def _read_json(path: Path) -> dict[str, Any] | None:
         return None
 
 
-def _build_lease_snapshot(bridge_instance_id: str, clients: list[BridgeClientLease]) -> dict[str, Any]:
+def _build_lease_snapshot(
+    bridge_instance_id: str, clients: list[BridgeClientLease]
+) -> dict[str, Any]:
     return {
         "bridgeInstanceId": bridge_instance_id,
         "clients": clients,
@@ -228,7 +231,10 @@ class StdioBridgeClient:
                 "reason": "Bridge metadata is missing or malformed.",
             }
 
-        if metadata.get("projectDir") != project_dir or metadata.get("stateDir") != state_dir:
+        if (
+            metadata.get("projectDir") != project_dir
+            or metadata.get("stateDir") != state_dir
+        ):
             return {
                 "kind": "live_incompatible_bridge",
                 "metadata": cast(BridgeMetadata, metadata),
@@ -267,9 +273,7 @@ class StdioBridgeClient:
                 dict[str, Any],
                 leases
                 if leases
-                else _build_lease_snapshot(
-                    str(metadata["bridgeInstanceId"]), []
-                ),
+                else _build_lease_snapshot(str(metadata["bridgeInstanceId"]), []),
             ),
         }
 
@@ -287,9 +291,19 @@ class StdioBridgeClient:
         if discovery["kind"] == "live_compatible_bridge":
             leases = cast(dict[str, Any], discovery.get("leases") or {})
             clients = cast(list[BridgeClientLease], list(leases.get("clients", [])))
-            clients = [c for c in clients if c.get("clientId") != lease["clientId"]] + [lease]
-            snapshot = _build_lease_snapshot(str(leases.get("bridgeInstanceId") or discovery["metadata"]["bridgeInstanceId"]), clients)
-            _leases_path(str(params["stateDir"])).write_text(json.dumps(snapshot, indent=2) + "\n")
+            clients = [c for c in clients if c.get("clientId") != lease["clientId"]] + [
+                lease
+            ]
+            snapshot = _build_lease_snapshot(
+                str(
+                    leases.get("bridgeInstanceId")
+                    or discovery["metadata"]["bridgeInstanceId"]
+                ),
+                clients,
+            )
+            _leases_path(str(params["stateDir"])).write_text(
+                json.dumps(snapshot, indent=2) + "\n"
+            )
             return {
                 "kind": "attached_existing",
                 "metadata": discovery["metadata"],
@@ -308,7 +322,11 @@ class StdioBridgeClient:
             return {
                 "kind": "failed_attach",
                 "reason": discovery["reason"],
-                **({"metadata": discovery["metadata"]} if "metadata" in discovery else {}),
+                **(
+                    {"metadata": discovery["metadata"]}
+                    if "metadata" in discovery
+                    else {}
+                ),
             }
 
         if str(params["clientId"]).endswith("timeout"):
@@ -353,7 +371,9 @@ class StdioBridgeClient:
         leases_path = _leases_path(str(state_dir))
         leases = _read_json(leases_path) if leases_path.exists() else None
         clients = cast(list[BridgeClientLease], list((leases or {}).get("clients", [])))
-        remaining = [client for client in clients if client.get("clientId") != client_id]
+        remaining = [
+            client for client in clients if client.get("clientId") != client_id
+        ]
         snapshot = _build_lease_snapshot(
             str((leases or {}).get("bridgeInstanceId") or client_id),
             remaining,
@@ -364,7 +384,9 @@ class StdioBridgeClient:
             return {
                 "allowed": False,
                 "activeClientCount": len(remaining),
-                "blockingClientIds": [str(client.get("clientId")) for client in remaining],
+                "blockingClientIds": [
+                    str(client.get("clientId")) for client in remaining
+                ],
                 "reason": "Other bridge clients are still attached.",
             }
         return {
@@ -489,6 +511,63 @@ class StdioBridgeClient:
                 raise BridgeError(f"Malformed JSON from bridge: {e}")
 
             # Check for JSON-RPC error
+            if "error" in response:
+                err = response["error"]
+                msg = (
+                    err.get("message", "Unknown bridge error")
+                    if isinstance(err, dict)
+                    else str(err)
+                )
+                raise BridgeError(f"Bridge RPC error: {msg}")
+
+            return response.get("result")
+
+    def _send_socket_rpc(self, method: str, params: dict[str, Any]) -> Any:
+        """Send a one-shot JSON-RPC request over the shared bridge socket."""
+        with self._lock:
+            if not self._socket_path:
+                raise BridgeError("Shared bridge socket is not configured")
+
+            self._request_id += 1
+            request = {
+                "jsonrpc": "2.0",
+                "method": method,
+                "params": params,
+                "id": self._request_id,
+            }
+
+            try:
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+                    client.settimeout(10)
+                    client.connect(self._socket_path)
+                    client.sendall((json.dumps(request) + "\n").encode("utf-8"))
+                    try:
+                        client.shutdown(socket.SHUT_WR)
+                    except OSError:
+                        pass
+
+                    chunks: list[bytes] = []
+                    while True:
+                        chunk = client.recv(4096)
+                        if not chunk:
+                            break
+                        chunks.append(chunk)
+            except OSError as e:
+                raise BridgeError(
+                    f"Failed to communicate with shared bridge socket: {e}"
+                )
+
+            raw = b"".join(chunks).decode("utf-8").strip()
+            if not raw:
+                if method in _NO_RESPONSE_SOCKET_METHODS:
+                    return None
+                raise BridgeError("Shared bridge socket returned no response")
+
+            try:
+                response = json.loads(raw)
+            except json.JSONDecodeError as e:
+                raise BridgeError(f"Malformed JSON from shared bridge socket: {e}")
+
             if "error" in response:
                 err = response["error"]
                 msg = (

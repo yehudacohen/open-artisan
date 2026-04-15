@@ -9,8 +9,12 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import subprocess
 import threading
+import tempfile
+import time
+from pathlib import Path
 from unittest.mock import MagicMock, patch, PropertyMock
 
 import pytest
@@ -151,6 +155,100 @@ class TestJsonRpcRoundTrip:
             client.call("lifecycle.ping")
             args = mock_rpc.call_args[0]
             assert args[0] == "lifecycle.ping"
+
+    def test_call_uses_shared_bridge_socket_when_attached(self, tmp_path):
+        """call() should use the shared bridge socket transport when attached."""
+        client = StdioBridgeClient()
+        short_dir = Path(tempfile.mkdtemp(prefix="oa-bridge-"))
+        socket_path = short_dir / "bridge.sock"
+        result_holder: dict[str, object] = {}
+
+        def serve_once() -> None:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
+                server.bind(str(socket_path))
+                server.listen(1)
+                conn, _ = server.accept()
+                with conn:
+                    buffer = b""
+                    while b"\n" not in buffer:
+                        chunk = conn.recv(4096)
+                        if not chunk:
+                            break
+                        buffer += chunk
+                    request = json.loads(buffer.decode("utf-8").strip())
+                    result_holder["method"] = request["method"]
+                    result_holder["params"] = request["params"]
+                    response = {
+                        "jsonrpc": "2.0",
+                        "id": request["id"],
+                        "result": {"phase": "DISCOVERY", "phaseState": "SCAN"},
+                    }
+                    conn.sendall((json.dumps(response) + "\n").encode("utf-8"))
+
+        thread = threading.Thread(target=serve_once)
+        thread.start()
+        try:
+            for _ in range(50):
+                if socket_path.exists():
+                    break
+                time.sleep(0.01)
+            client._socket_path = str(socket_path)
+            result = client.call("state.get", {"sessionId": "test-session"})
+        finally:
+            thread.join(timeout=5)
+            try:
+                socket_path.unlink(missing_ok=True)
+                short_dir.rmdir()
+            except OSError:
+                pass
+
+        assert result == {"phase": "DISCOVERY", "phaseState": "SCAN"}
+        assert result_holder["method"] == "state.get"
+        assert result_holder["params"] == {"sessionId": "test-session"}
+
+    def test_socket_call_allows_no_response_for_session_lifecycle(self):
+        """sessionCreated over shared socket should tolerate no response payload."""
+        client = StdioBridgeClient()
+        short_dir = Path(tempfile.mkdtemp(prefix="oa-bridge-"))
+        socket_path = short_dir / "bridge.sock"
+        result_holder: dict[str, object] = {}
+
+        def serve_once() -> None:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
+                server.bind(str(socket_path))
+                server.listen(1)
+                conn, _ = server.accept()
+                with conn:
+                    buffer = b""
+                    while b"\n" not in buffer:
+                        chunk = conn.recv(4096)
+                        if not chunk:
+                            break
+                        buffer += chunk
+                    request = json.loads(buffer.decode("utf-8").strip())
+                    result_holder["method"] = request["method"]
+
+        thread = threading.Thread(target=serve_once)
+        thread.start()
+        try:
+            for _ in range(50):
+                if socket_path.exists():
+                    break
+                time.sleep(0.01)
+            client._socket_path = str(socket_path)
+            result = client.call(
+                "lifecycle.sessionCreated", {"sessionId": "test-session"}
+            )
+        finally:
+            thread.join(timeout=5)
+            try:
+                socket_path.unlink(missing_ok=True)
+                short_dir.rmdir()
+            except OSError:
+                pass
+
+        assert result is None
+        assert result_holder["method"] == "lifecycle.sessionCreated"
 
 
 # ---------------------------------------------------------------------------

@@ -188,9 +188,12 @@ export function buildTaskReviewPrompt(req: TaskReviewRequest): string {
   lines.push("   no previously-passing tests are now failing.")
   lines.push("4. **Check conventions alignment.** If conventions are available, verify the implementation follows")
   lines.push("   naming, error handling, and structural patterns.")
+  lines.push("5. **Reject placeholder tests for claimed-complete scope.** If the task adds or updates tests for")
+  lines.push("   the behavior it claims to complete, verify they are real tests of runtime behavior — not TODOs,")
+  lines.push("   skipped/pending placeholders, or assertions that only prove helpers exist.")
 
-  // Check #5: Stub/placeholder detection (category-aware)
-  lines.push("5. **Stub/placeholder detection.** Scan the implementation for:")
+  // Check #6: Stub/placeholder detection (category-aware)
+  lines.push("6. **Stub/placeholder detection.** Scan the implementation for:")
   lines.push("   - Functions that return hardcoded values (`return 0`, `return \"\"`, `return []`, `return ok({})`, `return { rowsCopied: 0 }`)")
   lines.push("   - Functions that only throw `\"not implemented\"`, `\"TODO\"`, or similar sentinel errors")
   lines.push("   - Placeholder credentials (`localhost:5432`, `test-bucket`, `dummy-api-key`, `xxx`, `changeme`)")
@@ -211,10 +214,19 @@ export function buildTaskReviewPrompt(req: TaskReviewRequest): string {
     lines.push("   The implementation must contain real, functional logic — not placeholders.")
   }
 
-  // Check #6: Integration seam verification (only when adjacent tasks are provided)
+  lines.push("")
+  lines.push("7. **Reject helper-only or drifting policy integrations.** If this task adds shared infrastructure,")
+  lines.push("   client/adapter plumbing, workflow policy, approval routing, or guard logic, verify:")
+  lines.push("   - the new code is wired into a real runtime call path for the scope this task claims")
+  lines.push("   - claimed shared or multi-client behavior is integrated everywhere this task says it is")
+  lines.push("   - policy/gate logic is not duplicated in a second place without a clear justification")
+  lines.push("   Prefix these issues with `INTEGRATION_GAP:` when a runtime path is missing, or `POLICY_DUP:`")
+  lines.push("   when duplicated policy logic can drift between codepaths.")
+
+  // Check #8: Integration seam verification (only when adjacent tasks are provided)
   if (req.adjacentTasks && req.adjacentTasks.length > 0) {
     lines.push("")
-    lines.push("6. **Integration seam check.** Review the boundaries between this task and its adjacent tasks")
+    lines.push("8. **Integration seam check.** Review the boundaries between this task and its adjacent tasks")
     lines.push("   (listed in the \"Adjacent Tasks\" section above). For each boundary, verify:")
     lines.push("   - **Shared resources are configured:** If this task produces or consumes a shared resource")
     lines.push("     (queue, database table, config entry, DI binding, environment variable), verify the resource")
@@ -232,7 +244,7 @@ export function buildTaskReviewPrompt(req: TaskReviewRequest): string {
   }
 
   const hasAdjacentTasks = req.adjacentTasks && req.adjacentTasks.length > 0
-  const totalChecks = hasAdjacentTasks ? "eight" : "seven"
+  const totalChecks = hasAdjacentTasks ? "ten" : "nine"
 
   // Quality scoring criteria
   lines.push("")

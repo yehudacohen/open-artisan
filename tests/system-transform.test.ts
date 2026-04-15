@@ -317,6 +317,14 @@ describe("buildWorkflowSystemPrompt — acceptance criteria at REVIEW", () => {
     expect(prompt).toContain("Implementation matches approved interface signatures")
   })
 
+  it("includes substantive implementation gate criteria for placeholders and partial integrations", () => {
+    const prompt = buildWorkflowSystemPrompt(makeState({ phase: "IMPLEMENTATION", phaseState: "REVIEW" }))
+    expect(prompt).toContain("No placeholder tests for claimed-complete scope")
+    expect(prompt).toContain("No helper-only or half-integrated implementations")
+    expect(prompt).toContain("No partial client integration for shared runtime paths")
+    expect(prompt).toContain("No duplicated policy or gate logic without justification")
+  })
+
   it("injects Discovery/Refactor acceptance criteria at DISCOVERY/REVIEW in REFACTOR mode", () => {
     const prompt = buildWorkflowSystemPrompt(
       makeState({ phase: "DISCOVERY", phaseState: "REVIEW", mode: "REFACTOR" }),

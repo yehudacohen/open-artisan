@@ -114,6 +114,8 @@ describe("buildTaskReviewPrompt", () => {
     expect(prompt).toContain("Verify interface alignment")
     expect(prompt).toContain("Check for regressions")
     expect(prompt).toContain("Check conventions alignment")
+    expect(prompt).toContain("Reject placeholder tests for claimed-complete scope")
+    expect(prompt).toContain("Reject helper-only or drifting policy integrations")
   })
 
   it("includes JSON response format", () => {
@@ -166,13 +168,13 @@ describe("buildTaskReviewPrompt — integration seam check", () => {
     expect(prompt).toContain("Integration seam check")
     expect(prompt).toContain("INTEGRATION_GAP")
     expect(prompt).toContain("not my responsibility")
-    expect(prompt).toContain("eight checks")
+    expect(prompt).toContain("ten checks")
   })
 
   it("says seven checks when no adjacent tasks", () => {
     const prompt = buildTaskReviewPrompt(makeRequest())
-    expect(prompt).toContain("seven checks")
-    expect(prompt).not.toContain("eight checks")
+    expect(prompt).toContain("nine checks")
+    expect(prompt).not.toContain("ten checks")
   })
 
   it("separates upstream and downstream tasks", () => {

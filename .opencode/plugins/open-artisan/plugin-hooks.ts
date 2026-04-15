@@ -11,7 +11,7 @@ import { buildCompactionContext } from "#core/hooks/compaction"
 import { buildUserGateHint, processUserMessage } from "#core/hooks/chat-message"
 import { handleIdle } from "#core/hooks/idle-handler"
 import { buildSubagentContext, buildWorkflowSystemPrompt } from "#core/hooks/system-transform"
-import { getPhaseToolPolicy } from "#core/hooks/tool-guard"
+import { getPhaseToolPolicy, getTaskWriteFiles } from "#core/hooks/tool-guard"
 import { detectMode } from "#core/mode-detect"
 import { extractAgentName, isWorkflowSessionActive, persistActiveAgent } from "#core/agent-policy"
 import type { ModeDetectionResult } from "#core/types"
@@ -393,7 +393,7 @@ export function createPluginHooks({
             const parentState = store.get(parentId)
             if (!parentState) return
             const rawParentTaskFiles = parentState.currentTaskId && parentState.implDag
-              ? parentState.implDag.find((task) => task.id === parentState.currentTaskId)?.expectedFiles
+              ? getTaskWriteFiles(parentState.implDag.find((task) => task.id === parentState.currentTaskId))
               : undefined
             const parentTaskFiles = rawParentTaskFiles?.map((file) => file.startsWith("/") ? file : resolve(projectRoot, file))
             const policy = getPhaseToolPolicy(
@@ -452,7 +452,7 @@ export function createPluginHooks({
         if (passthroughToolNames.has(input.tool.toLowerCase())) return
 
         const rawTaskFiles = refreshedState.currentTaskId && refreshedState.implDag
-          ? refreshedState.implDag.find((task) => task.id === refreshedState.currentTaskId)?.expectedFiles
+          ? getTaskWriteFiles(refreshedState.implDag.find((task) => task.id === refreshedState.currentTaskId))
           : undefined
         const currentTaskFiles = rawTaskFiles?.map((file) => file.startsWith("/") ? file : resolve(projectRoot, file))
         const policy = getPhaseToolPolicy(

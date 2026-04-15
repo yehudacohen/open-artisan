@@ -705,6 +705,14 @@ describe("IMPLEMENTATION — per-task expectedFiles enforcement", () => {
     expect(policy.writePathPredicate!("/project/src/d.ts")).toBe(false) // in neither
   })
 
+  it("task write restrictions may include expected test files", () => {
+    const allowlist = ["/project/src/a.ts", "/project/tests/a.test.ts"]
+    const taskFiles = ["/project/src/a.ts", "/project/tests/a.test.ts"]
+    const policy = getPhaseToolPolicy("IMPLEMENTATION", "DRAFT", "INCREMENTAL", allowlist, taskFiles)
+    expect(policy.writePathPredicate!("/project/src/a.ts")).toBe(true)
+    expect(policy.writePathPredicate!("/project/tests/a.test.ts")).toBe(true)
+  })
+
   it("INCREMENTAL with taskExpectedFiles still allows .openartisan/", () => {
     const policy = getPhaseToolPolicy("IMPLEMENTATION", "DRAFT", "INCREMENTAL", ["/a.ts"], ["/a.ts"])
     expect(policy.writePathPredicate!("/project/.openartisan/status.md")).toBe(true)

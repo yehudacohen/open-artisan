@@ -144,6 +144,32 @@ describe("guard.check", () => {
     expect(result.allowed).toBe(true)
   })
 
+  it("allows expected test files for the current implementation task", async () => {
+    await ctx.engine!.store.update("s1", (d) => {
+      d.mode = "INCREMENTAL"
+      d.phase = "IMPLEMENTATION"
+      d.phaseState = "DRAFT"
+      d.featureName = "impl-feat"
+      d.fileAllowlist = [join(tmpDir, "src/foo.ts"), join(tmpDir, "tests/foo.test.ts")]
+      d.currentTaskId = "T1"
+      d.implDag = [{
+        id: "T1",
+        description: "Task",
+        dependencies: [],
+        expectedFiles: [join(tmpDir, "src/foo.ts")],
+        expectedTests: [join(tmpDir, "tests/foo.test.ts")],
+        estimatedComplexity: "small",
+        status: "pending",
+      }]
+    })
+    const result = await handleGuardCheck({
+      toolName: "write_file",
+      args: { filePath: join(tmpDir, "tests/foo.test.ts") },
+      sessionId: "s1",
+    }, ctx) as GuardCheckResult
+    expect(result.allowed).toBe(true)
+  })
+
   it("blocks bash write operators in INCREMENTAL mode", async () => {
     await ctx.engine!.store.update("s1", (d) => {
       d.mode = "INCREMENTAL"
@@ -190,6 +216,18 @@ describe("guard.policy", () => {
     // INCREMENTAL mode has write path and bash command predicates
     expect(typeof result.hasWritePathPredicate).toBe("boolean")
     expect(typeof result.hasBashCommandPredicate).toBe("boolean")
+  })
+})
+
+describe("lifecycle.init capabilities", () => {
+  it("defaults bridge mode to agent-only capabilities", async () => {
+    const freshCtx = makeBridgeContext()
+    await handleInit({ projectDir: tmpDir }, freshCtx)
+    expect(freshCtx.capabilities).toEqual({
+      selfReview: "agent-only",
+      orchestrator: false,
+      discoveryFleet: false,
+    })
   })
 })
 

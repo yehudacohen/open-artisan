@@ -160,9 +160,9 @@ export const handleInit: MethodHandler = async (params, ctx) => {
   ctx.stateDir = stateDir
   ctx.projectDir = projectDir
   ctx.capabilities = {
-    selfReview: p.capabilities?.selfReview ?? "isolated",
-    orchestrator: p.capabilities?.orchestrator ?? true,
-    discoveryFleet: p.capabilities?.discoveryFleet ?? true,
+    selfReview: p.capabilities?.selfReview ?? "agent-only",
+    orchestrator: p.capabilities?.orchestrator ?? false,
+    discoveryFleet: p.capabilities?.discoveryFleet ?? false,
   }
   ctx.pinoLogger = pinoLogger
 

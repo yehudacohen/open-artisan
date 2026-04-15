@@ -9,7 +9,7 @@ import { resolve } from "node:path"
 import type { MethodHandler } from "../server"
 import type { GuardCheckParams, GuardPolicyParams, GuardCheckResult, GuardPolicyResult } from "../protocol"
 import { SESSION_NOT_FOUND, INVALID_PARAMS } from "../protocol"
-import { getPhaseToolPolicy } from "../../core/hooks/tool-guard"
+import { getPhaseToolPolicy, getTaskWriteFiles } from "../../core/hooks/tool-guard"
 import { WORKFLOW_TOOL_NAMES } from "../../core/constants"
 import type { Phase, PhaseState, WorkflowMode } from "../../core/types"
 
@@ -52,7 +52,7 @@ export const handleGuardCheck: MethodHandler = async (params, ctx) => {
   // Resolve per-task expected files for the current task.
   // Resolve relative paths to absolute using the project directory.
   const rawTaskFiles = state.currentTaskId && state.implDag
-    ? state.implDag.find((t: { id: string; expectedFiles?: string[] }) => t.id === state.currentTaskId)?.expectedFiles
+    ? getTaskWriteFiles(state.implDag.find((t: { id: string; expectedFiles?: string[]; expectedTests?: string[] }) => t.id === state.currentTaskId))
     : undefined
   const taskExpectedFiles = rawTaskFiles && ctx.projectDir
     ? rawTaskFiles.map((f: string) => f.startsWith("/") ? f : resolve(ctx.projectDir!, f))

@@ -368,3 +368,9 @@ export function getPhaseToolPolicy(
     }
   }
 }
+
+export function getTaskWriteFiles(task: { expectedFiles?: string[]; expectedTests?: string[] } | null | undefined): string[] | undefined {
+  if (!task) return undefined
+  const combined = [...(task.expectedFiles ?? []), ...(task.expectedTests ?? [])]
+  return combined.length > 0 ? Array.from(new Set(combined)) : undefined
+}

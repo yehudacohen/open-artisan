@@ -18,6 +18,20 @@
 import { createServer, type Server } from "node:net"
 import { existsSync, unlinkSync, readFileSync } from "node:fs"
 
+import { attachOrStartBridgeClient, detachBridgeClient, evaluateBridgeShutdownEligibility } from "#bridge/bridge-clients"
+import { discoverBridge } from "#bridge/bridge-discovery"
+import { loadBridgeLeaseSnapshot } from "#bridge/bridge-meta"
+import type {
+  BridgeAttachParams,
+  BridgeAttachRpcResult,
+  BridgeDetachParams,
+  BridgeDetachResult,
+  BridgeDiscoverParams,
+  BridgeDiscoverResult,
+  BridgeShutdownEligibilityParams,
+  BridgeShutdownEligibilityResult,
+} from "#bridge/protocol"
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -252,4 +266,41 @@ export async function sendSocketRequest(
       resolve(null) // Socket error — graceful fallback
     })
   })
+}
+
+// ---------------------------------------------------------------------------
+// Shared bridge contract helpers for Claude Code
+// ---------------------------------------------------------------------------
+
+export async function discoverSharedBridge(
+  params: BridgeDiscoverParams,
+): Promise<BridgeDiscoverResult> {
+  return {
+    discovery: await discoverBridge(params),
+  }
+}
+
+export async function attachOrStartSocketBridge(
+  params: BridgeAttachParams,
+): Promise<BridgeAttachRpcResult> {
+  return {
+    attach: await attachOrStartBridgeClient(params),
+  }
+}
+
+export async function detachSocketBridgeClient(
+  params: BridgeDetachParams,
+): Promise<BridgeDetachResult> {
+  return detachBridgeClient(params)
+}
+
+export async function getSocketShutdownEligibility(
+  params: BridgeShutdownEligibilityParams,
+): Promise<BridgeShutdownEligibilityResult> {
+  const leases = await loadBridgeLeaseSnapshot(params.stateDir)
+  return {
+    eligibility: evaluateBridgeShutdownEligibility(
+      leases ?? { bridgeInstanceId: "bridge", clients: [] },
+    ),
+  }
 }

@@ -2256,6 +2256,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                 draft.iterationCount = 0
               }
               draft.retryCount = 0
+              draft.latestReviewResults = null
               if (reviewHash !== null) {
                 draft.reviewArtifactHash = reviewHash
               }
@@ -2414,6 +2415,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             draft.phase = outcome.nextPhase
             draft.phaseState = outcome.nextPhaseState
             draft.retryCount = 0
+            draft.latestReviewResults = null
             // Clear revision baseline — we're leaving REVISE
             draft.revisionBaseline = null
             // Capture artifact hash for review integrity (mark_satisfied checks this)

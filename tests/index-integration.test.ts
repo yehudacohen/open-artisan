@@ -1420,6 +1420,36 @@ describe("request_review — re-submit at REVIEW state", () => {
     expect(state.iterationCount).toBe(2)
   })
 
+  it("clears stale latestReviewResults on request_review resubmission", async () => {
+    const sid = `int-test-${Date.now()}-clear-review-results`
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: sid } } },
+    })
+    const ctx = { directory: tempDir, sessionId: sid }
+
+    await plugin.tool.select_mode.execute(
+      { mode: "GREENFIELD", feature_name: "clear-review-results-test" },
+      ctx,
+    )
+    await plugin.tool.request_review.execute(
+      { summary: "Initial plan", artifact_description: "Plan", artifact_content: "Plan v1" },
+      ctx,
+    )
+
+    const store = plugin._testStore
+    await store.update(sid, (draft: any) => {
+      draft.latestReviewResults = [{ criterion: "Old", met: false, evidence: "stale" }]
+    })
+
+    await plugin.tool.request_review.execute(
+      { summary: "Updated plan", artifact_description: "Plan", artifact_content: "Plan v2" },
+      ctx,
+    )
+
+    const state = store.get(sid)
+    expect(state.latestReviewResults).toBeNull()
+  })
+
   it("rejects request_review at REVIEW state without artifact_content", async () => {
     const sid = `int-test-${Date.now()}-resubmit-no-content`
     await plugin.event({

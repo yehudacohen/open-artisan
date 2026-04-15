@@ -374,6 +374,7 @@ const handleRequestReview: ToolHandler = async (args, toolCtx, ctx) => {
     const artifactFiles = args.artifact_files as string[] | undefined
     await store.update(toolCtx.sessionId, (draft) => {
       draft.retryCount = 0
+      draft.latestReviewResults = null
       if (reviewHash) draft.reviewArtifactHash = reviewHash
       if (artifactDiskPath && artifactKey) {
         draft.artifactDiskPaths[artifactKey] = artifactDiskPath
@@ -425,6 +426,7 @@ const handleRequestReview: ToolHandler = async (args, toolCtx, ctx) => {
     draft.phase = outcome.nextPhase
     draft.phaseState = outcome.nextPhaseState
     draft.retryCount = 0
+    draft.latestReviewResults = null
     draft.reviewArtifactHash = null
     if (artifactDiskPath && artifactKey) {
       draft.artifactDiskPaths[artifactKey] = artifactDiskPath

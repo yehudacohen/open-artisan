@@ -750,6 +750,7 @@ describe("tool.execute — agent-only mode", () => {
       d.featureName = d.featureName ?? `review-refresh-${Date.now()}`
       d.artifactDiskPaths.tests = join(tmpDir, ".openartisan", d.featureName!, "tests.md")
       d.reviewArtifactHash = "stale-hash"
+      d.latestReviewResults = [{ criterion: "Old", met: false, evidence: "stale" }]
     })
 
     const result = await exec("request_review", {
@@ -766,6 +767,7 @@ describe("tool.execute — agent-only mode", () => {
     expect(state?.phaseState).toBe("REVIEW")
     expect(state?.reviewArtifactHash).not.toBe("stale-hash")
     expect(state?.reviewArtifactFiles).toContain("tests/bridge-tool-execute.test.ts")
+    expect(state?.latestReviewResults).toBeNull()
   })
 
   it("allows request_review from DISCOVERY/CONVENTIONS", async () => {

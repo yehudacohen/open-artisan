@@ -106,7 +106,7 @@ class BridgeTestClient {
         jsonrpc: "2.0",
         id: this.nextId++,
         method: "lifecycle.shutdown",
-        params: {},
+        params: { force: true },
       }) + "\n"
       stdin.write(request)
     } catch {

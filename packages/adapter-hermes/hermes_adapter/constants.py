@@ -48,6 +48,9 @@ TOOLSET_NAME = "open-artisan"
 # ---------------------------------------------------------------------------
 
 DEFAULT_STATE_DIR_NAME = ".openartisan"
+DEFAULT_SOCKET_FILENAME = ".bridge.sock"
+BRIDGE_METADATA_FILENAME = ".bridge-meta.json"
+BRIDGE_LEASES_FILENAME = ".bridge-clients.json"
 
 # ---------------------------------------------------------------------------
 # Capabilities (agent-only mode — no SubagentDispatcher)

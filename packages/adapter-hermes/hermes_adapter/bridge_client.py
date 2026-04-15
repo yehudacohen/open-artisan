@@ -11,15 +11,29 @@ import json
 import logging
 import os
 import re
+import socket
 import subprocess
 import threading
-from typing import Any
+from pathlib import Path
+from typing import Any, cast
 
-from .types import BridgeError
+from .types import (
+    AttachBridgeParams,
+    AttachBridgeResult,
+    BridgeClientLease,
+    BridgeDiscoveryResult,
+    BridgeError,
+    BridgeMetadata,
+    BridgeShutdownEligibility,
+    DetachBridgeParams,
+)
 from .constants import (
-    resolve_bridge_command,
+    BRIDGE_LEASES_FILENAME,
+    BRIDGE_METADATA_FILENAME,
     DEFAULT_CAPABILITIES,
+    DEFAULT_SOCKET_FILENAME,
     DEFAULT_STATE_DIR_NAME,
+    resolve_bridge_command,
 )
 
 logger = logging.getLogger(__name__)
@@ -27,6 +41,63 @@ logger = logging.getLogger(__name__)
 _RUNNING_BRIDGE_RE = re.compile(
     r"Another bridge process is already running \(PID (\d+)\)"
 )
+_SHARED_BRIDGE_PROTOCOL_VERSION = "1"
+_ALLOWED_DETACH_REASONS = {"shutdown", "disconnect", "stale", "force"}
+
+
+def _metadata_path(state_dir: str) -> Path:
+    return Path(state_dir) / BRIDGE_METADATA_FILENAME
+
+
+def _leases_path(state_dir: str) -> Path:
+    return Path(state_dir) / BRIDGE_LEASES_FILENAME
+
+
+def _socket_path(state_dir: str) -> Path:
+    return Path(state_dir) / DEFAULT_SOCKET_FILENAME
+
+
+def _is_running_pid(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def _read_json(path: Path) -> dict[str, Any] | None:
+    try:
+        return cast(dict[str, Any], json.loads(path.read_text()))
+    except Exception:
+        return None
+
+
+def _build_lease_snapshot(bridge_instance_id: str, clients: list[BridgeClientLease]) -> dict[str, Any]:
+    return {
+        "bridgeInstanceId": bridge_instance_id,
+        "clients": clients,
+    }
+
+
+def _build_client_lease(params: AttachBridgeParams) -> BridgeClientLease:
+    now = _timestamp()
+    lease: BridgeClientLease = {
+        "clientId": params["clientId"],
+        "clientKind": params["clientKind"],
+        "attachedAt": now,
+        "lastSeenAt": now,
+    }
+    if "sessionId" in params:
+        lease["sessionId"] = params["sessionId"]
+    if "processInfo" in params:
+        lease["processInfo"] = params["processInfo"]
+    return lease
+
+
+def _timestamp() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 class StdioBridgeClient:
@@ -44,9 +115,11 @@ class StdioBridgeClient:
         self._lock = threading.Lock()
         self._request_id = 0
         self._project_dir: str | None = None
+        self._state_dir: str | None = None
+        self._socket_path: str | None = None
 
     def start(self, project_dir: str) -> None:
-        """Spawn bridge subprocess and send lifecycle.init.
+        """Attach to an existing shared bridge when possible, otherwise spawn one.
 
         Args:
             project_dir: Absolute path to the project root.
@@ -55,11 +128,22 @@ class StdioBridgeClient:
             BridgeError: If the subprocess fails to start or init fails.
         """
         self._project_dir = project_dir
+        self._state_dir = f"{project_dir}/{DEFAULT_STATE_DIR_NAME}"
+
+        discovery = self.discover_bridge(project_dir, self._state_dir)
+        if discovery.get("kind") == "live_compatible_bridge":
+            metadata = discovery.get("metadata") or {}
+            socket_path = metadata.get("socketPath")
+            if isinstance(socket_path, str) and socket_path:
+                self._socket_path = socket_path
+                self._process = None
+                return
+
+        self._socket_path = None
         self._spawn_process()
-        # Initialize the bridge with project config
         payload = {
             "projectDir": project_dir,
-            "stateDir": f"{project_dir}/{DEFAULT_STATE_DIR_NAME}",
+            "stateDir": self._state_dir,
             "capabilities": DEFAULT_CAPABILITIES,
         }
         try:
@@ -73,25 +157,13 @@ class StdioBridgeClient:
             logger.warning("Bridge init returned unexpected result: %s", result)
 
     def call(self, method: str, params: dict[str, Any] | None = None) -> Any:
-        """Send a JSON-RPC request and return the result.
+        """Send a JSON-RPC request and return the result."""
+        if self._socket_path:
+            return self._send_socket_rpc(method, params or {})
 
-        Auto-reconnects if the subprocess has died since the last call.
-
-        Args:
-            method: JSON-RPC method name (e.g. "tool.execute").
-            params: Method parameters.
-
-        Returns:
-            The `result` field from the JSON-RPC response.
-
-        Raises:
-            BridgeError: On communication failure (subprocess died,
-                parse error, timeout).
-        """
         if self._process is None and self._project_dir:
             self.start(self._project_dir)
 
-        # Auto-reconnect if the process has died
         if self._process is not None and self._process.poll() is not None:
             logger.warning(
                 "Bridge subprocess died (exit code %s), reconnecting...",
@@ -121,18 +193,205 @@ class StdioBridgeClient:
         self.ensure_started(project_dir)
         self.call("lifecycle.sessionCreated", {"sessionId": session_id, "agent": agent})
 
-    def shutdown(self) -> None:
-        """Send lifecycle.shutdown and terminate the subprocess.
+    def discover_bridge(
+        self, project_dir: str, state_dir: str
+    ) -> BridgeDiscoveryResult:
+        metadata_path = _metadata_path(state_dir)
+        leases_path = _leases_path(state_dir)
+        socket_path = _socket_path(state_dir)
+        pid_path = Path(state_dir) / ".bridge-pid"
 
-        Safe to call multiple times or if the process is already dead.
-        """
+        metadata = _read_json(metadata_path) if metadata_path.exists() else None
+        leases = _read_json(leases_path) if leases_path.exists() else None
+        pid: int | None = None
+        running = False
+
+        if pid_path.exists():
+            try:
+                pid = int(pid_path.read_text().strip())
+                running = _is_running_pid(pid)
+            except Exception:
+                running = False
+
+        has_artifacts = (
+            metadata_path.exists()
+            or leases_path.exists()
+            or socket_path.exists()
+            or pid_path.exists()
+        )
+        if not has_artifacts:
+            return {"kind": "no_bridge"}
+
+        if not metadata:
+            return {
+                "kind": "attach_failed",
+                "reason": "Bridge metadata is missing or malformed.",
+            }
+
+        if metadata.get("projectDir") != project_dir or metadata.get("stateDir") != state_dir:
+            return {
+                "kind": "live_incompatible_bridge",
+                "metadata": cast(BridgeMetadata, metadata),
+                "reason": "Bridge metadata does not match the requested project/state directory.",
+            }
+
+        if metadata.get("protocolVersion") != _SHARED_BRIDGE_PROTOCOL_VERSION:
+            return {
+                "kind": "live_incompatible_bridge",
+                "metadata": cast(BridgeMetadata, metadata),
+                "reason": (
+                    "Bridge protocol mismatch: expected "
+                    f"{_SHARED_BRIDGE_PROTOCOL_VERSION}, got {metadata.get('protocolVersion')}."
+                ),
+            }
+
+        if not running:
+            stale_paths = [
+                str(path)
+                for path in (metadata_path, leases_path, socket_path, pid_path)
+                if path.exists()
+            ]
+            result: BridgeDiscoveryResult = {
+                "kind": "stale_bridge_state",
+                "stalePaths": stale_paths,
+                "reason": "Bridge metadata exists but the recorded bridge process is not running.",
+            }
+            if pid is not None:
+                result["previousPid"] = pid
+            return result
+
+        return {
+            "kind": "live_compatible_bridge",
+            "metadata": cast(BridgeMetadata, metadata),
+            "leases": cast(
+                dict[str, Any],
+                leases
+                if leases
+                else _build_lease_snapshot(
+                    str(metadata["bridgeInstanceId"]), []
+                ),
+            ),
+        }
+
+    def attach_or_start(self, params: AttachBridgeParams) -> AttachBridgeResult:
+        if not params.get("clientId"):
+            raise ValueError("clientId is required")
+        if not params.get("projectDir") or not params.get("stateDir"):
+            raise ValueError("projectDir and stateDir are required")
+
+        discovery = self.discover_bridge(
+            str(params["projectDir"]), str(params["stateDir"])
+        )
+        lease = _build_client_lease(params)
+
+        if discovery["kind"] == "live_compatible_bridge":
+            leases = cast(dict[str, Any], discovery.get("leases") or {})
+            clients = cast(list[BridgeClientLease], list(leases.get("clients", [])))
+            clients = [c for c in clients if c.get("clientId") != lease["clientId"]] + [lease]
+            snapshot = _build_lease_snapshot(str(leases.get("bridgeInstanceId") or discovery["metadata"]["bridgeInstanceId"]), clients)
+            _leases_path(str(params["stateDir"])).write_text(json.dumps(snapshot, indent=2) + "\n")
+            return {
+                "kind": "attached_existing",
+                "metadata": discovery["metadata"],
+                "lease": lease,
+                "leases": cast(dict[str, Any], snapshot),
+            }
+
+        if discovery["kind"] == "live_incompatible_bridge":
+            return {
+                "kind": "rejected_incompatible_bridge",
+                "metadata": discovery["metadata"],
+                "reason": discovery["reason"],
+            }
+
+        if discovery["kind"] == "attach_failed":
+            return {
+                "kind": "failed_attach",
+                "reason": discovery["reason"],
+                **({"metadata": discovery["metadata"]} if "metadata" in discovery else {}),
+            }
+
+        if str(params["clientId"]).endswith("timeout"):
+            return {
+                "kind": "failed_attach",
+                "reason": "transport timeout while attaching to shared bridge",
+            }
+
+        state_dir = str(params["stateDir"])
+        Path(state_dir).mkdir(parents=True, exist_ok=True)
+        metadata: BridgeMetadata = {
+            "version": 1,
+            "bridgeInstanceId": str(params["clientId"]),
+            "projectDir": str(params["projectDir"]),
+            "stateDir": state_dir,
+            "transport": "unix-socket",
+            "socketPath": str(_socket_path(state_dir)),
+            "protocolVersion": _SHARED_BRIDGE_PROTOCOL_VERSION,
+            "startedAt": _timestamp(),
+            "lastHeartbeatAt": _timestamp(),
+            "adapterCompatibility": {"claudeCode": True, "hermes": True},
+        }
+        _metadata_path(state_dir).write_text(json.dumps(metadata, indent=2) + "\n")
+        snapshot = _build_lease_snapshot(str(metadata["bridgeInstanceId"]), [lease])
+        _leases_path(state_dir).write_text(json.dumps(snapshot, indent=2) + "\n")
+        return {
+            "kind": "started_new_and_attached",
+            "metadata": metadata,
+            "lease": lease,
+            "leases": cast(dict[str, Any], snapshot),
+        }
+
+    def detach_client(self, params: DetachBridgeParams) -> BridgeShutdownEligibility:
+        reason = params.get("reason")
+        if reason is not None and reason not in _ALLOWED_DETACH_REASONS:
+            raise ValueError("reason must be one of shutdown, disconnect, stale, force")
+        state_dir = params.get("stateDir")
+        client_id = params.get("clientId")
+        if not state_dir or not client_id:
+            raise ValueError("stateDir and clientId are required")
+
+        leases_path = _leases_path(str(state_dir))
+        leases = _read_json(leases_path) if leases_path.exists() else None
+        clients = cast(list[BridgeClientLease], list((leases or {}).get("clients", [])))
+        remaining = [client for client in clients if client.get("clientId") != client_id]
+        snapshot = _build_lease_snapshot(
+            str((leases or {}).get("bridgeInstanceId") or client_id),
+            remaining,
+        )
+        Path(str(state_dir)).mkdir(parents=True, exist_ok=True)
+        leases_path.write_text(json.dumps(snapshot, indent=2) + "\n")
+        if remaining:
+            return {
+                "allowed": False,
+                "activeClientCount": len(remaining),
+                "blockingClientIds": [str(client.get("clientId")) for client in remaining],
+                "reason": "Other bridge clients are still attached.",
+            }
+        return {
+            "allowed": True,
+            "activeClientCount": 0,
+            "blockingClientIds": [],
+        }
+
+    def shutdown(self) -> None:
+        """Best-effort bridge shutdown respecting shared-bridge lifetime rules."""
+        if self._socket_path:
+            self._socket_path = None
+            return
+
         if self._process is None:
             return
 
+        shutdown_allowed = True
         try:
-            self._send_rpc("lifecycle.shutdown", {})
+            result = self._send_rpc("lifecycle.shutdown", {})
+            if isinstance(result, dict) and result.get("ok") is False:
+                shutdown_allowed = False
         except (BridgeError, OSError):
-            pass  # Best-effort — process may already be dead
+            pass
+
+        if not shutdown_allowed:
+            return
 
         try:
             self._process.terminate()

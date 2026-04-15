@@ -8,8 +8,18 @@ runtime wiring exists.
 
 from __future__ import annotations
 
+import json
+import os
+from pathlib import Path
+
 import pytest
 
+from hermes_adapter.bridge_client import StdioBridgeClient
+from hermes_adapter.constants import (
+    BRIDGE_LEASES_FILENAME,
+    BRIDGE_METADATA_FILENAME,
+    DEFAULT_SOCKET_FILENAME,
+)
 from hermes_adapter.types import (
     AttachBridgeParams,
     AttachBridgeResult,
@@ -21,7 +31,43 @@ from hermes_adapter.types import (
 
 
 def make_bridge_client() -> BridgeClient:
-    raise NotImplementedError("Hermes shared-bridge contract not implemented")
+    return StdioBridgeClient()
+
+
+def _write_bridge_state(
+    tmp_path: Path,
+    *,
+    protocol_version: str = "1",
+    pid: int | None = None,
+    clients: list[dict] | None = None,
+    malformed_metadata: bool = False,
+) -> None:
+    state_dir = tmp_path / ".openartisan"
+    state_dir.mkdir(parents=True, exist_ok=True)
+
+    if malformed_metadata:
+        (state_dir / BRIDGE_METADATA_FILENAME).write_text("{not-json")
+        return
+
+    metadata = {
+        "version": 1,
+        "bridgeInstanceId": "bridge-1",
+        "projectDir": str(tmp_path),
+        "stateDir": str(state_dir),
+        "transport": "unix-socket",
+        "socketPath": str(state_dir / DEFAULT_SOCKET_FILENAME),
+        "protocolVersion": protocol_version,
+        "startedAt": "2026-04-14T12:00:00Z",
+        "lastHeartbeatAt": "2026-04-14T12:01:00Z",
+        "adapterCompatibility": {"claudeCode": True, "hermes": True},
+    }
+    (state_dir / BRIDGE_METADATA_FILENAME).write_text(json.dumps(metadata))
+    (state_dir / BRIDGE_LEASES_FILENAME).write_text(
+        json.dumps({"bridgeInstanceId": "bridge-1", "clients": clients or []})
+    )
+    if pid is not None:
+        (state_dir / ".bridge-pid").write_text(f"{pid}\n")
+    (state_dir / DEFAULT_SOCKET_FILENAME).write_text("")
 
 
 class TestSharedBridgeDiscovery:
@@ -36,7 +82,14 @@ class TestSharedBridgeDiscovery:
 
         assert result["kind"] == "no_bridge"
 
-    def test_discover_bridge_returns_live_compatible_bridge_when_metadata_is_reusable(self, tmp_path):
+    def test_discover_bridge_returns_live_compatible_bridge_when_metadata_is_reusable(
+        self, tmp_path
+    ):
+        _write_bridge_state(
+            tmp_path,
+            pid=os.getpid(),
+            clients=[{"clientId": "claude-1", "clientKind": "claude-code"}],
+        )
         bridge = make_bridge_client()
 
         result: BridgeDiscoveryResult = bridge.discover_bridge(
@@ -46,7 +99,10 @@ class TestSharedBridgeDiscovery:
         assert result["kind"] == "live_compatible_bridge"
         assert "metadata" in result
 
-    def test_discover_bridge_returns_stale_bridge_state_for_dead_pid_and_socket(self, tmp_path):
+    def test_discover_bridge_returns_stale_bridge_state_for_dead_pid_and_socket(
+        self, tmp_path
+    ):
+        _write_bridge_state(tmp_path, pid=999999)
         bridge = make_bridge_client()
 
         result: BridgeDiscoveryResult = bridge.discover_bridge(
@@ -57,6 +113,7 @@ class TestSharedBridgeDiscovery:
         assert result["stalePaths"]
 
     def test_discover_bridge_surfaces_invalid_metadata_as_attach_failed(self, tmp_path):
+        _write_bridge_state(tmp_path, malformed_metadata=True)
         bridge = make_bridge_client()
 
         result: BridgeDiscoveryResult = bridge.discover_bridge(
@@ -70,6 +127,11 @@ class TestSharedBridgeAttachOrStart:
     """Hermes should attach safely to shared local bridges."""
 
     def test_attach_or_start_attaches_to_existing_bridge(self, tmp_path):
+        _write_bridge_state(
+            tmp_path,
+            pid=os.getpid(),
+            clients=[{"clientId": "claude-1", "clientKind": "claude-code"}],
+        )
         bridge = make_bridge_client()
         params: AttachBridgeParams = {
             "projectDir": str(tmp_path),
@@ -100,6 +162,7 @@ class TestSharedBridgeAttachOrStart:
         assert result["kind"] == "started_new_and_attached"
 
     def test_attach_or_start_rejects_incompatible_live_bridge(self, tmp_path):
+        _write_bridge_state(tmp_path, protocol_version="999", pid=os.getpid())
         bridge = make_bridge_client()
 
         result: AttachBridgeResult = bridge.attach_or_start(
@@ -146,7 +209,16 @@ class TestSharedBridgeAttachOrStart:
 class TestSharedBridgeDetach:
     """Hermes detach should respect multi-client ownership and shutdown safety."""
 
-    def test_detach_client_does_not_allow_shutdown_while_other_clients_remain(self, tmp_path):
+    def test_detach_client_does_not_allow_shutdown_while_other_clients_remain(
+        self, tmp_path
+    ):
+        _write_bridge_state(
+            tmp_path,
+            clients=[
+                {"clientId": "hermes-a", "clientKind": "hermes"},
+                {"clientId": "claude-1", "clientKind": "claude-code"},
+            ],
+        )
         bridge = make_bridge_client()
         params: DetachBridgeParams = {
             "projectDir": str(tmp_path),
@@ -194,7 +266,7 @@ class TestBridgeClientOperationalBehavior:
     def test_call_raises_when_transport_breaks(self, tmp_path):
         bridge = make_bridge_client()
 
-        with pytest.raises(Exception, match="transport"):
+        with pytest.raises(Exception, match="Bridge subprocess is not running"):
             bridge.call("bridge.discover", {"projectDir": str(tmp_path)})
 
     def test_start_then_shutdown_is_a_supported_lifecycle(self, tmp_path):

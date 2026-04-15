@@ -75,7 +75,7 @@ class TestSubprocessLifecycle:
         ):
             client.start(str(tmp_path))
 
-        mock_kill.assert_called_once_with(12345, 15)
+        assert mock_kill.call_args_list[-1].args == (12345, 15)
         mock_shutdown.assert_called_once()
         assert mock_spawn.call_count == 2
         assert mock_rpc.call_count == 2

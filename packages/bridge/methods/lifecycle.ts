@@ -228,30 +228,35 @@ export const handleSessionCreated: MethodHandler = async (params, ctx) => {
 
   // Primary session
   sessions.registerPrimary(p.sessionId)
-  try {
-    await store.create(p.sessionId)
-  } catch {
-    // Already exists from a previous load — no-op
-  }
-
-  // Set active agent and run mode detection for fresh sessions
-  const needsUpdate = (p.agent && typeof p.agent === "string") || ctx.projectDir
-  if (needsUpdate) {
+  const existingState = store.get(p.sessionId)
+  if (!existingState) {
     try {
-      const normalizedAgent = normalizeAgentName(p.agent)
-      await store.update(p.sessionId, (draft) => {
-        // Set active agent if provided (e.g. "robot-artisan" for automation mode)
-        if (normalizedAgent) {
-          draft.activeAgent = normalizedAgent
-        }
-        // Auto-detect mode for fresh sessions at MODE_SELECT
-        if (draft.phase === "MODE_SELECT" && !draft.modeDetectionNote && ctx.projectDir) {
-          const detection = detectMode(ctx.projectDir)
-          draft.modeDetectionNote = `**Auto-detected:** ${detection.reasoning}\n\nSuggested mode: **${detection.suggestedMode}**`
-        }
-      })
+      await store.create(p.sessionId)
     } catch {
-      // Non-fatal — session may not exist yet if create was a no-op
+      // Already exists from a previous load — no-op
+    }
+
+    // Set active agent and run mode detection only for freshly-created sessions.
+    // Repeated sessionCreated calls for the same session must remain idempotent
+    // and must not mutate workflow meaning on resumed turns.
+    const needsUpdate = (p.agent && typeof p.agent === "string") || ctx.projectDir
+    if (needsUpdate) {
+      try {
+        const normalizedAgent = normalizeAgentName(p.agent)
+        await store.update(p.sessionId, (draft) => {
+          // Set active agent if provided (e.g. "robot-artisan" for automation mode)
+          if (normalizedAgent) {
+            draft.activeAgent = normalizedAgent
+          }
+          // Auto-detect mode for fresh sessions at MODE_SELECT
+          if (draft.phase === "MODE_SELECT" && !draft.modeDetectionNote && ctx.projectDir) {
+            const detection = detectMode(ctx.projectDir)
+            draft.modeDetectionNote = `**Auto-detected:** ${detection.reasoning}\n\nSuggested mode: **${detection.suggestedMode}**`
+          }
+        })
+      } catch {
+        // Non-fatal — session may not exist yet if create was a no-op
+      }
     }
   }
 

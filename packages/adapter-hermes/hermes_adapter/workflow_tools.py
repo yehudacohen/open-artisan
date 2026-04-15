@@ -15,6 +15,16 @@ from .types import BridgeClient, BridgeError, HermesContext, make_error_response
 from .constants import WORKFLOW_TOOLS, OA_STATE_SCHEMA, TOOLSET_NAME
 
 
+def ensure_workflow_session(
+    bridge: BridgeClient,
+    session_id: str | None,
+    project_dir: str | None,
+    agent: str = "artisan",
+) -> None:
+    """Ensure a workflow session exists using the shared adapter contract."""
+    bridge.ensure_session(session_id or "default", project_dir or os.getcwd(), agent=agent)
+
+
 def register_workflow_tools(
     ctx: HermesContext,
     bridge: BridgeClient,
@@ -106,7 +116,7 @@ def _handle_workflow_tool(
             project_dir = str(kwargs.get("cwd") or os.getcwd())
             tool_args = args
 
-        bridge.ensure_session(session_id, project_dir)
+        ensure_workflow_session(bridge, session_id, project_dir)
         if bridge_tool_name == "submit_feedback":
             feedback_text = tool_args.get("feedback_text")
             if isinstance(feedback_text, str) and feedback_text.strip():
@@ -153,7 +163,7 @@ def _handle_oa_state(
     """
     try:
         effective_project_dir = project_dir or os.getcwd()
-        bridge.ensure_session(session_id or "default", effective_project_dir)
+        ensure_workflow_session(bridge, session_id, effective_project_dir)
         result = bridge.call("state.get", {"sessionId": session_id or "default"})
         if result is None:
             return make_error_response("No active workflow session.")

@@ -456,3 +456,80 @@ class TestPromptDuringWorkflow:
         )
         r2 = hook()
         assert "INTERFACES" in r2["context"]
+
+    def test_prompt_hook_does_not_mark_user_gate_message_received_for_non_robot_sessions(
+        self, started_bridge
+    ):
+        """Ordinary Hermes pre-turn hook activity must not fake a user reply at USER_GATE."""
+        started_bridge.set_response(
+            "state.get", {"phaseState": "USER_GATE", "activeAgent": "artisan"}
+        )
+        started_bridge.set_response("prompt.build", "## USER_GATE\nWait for user input.")
+
+        hook = create_prompt_hook(started_bridge, "s1")
+        result = hook()
+
+        assert "USER_GATE" in result["context"]
+        assert started_bridge.get_calls("message.process") == []
+
+    def test_user_gate_approval_still_requires_real_user_input_after_prompt_hook_runs(
+        self, started_bridge
+    ):
+        """Running the prompt hook alone must not create approval eligibility."""
+        started_bridge.set_response(
+            "state.get", {"phaseState": "USER_GATE", "activeAgent": "artisan"}
+        )
+        started_bridge.set_response("prompt.build", "## USER_GATE\nWait for user input.")
+
+        hook = create_prompt_hook(started_bridge, "s1")
+        hook()
+        hook()
+
+        assert started_bridge.get_calls("message.process") == []
+        session_calls = started_bridge.get_calls("lifecycle.sessionCreated")
+        assert len(session_calls) == 2
+        assert all(call[1] == {"sessionId": "s1", "agent": "artisan"} for call in session_calls)
+
+    def test_user_gate_runtime_path_stays_safe_across_hook_and_tool_calls(
+        self, started_bridge
+    ):
+        """Repeated hook + tool activity must keep USER_GATE safety and session semantics stable."""
+
+        started_bridge.set_response_fn(
+            "state.get",
+            lambda params: {
+                "phase": "IMPLEMENTATION",
+                "phaseState": "USER_GATE",
+                "activeAgent": "artisan",
+                "featureName": "harden-hermes-adapter-runtime-behavior",
+                "currentTaskId": "T4",
+            },
+        )
+        started_bridge.set_response("prompt.build", "## USER_GATE\nWait for user input.")
+        started_bridge.set_response(
+            "tool.execute",
+            {"phase": "IMPLEMENTATION", "phaseState": "USER_GATE", "currentTaskId": "T4"},
+        )
+
+        hook = create_prompt_hook(started_bridge, "s1")
+        assert "USER_GATE" in hook()["context"]
+
+        from hermes_adapter.workflow_tools import _handle_workflow_tool
+
+        tool_result = _handle_workflow_tool(
+            started_bridge,
+            "query_child_workflow",
+            "s1",
+            "/tmp/test-project",
+            {"task_id": "T4"},
+        )
+
+        parsed = json.loads(tool_result)
+        assert parsed["phase"] == "IMPLEMENTATION"
+        assert parsed["phaseState"] == "USER_GATE"
+        assert parsed["currentTaskId"] == "T4"
+        assert started_bridge.get_calls("message.process") == []
+        assert started_bridge.get_calls("lifecycle.sessionCreated") == [
+            ("lifecycle.sessionCreated", {"sessionId": "s1", "agent": "artisan"}),
+            ("lifecycle.sessionCreated", {"sessionId": "s1", "agent": "artisan"}),
+        ]

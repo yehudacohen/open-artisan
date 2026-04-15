@@ -248,6 +248,52 @@ class TestSharedBridgeAttachOrStart:
 
         assert result["kind"] == "failed_attach"
 
+    def test_attach_or_start_keeps_recovery_outcomes_explicit_across_runtime_paths(
+        self, tmp_path
+    ):
+        incompatible_dir = tmp_path / "incompatible"
+        stale_dir = tmp_path / "stale"
+        fresh_dir = tmp_path / "fresh"
+
+        _write_bridge_state(incompatible_dir, protocol_version="999", pid=os.getpid())
+        _write_bridge_state(stale_dir, pid=999999)
+
+        bridge = make_bridge_client()
+
+        incompatible = bridge.attach_or_start(
+            {
+                "projectDir": str(incompatible_dir),
+                "stateDir": str(incompatible_dir / ".openartisan"),
+                "clientId": "hermes-incompatible",
+                "clientKind": "hermes",
+                "sessionId": "session-incompatible",
+            }
+        )
+        stale = bridge.attach_or_start(
+            {
+                "projectDir": str(stale_dir),
+                "stateDir": str(stale_dir / ".openartisan"),
+                "clientId": "hermes-stale",
+                "clientKind": "hermes",
+                "sessionId": "session-stale",
+            }
+        )
+        fresh = bridge.attach_or_start(
+            {
+                "projectDir": str(fresh_dir),
+                "stateDir": str(fresh_dir / ".openartisan"),
+                "clientId": "hermes-fresh",
+                "clientKind": "hermes",
+                "sessionId": "session-fresh",
+            }
+        )
+
+        assert incompatible["kind"] == "rejected_incompatible_bridge"
+        assert stale["kind"] == "started_new_and_attached"
+        assert fresh["kind"] == "started_new_and_attached"
+        assert stale["metadata"]["bridgeInstanceId"] == stale["leases"]["bridgeInstanceId"]
+        assert fresh["metadata"]["bridgeInstanceId"] == fresh["leases"]["bridgeInstanceId"]
+
     def test_attach_or_start_rejects_missing_required_client_id(self, tmp_path):
         bridge = make_bridge_client()
 

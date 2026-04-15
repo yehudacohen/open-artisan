@@ -19,6 +19,7 @@ import subprocess
 from typing import Any
 
 from .types import BridgeClient
+from .workflow_tools import ensure_workflow_session
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +58,7 @@ def create_prompt_hook(
         session_id = str(kwargs.get("session_id") or default_session_id or "default")
         effective_project_dir = str(kwargs.get("cwd") or project_dir or os.getcwd())
         try:
-            bridge.ensure_session(session_id, effective_project_dir)
+            ensure_workflow_session(bridge, session_id, effective_project_dir)
             state = bridge.call("state.get", {"sessionId": session_id})
             if not state or not isinstance(state, dict):
                 logger.debug("state.get returned non-dict: %s", type(state).__name__)
@@ -69,24 +70,15 @@ def create_prompt_hook(
             if state.get("taskCompletionInProgress"):
                 _dispatch_task_review(bridge, session_id, state, effective_project_dir)
 
-            # USER_GATE handling: either auto-approve (robot-artisan) or
-            # signal user message for structural enforcement.
-            if state.get("phaseState") == "USER_GATE":
-                if state.get("activeAgent") == "robot-artisan":
-                    _dispatch_auto_approve(bridge, session_id, effective_project_dir)
-                else:
-                    bridge.call(
-                        "message.process",
-                        {
-                            "sessionId": session_id,
-                            "parts": [
-                                {
-                                    "type": "text",
-                                    "text": "(user message detected via pre_llm_call)",
-                                }
-                            ],
-                        },
-                    )
+            # USER_GATE handling: only robot-artisan auto-approval may
+            # synthesize workflow input here. Ordinary Hermes pre-turn hook
+            # execution must remain observational so approval eligibility still
+            # depends on real user-originated input.
+            if (
+                state.get("phaseState") == "USER_GATE"
+                and state.get("activeAgent") == "robot-artisan"
+            ):
+                _dispatch_auto_approve(bridge, session_id, effective_project_dir)
         except Exception:
             logger.debug("State/gate check failed in pre_llm_call hook", exc_info=True)
 

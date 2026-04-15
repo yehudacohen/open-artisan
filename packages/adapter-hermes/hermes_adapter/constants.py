@@ -169,6 +169,21 @@ WORKFLOW_TOOLS: list[tuple[str, str, str, dict]] = [
         },
     ),
     (
+        "oa_submit_task_review",
+        "submit_task_review",
+        "Submit the per-task review result for the currently pending implementation task review.",
+        {
+            "type": "object",
+            "properties": {
+                "review_output": {
+                    "type": "string",
+                    "description": "Raw review output from the isolated per-task reviewer.",
+                },
+            },
+            "required": ["review_output"],
+        },
+    ),
+    (
         "oa_reset_task",
         "reset_task",
         "Reset one or more implementation DAG tasks back to pending by task ID.",

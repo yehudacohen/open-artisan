@@ -159,18 +159,20 @@ class TestPerPhaseContent:
 
 
 class TestUserGateDetection:
-    """Hook calls message.process at USER_GATE for structural enforcement."""
+    """Ordinary USER_GATE hook turns remain observational."""
 
-    def test_calls_message_process_at_user_gate(self, started_bridge):
-        """When state is USER_GATE, hook should call message.process."""
-        started_bridge.set_response("state.get", {"phaseState": "USER_GATE"})
-        started_bridge.set_response("message.process", None)
+    def test_does_not_call_message_process_at_user_gate_for_normal_sessions(
+        self, started_bridge
+    ):
+        """When state is USER_GATE, ordinary Hermes turns should not fake user input."""
+        started_bridge.set_response(
+            "state.get", {"phaseState": "USER_GATE", "activeAgent": "artisan"}
+        )
         started_bridge.set_response("prompt.build", "prompt text")
         hook = create_prompt_hook(started_bridge, "s1")
         hook()
         msg_calls = started_bridge.get_calls("message.process")
-        assert len(msg_calls) == 1
-        assert msg_calls[0][1]["sessionId"] == "s1"
+        assert len(msg_calls) == 0
 
     def test_does_not_call_message_process_at_draft(self, started_bridge):
         """When state is DRAFT, hook should NOT call message.process."""

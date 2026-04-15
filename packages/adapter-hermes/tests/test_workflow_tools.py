@@ -120,6 +120,23 @@ class TestBridgeDelegation:
         assert params["name"] == "reset_task"
         assert params["args"]["task_ids"] == ["T3"]
 
+    def test_submit_task_review_delegates_review_output(self, started_bridge):
+        """oa_submit_task_review should relay review_output to bridge tool.execute."""
+        started_bridge.set_response("tool.execute", 'Task "T1" review passed.')
+        result = _handle_workflow_tool(
+            started_bridge,
+            "submit_task_review",
+            "test-session",
+            "/tmp/project",
+            {"review_output": '{"passed": true, "issues": []}'},
+        )
+        assert "review passed" in result
+        calls = started_bridge.get_calls("tool.execute")
+        assert len(calls) == 1
+        params = calls[0][1]
+        assert params["name"] == "submit_task_review"
+        assert params["args"]["review_output"] == '{"passed": true, "issues": []}'
+
     def test_submit_feedback_relays_user_message_first(self, started_bridge):
         """submit_feedback should relay the actual user text through message.process first."""
         started_bridge.set_response(

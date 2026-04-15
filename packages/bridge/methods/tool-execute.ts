@@ -21,8 +21,10 @@ import type { ToolExecuteParams } from "../protocol"
 import { SESSION_NOT_FOUND, INVALID_PARAMS } from "../protocol"
 import type { WorkflowState } from "../../core/types"
 
+import { createHash } from "node:crypto"
 import { resolve } from "node:path"
 import { readFileSync } from "node:fs"
+import { readFile } from "node:fs/promises"
 import { parseSelectModeArgs } from "../../core/tools/select-mode"
 import { processMarkScanComplete } from "../../core/tools/mark-scan-complete"
 import { processMarkTaskComplete } from "../../core/tools/mark-task-complete"
@@ -74,6 +76,23 @@ function subagentError(toolName: string, feature: string): string {
     `Error: ${toolName} requires ${feature} which is not available in bridge mode. ` +
     `Use an in-process adapter or configure an LLM client.`
   )
+}
+
+function artifactHash(text: string): string {
+  return createHash("sha256").update(text).digest("hex").slice(0, 16)
+}
+
+async function readCurrentArtifactHash(state: WorkflowState): Promise<string | null> {
+  const artifactKey = PHASE_TO_ARTIFACT[state.phase]
+  if (!artifactKey) return null
+  const artifactPath = state.artifactDiskPaths[artifactKey]
+  if (!artifactPath) return null
+  try {
+    const content = await readFile(artifactPath, "utf-8")
+    return artifactHash(content)
+  } catch {
+    return null
+  }
 }
 
 /**
@@ -281,6 +300,13 @@ const handleMarkSatisfied: ToolHandler = async (args, toolCtx, ctx) => {
     return subagentError("mark_satisfied", "the self-review subagent (SubagentDispatcher)")
   }
   const state = requireState(ctx, toolCtx.sessionId)
+  const currentArtifactHash = await readCurrentArtifactHash(state)
+  if (state.reviewArtifactHash && currentArtifactHash && state.reviewArtifactHash !== currentArtifactHash) {
+    return (
+      "Error: The artifact changed after it was submitted for review. " +
+      "Call `request_review` again so the reviewer evaluates the current artifact instead of stale content."
+    )
+  }
   const rawCriteria = (args.criteria_met ?? []) as Array<{
     criterion: string; met: boolean; evidence: string;
     severity?: "blocking" | "suggestion"; score?: string | number
@@ -307,9 +333,60 @@ const handleRequestReview: ToolHandler = async (args, toolCtx, ctx) => {
   const { store, sm } = ctx.engine!
   const state = requireState(ctx, toolCtx.sessionId)
 
-  const validReviewStates = new Set(["DRAFT", "CONVENTIONS", "REVISE"])
+  const validReviewStates = new Set(["DRAFT", "CONVENTIONS", "REVISE", "REVIEW"])
   if (!validReviewStates.has(state.phaseState)) {
-    return `Error: request_review can only be called in DRAFT, CONVENTIONS, or REVISE state (current: ${state.phase}/${state.phaseState}).`
+    return `Error: request_review can only be called in DRAFT, CONVENTIONS, REVISE, or REVIEW state (current: ${state.phase}/${state.phaseState}).`
+  }
+
+  if (state.phaseState === "REVIEW") {
+    if (!(args.artifact_content as string | undefined) && !((args.artifact_files as string[] | undefined)?.length)) {
+      return (
+        "Error: request_review at REVIEW state requires either artifact_content " +
+        "or artifact_files so the review source of truth can be updated."
+      )
+    }
+
+    const artifactContent = args.artifact_content as string | undefined
+    const artifactKey = PHASE_TO_ARTIFACT[state.phase]
+    let artifactDiskPath: string | null = null
+    if (artifactContent && artifactKey && artifactKey !== "implementation") {
+      try {
+        artifactDiskPath = await writeArtifact(toolCtx.directory, artifactKey, artifactContent, state.featureName)
+      } catch {
+        // Non-fatal
+      }
+    }
+
+    let reviewHash: string | null = null
+    if (artifactDiskPath) {
+      try {
+        const diskContent = await readFile(artifactDiskPath, "utf-8")
+        reviewHash = artifactHash(diskContent)
+      } catch {
+        // Non-fatal
+      }
+    } else if (artifactContent) {
+      reviewHash = artifactHash(artifactContent)
+    }
+
+    const artifactFiles = args.artifact_files as string[] | undefined
+    await store.update(toolCtx.sessionId, (draft) => {
+      draft.retryCount = 0
+      if (reviewHash) draft.reviewArtifactHash = reviewHash
+      if (artifactDiskPath && artifactKey) {
+        draft.artifactDiskPaths[artifactKey] = artifactDiskPath
+      }
+      if (artifactFiles && artifactFiles.length > 0) {
+        const existing = new Set(draft.reviewArtifactFiles)
+        for (const f of artifactFiles) {
+          if (!existing.has(f)) draft.reviewArtifactFiles.push(f)
+        }
+      }
+    })
+
+    const diskMsg = artifactDiskPath ? ` Artifact updated at ${artifactDiskPath}.` : ""
+    const filesMsg = artifactFiles?.length ? ` Registered ${artifactFiles.length} review file(s).` : ""
+    return `Artifact re-submitted for ${state.phase} review.${diskMsg}${filesMsg}`
   }
 
   const event = state.phaseState === "REVISE" ? "revision_complete" : "draft_complete"
@@ -327,6 +404,17 @@ const handleRequestReview: ToolHandler = async (args, toolCtx, ctx) => {
       // Non-fatal — disk write failure does not block the transition
     }
   }
+  let reviewHash: string | null = null
+  if (artifactDiskPath) {
+    try {
+      const diskContent = await readFile(artifactDiskPath, "utf-8")
+      reviewHash = artifactHash(diskContent)
+    } catch {
+      // Non-fatal
+    }
+  } else if (artifactContent) {
+    reviewHash = artifactHash(artifactContent)
+  }
 
   // Merge agent-provided artifact_files into reviewArtifactFiles
   const artifactFiles = args.artifact_files as string[] | undefined
@@ -335,8 +423,12 @@ const handleRequestReview: ToolHandler = async (args, toolCtx, ctx) => {
     draft.phase = outcome.nextPhase
     draft.phaseState = outcome.nextPhaseState
     draft.retryCount = 0
+    draft.reviewArtifactHash = null
     if (artifactDiskPath && artifactKey) {
       draft.artifactDiskPaths[artifactKey] = artifactDiskPath
+    }
+    if (artifactContent) {
+      draft.reviewArtifactHash = reviewHash
     }
     if (artifactFiles && artifactFiles.length > 0) {
       const existing = new Set(draft.reviewArtifactFiles)

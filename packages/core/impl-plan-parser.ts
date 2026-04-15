@@ -73,19 +73,21 @@ const TASK_HEADER_BARE_RE = /^#{1,3}\s+((?:T\d+[A-Za-z0-9_-]*|task-[A-Za-z0-9_-]
  * Matches "**Dependencies:** T1, T2" or "**Depends on:** T1".
  * The separator pattern `[*:\s]+` handles bold Markdown closing `**` before the colon.
  */
-const DEPS_RE = /^\*{0,2}(?:Dep(?:endencies|ends on)|Requires?)[*:\s]+(.+)/i
+const DEPS_RE = /^\s*(?:-\s*)?\*{0,2}(?:Dep(?:endencies|ends on)|Requires?)[*:\s]+(.*)$/i
 
 /** Matches "**Expected tests:** tests/foo.test.ts, tests/bar.test.ts" */
-const TESTS_RE = /^\*{0,2}Expected\s+tests?[*:\s]+(.+)/i
+const TESTS_RE = /^\s*(?:-\s*)?\*{0,2}Expected\s+tests?[*:\s]+(.*)$/i
 
 /** Matches "**Complexity:** small" */
-const COMPLEXITY_RE = /^\*{0,2}Complexity[*:\s]+(.+)/i
+const COMPLEXITY_RE = /^\s*(?:-\s*)?\*{0,2}Complexity[*:\s]+(.*)$/i
 
 /** Matches "**Category:** scaffold" or "**Category:** human-gate" */
-const CATEGORY_RE = /^\*{0,2}Category[*:\s]+(.+)/i
+const CATEGORY_RE = /^\s*(?:-\s*)?\*{0,2}Category[*:\s]+(.*)$/i
 
 /** Matches "**Files:** src/foo.ts, src/bar.ts" or "**Expected files:** ..." */
-const FILES_RE = /^\*{0,2}(?:Expected\s+)?files?[*:\s]+(.+)/i
+const FILES_RE = /^\s*(?:-\s*)?\*{0,2}(?:Expected\s+)?files?[*:\s]+(.*)$/i
+
+const LIST_ITEM_RE = /^\s*[-*]\s+(.+)$/
 
 // ---------------------------------------------------------------------------
 // Line-level parsers
@@ -145,6 +147,7 @@ function extractRawBlocks(text: string): RawBlock[] {
   const blocks: RawBlock[] = []
   let current: RawBlock | null = null
   let inCodeBlock = false
+  let pendingListField: "deps" | "tests" | "files" | null = null
 
   for (const line of lines) {
     // Track fenced code blocks — ignore task headers inside them
@@ -174,6 +177,7 @@ function extractRawBlocks(text: string): RawBlock[] {
         rawCategory: "",
         bodyLines: [],
       }
+      pendingListField = null
       continue
     }
 
@@ -182,32 +186,58 @@ function extractRawBlocks(text: string): RawBlock[] {
     const depsMatch = DEPS_RE.exec(line)
     if (depsMatch) {
       current.rawDeps = depsMatch[1]!.trim()
+      pendingListField = current.rawDeps === "" ? "deps" : null
       continue
     }
 
     const testsMatch = TESTS_RE.exec(line)
     if (testsMatch) {
       current.rawTests = testsMatch[1]!.trim()
+      pendingListField = current.rawTests === "" ? "tests" : null
       continue
     }
 
     const filesMatch = FILES_RE.exec(line)
     if (filesMatch) {
       current.rawFiles = filesMatch[1]!.trim()
+      pendingListField = current.rawFiles === "" ? "files" : null
       continue
     }
 
     const complexityMatch = COMPLEXITY_RE.exec(line)
     if (complexityMatch) {
       current.rawComplexity = complexityMatch[1]!.trim()
+      pendingListField = null
       continue
     }
 
     const categoryMatch = CATEGORY_RE.exec(line)
     if (categoryMatch) {
       current.rawCategory = categoryMatch[1]!.trim()
+      pendingListField = null
       continue
     }
+
+    const listItemMatch = pendingListField ? LIST_ITEM_RE.exec(line) : null
+    if (pendingListField && listItemMatch) {
+      const value = listItemMatch[1]!.trim()
+      if (value.length > 0) {
+        if (pendingListField === "deps") {
+          current.rawDeps = current.rawDeps ? `${current.rawDeps}, ${value}` : value
+        } else if (pendingListField === "tests") {
+          current.rawTests = current.rawTests ? `${current.rawTests}, ${value}` : value
+        } else {
+          current.rawFiles = current.rawFiles ? `${current.rawFiles}, ${value}` : value
+        }
+      }
+      continue
+    }
+
+    if (pendingListField && line.trim() === "") {
+      continue
+    }
+
+    pendingListField = null
 
     current.bodyLines.push(line)
   }

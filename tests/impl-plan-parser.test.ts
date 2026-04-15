@@ -505,4 +505,28 @@ Build the page without specifying files.
     expect(t2.expectedFiles).toEqual(["src/logic.ts", "src/helpers.ts"])
     expect(t2.expectedTests).toEqual(["tests/logic.test.ts"])
   })
+
+  it("parses bullet-list Files and Expected tests fields", () => {
+    const plan = `
+## Task T1: Bridge parity
+- **Dependencies:** none
+- **Files:**
+  - packages/bridge/methods/tool-execute.ts
+  - tests/bridge-tool-execute.test.ts
+- **Expected tests:**
+  - tests/bridge-tool-execute.test.ts
+- **Complexity:** medium
+
+Tighten bridge parity behavior.
+`
+    const result = parseImplPlan(plan)
+    if (!result.success) throw new Error(result.errors.join("; "))
+    const t1 = Array.from(result.dag.tasks).find((t) => t.id === "T1")!
+    expect(t1.expectedFiles).toEqual([
+      "packages/bridge/methods/tool-execute.ts",
+      "tests/bridge-tool-execute.test.ts",
+    ])
+    expect(t1.expectedTests).toEqual(["tests/bridge-tool-execute.test.ts"])
+    expect(t1.description).toContain("Tighten bridge parity behavior")
+  })
 })

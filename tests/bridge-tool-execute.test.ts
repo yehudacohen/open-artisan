@@ -607,6 +607,61 @@ describe("tool.execute — agent-only mode", () => {
     expect(stateAfter?.phaseState).toBe("REVIEW")
   })
 
+  it("blocks mark_satisfied when the reviewed artifact changed on disk", async () => {
+    await agentExec("select_mode", { mode: "GREENFIELD", feature_name: `ao-hash-${Date.now()}` })
+    await agentExec("request_review", {
+      summary: "Plan",
+      artifact_description: "Plan",
+      artifact_content: "# Initial plan",
+    })
+
+    const stateBefore = agentCtx.engine!.store.get("ao-session")
+    const planPath = stateBefore?.artifactDiskPaths.plan
+    expect(planPath).toBeTruthy()
+    if (!planPath) return
+
+    await Bun.write(planPath, "# Modified plan after review")
+
+    const criteria = Array.from({ length: 16 }, (_, i) => ({
+      criterion: `Criterion ${i + 1}`,
+      met: true,
+      evidence: "verified",
+      severity: "blocking",
+    }))
+
+    const result = await agentExec("mark_satisfied", { criteria_met: criteria })
+    expect(result).toContain("artifact changed after it was submitted for review")
+
+    const stateAfter = agentCtx.engine!.store.get("ao-session")
+    expect(stateAfter?.phaseState).toBe("REVIEW")
+  })
+
+  it("allows request_review at REVIEW to refresh artifact hash and review files", async () => {
+    await exec("select_mode", { mode: "GREENFIELD", feature_name: `review-refresh-${Date.now()}` })
+    await ctx.engine!.store.update("s1", (d) => {
+      d.phase = "TESTS"
+      d.phaseState = "REVIEW"
+      d.featureName = d.featureName ?? `review-refresh-${Date.now()}`
+      d.artifactDiskPaths.tests = join(tmpDir, ".openartisan", d.featureName!, "tests.md")
+      d.reviewArtifactHash = "stale-hash"
+    })
+
+    const result = await exec("request_review", {
+      artifact_content: "# Updated tests artifact",
+      artifact_files: ["tests/bridge-tool-execute.test.ts"],
+      summary: "Updated tests",
+      artifact_description: "Tests artifact",
+    })
+
+    expect(result).toContain("re-submitted")
+    expect(result).toContain("Registered 1 review file")
+
+    const state = ctx.engine!.store.get("s1")
+    expect(state?.phaseState).toBe("REVIEW")
+    expect(state?.reviewArtifactHash).not.toBe("stale-hash")
+    expect(state?.reviewArtifactFiles).toContain("tests/bridge-tool-execute.test.ts")
+  })
+
   it("allows request_review from DISCOVERY/CONVENTIONS", async () => {
     await exec("select_mode", { mode: "GREENFIELD", feature_name: `conv-${Date.now()}` })
     await ctx.engine!.store.update("s1", (d) => {

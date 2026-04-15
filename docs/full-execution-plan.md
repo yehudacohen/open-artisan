@@ -47,10 +47,15 @@ Be token-efficient by:
 Status update:
 
 - Completed: `harness-quality-hardening`
+- Completed: `cross-client-shared-bridge-e2e`
+- In progress: `post-feature-cleanup-quality-pass`
 - Landed commits from that slice:
   - `d2e61e3` `fix: handle Hermes shared bridge socket RPC`
   - `c4bb86c` `fix: resume workflows from persisted feature state`
   - `a026d84` `fix: harden bridge review and impl-plan parsing`
+  - `7f19a02` `fix: harden shared bridge workflow parity`
+  - `39c0779` `test: cover shared bridge lifecycle end to end`
+  - `840eafb` `fix: restore bridge impl-plan approval parity`
 - Historical-state policy: do not backfill already-completed persisted workflow-state files just to mirror parser/runtime fixes discovered after completion unless a concrete runtime/product need requires migration.
 
 ### 1. Tighten artifact revision discipline

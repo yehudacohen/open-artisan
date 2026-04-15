@@ -17,6 +17,8 @@ The operating model is:
 - Shared bridge feature workflow was completed successfully in Hermes.
 - Shared bridge implementation landed in multiple commits and reached `DONE`.
 - `harness-quality-hardening` was completed successfully in Hermes and reached `DONE`.
+- `cross-client-shared-bridge-e2e` was completed successfully in Hermes and reached `DONE`.
+- `post-feature-cleanup-quality-pass` is the current active Hermes-driven cleanup slice.
 - Hermes dogfooding exposed and fixed multiple framework issues:
   - approval routing at `USER_GATE`
   - Hermes hook/tool API mismatches
@@ -43,6 +45,9 @@ Recent commits of note:
 - `d2e61e3` `fix: handle Hermes shared bridge socket RPC`
 - `c4bb86c` `fix: resume workflows from persisted feature state`
 - `a026d84` `fix: harden bridge review and impl-plan parsing`
+- `7f19a02` `fix: harden shared bridge workflow parity`
+- `39c0779` `test: cover shared bridge lifecycle end to end`
+- `840eafb` `fix: restore bridge impl-plan approval parity`
 
 ## Completed Harness-Quality Slice
 
@@ -145,17 +150,17 @@ Be token-efficient by:
 
 ## Recommendation for the Next Session
 
-Start a new Hermes-driven workflow for the next planned backlog item rather than broadening `harness-quality-hardening` further.
+Resume the active Hermes-driven cleanup workflow before starting another backlog item.
 
 Recommended next feature/workflow name:
 
-- `cross-client-shared-bridge-e2e`
+- `post-feature-cleanup-quality-pass`
 
 Recommended scope inside that workflow:
 
-1. Add cross-client E2E shared-bridge tests
-2. Dogfood real multi-client bridge behavior through Hermes
-3. Fix any bridge/client/runtime defects immediately and return to Hermes
+1. Finish cleanup/parity tasks already in progress
+2. Fix any residual workflow/runtime defects immediately and return to Hermes
+3. Only after that, move to the next planned backlog item
 
 ## Instruction for the Next Session
 
@@ -163,7 +168,7 @@ At the start of the next session:
 
 1. Read this file.
 2. Confirm recent commits/worktree state.
-3. Start or resume a Hermes-driven workflow for `cross-client-shared-bridge-e2e`.
+3. Start or resume a Hermes-driven workflow for `post-feature-cleanup-quality-pass`.
 4. Continue using Hermes as the main execution driver.
 5. Fix framework issues directly in the repo when Hermes exposes them.
 6. Return to Hermes after each fix.

@@ -75,8 +75,8 @@ const TASK_HEADER_BARE_RE = /^#{1,3}\s+((?:T\d+[A-Za-z0-9_-]*|task-[A-Za-z0-9_-]
  */
 const DEPS_RE = /^\s*(?:-\s*)?\*{0,2}(?:Dep(?:endencies|ends on)|Requires?)[*:\s]+(.*)$/i
 
-/** Matches "**Expected tests:** tests/foo.test.ts, tests/bar.test.ts" */
-const TESTS_RE = /^\s*(?:-\s*)?\*{0,2}Expected\s+tests?[*:\s]+(.*)$/i
+/** Matches "**Expected tests:** ..." or shorthand "**Tests:** ..." */
+const TESTS_RE = /^\s*(?:-\s*)?\*{0,2}(?:Expected\s+)?tests?[*:\s]+(.*)$/i
 
 /** Matches "**Complexity:** small" */
 const COMPLEXITY_RE = /^\s*(?:-\s*)?\*{0,2}Complexity[*:\s]+(.*)$/i

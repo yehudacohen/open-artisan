@@ -44,6 +44,8 @@ import type { AutoApproveResult } from "../../core/auto-approve"
 import { writeArtifact } from "../../core/artifact-store"
 import { parseImplPlan } from "../../core/impl-plan-parser"
 import { PHASE_TO_ARTIFACT } from "../../core/artifacts"
+import { createImplDAG } from "../../core/dag"
+import { nextSchedulerDecision, resolveHumanGate } from "../../core/scheduler"
 import {
   buildAutoApproveRequest,
   buildRobotArtisanAutoApproveFailureFeedback,
@@ -469,6 +471,98 @@ const handleSubmitFeedback: ToolHandler = async (args, toolCtx, ctx) => {
   if (feedbackType === "approve") {
     if (state.phaseState === "ESCAPE_HATCH") {
       return "Error: Cannot approve while an escape hatch is pending."
+    }
+
+    if (
+      state.phase === "IMPLEMENTATION" &&
+      state.implDag &&
+      (!args.resolved_human_gates || (args.resolved_human_gates as string[]).length === 0)
+    ) {
+      const unresolvedGates = state.implDag.filter(
+        (t) => t.status === "human-gated" && (!t.humanGate || !t.humanGate.resolved),
+      )
+      if (unresolvedGates.length > 0) {
+        const gateList = unresolvedGates
+          .map((t) => `  - **${t.id}:** ${t.humanGate?.whatIsNeeded ?? t.description}`)
+          .join("\n")
+        return (
+          `Cannot approve — ${unresolvedGates.length} unresolved human gate(s):\n\n` +
+          `${gateList}\n\n` +
+          "Please complete the required actions above, then call `submit_feedback` with `resolved_human_gates`."
+        )
+      }
+    }
+
+    if (state.phase === "IMPLEMENTATION" && state.implDag && args.resolved_human_gates && (args.resolved_human_gates as string[]).length > 0) {
+      const dag = createImplDAG(Array.from(state.implDag))
+      const resolvedIds: string[] = []
+      const errors: string[] = []
+
+      for (const gateId of args.resolved_human_gates as string[]) {
+        const resolved = resolveHumanGate(dag, gateId)
+        if (resolved) {
+          resolvedIds.push(gateId)
+        } else {
+          const task = Array.from(dag.tasks).find((t) => t.id === gateId)
+          if (!task) errors.push(`Task "${gateId}" not found in DAG`)
+          else if (task.status !== "human-gated") errors.push(`Task "${gateId}" is not human-gated (status: ${task.status})`)
+        }
+      }
+
+      if (errors.length > 0) {
+        return `Error resolving human gates:\n${errors.map((e) => `  - ${e}`).join("\n")}`
+      }
+
+      const nextDecision = nextSchedulerDecision(dag)
+      const updatedNodes = Array.from(dag.tasks).map((t) => ({
+        ...t,
+        ...(t.humanGate ? { humanGate: { ...t.humanGate } } : {}),
+      }))
+
+      const remainingGates = Array.from(dag.tasks).filter(
+        (t) => t.status === "human-gated" && (!t.humanGate || !t.humanGate.resolved),
+      )
+      if (remainingGates.length > 0) {
+        await store.update(toolCtx.sessionId, (draft) => {
+          draft.implDag = updatedNodes
+          draft.userGateMessageReceived = false
+        })
+        return (
+          `Resolved ${resolvedIds.length} human gate(s): ${resolvedIds.join(", ")}.\n\n` +
+          `**${remainingGates.length} unresolved gate(s) remain.**\n\n` +
+          "Please resolve these and call `submit_feedback` again with `resolved_human_gates`."
+        )
+      }
+
+      if (nextDecision.action === "dispatch") {
+        await store.update(toolCtx.sessionId, (draft) => {
+          draft.implDag = updatedNodes
+          draft.phase = "IMPLEMENTATION"
+          draft.phaseState = "DRAFT"
+          draft.currentTaskId = nextDecision.task.id
+          draft.iterationCount = 0
+          draft.retryCount = 0
+          draft.userGateMessageReceived = false
+        })
+        return (
+          `Resolved ${resolvedIds.length} human gate(s): ${resolvedIds.join(", ")}.\n\n` +
+          "Returning to IMPLEMENTATION/DRAFT — downstream tasks are now unblocked."
+        )
+      }
+
+      if (nextDecision.action !== "complete") {
+        await store.update(toolCtx.sessionId, (draft) => {
+          draft.implDag = updatedNodes
+        })
+        return (
+          `Resolved ${resolvedIds.length} human gate(s): ${resolvedIds.join(", ")}.\n\n` +
+          `However, the scheduler reports: ${nextDecision.message}`
+        )
+      }
+
+      await store.update(toolCtx.sessionId, (draft) => {
+        draft.implDag = updatedNodes
+      })
     }
 
     if (state.phase === "IMPL_PLAN") {

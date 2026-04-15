@@ -1377,13 +1377,47 @@ describe("request_review — re-submit at REVIEW state", () => {
     )
     expect(resubmitResult).not.toContain("Error")
     expect(resubmitResult).toContain("re-submitted")
-    expect(resubmitResult).toContain("updated")
+    expect(resubmitResult).toContain("in-place revision")
 
     // State should still be in REVIEW
     const store = plugin._testStore
     const state = store.get(sid)
     expect(state.phaseState).toBe("REVIEW")
     expect(state.iterationCount).toBe(0)
+  })
+
+  it("classifies unchanged REVIEW resubmission and preserves iteration count", async () => {
+    const sid = `int-test-${Date.now()}-resubmit-unchanged`
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: sid } } },
+    })
+    const ctx = { directory: tempDir, sessionId: sid }
+
+    await plugin.tool.select_mode.execute(
+      { mode: "GREENFIELD", feature_name: "resubmit-unchanged-test" },
+      ctx,
+    )
+    await plugin.tool.request_review.execute(
+      { summary: "Initial plan", artifact_description: "Plan v1", artifact_content: "Stable plan content" },
+      ctx,
+    )
+
+    const store = plugin._testStore
+    await store.update(sid, (draft: any) => {
+      draft.iterationCount = 2
+    })
+
+    const resubmitResult = await plugin.tool.request_review.execute(
+      { summary: "Same plan", artifact_description: "Plan v1", artifact_content: "Stable plan content" },
+      ctx,
+    )
+
+    expect(resubmitResult).toContain("unchanged resubmission")
+    expect(resubmitResult).toContain("review iteration 2/")
+
+    const state = store.get(sid)
+    expect(state.phaseState).toBe("REVIEW")
+    expect(state.iterationCount).toBe(2)
   })
 
   it("rejects request_review at REVIEW state without artifact_content", async () => {

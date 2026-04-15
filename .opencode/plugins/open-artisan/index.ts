@@ -104,6 +104,25 @@ function artifactHash(text: string): string {
   return createHash("sha256").update(text).digest("hex").slice(0, 16)
 }
 
+type ReviewResubmissionKind = "unchanged resubmission" | "in-place revision" | "regenerated artifact"
+
+function classifyReviewResubmission(options: {
+  previousReviewHash: string | null
+  nextReviewHash: string | null
+  previousArtifactPath: string | null
+  nextArtifactPath: string | null
+}): ReviewResubmissionKind {
+  if (options.previousReviewHash && options.nextReviewHash && options.previousReviewHash === options.nextReviewHash) {
+    return "unchanged resubmission"
+  }
+
+  if (options.previousArtifactPath && options.nextArtifactPath && options.previousArtifactPath === options.nextArtifactPath) {
+    return "in-place revision"
+  }
+
+  return "regenerated artifact"
+}
+
 /**
  * Phases where the artifact is a single plan document under .openartisan/.
  * For these phases, the complete expected file list is just the artifact path.
@@ -2200,6 +2219,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             }
             let artifactDiskPath: string | null = null
             const artifactKey = PHASE_TO_ARTIFACT[state.phase]
+            const previousArtifactPath = artifactKey ? (state.artifactDiskPaths[artifactKey] ?? null) : null
             if (args.artifact_content && artifactKey && artifactKey !== "implementation") {
               try {
                 const cwd = context.directory || process.cwd()
@@ -2219,12 +2239,18 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             } else if (args.artifact_content) {
               reviewHash = artifactHash(args.artifact_content)
             }
+            const resubmissionKind = classifyReviewResubmission({
+              previousReviewHash: state.reviewArtifactHash,
+              nextReviewHash: reviewHash,
+              previousArtifactPath,
+              nextArtifactPath: artifactDiskPath,
+            })
             // Only reset iterationCount when artifact_content is provided (actual
             // content change). Providing just artifact_files is metadata that
             // registers files for the reviewer — it should NOT reset the review
             // escalation timer. Otherwise the agent can loop forever by calling
             // request_review to reset the counter before escalation triggers.
-            const contentChanged = !!args.artifact_content
+            const contentChanged = !!args.artifact_content && resubmissionKind !== "unchanged resubmission"
             await store.update(sessionId, (draft) => {
               if (contentChanged) {
                 draft.iterationCount = 0
@@ -2257,8 +2283,10 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             const iterMsg = contentChanged
               ? "Review cycle restarted (iteration count reset to 0). "
               : `Artifact files updated (review iteration ${updatedState.iterationCount}/${MAX_REVIEW_ITERATIONS} preserved). `
+            const kindMsg = `Submission classified as **${resubmissionKind}**.`
             return (
               `Artifact re-submitted for ${updatedState.phase} review. ${artifactDiskPath ? "The on-disk version has been updated." : ""}${diskMsg}${filesMsg}\n\n` +
+              `${kindMsg} ` +
               `${iterMsg}` +
               `Now call \`mark_satisfied\` with your criteria evaluation to proceed with the review.`
             )

@@ -16,6 +16,7 @@ import {
   handleSessionCreated,
   handleSessionDeleted,
 } from "#bridge/methods/lifecycle"
+import { loadBridgeLeaseSnapshot, loadBridgeMetadata } from "#bridge/bridge-meta"
 import { handleStateGet } from "#bridge/methods/state"
 import type { BridgeContext } from "#bridge/server"
 import type { EngineContext } from "#core/engine-context"
@@ -149,6 +150,15 @@ describe("lifecycle.sessionDeleted", () => {
     await handleSessionDeleted({ sessionId: "s1" }, ctx)
     expect(ctx.engine!.store.get("s1")?.featureName).toBe("persisted-feature")
   })
+
+  it("removes the detached client lease", async () => {
+    await handleInit({ projectDir: tmpDir }, ctx)
+    await handleSessionCreated({ sessionId: "s1", agent: "artisan" }, ctx)
+    await handleSessionDeleted({ sessionId: "s1" }, ctx)
+
+    const leases = await loadBridgeLeaseSnapshot(join(tmpDir, ".openartisan"))
+    expect(leases?.clients).toHaveLength(0)
+  })
 })
 
 describe("state.get", () => {
@@ -212,6 +222,23 @@ describe("lifecycle.shutdown", () => {
   it("shuttingDown starts as false", () => {
     expect(ctx.shuttingDown).toBe(false)
   })
+
+  it("returns blocked result when active clients remain", async () => {
+    await handleInit({ projectDir: tmpDir }, ctx)
+    await handleSessionCreated({ sessionId: "s1" }, ctx)
+
+    const result = await handleShutdown({}, ctx) as { ok: boolean; activeClientCount: number }
+    expect(result.ok).toBe(false)
+    expect(result.activeClientCount).toBe(1)
+  })
+
+  it("allows forced shutdown even when clients remain", async () => {
+    await handleInit({ projectDir: tmpDir }, ctx)
+    await handleSessionCreated({ sessionId: "s1" }, ctx)
+
+    const result = await handleShutdown({ force: true }, ctx)
+    expect(result).toBe("ok")
+  })
 })
 
 describe("lifecycle.init — double init", () => {
@@ -230,6 +257,13 @@ describe("lifecycle.init — double init", () => {
     expect(state).not.toBeNull()
     expect(state?.sessionId).toBe("s1")
     expect(state?.featureName).toBe("double-init-feat")
+  })
+
+  it("writes bridge metadata on init", async () => {
+    await handleInit({ projectDir: tmpDir }, ctx)
+    const metadata = await loadBridgeMetadata(join(tmpDir, ".openartisan"))
+    expect(metadata?.projectDir).toBe(tmpDir)
+    expect(metadata?.pid).toBe(process.pid)
   })
 })
 

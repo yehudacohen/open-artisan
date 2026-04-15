@@ -70,6 +70,11 @@ export interface LifecycleSessionParams {
   traceId?: string
 }
 
+export interface LifecycleShutdownParams {
+  force?: boolean
+  traceId?: string
+}
+
 export interface StateGetParams {
   sessionId: string
   traceId?: string

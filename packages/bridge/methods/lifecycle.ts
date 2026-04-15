@@ -8,9 +8,10 @@
  * lifecycle.sessionDeleted: Unregister and delete session state.
  */
 import { join } from "node:path"
+import { randomUUID } from "node:crypto"
 import { JSONRPCErrorException } from "json-rpc-2.0"
 import type { MethodHandler, BridgeContext } from "../server"
-import type { LifecycleInitParams, LifecycleSessionParams } from "../protocol"
+import type { LifecycleInitParams, LifecycleSessionParams, LifecycleShutdownParams } from "../protocol"
 import { INVALID_PARAMS, NOT_INITIALIZED } from "../protocol"
 
 import { createSessionStateStore, setPostUpdateHook } from "../../core/session-state"
@@ -24,9 +25,14 @@ import { setDefaultStateDir } from "../../core/logger"
 import { writeStatusFile } from "../../core/status-writer"
 import { checkPidFile, writePidFile, removePidFile } from "../pid-file"
 import { createBridgeLogger, adaptPinoToLogger } from "../structured-log"
+import { loadBridgeLeaseSnapshot, loadBridgeMetadata, upsertBridgeMetadata } from "../bridge-meta"
+import { detachBridgeClient, evaluateBridgeShutdownEligibility } from "../bridge-clients"
+import { upsertBridgeClientLease } from "../bridge-leases"
+import { DEFAULT_BRIDGE_SOCKET_FILENAME, SHARED_BRIDGE_PROTOCOL_VERSION } from "../bridge-discovery"
 import type { EngineContext } from "../../core/engine-context"
 import type { SubagentDispatcher } from "../../core/subagent-dispatcher"
 import type { NotificationSink } from "../../core/logger"
+import type { BridgeClientLease, BridgeMetadata } from "../shared-bridge-types"
 
 // Stub SubagentDispatcher — returns descriptive errors for Phase 4.
 const stubSubagentDispatcher: SubagentDispatcher = {
@@ -42,6 +48,34 @@ const stubSubagentDispatcher: SubagentDispatcher = {
 // No-op notification sink — bridge doesn't have a TUI.
 const noopNotify: NotificationSink = {
   toast() { /* no-op */ },
+}
+
+function buildBridgeMetadata(projectDir: string, stateDir: string, existing?: BridgeMetadata | null): BridgeMetadata {
+  const now = new Date().toISOString()
+  return {
+    version: 1,
+    bridgeInstanceId: existing?.bridgeInstanceId ?? randomUUID(),
+    projectDir,
+    stateDir,
+    transport: existing?.transport ?? "unix-socket",
+    socketPath: existing?.socketPath ?? join(stateDir, DEFAULT_BRIDGE_SOCKET_FILENAME),
+    pid: process.pid,
+    startedAt: existing?.startedAt ?? now,
+    protocolVersion: SHARED_BRIDGE_PROTOCOL_VERSION,
+    adapterCompatibility: existing?.adapterCompatibility ?? { claudeCode: true, hermes: true },
+    lastHeartbeatAt: now,
+  }
+}
+
+function buildSessionLease(sessionId: string, agent?: string): BridgeClientLease {
+  const now = new Date().toISOString()
+  return {
+    clientId: sessionId,
+    clientKind: agent === "hermes" ? "hermes" : agent === "claude-code" ? "claude-code" : "unknown",
+    sessionId,
+    attachedAt: now,
+    lastSeenAt: now,
+  }
 }
 
 export const handleInit: MethodHandler = async (params, ctx) => {
@@ -67,6 +101,9 @@ export const handleInit: MethodHandler = async (params, ctx) => {
 
   // Write PID file
   await writePidFile(stateDir)
+
+  const existingMetadata = await loadBridgeMetadata(stateDir)
+  await upsertBridgeMetadata(stateDir, buildBridgeMetadata(projectDir, stateDir, existingMetadata))
 
   // Create backend and store
   const backend = createFileSystemStateBackend(stateDir)
@@ -140,7 +177,21 @@ export const handlePing: MethodHandler = async () => {
   return "pong"
 }
 
-export const handleShutdown: MethodHandler = async (_params, ctx) => {
+export const handleShutdown: MethodHandler = async (params, ctx) => {
+  const p = params as Partial<LifecycleShutdownParams>
+  if (ctx.stateDir) {
+    const leases = await loadBridgeLeaseSnapshot(ctx.stateDir)
+    const eligibility = evaluateBridgeShutdownEligibility(leases ?? { bridgeInstanceId: "bridge", clients: [] })
+    if (!p.force && !eligibility.allowed) {
+      return {
+        ok: false,
+        reason: eligibility.reason ?? "Other bridge clients are still attached.",
+        activeClientCount: eligibility.activeClientCount,
+        blockingClientIds: eligibility.blockingClientIds,
+      }
+    }
+  }
+
   ctx.shuttingDown = true
   ctx.engine?.log.info("Bridge shutting down")
 
@@ -205,6 +256,15 @@ export const handleSessionCreated: MethodHandler = async (params, ctx) => {
   }
 
   log.debug("Session created", { detail: `${p.sessionId}${p.agent ? ` (agent: ${p.agent})` : ""}` })
+
+  if (ctx.stateDir && ctx.projectDir) {
+    await upsertBridgeClientLease({
+      projectDir: ctx.projectDir,
+      stateDir: ctx.stateDir,
+      lease: buildSessionLease(p.sessionId, normalizeAgentName(p.agent) ?? undefined),
+    })
+  }
+
   return null
 }
 
@@ -221,6 +281,15 @@ export const handleSessionDeleted: MethodHandler = async (params, ctx) => {
   const state = store.get(p.sessionId)
   if (!state) {
     return null
+  }
+
+  if (ctx.stateDir && ctx.projectDir) {
+    await detachBridgeClient({
+      projectDir: ctx.projectDir,
+      stateDir: ctx.stateDir,
+      clientId: p.sessionId,
+      reason: "disconnect",
+    })
   }
 
   log.debug("Session detached (state preserved)", {

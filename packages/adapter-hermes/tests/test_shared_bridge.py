@@ -161,6 +161,40 @@ class TestSharedBridgeAttachOrStart:
 
         assert result["kind"] == "started_new_and_attached"
 
+    def test_attach_or_start_reuses_bridge_started_by_prior_client(self, tmp_path):
+        first_bridge = make_bridge_client()
+        first = first_bridge.attach_or_start(
+            {
+                "projectDir": str(tmp_path),
+                "stateDir": str(tmp_path / ".openartisan"),
+                "clientId": "claude-a",
+                "clientKind": "claude-code",
+                "sessionId": "claude-session",
+            }
+        )
+
+        second_bridge = make_bridge_client()
+        second = second_bridge.attach_or_start(
+            {
+                "projectDir": str(tmp_path),
+                "stateDir": str(tmp_path / ".openartisan"),
+                "clientId": "hermes-a",
+                "clientKind": "hermes",
+                "sessionId": "hermes-session",
+            }
+        )
+
+        assert first["kind"] == "started_new_and_attached"
+        assert second["kind"] == "attached_existing"
+        assert (
+            second["metadata"]["bridgeInstanceId"]
+            == first["metadata"]["bridgeInstanceId"]
+        )
+        assert sorted(client["clientId"] for client in second["leases"]["clients"]) == [
+            "claude-a",
+            "hermes-a",
+        ]
+
     def test_attach_or_start_rejects_incompatible_live_bridge(self, tmp_path):
         _write_bridge_state(tmp_path, protocol_version="999", pid=os.getpid())
         bridge = make_bridge_client()

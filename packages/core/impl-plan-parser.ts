@@ -66,8 +66,8 @@ export type ParseResult = ParseSuccess | ParseError
  * This prevents normal section headings like "## Goal" or "## Task List" from
  * being misparsed as DAG tasks.
  */
-const TASK_HEADER_WITH_LABEL_RE = /^#{1,3}\s+Task\s+([A-Za-z][A-Za-z0-9_-]*)(?:\s*[:—–-]\s*|\s+)(.+)/i
-const TASK_HEADER_BARE_RE = /^#{1,3}\s+((?:T\d+[A-Za-z0-9_-]*|task-[A-Za-z0-9_-]+))\s*[:—–]\s*(.+)/i
+const TASK_HEADER_WITH_LABEL_RE = /^#{1,3}\s+Task\s+([A-Za-z][A-Za-z0-9_-]*)(?:\s*[:.—–-]\s*|\s+)(.+)/i
+const TASK_HEADER_BARE_RE = /^#{1,3}\s+((?:T\d+[A-Za-z0-9_-]*|task-[A-Za-z0-9_-]+))\s*[:.—–]\s*(.+)/i
 
 /**
  * Matches "**Dependencies:** T1, T2" or "**Depends on:** T1".

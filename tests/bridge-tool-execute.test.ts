@@ -266,6 +266,30 @@ describe("tool.execute — submit_feedback", () => {
     expect(state?.currentTaskId).not.toBeNull()
   })
 
+  it("rejects IMPL_PLAN approval when the plan cannot be parsed into a DAG", async () => {
+    await exec("select_mode", { mode: "GREENFIELD", feature_name: "bad-dag-feat" })
+    await ctx.engine!.store.update("s1", (d) => {
+      d.phase = "IMPL_PLAN"
+      d.phaseState = "USER_GATE"
+      d.userGateMessageReceived = true
+    })
+
+    const badPlan = `# Implementation Plan\n\n## Tasks\n\n### Not a task heading\n- **Dependencies:** none\n`
+
+    const result = await exec("submit_feedback", {
+      feedback_type: "approve",
+      feedback_text: "approved",
+      artifact_content: badPlan,
+    })
+
+    expect(result).toContain("Error: Failed to parse implementation plan into DAG")
+
+    const state = ctx.engine!.store.get("s1")
+    expect(state?.phase).toBe("IMPL_PLAN")
+    expect(state?.phaseState).toBe("USER_GATE")
+    expect(state?.implDag).toBeNull()
+  })
+
   it("revise returns bridge mode error (needs orchestrator)", async () => {
     await exec("select_mode", { mode: "GREENFIELD", feature_name: "rev-feat" })
     await ctx.engine!.store.update("s1", (d) => {

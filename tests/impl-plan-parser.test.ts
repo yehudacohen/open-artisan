@@ -280,6 +280,14 @@ describe("parseImplPlan — alternative header formats", () => {
     expect(Array.from(result.dag.tasks)[0]!.id).toBe("T1")
   })
 
+  it("parses '### T1. description' with period separator", () => {
+    const plan = `### T1. My task\n**Dependencies:** none\n`
+    const result = parseImplPlan(plan)
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    expect(Array.from(result.dag.tasks)[0]!.id).toBe("T1")
+  })
+
   it("parses 'Depends on' as an alias for Dependencies", () => {
     const plan = `
 ## Task T1: base

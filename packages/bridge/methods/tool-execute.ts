@@ -470,6 +470,24 @@ const handleSubmitFeedback: ToolHandler = async (args, toolCtx, ctx) => {
     if (state.phaseState === "ESCAPE_HATCH") {
       return "Error: Cannot approve while an escape hatch is pending."
     }
+
+    if (state.phase === "IMPL_PLAN") {
+      const artifactContent = args.artifact_content as string | undefined
+      if (!artifactContent) {
+        return (
+          "Error: IMPL_PLAN approval requires `artifact_content` so the implementation plan " +
+          "can be parsed into a DAG before entering IMPLEMENTATION."
+        )
+      }
+      const parseCheck = parseImplPlan(artifactContent)
+      if (!parseCheck.success) {
+        return (
+          `Error: Failed to parse implementation plan into DAG: ${parseCheck.errors.join("; ")}. ` +
+          "Fix the plan format and re-submit approval with corrected `artifact_content`."
+        )
+      }
+    }
+
     const outcome = sm.transition(state.phase, state.phaseState, "user_approve", state.mode)
     if (!outcome.success) return `Error: ${outcome.message}`
 

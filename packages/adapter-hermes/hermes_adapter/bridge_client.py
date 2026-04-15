@@ -340,6 +340,7 @@ class StdioBridgeClient:
         metadata: BridgeMetadata = {
             "version": 1,
             "bridgeInstanceId": str(params["clientId"]),
+            "pid": os.getpid(),
             "projectDir": str(params["projectDir"]),
             "stateDir": state_dir,
             "transport": "unix-socket",
@@ -350,6 +351,8 @@ class StdioBridgeClient:
             "adapterCompatibility": {"claudeCode": True, "hermes": True},
         }
         _metadata_path(state_dir).write_text(json.dumps(metadata, indent=2) + "\n")
+        (Path(state_dir) / ".bridge-pid").write_text(f"{os.getpid()}\n")
+        _socket_path(state_dir).touch()
         snapshot = _build_lease_snapshot(str(metadata["bridgeInstanceId"]), [lease])
         _leases_path(state_dir).write_text(json.dumps(snapshot, indent=2) + "\n")
         return {

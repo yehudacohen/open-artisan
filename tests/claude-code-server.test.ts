@@ -8,7 +8,7 @@ import { describe, expect, it, beforeEach, afterEach } from "bun:test"
 import { join } from "node:path"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { existsSync } from "node:fs"
+import { existsSync, readFileSync } from "node:fs"
 import { spawn, type ChildProcess } from "node:child_process"
 
 import { sendSocketRequest } from "#claude-code/src/socket-transport"
@@ -145,5 +145,26 @@ describe("artisan-server", () => {
     for (const r of results) {
       expect(r.result).toBe("pong")
     }
+  }, 15000)
+
+  it("reuses one bridge identity for two clients on the same state dir", async () => {
+    await startServer()
+
+    await rpc("lifecycle.sessionCreated", { sessionId: "claude-a", agent: "claude-code" })
+    await rpc("lifecycle.sessionCreated", { sessionId: "hermes-a", agent: "hermes" })
+
+    const metadata = JSON.parse(readFileSync(join(stateDir, ".bridge-meta.json"), "utf-8"))
+    const leases = JSON.parse(readFileSync(join(stateDir, ".bridge-clients.json"), "utf-8"))
+
+    expect(leases.bridgeInstanceId).toBe(metadata.bridgeInstanceId)
+    expect(leases.clients).toHaveLength(2)
+    expect(leases.clients.map((client: any) => client.clientId).sort()).toEqual([
+      "claude-a",
+      "hermes-a",
+    ])
+    expect(leases.clients.map((client: any) => client.clientKind).sort()).toEqual([
+      "claude-code",
+      "hermes",
+    ])
   }, 15000)
 })

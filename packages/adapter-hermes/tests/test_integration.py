@@ -12,10 +12,17 @@ import pytest
 from unittest.mock import AsyncMock
 
 from hermes_adapter import register, _on_session_start, _on_session_end
+from hermes_adapter.bridge_client import StdioBridgeClient
 from hermes_adapter.workflow_tools import register_workflow_tools
 from hermes_adapter.guard_wrappers import register_guard_wrappers, _guarded_handler
 from hermes_adapter.prompt_hook import create_prompt_hook
-from hermes_adapter.constants import WORKFLOW_TOOLS, GUARDED_TOOLS, TOOLSET_NAME
+from hermes_adapter.constants import (
+    BRIDGE_LEASES_FILENAME,
+    BRIDGE_METADATA_FILENAME,
+    WORKFLOW_TOOLS,
+    GUARDED_TOOLS,
+    TOOLSET_NAME,
+)
 from hermes_adapter.types import BridgeError
 
 from .conftest import MockBridgeClient, MockHermesContext
@@ -222,6 +229,61 @@ class TestResumeAfterCrash:
         result3 = _handle_oa_state(started_bridge, "s1")
         parsed3 = json.loads(result3)
         assert parsed3["phase"] == "PLANNING"
+
+
+# ---------------------------------------------------------------------------
+# Shared bridge reuse
+# ---------------------------------------------------------------------------
+
+
+class TestSharedBridgeReuse:
+    """Hermes should observe shared bridge identity with another client."""
+
+    def test_hermes_reuses_one_bridge_identity_with_existing_claude_client(
+        self, tmp_path
+    ):
+        state_dir = tmp_path / ".openartisan"
+
+        claude_bridge = StdioBridgeClient()
+        claude_result = claude_bridge.attach_or_start(
+            {
+                "projectDir": str(tmp_path),
+                "stateDir": str(state_dir),
+                "clientId": "claude-a",
+                "clientKind": "claude-code",
+                "sessionId": "claude-session",
+            }
+        )
+
+        hermes_bridge = StdioBridgeClient()
+        hermes_result = hermes_bridge.attach_or_start(
+            {
+                "projectDir": str(tmp_path),
+                "stateDir": str(state_dir),
+                "clientId": "hermes-a",
+                "clientKind": "hermes",
+                "sessionId": "hermes-session",
+            }
+        )
+
+        metadata = json.loads((state_dir / BRIDGE_METADATA_FILENAME).read_text())
+        leases = json.loads((state_dir / BRIDGE_LEASES_FILENAME).read_text())
+
+        assert claude_result["kind"] == "started_new_and_attached"
+        assert hermes_result["kind"] == "attached_existing"
+        assert leases["bridgeInstanceId"] == metadata["bridgeInstanceId"]
+        assert (
+            hermes_result["metadata"]["bridgeInstanceId"]
+            == metadata["bridgeInstanceId"]
+        )
+        assert sorted(client["clientId"] for client in leases["clients"]) == [
+            "claude-a",
+            "hermes-a",
+        ]
+        assert sorted(client["clientKind"] for client in leases["clients"]) == [
+            "claude-code",
+            "hermes",
+        ]
 
 
 # ---------------------------------------------------------------------------

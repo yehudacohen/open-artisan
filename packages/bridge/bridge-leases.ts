@@ -3,6 +3,7 @@
  */
 import {
   loadBridgeLeaseSnapshot,
+  loadBridgeMetadata,
   upsertBridgeLeaseSnapshot,
 } from "./bridge-meta"
 import type {
@@ -50,8 +51,9 @@ export async function upsertBridgeClientLease(
   params: UpsertBridgeClientLeaseParams,
 ): Promise<UpsertBridgeClientLeaseResult> {
   const existing = await loadBridgeLeaseSnapshot(params.stateDir)
+  const metadata = existing ? null : await loadBridgeMetadata(params.stateDir)
   const store = createBridgeLeaseStore(
-    existing?.bridgeInstanceId ?? params.lease.clientId,
+    existing?.bridgeInstanceId ?? metadata?.bridgeInstanceId ?? params.lease.clientId,
     existing?.clients ?? [],
   )
   const lease = store.upsert(params.lease)

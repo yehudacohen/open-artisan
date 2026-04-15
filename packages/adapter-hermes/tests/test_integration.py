@@ -8,8 +8,17 @@ guard enforcement → phase progression. Also tests resume after crash.
 from __future__ import annotations
 
 import json
-import pytest
+import os
+import shutil
+import socket
+import subprocess
+import tempfile
+import time
+from pathlib import Path
+from subprocess import Popen
 from unittest.mock import AsyncMock
+
+import pytest
 
 from hermes_adapter import register, _on_session_start, _on_session_end
 from hermes_adapter.bridge_client import StdioBridgeClient
@@ -26,6 +35,59 @@ from hermes_adapter.constants import (
 from hermes_adapter.types import BridgeError
 
 from .conftest import MockBridgeClient, MockHermesContext
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+SERVER_SCRIPT = REPO_ROOT / "packages" / "claude-code" / "bin" / "artisan-server.ts"
+
+
+def _socket_request(
+    socket_path: Path, method: str, params: dict[str, object] | None = None
+) -> dict[str, object] | None:
+    request = {
+        "jsonrpc": "2.0",
+        "method": method,
+        "params": params or {},
+        "id": int(time.time() * 1000),
+    }
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+        client.settimeout(5)
+        client.connect(str(socket_path))
+        client.sendall((json.dumps(request) + "\n").encode("utf-8"))
+        chunks: list[bytes] = []
+        while True:
+            chunk = client.recv(4096)
+            if not chunk:
+                break
+            chunks.append(chunk)
+    raw = b"".join(chunks).decode("utf-8").strip()
+    return json.loads(raw) if raw else None
+
+
+def _start_bridge_server(project_dir: Path) -> tuple[Popen[bytes], Path]:
+    state_dir = project_dir / ".openartisan"
+    socket_path = state_dir / ".bridge.sock"
+    proc = subprocess.Popen(
+        ["bun", "run", str(SERVER_SCRIPT), "--project-dir", str(project_dir)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        if socket_path.exists():
+            response = _socket_request(socket_path, "lifecycle.ping")
+            if response and response.get("result") == "pong":
+                return proc, socket_path
+        time.sleep(0.1)
+    proc.kill()
+    raise AssertionError("bridge server failed to start")
+
+
+def _stop_bridge_server(proc: Popen[bytes]) -> None:
+    try:
+        proc.terminate()
+        proc.wait(timeout=5)
+    except Exception:
+        proc.kill()
 
 
 # ---------------------------------------------------------------------------
@@ -323,6 +385,52 @@ class TestSharedBridgeReuse:
         assert result["blockingClientIds"] == ["hermes-a"]
         assert [client["clientId"] for client in leases["clients"]] == ["hermes-a"]
         assert [client["clientKind"] for client in leases["clients"]] == ["hermes"]
+
+    def test_hermes_attaches_to_real_live_bridge_started_for_claude(self):
+        project_dir = Path(tempfile.mkdtemp(prefix="oa-live-bridge-"))
+        try:
+            proc, socket_path = _start_bridge_server(project_dir)
+            try:
+                session_result = _socket_request(
+                    socket_path,
+                    "lifecycle.sessionCreated",
+                    {"sessionId": "claude-a", "agent": "claude-code"},
+                )
+                assert session_result is not None
+
+                hermes_bridge = StdioBridgeClient()
+                result = hermes_bridge.attach_or_start(
+                    {
+                        "projectDir": str(project_dir),
+                        "stateDir": str(project_dir / ".openartisan"),
+                        "clientId": "hermes-a",
+                        "clientKind": "hermes",
+                        "sessionId": "hermes-session",
+                    }
+                )
+
+                metadata = json.loads(
+                    (
+                        project_dir / ".openartisan" / BRIDGE_METADATA_FILENAME
+                    ).read_text()
+                )
+                leases = json.loads(
+                    (project_dir / ".openartisan" / BRIDGE_LEASES_FILENAME).read_text()
+                )
+
+                assert result["kind"] == "attached_existing"
+                assert (
+                    result["metadata"]["bridgeInstanceId"]
+                    == metadata["bridgeInstanceId"]
+                )
+                assert sorted(client["clientId"] for client in leases["clients"]) == [
+                    "claude-a",
+                    "hermes-a",
+                ]
+            finally:
+                _stop_bridge_server(proc)
+        finally:
+            shutil.rmtree(project_dir, ignore_errors=True)
 
 
 # ---------------------------------------------------------------------------

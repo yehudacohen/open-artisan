@@ -290,6 +290,41 @@ describe("tool.execute — submit_feedback", () => {
     expect(state?.implDag).toBeNull()
   })
 
+  it("approves IMPL_PLAN from previously written disk artifact when content is omitted", async () => {
+    await exec("select_mode", { mode: "GREENFIELD", feature_name: "disk-dag-feat" })
+    await ctx.engine!.store.update("s1", (d) => {
+      d.phase = "IMPL_PLAN"
+      d.phaseState = "USER_GATE"
+      d.userGateMessageReceived = true
+      d.featureName = "disk-dag-feat"
+    })
+
+    const implPlan = `# Implementation Plan
+
+## Tasks
+
+### T1. Disk-backed task
+- **Dependencies:** none
+`
+    const artifactPath = join(tmpDir, ".openartisan", "disk-dag-feat", "impl-plan.md")
+    await Bun.write(artifactPath, implPlan)
+    await ctx.engine!.store.update("s1", (d) => {
+      d.artifactDiskPaths.impl_plan = artifactPath
+    })
+
+    const result = await exec("submit_feedback", {
+      feedback_type: "approve",
+      feedback_text: "approved",
+    })
+
+    expect(result).toContain("Approved")
+    expect(result).toContain("IMPLEMENTATION")
+
+    const state = ctx.engine!.store.get("s1")
+    expect(state?.implDag).not.toBeNull()
+    expect(state?.currentTaskId).toBe("T1")
+  })
+
   it("revise returns bridge mode error (needs orchestrator)", async () => {
     await exec("select_mode", { mode: "GREENFIELD", feature_name: "rev-feat" })
     await ctx.engine!.store.update("s1", (d) => {

@@ -472,14 +472,24 @@ const handleSubmitFeedback: ToolHandler = async (args, toolCtx, ctx) => {
     }
 
     if (state.phase === "IMPL_PLAN") {
-      const artifactContent = args.artifact_content as string | undefined
-      if (!artifactContent) {
+      let planContent = args.artifact_content as string | undefined
+      if (!planContent) {
+        const diskPath = state.artifactDiskPaths["impl_plan" as keyof typeof state.artifactDiskPaths] as string | undefined
+        if (diskPath) {
+          try {
+            planContent = readFileSync(diskPath, "utf-8")
+          } catch {
+            // handled below with a clear error
+          }
+        }
+      }
+      if (!planContent) {
         return (
-          "Error: IMPL_PLAN approval requires `artifact_content` so the implementation plan " +
-          "can be parsed into a DAG before entering IMPLEMENTATION."
+          "Error: IMPL_PLAN approval requires `artifact_content` or a previously written implementation plan on disk " +
+          "so the plan can be parsed into a DAG before entering IMPLEMENTATION."
         )
       }
-      const parseCheck = parseImplPlan(artifactContent)
+      const parseCheck = parseImplPlan(planContent)
       if (!parseCheck.success) {
         return (
           `Error: Failed to parse implementation plan into DAG: ${parseCheck.errors.join("; ")}. ` +

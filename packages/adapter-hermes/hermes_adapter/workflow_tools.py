@@ -19,7 +19,7 @@ def ensure_workflow_session(
     bridge: BridgeClient,
     session_id: str | None,
     project_dir: str | None,
-    agent: str = "artisan",
+    agent: str = "hermes",
 ) -> None:
     """Ensure a workflow session exists using the shared adapter contract."""
     bridge.ensure_session(session_id or "default", project_dir or os.getcwd(), agent=agent)

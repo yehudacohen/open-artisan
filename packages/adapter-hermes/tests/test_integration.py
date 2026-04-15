@@ -66,17 +66,31 @@ def _socket_request(
 def _start_bridge_server(project_dir: Path) -> tuple[Popen[bytes], Path]:
     state_dir = project_dir / ".openartisan"
     socket_path = state_dir / ".bridge.sock"
+    stderr_log = tempfile.NamedTemporaryFile(prefix="oa-bridge-stderr-", delete=False)
     proc = subprocess.Popen(
         ["bun", "run", str(SERVER_SCRIPT), "--project-dir", str(project_dir)],
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stderr=stderr_log,
+        cwd=str(REPO_ROOT),
     )
-    deadline = time.time() + 10
+    stderr_log.close()
+    deadline = time.time() + 20
     while time.time() < deadline:
+        if proc.poll() is not None:
+            try:
+                stderr_text = Path(stderr_log.name).read_text()
+            except OSError:
+                stderr_text = ""
+            raise AssertionError(
+                f"bridge server exited early with code {proc.returncode}: {stderr_text.strip()}"
+            )
         if socket_path.exists():
-            response = _socket_request(socket_path, "lifecycle.ping")
-            if response and response.get("result") == "pong":
-                return proc, socket_path
+            try:
+                response = _socket_request(socket_path, "lifecycle.ping")
+                if response and response.get("result") == "pong":
+                    return proc, socket_path
+            except OSError:
+                pass
         time.sleep(0.1)
     proc.kill()
     raise AssertionError("bridge server failed to start")
@@ -88,6 +102,17 @@ def _stop_bridge_server(proc: Popen[bytes]) -> None:
         proc.wait(timeout=5)
     except Exception:
         proc.kill()
+
+
+@pytest.fixture(scope="module")
+def live_bridge_server() -> tuple[Path, Path]:
+    project_dir = Path(tempfile.mkdtemp(prefix="oa-", dir="/tmp"))
+    proc, socket_path = _start_bridge_server(project_dir)
+    try:
+        yield project_dir, socket_path
+    finally:
+        _stop_bridge_server(proc)
+        shutil.rmtree(project_dir, ignore_errors=True)
 
 
 # ---------------------------------------------------------------------------
@@ -155,6 +180,32 @@ class TestSessionLifecycle:
         mock_bridge.set_response("lifecycle.sessionDeleted", None)
         _on_session_end(mock_ctx, mock_bridge, session_id=mock_ctx.session_id)
         assert not mock_bridge.is_alive
+
+    def test_hermes_positive_path_exposes_dogfooding_provenance(
+        self, live_bridge_server
+    ):
+        _, socket_path = live_bridge_server
+        response = _socket_request(
+            socket_path,
+            "lifecycle.sessionCreated",
+            {"sessionId": "hermes-session", "agent": "hermes"},
+        )
+
+        assert response is not None
+        assert response["result"]["dogfooding_provenance"] == "hermes"
+        assert response["result"]["dogfooding_bug_loop_required"] is False
+
+    def test_non_hermes_path_has_no_dogfooding_provenance(self, live_bridge_server):
+        _, socket_path = live_bridge_server
+        response = _socket_request(
+            socket_path,
+            "lifecycle.sessionCreated",
+            {"sessionId": "artisan-session", "agent": "artisan"},
+        )
+
+        assert response is not None
+        assert response["result"]["dogfooding_provenance"] is None
+        assert response["result"]["dogfooding_bug_loop_required"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -248,6 +299,77 @@ class TestPhaseProgression:
         parsed = json.loads(result)
         assert parsed["phase"] == "INTERFACES"
         assert parsed["mode"] == "GREENFIELD"
+
+    def test_dogfooding_defect_requires_bug_loop(self, started_bridge):
+        started_bridge.set_response(
+            "state.get",
+            {
+                "phase": "IMPLEMENTATION",
+                "phaseState": "DRAFT",
+                "dogfooding_provenance": "hermes",
+                "dogfooding_bug_loop_required": True,
+            },
+        )
+
+        from hermes_adapter.workflow_tools import _handle_oa_state
+
+        result = _handle_oa_state(started_bridge, "s1")
+        parsed = json.loads(result)
+        assert parsed["dogfooding_provenance"] == "hermes"
+        assert parsed["dogfooding_bug_loop_required"] is True
+
+    def test_no_defect_clears_bug_loop_requirement(self, started_bridge):
+        started_bridge.set_response(
+            "state.get",
+            {
+                "phase": "IMPLEMENTATION",
+                "phaseState": "DRAFT",
+                "dogfooding_provenance": "hermes",
+                "dogfooding_bug_loop_required": False,
+            },
+        )
+
+        from hermes_adapter.workflow_tools import _handle_oa_state
+
+        result = _handle_oa_state(started_bridge, "s1")
+        parsed = json.loads(result)
+        assert parsed["dogfooding_provenance"] == "hermes"
+        assert parsed["dogfooding_bug_loop_required"] is False
+
+    def test_docs_only_drift_does_not_create_provenance(self, started_bridge):
+        started_bridge.set_response(
+            "state.get",
+            {
+                "phase": "IMPLEMENTATION",
+                "phaseState": "DRAFT",
+                "modeDetectionNote": "Docs still say Hermes-first dogfooding is required.",
+            },
+        )
+
+        from hermes_adapter.workflow_tools import _handle_oa_state
+
+        result = _handle_oa_state(started_bridge, "s1")
+        parsed = json.loads(result)
+        assert parsed.get("dogfooding_provenance") is None
+
+    def test_docs_only_drift_does_not_weaken_bug_loop_requirement(self, started_bridge):
+        started_bridge.set_response(
+            "state.get",
+            {
+                "phase": "IMPLEMENTATION",
+                "phaseState": "DRAFT",
+                "dogfooding_provenance": "hermes",
+                "modeDetectionNote": "Docs describe bug-loop handling as optional.",
+                "dogfooding_bug_loop_required": True,
+            },
+        )
+
+        from hermes_adapter.workflow_tools import _handle_oa_state
+
+        result = _handle_oa_state(started_bridge, "s1")
+        parsed = json.loads(result)
+        assert parsed["dogfooding_provenance"] == "hermes"
+        assert parsed["dogfooding_bug_loop_required"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -464,7 +586,9 @@ class TestPromptDuringWorkflow:
         started_bridge.set_response(
             "state.get", {"phaseState": "USER_GATE", "activeAgent": "artisan"}
         )
-        started_bridge.set_response("prompt.build", "## USER_GATE\nWait for user input.")
+        started_bridge.set_response(
+            "prompt.build", "## USER_GATE\nWait for user input."
+        )
 
         hook = create_prompt_hook(started_bridge, "s1")
         result = hook()
@@ -479,7 +603,9 @@ class TestPromptDuringWorkflow:
         started_bridge.set_response(
             "state.get", {"phaseState": "USER_GATE", "activeAgent": "artisan"}
         )
-        started_bridge.set_response("prompt.build", "## USER_GATE\nWait for user input.")
+        started_bridge.set_response(
+            "prompt.build", "## USER_GATE\nWait for user input."
+        )
 
         hook = create_prompt_hook(started_bridge, "s1")
         hook()
@@ -488,7 +614,9 @@ class TestPromptDuringWorkflow:
         assert started_bridge.get_calls("message.process") == []
         session_calls = started_bridge.get_calls("lifecycle.sessionCreated")
         assert len(session_calls) == 2
-        assert all(call[1] == {"sessionId": "s1", "agent": "artisan"} for call in session_calls)
+        assert all(
+            call[1] == {"sessionId": "s1", "agent": "hermes"} for call in session_calls
+        )
 
     def test_user_gate_runtime_path_stays_safe_across_hook_and_tool_calls(
         self, started_bridge
@@ -505,10 +633,16 @@ class TestPromptDuringWorkflow:
                 "currentTaskId": "T4",
             },
         )
-        started_bridge.set_response("prompt.build", "## USER_GATE\nWait for user input.")
+        started_bridge.set_response(
+            "prompt.build", "## USER_GATE\nWait for user input."
+        )
         started_bridge.set_response(
             "tool.execute",
-            {"phase": "IMPLEMENTATION", "phaseState": "USER_GATE", "currentTaskId": "T4"},
+            {
+                "phase": "IMPLEMENTATION",
+                "phaseState": "USER_GATE",
+                "currentTaskId": "T4",
+            },
         )
 
         hook = create_prompt_hook(started_bridge, "s1")
@@ -530,6 +664,6 @@ class TestPromptDuringWorkflow:
         assert parsed["currentTaskId"] == "T4"
         assert started_bridge.get_calls("message.process") == []
         assert started_bridge.get_calls("lifecycle.sessionCreated") == [
-            ("lifecycle.sessionCreated", {"sessionId": "s1", "agent": "artisan"}),
-            ("lifecycle.sessionCreated", {"sessionId": "s1", "agent": "artisan"}),
+            ("lifecycle.sessionCreated", {"sessionId": "s1", "agent": "hermes"}),
+            ("lifecycle.sessionCreated", {"sessionId": "s1", "agent": "hermes"}),
         ]

@@ -78,6 +78,16 @@ function buildSessionLease(sessionId: string, agent?: string): BridgeClientLease
   }
 }
 
+function buildDogfoodingContract(agent?: string): {
+  dogfooding_provenance: "hermes" | null
+  dogfooding_bug_loop_required: boolean
+} {
+  return {
+    dogfooding_provenance: agent === "hermes" ? "hermes" : null,
+    dogfooding_bug_loop_required: false,
+  }
+}
+
 export const handleInit: MethodHandler = async (params, ctx) => {
   const p = params as Partial<LifecycleInitParams>
   if (!p.projectDir || typeof p.projectDir !== "string") {
@@ -223,7 +233,7 @@ export const handleSessionCreated: MethodHandler = async (params, ctx) => {
   if (p.parentId) {
     // Child session — register but don't create WorkflowState
     sessions.registerChild(p.sessionId, p.parentId)
-    return null
+    return buildDogfoodingContract(normalizeAgentName(p.agent) ?? undefined)
   }
 
   // Primary session
@@ -270,7 +280,7 @@ export const handleSessionCreated: MethodHandler = async (params, ctx) => {
     })
   }
 
-  return null
+  return buildDogfoodingContract(normalizeAgentName(p.agent) ?? undefined)
 }
 
 export const handleSessionDeleted: MethodHandler = async (params, ctx) => {

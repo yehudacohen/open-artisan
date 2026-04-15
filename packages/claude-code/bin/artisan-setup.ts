@@ -174,6 +174,10 @@ To start using open-artisan:
   4. Or use the /artisan skill in Claude Code:
      /artisan on
 
+  Note: do not enable /artisan from a normal build-mode session unless you
+  explicitly want Claude Code to enter the phased workflow. If Hermes with the
+  openartisan profile is your dogfooding driver, keep Claude Code dormant.
+
 To verify:
   ./artisan ping
   ./artisan state

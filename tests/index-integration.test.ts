@@ -1553,6 +1553,42 @@ describe("fileAllowlist — relative paths are normalized to absolute", () => {
     expect(state.fileAllowlist).toContain("/already/absolute.ts")
   })
 
+  it("derives INCREMENTAL allowlist from planning artifact when approved_files is omitted", async () => {
+    const sid = `int-test-${Date.now()}-allowlist-derived`
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: sid } } },
+    })
+    const ctx = { directory: tempDir, sessionId: sid }
+
+    await plugin.tool.select_mode.execute(
+      { mode: "INCREMENTAL", feature_name: "allowlist-derived-test" },
+      ctx,
+    )
+
+    const store = plugin._testStore
+    const planPath = `${tempDir}/.openartisan/allowlist-derived-test/plan.md`
+    await Bun.write(planPath, "# Planning\n\nAllowlist\n- src/a.ts\n- tests/a.test.ts\n")
+    await store.update(sid, (draft: any) => {
+      draft.phase = "PLANNING"
+      draft.phaseState = "USER_GATE"
+      draft.userGateMessageReceived = true
+      draft.artifactDiskPaths.plan = planPath
+    })
+
+    const result = await plugin.tool.submit_feedback.execute(
+      {
+        feedback_type: "approve",
+        feedback_text: "approved",
+      },
+      ctx,
+    )
+
+    expect(result).not.toContain("Error")
+    const state = store.get(sid)
+    expect(state.fileAllowlist).toContain(`${tempDir}/src/a.ts`)
+    expect(state.fileAllowlist).toContain(`${tempDir}/tests/a.test.ts`)
+  })
+
   it("normalizes preserved fileAllowlist from prior cycle at select_mode time", async () => {
     const sid = `int-test-${Date.now()}-selectmode-normalize`
     await plugin.event({

@@ -41,6 +41,7 @@ import {
 import { buildAutoApprovePrompt, parseAutoApproveResult } from "../../core/auto-approve"
 import { createGitCheckpoint } from "../../core/hooks/git-checkpoint"
 import type { AutoApproveResult } from "../../core/auto-approve"
+import { extractApprovedFileAllowlist } from "../../core/tools/plan-allowlist"
 import { writeArtifact } from "../../core/artifact-store"
 import { parseImplPlan } from "../../core/impl-plan-parser"
 import { PHASE_TO_ARTIFACT } from "../../core/artifacts"
@@ -454,6 +455,7 @@ const handleRequestReview: ToolHandler = async (args, toolCtx, ctx) => {
 const handleSubmitFeedback: ToolHandler = async (args, toolCtx, ctx) => {
   const { store, sm } = ctx.engine!
   const state = requireState(ctx, toolCtx.sessionId)
+  const cwd = toolCtx.directory || process.cwd()
 
   if (state.phaseState !== "USER_GATE" && state.phaseState !== "ESCAPE_HATCH") {
     return `Error: submit_feedback can only be called at USER_GATE or ESCAPE_HATCH (current: ${state.phaseState}).`
@@ -594,6 +596,21 @@ const handleSubmitFeedback: ToolHandler = async (args, toolCtx, ctx) => {
       }
     }
 
+    let derivedApprovedFiles: string[] | null = null
+    if (state.phase === "PLANNING" && state.mode === "INCREMENTAL" && !args.approved_files) {
+      let planContent = args.artifact_content as string | undefined
+      if (!planContent && state.artifactDiskPaths.plan) {
+        try {
+          planContent = readFileSync(state.artifactDiskPaths.plan, "utf-8")
+        } catch {
+          // non-fatal
+        }
+      }
+      if (planContent) {
+        derivedApprovedFiles = extractApprovedFileAllowlist(planContent, cwd)
+      }
+    }
+
     const outcome = sm.transition(state.phase, state.phaseState, "user_approve", state.mode)
     if (!outcome.success) return `Error: ${outcome.message}`
 
@@ -656,8 +673,10 @@ const handleSubmitFeedback: ToolHandler = async (args, toolCtx, ctx) => {
       if (state.phase === "PLANNING" && state.mode === "INCREMENTAL" && args.approved_files) {
         const files = args.approved_files as string[]
         draft.fileAllowlist = files.map((p) =>
-          p.startsWith("/") ? p : resolve(toolCtx.directory, p),
+          p.startsWith("/") ? p : resolve(cwd, p),
         )
+      } else if (state.phase === "PLANNING" && state.mode === "INCREMENTAL" && derivedApprovedFiles) {
+        draft.fileAllowlist = derivedApprovedFiles
       }
       // Reset artifact file tracking for the new phase
       draft.reviewArtifactFiles = []

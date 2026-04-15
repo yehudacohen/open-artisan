@@ -2,7 +2,7 @@
  * Tests for bridge tool.execute — dispatches tool calls through the bridge.
  */
 import { describe, expect, it, beforeEach, afterEach } from "bun:test"
-import { join } from "node:path"
+import { join, resolve } from "node:path"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 
@@ -356,6 +356,28 @@ describe("tool.execute — submit_feedback", () => {
     const state = ctx.engine!.store.get("s1")
     expect(state?.implDag).not.toBeNull()
     expect(state?.currentTaskId).toBe("T1")
+  })
+
+  it("derives INCREMENTAL allowlist from approved planning artifact when approved_files is omitted", async () => {
+    await exec("select_mode", { mode: "INCREMENTAL", feature_name: "derived-allowlist-feat" })
+    const planPath = join(tmpDir, ".openartisan", "derived-allowlist-feat", "plan.md")
+    await Bun.write(planPath, "# Planning\n\nAllowlist\n- src/a.ts\n- tests/a.test.ts\n")
+    await ctx.engine!.store.update("s1", (d) => {
+      d.phase = "PLANNING"
+      d.phaseState = "USER_GATE"
+      d.userGateMessageReceived = true
+      d.featureName = "derived-allowlist-feat"
+      d.artifactDiskPaths.plan = planPath
+    })
+
+    await exec("submit_feedback", {
+      feedback_type: "approve",
+      feedback_text: "approved",
+    })
+
+    const state = ctx.engine!.store.get("s1")
+    expect(state?.fileAllowlist).toContain(resolve(tmpDir, "src/a.ts"))
+    expect(state?.fileAllowlist).toContain(resolve(tmpDir, "tests/a.test.ts"))
   })
 
   it("revise routes directly to REVISE in default agent-only bridge mode", async () => {

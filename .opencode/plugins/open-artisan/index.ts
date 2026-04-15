@@ -76,6 +76,7 @@ import { dispatchTaskReview, type AdjacentTask } from "../../../packages/core/ta
 import { dispatchDriftCheck } from "../../../packages/core/task-drift"
 import { captureRevisionBaseline, hasArtifactChanged } from "../../../packages/core/revision-baseline"
 import { writeStatusFile } from "../../../packages/core/status-writer"
+import { extractApprovedFileAllowlist } from "../../../packages/core/tools/plan-allowlist"
 import { computeFastForward, computeForwardSkip } from "../../../packages/core/fast-forward"
 import { cascadeAutoSkip } from "../../../packages/core/cascade-auto-skip"
 import { dispatchAutoApproval } from "../../../packages/core/auto-approve"
@@ -2728,10 +2729,23 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             // Using the stale value caused computeForwardSkip to always return null
             // at PLANNING approval time, forcing the agent through INTERFACES/TESTS/IMPL_PLAN
             // even when approved_files was intentionally empty (operational-only tasks).
-            const effectiveAllowlist: string[] = (() => {
-              if (state.phase === "PLANNING" && state.mode === "INCREMENTAL" && args.approved_files) {
-                const cwd = context.directory || process.cwd()
-                return args.approved_files.map((p) => p.startsWith("/") ? p : resolve(cwd, p))
+            const effectiveAllowlist: string[] = await (async () => {
+              const cwd = context.directory || process.cwd()
+              if (state.phase === "PLANNING" && state.mode === "INCREMENTAL") {
+                if (args.approved_files) {
+                  return args.approved_files.map((p) => p.startsWith("/") ? p : resolve(cwd, p))
+                }
+                let planContent = args.artifact_content
+                if (!planContent && state.artifactDiskPaths.plan) {
+                  try {
+                    planContent = await readFile(state.artifactDiskPaths.plan, "utf-8")
+                  } catch {
+                    // non-fatal
+                  }
+                }
+                if (planContent) {
+                  return extractApprovedFileAllowlist(planContent, cwd)
+                }
               }
               return state.fileAllowlist
             })()
@@ -2808,11 +2822,8 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
               // Normalize to absolute paths — the agent may pass relative paths
               // (e.g. ".gitignore" instead of "/project/.gitignore"). The validator
               // rejects relative paths, so we resolve them against the project dir.
-              if (state.phase === "PLANNING" && state.mode === "INCREMENTAL" && args.approved_files) {
-                const cwd = context.directory || process.cwd()
-                draft.fileAllowlist = args.approved_files.map((p) =>
-                  p.startsWith("/") ? p : resolve(cwd, p),
-                )
+              if (state.phase === "PLANNING" && state.mode === "INCREMENTAL") {
+                draft.fileAllowlist = effectiveAllowlist
               }
               // S3: Record artifact hash for drift detection (approvedArtifacts).
               // If artifact_content is provided, hash it for accurate content-based drift detection.

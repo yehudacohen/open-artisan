@@ -45,7 +45,7 @@ Python module that spawns the bridge server (`bun run packages/bridge/cli.ts`) a
 from hermes_adapter.bridge_client import StdioBridgeClient
 
 bridge = StdioBridgeClient()
-bridge.start("/path/to/project")  # spawns subprocess, calls lifecycle.init
+bridge.start("/path/to/project")  # attaches to a compatible shared bridge or spawns one
 
 result = bridge.call("tool.execute", {
     "name": "select_mode",
@@ -60,6 +60,48 @@ bridge.shutdown()
 - Auto-reconnect on subprocess death
 - Eager init in `on_session_start` (not lazy — every session uses the bridge)
 - Capabilities: `selfReview="agent-only"`, `orchestrator=False`, `discoveryFleet=False`
+
+### Shared local bridge behavior
+
+Hermes now uses the same local shared bridge lifecycle as Claude Code:
+
+- one bridge per `projectDir` / `.openartisan/`
+- Hermes discovers bridge metadata before spawning a subprocess
+- Hermes attaches to a live compatible bridge when possible
+- Hermes starts a fresh bridge only when no compatible bridge exists
+- Hermes detaches without shutting down bridges that are still in use by other clients
+
+Shared bridge artifacts are local and inspectable:
+
+- `.openartisan/.bridge-pid`
+- `.openartisan/.bridge.sock`
+- `.openartisan/.bridge-meta.json`
+- `.openartisan/.bridge-clients.json`
+
+What Hermes users should expect:
+
+- Starting Hermes in a repo that already has a healthy local bridge should usually attach to that bridge instead of spawning a second owner.
+- Hermes session shutdown should not tear down the bridge if another local client is still attached.
+- Shared bridge metadata is operational state for recovery/debugging, not user-auth configuration.
+- Errors should be explicit: incompatible bridge, malformed metadata, stale state, or broken transport should each surface as a distinct failure mode instead of being silently ignored.
+
+### Failure handling and recovery
+
+Shared-bridge recovery rules for Hermes are explicit:
+
+- malformed metadata -> reported as attach failure
+- incompatible protocol metadata -> rejected rather than reused
+- stale pid/socket/metadata -> classified as stale bridge state
+- transport timeout / broken bridge -> surfaced as `failed_attach` or reconnect failure
+- detach while other clients remain -> returns shutdown blocked with remaining client ids
+
+Recovery checklist for Hermes users:
+
+1. Retry once if Hermes reports a bridge attach failure caused by a transient transport issue.
+2. Inspect `.openartisan/.bridge-meta.json` and `.openartisan/.bridge-clients.json` before manually deleting state.
+3. If the bridge state is stale, restart the local bridge path rather than removing unrelated workflow files.
+4. If another client is still attached, let that client exit or explicitly coordinate a forced shutdown.
+5. If Hermes cannot reconnect to the bridge subprocess, restart the Hermes session so persisted workflow state can be reloaded cleanly.
 
 ### Workflow Tools (`workflow_tools.py`)
 

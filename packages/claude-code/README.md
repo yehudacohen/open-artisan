@@ -50,6 +50,48 @@ Long-lived background process that hosts the bridge engine and Unix socket. Star
 - Opens Unix socket for hook scripts and CLI
 - Uses agent self-review mode (no SubagentDispatcher — the agent evaluates its own criteria, the human reviews at USER_GATE)
 
+### Shared local bridge behavior
+
+The Claude Code adapter now treats the bridge as a shared local service scoped to one project/state directory:
+
+- One bridge per `projectDir` / `.openartisan/`
+- Hook scripts and the CLI reuse a live compatible bridge when one already exists
+- If no compatible bridge exists, Claude starts a new one and attaches to it
+- If bridge metadata or socket state is stale, Claude treats it as recoverable local state rather than a live ownership conflict
+- A single Claude session detaching does not shut down the bridge if other clients are still attached
+
+Shared bridge state is tracked through:
+
+- `.openartisan/.bridge-pid`
+- `.openartisan/.bridge.sock`
+- `.openartisan/.bridge-meta.json`
+- `.openartisan/.bridge-clients.json`
+
+What users should expect:
+
+- Opening another Claude Code session in the same repo should normally reuse the existing bridge rather than starting a competing one.
+- Stopping one Claude session should not interrupt another client that is still using the same repo bridge.
+- The bridge state files in `.openartisan/` are local operational artifacts, not user config files.
+- If the bridge is healthy, Claude should attach quietly; if it is stale or incompatible, Claude should fail with a reason instead of guessing.
+
+### Failure handling and recovery
+
+The shared bridge path uses conservative recovery rules:
+
+- malformed or missing metadata -> attach fails safely instead of guessing
+- stale PID/socket artifacts -> classified as stale and cleaned only through the bridge's explicit stale-state path
+- incompatible bridge metadata/protocol -> rejected instead of attached blindly
+- shutdown while clients remain -> blocked unless an explicit force path is used for bridge process teardown
+- socket timeout or connection failure -> handled as bridge unavailable, allowing Claude to retry or start a fresh compatible bridge path
+
+Recovery checklist for Claude users:
+
+1. Retry the command once if Claude reports the bridge as unavailable.
+2. Inspect `.openartisan/.bridge-meta.json` and `.openartisan/.bridge-clients.json` if behavior looks inconsistent.
+3. If the bridge files are clearly stale, restart the local bridge process instead of manually deleting random workflow files.
+4. If another client is still attached, let that client exit cleanly before forcing shutdown.
+5. If a repo is wedged, restart the background server and re-run `/artisan on` or the relevant Claude workflow entrypoint.
+
 ### artisan CLI (`bin/artisan.ts`)
 
 The interface Claude uses to call workflow tools via Bash. Connects to the Unix socket, sends a JSON-RPC request, prints the result.

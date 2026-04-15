@@ -237,7 +237,7 @@ class TestResumeAfterCrash:
 
 
 class TestSharedBridgeReuse:
-    """Hermes should observe shared bridge identity with another client."""
+    """Hermes should observe shared bridge lifecycle with another client."""
 
     def test_hermes_reuses_one_bridge_identity_with_existing_claude_client(
         self, tmp_path
@@ -284,6 +284,45 @@ class TestSharedBridgeReuse:
             "claude-code",
             "hermes",
         ]
+
+    def test_detaching_one_client_keeps_the_other_client_lease_usable(self, tmp_path):
+        state_dir = tmp_path / ".openartisan"
+
+        bridge = StdioBridgeClient()
+        bridge.attach_or_start(
+            {
+                "projectDir": str(tmp_path),
+                "stateDir": str(state_dir),
+                "clientId": "claude-a",
+                "clientKind": "claude-code",
+                "sessionId": "claude-session",
+            }
+        )
+        bridge.attach_or_start(
+            {
+                "projectDir": str(tmp_path),
+                "stateDir": str(state_dir),
+                "clientId": "hermes-a",
+                "clientKind": "hermes",
+                "sessionId": "hermes-session",
+            }
+        )
+
+        result = bridge.detach_client(
+            {
+                "projectDir": str(tmp_path),
+                "stateDir": str(state_dir),
+                "clientId": "claude-a",
+                "reason": "disconnect",
+            }
+        )
+
+        leases = json.loads((state_dir / BRIDGE_LEASES_FILENAME).read_text())
+        assert result["allowed"] is False
+        assert result["activeClientCount"] == 1
+        assert result["blockingClientIds"] == ["hermes-a"]
+        assert [client["clientId"] for client in leases["clients"]] == ["hermes-a"]
+        assert [client["clientKind"] for client in leases["clients"]] == ["hermes"]
 
 
 # ---------------------------------------------------------------------------

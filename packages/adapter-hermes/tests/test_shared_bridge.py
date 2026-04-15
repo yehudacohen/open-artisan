@@ -211,6 +211,27 @@ class TestSharedBridgeAttachOrStart:
 
         assert result["kind"] == "rejected_incompatible_bridge"
 
+    def test_attach_or_start_recovers_from_stale_bridge_state(self, tmp_path):
+        _write_bridge_state(tmp_path, pid=999999)
+        bridge = make_bridge_client()
+
+        result: AttachBridgeResult = bridge.attach_or_start(
+            {
+                "projectDir": str(tmp_path),
+                "stateDir": str(tmp_path / ".openartisan"),
+                "clientId": "hermes-recover",
+                "clientKind": "hermes",
+                "sessionId": "recover-session",
+            }
+        )
+
+        assert result["kind"] == "started_new_and_attached"
+        assert result["lease"]["clientId"] == "hermes-recover"
+        assert (
+            result["leases"]["bridgeInstanceId"]
+            == result["metadata"]["bridgeInstanceId"]
+        )
+
     def test_attach_or_start_returns_failed_attach_on_transport_timeout(self, tmp_path):
         bridge = make_bridge_client()
 

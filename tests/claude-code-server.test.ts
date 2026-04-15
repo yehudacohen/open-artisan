@@ -30,6 +30,11 @@ beforeEach(async () => {
 })
 
 afterEach(async () => {
+  await stopServer()
+  await rm(tmpDir, { recursive: true, force: true })
+})
+
+async function stopServer(): Promise<void> {
   if (serverProcess) {
     serverProcess.kill("SIGTERM")
     // Wait for process to exit
@@ -40,8 +45,7 @@ afterEach(async () => {
     })
     serverProcess = null
   }
-  await rm(tmpDir, { recursive: true, force: true })
-})
+}
 
 /** Spawn the server and wait for the socket to become available. */
 async function startServer(): Promise<void> {
@@ -166,5 +170,69 @@ describe("artisan-server", () => {
       "claude-code",
       "hermes",
     ])
+  }, 15000)
+
+  it("removes only the exiting client lease and keeps the other client usable", async () => {
+    await startServer()
+
+    await rpc("lifecycle.sessionCreated", { sessionId: "claude-a", agent: "claude-code" })
+    await rpc("lifecycle.sessionCreated", { sessionId: "hermes-a", agent: "hermes" })
+
+    const deleteResponse = await sendSocketRequest(socketPath, {
+      jsonrpc: "2.0",
+      method: "lifecycle.sessionDeleted",
+      params: { sessionId: "claude-a" },
+      id: Date.now(),
+    })
+    expect((deleteResponse as any)?.result ?? null).toBeNull()
+
+    const leases = JSON.parse(readFileSync(join(stateDir, ".bridge-clients.json"), "utf-8"))
+    expect(leases.clients.map((client: any) => client.clientId)).toEqual(["hermes-a"])
+    expect(leases.clients.map((client: any) => client.clientKind)).toEqual(["hermes"])
+
+    const stateResult = await rpc("state.get", { sessionId: "hermes-a" })
+    expect(stateResult.result).not.toBeNull()
+  }, 15000)
+
+  it("blocks shutdown while another client lease remains and keeps the bridge usable", async () => {
+    await startServer()
+
+    await rpc("lifecycle.sessionCreated", { sessionId: "claude-a", agent: "claude-code" })
+    await rpc("lifecycle.sessionCreated", { sessionId: "hermes-a", agent: "hermes" })
+
+    const shutdownResult = await rpc("lifecycle.shutdown")
+    expect(shutdownResult.result.ok).toBe(false)
+    expect(shutdownResult.result.activeClientCount).toBe(2)
+    expect(shutdownResult.result.blockingClientIds.sort()).toEqual([
+      "claude-a",
+      "hermes-a",
+    ])
+
+    const stateResult = await rpc("state.get", { sessionId: "hermes-a" })
+    expect(stateResult.result).not.toBeNull()
+  }, 15000)
+
+  it("preserves bridge identity and workflow state across restart", async () => {
+    await startServer()
+    await rpc("lifecycle.sessionCreated", { sessionId: "resume-a", agent: "hermes" })
+
+    await rpc("tool.execute", {
+      name: "select_mode",
+      args: { mode: "GREENFIELD", feature_name: "restart-continuity" },
+      context: { sessionId: "resume-a", directory: tmpDir },
+    })
+
+    const metadataBefore = JSON.parse(readFileSync(join(stateDir, ".bridge-meta.json"), "utf-8"))
+    await stopServer()
+
+    await startServer()
+
+    const metadataAfter = JSON.parse(readFileSync(join(stateDir, ".bridge-meta.json"), "utf-8"))
+    const stateResult = await rpc("state.get", { sessionId: "resume-a" })
+
+    expect(metadataAfter.bridgeInstanceId).toBe(metadataBefore.bridgeInstanceId)
+    expect(stateResult.result.phase).toBe("PLANNING")
+    expect(stateResult.result.phaseState).toBe("DRAFT")
+    expect(stateResult.result.featureName).toBe("restart-continuity")
   }, 15000)
 })

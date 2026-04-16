@@ -855,6 +855,49 @@ describe("SessionStateStore — load", () => {
     expect(loaded?.phaseState).toBe("DRAFT")
     expect(loaded?.currentTaskId).toBe("T1")
   })
+
+  it("reverts a completed current task to pending when a review attempt was lost on load", async () => {
+    writePerFeatureState(tmpDir, "repair-lost-review", makeState("repair-lost-review-session", "repair-lost-review", {
+      mode: "GREENFIELD",
+      phase: "IMPLEMENTATION",
+      phaseState: "DRAFT",
+      implDag: [
+        { id: "T1", description: "completed", dependencies: [], expectedTests: [], expectedFiles: [], estimatedComplexity: "small", status: "complete" },
+        { id: "T2", description: "next", dependencies: ["T1"], expectedTests: [], expectedFiles: [], estimatedComplexity: "small", status: "pending" },
+      ],
+      currentTaskId: "T1",
+      taskReviewCount: 1,
+    }))
+
+    const store2 = createSessionStateStore(createFileSystemStateBackend(tmpDir))
+    const result = await store2.load()
+    expect(result.success).toBe(true)
+    const loaded = store2.get("repair-lost-review-session")
+    expect(loaded?.currentTaskId).toBe("T1")
+    expect(loaded?.taskReviewCount).toBe(0)
+    expect(loaded?.implDag?.find((task) => task.id === "T1")?.status).toBe("pending")
+  })
+
+  it("advances past a completed current task on load when no review retry is pending", async () => {
+    writePerFeatureState(tmpDir, "repair-terminal-pointer", makeState("repair-terminal-pointer-session", "repair-terminal-pointer", {
+      mode: "GREENFIELD",
+      phase: "IMPLEMENTATION",
+      phaseState: "DRAFT",
+      implDag: [
+        { id: "T1", description: "completed", dependencies: [], expectedTests: [], expectedFiles: [], estimatedComplexity: "small", status: "complete" },
+        { id: "T2", description: "next", dependencies: ["T1"], expectedTests: [], expectedFiles: [], estimatedComplexity: "small", status: "pending" },
+      ],
+      currentTaskId: "T1",
+      taskReviewCount: 0,
+    }))
+
+    const store2 = createSessionStateStore(createFileSystemStateBackend(tmpDir))
+    const result = await store2.load()
+    expect(result.success).toBe(true)
+    const loaded = store2.get("repair-terminal-pointer-session")
+    expect(loaded?.currentTaskId).toBe("T2")
+    expect(loaded?.implDag?.find((task) => task.id === "T1")?.status).toBe("complete")
+  })
 })
 
 // ---------------------------------------------------------------------------

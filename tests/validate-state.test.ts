@@ -831,4 +831,15 @@ describe("validateWorkflowState — implementation pointer invariants", () => {
     }))
     expect(err).toContain("DONE cannot contain unresolved implDag work")
   })
+
+  it("rejects currentTaskId pointing at a completed task when no review is pending", () => {
+    const err = validateWorkflowState(makeValidState({
+      phase: "IMPLEMENTATION",
+      phaseState: "DRAFT",
+      implDag: [{ id: "T1", description: "d", dependencies: [], expectedTests: [], expectedFiles: [], estimatedComplexity: "small", status: "complete" }],
+      currentTaskId: "T1",
+      taskReviewCount: 1,
+    }))
+    expect(err).toContain("cannot point to a terminal task")
+  })
 })

@@ -1198,6 +1198,15 @@ export interface CriterionResult {
     if (state.currentTaskId !== null && !taskIds.has(state.currentTaskId)) {
       return `currentTaskId "${state.currentTaskId}" does not exist in implDag`
     }
+    const currentTask = state.currentTaskId !== null
+      ? state.implDag.find((task) => task.id === state.currentTaskId) ?? null
+      : null
+    if (
+      currentTask &&
+      (currentTask.status === "complete" || currentTask.status === "aborted") &&
+      state.taskCompletionInProgress !== state.currentTaskId
+    ) {
+      return `currentTaskId "${state.currentTaskId}" cannot point to a terminal task with status "${currentTask.status}"`
     if (state.taskCompletionInProgress !== null && !taskIds.has(state.taskCompletionInProgress)) {
       return `taskCompletionInProgress "${state.taskCompletionInProgress}" does not exist in implDag`
     }

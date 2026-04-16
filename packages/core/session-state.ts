@@ -230,6 +230,29 @@ function repairStateInconsistencies(state: WorkflowState): void {
     state.taskCompletionInProgress = null
     state.taskReviewCount = 0
   }
+
+  const currentTask = state.currentTaskId !== null
+    ? state.implDag.find((task) => task.id === state.currentTaskId) ?? null
+    : null
+  if (
+    currentTask &&
+    (currentTask.status === "complete" || currentTask.status === "aborted") &&
+    state.taskCompletionInProgress !== state.currentTaskId
+  ) {
+    if (currentTask.status === "complete" && state.taskReviewCount > 0) {
+      currentTask.status = "pending"
+      state.currentTaskId = currentTask.id
+    } else {
+      const input = readDecisionInput({ implDag: state.implDag, concurrency: state.concurrency })
+      const evaluation = nextSchedulerDecisionForInput(input)
+      const decision =
+        evaluation.decision.action === "unsupported" && evaluation.decision.fallback === "sequential"
+          ? nextSchedulerDecision(input.dag)
+          : evaluation.decision
+      state.currentTaskId = decision.action === "dispatch" ? decision.task.id : null
+    }
+    state.taskReviewCount = 0
+  }
 }
 
 /**

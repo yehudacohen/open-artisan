@@ -8,11 +8,9 @@ Execution rules:
 
 1. Implement one step at a time.
 2. Use Hermes + Open Artisan to drive each major step.
-3. Treat Hermes dogfooding as explicit only when the runtime/adapter contract reports Hermes provenance; documentation alone does not establish dogfooded state.
-4. Non-Hermes or unlabeled paths do not implicitly qualify as Hermes-dogfooded.
-5. When Hermes dogfooding exposes workflow/framework/runtime bugs, the bug loop is required before normal planned feature work resumes.
-6. Return to Hermes and continue the planned task.
-7. Commit progress as meaningful slices land.
+3. When Hermes dogfooding exposes workflow/framework/runtime bugs, fix them immediately in the repo before normal planned feature work resumes.
+4. Return to Hermes and continue the planned task.
+5. Commit progress as meaningful slices land.
 
 ## Quality Standard
 
@@ -221,9 +219,9 @@ Status update:
 2. Hermes/Open Artisan interaction no longer depends on ad hoc rescue.
 3. Hermes Python suite remains green.
 
-### 9. Make Hermes dogfooding an explicit rule
+### 9. Keep Hermes as the primary dogfood driver
 
-**Goal:** every important harness feature is validated through Hermes.
+**Goal:** every important harness feature is exercised through Hermes while framework fixes remain external/operator-driven.
 
 **Work**
 
@@ -232,11 +230,13 @@ Status update:
    - roadmap DAG
    - parallel DAG
 2. Feed discovered issues into the bug loop immediately.
+3. Do not add dogfooding-only runtime semantics without a dedicated design.
 
 **Acceptance criteria**
 
 1. Shared infrastructure features are dogfooded through Hermes.
 2. Bugs found during dogfooding are fixed before moving on.
+3. Dogfooding remains an operational workflow, not a synthetic bridge/runtime contract.
 
 ### 10. Use Hermes to implement parallel DAG execution explicitly
 

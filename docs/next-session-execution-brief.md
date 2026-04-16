@@ -8,11 +8,9 @@ The operating model is:
 
 1. Implement one step at a time.
 2. Use Hermes + Open Artisan to drive each major step.
-3. Treat Hermes dogfooding as explicit only when the runtime/adapter contract reports Hermes provenance; docs alone do not create Hermes-dogfooded state.
-4. Non-Hermes or unlabeled paths do not implicitly qualify as Hermes-dogfooded.
-5. When Hermes dogfooding exposes workflow/framework/runtime bugs, the bug loop is required before normal planned feature work resumes.
-6. Return to Hermes and continue the planned task.
-7. Commit progress as meaningful slices land.
+3. When Hermes dogfooding exposes workflow/framework/runtime bugs, fix them immediately in the repo before normal planned feature work resumes.
+4. Return to Hermes and continue the planned task.
+5. Commit progress as meaningful slices land.
 
 ## Current Status
 
@@ -115,7 +113,7 @@ Be token-efficient by:
 ### B. Hermes as first-class dogfood driver
 
 8. Harden Hermes adapter/runtime behavior further
-9. Make Hermes dogfooding an explicit rule
+9. Keep Hermes as the primary dogfood driver while framework fixes stay external/operator-driven
 10. Use Hermes to implement parallel DAG execution explicitly
 
 ### C. Roadmap DAG + durable backend

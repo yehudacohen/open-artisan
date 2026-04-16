@@ -181,7 +181,7 @@ class TestSessionLifecycle:
         _on_session_end(mock_ctx, mock_bridge, session_id=mock_ctx.session_id)
         assert not mock_bridge.is_alive
 
-    def test_hermes_positive_path_exposes_dogfooding_provenance(
+    def test_live_bridge_session_created_returns_no_synthetic_dogfooding_contract(
         self, live_bridge_server
     ):
         _, socket_path = live_bridge_server
@@ -191,21 +191,7 @@ class TestSessionLifecycle:
             {"sessionId": "hermes-session", "agent": "hermes"},
         )
 
-        assert response is not None
-        assert response["result"]["dogfooding_provenance"] == "hermes"
-        assert response["result"]["dogfooding_bug_loop_required"] is False
-
-    def test_non_hermes_path_has_no_dogfooding_provenance(self, live_bridge_server):
-        _, socket_path = live_bridge_server
-        response = _socket_request(
-            socket_path,
-            "lifecycle.sessionCreated",
-            {"sessionId": "artisan-session", "agent": "artisan"},
-        )
-
-        assert response is not None
-        assert response["result"]["dogfooding_provenance"] is None
-        assert response["result"]["dogfooding_bug_loop_required"] is False
+        assert response is None or response.get("result") is None
 
 
 # ---------------------------------------------------------------------------
@@ -300,43 +286,9 @@ class TestPhaseProgression:
         assert parsed["phase"] == "INTERFACES"
         assert parsed["mode"] == "GREENFIELD"
 
-    def test_dogfooding_defect_requires_bug_loop(self, started_bridge):
-        started_bridge.set_response(
-            "state.get",
-            {
-                "phase": "IMPLEMENTATION",
-                "phaseState": "DRAFT",
-                "dogfooding_provenance": "hermes",
-                "dogfooding_bug_loop_required": True,
-            },
-        )
-
-        from hermes_adapter.workflow_tools import _handle_oa_state
-
-        result = _handle_oa_state(started_bridge, "s1")
-        parsed = json.loads(result)
-        assert parsed["dogfooding_provenance"] == "hermes"
-        assert parsed["dogfooding_bug_loop_required"] is True
-
-    def test_no_defect_clears_bug_loop_requirement(self, started_bridge):
-        started_bridge.set_response(
-            "state.get",
-            {
-                "phase": "IMPLEMENTATION",
-                "phaseState": "DRAFT",
-                "dogfooding_provenance": "hermes",
-                "dogfooding_bug_loop_required": False,
-            },
-        )
-
-        from hermes_adapter.workflow_tools import _handle_oa_state
-
-        result = _handle_oa_state(started_bridge, "s1")
-        parsed = json.loads(result)
-        assert parsed["dogfooding_provenance"] == "hermes"
-        assert parsed["dogfooding_bug_loop_required"] is False
-
-    def test_docs_only_drift_does_not_create_provenance(self, started_bridge):
+    def test_docs_only_drift_does_not_create_synthetic_runtime_contract(
+        self, started_bridge
+    ):
         started_bridge.set_response(
             "state.get",
             {
@@ -351,25 +303,7 @@ class TestPhaseProgression:
         result = _handle_oa_state(started_bridge, "s1")
         parsed = json.loads(result)
         assert parsed.get("dogfooding_provenance") is None
-
-    def test_docs_only_drift_does_not_weaken_bug_loop_requirement(self, started_bridge):
-        started_bridge.set_response(
-            "state.get",
-            {
-                "phase": "IMPLEMENTATION",
-                "phaseState": "DRAFT",
-                "dogfooding_provenance": "hermes",
-                "modeDetectionNote": "Docs describe bug-loop handling as optional.",
-                "dogfooding_bug_loop_required": True,
-            },
-        )
-
-        from hermes_adapter.workflow_tools import _handle_oa_state
-
-        result = _handle_oa_state(started_bridge, "s1")
-        parsed = json.loads(result)
-        assert parsed["dogfooding_provenance"] == "hermes"
-        assert parsed["dogfooding_bug_loop_required"] is True
+        assert parsed.get("dogfooding_bug_loop_required") is None
 
 
 # ---------------------------------------------------------------------------

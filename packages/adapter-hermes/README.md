@@ -105,12 +105,7 @@ Recovery checklist for Hermes users:
 
 ### Workflow Tools (`workflow_tools.py`)
 
-Hermes workflow execution now carries explicit dogfooding provenance through the bridge/runtime contract:
-
-- Hermes-driven workflow paths should surface `dogfooding_provenance: "hermes"`
-- non-Hermes or unlabeled paths should surface `dogfooding_provenance: null` (or omit the field where equivalent)
-- when a defect is observed on a Hermes-dogfooded path, the contract should surface `dogfooding_bug_loop_required: true` until the defect is routed into the bug loop
-- documentation describes these rules, but the runtime/adapter contract remains the source of truth
+Hermes remains the primary exercise path for dogfooding Open Artisan behavior, but that is an operational practice rather than a bridge/runtime contract. The adapter should stay truthful about workflow state and should not invent extra dogfooding-specific state just to reflect operator process.
 
 Workflow tools registered in the `open-artisan` toolset via `ctx.register_tool()`. Each delegates to the bridge's `tool.execute` method.
 

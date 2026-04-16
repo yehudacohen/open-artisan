@@ -145,6 +145,20 @@ class BridgeClient(Protocol):
         """Inspect existing local bridge metadata and liveness for a project."""
         ...
 
+    def ensure_started(self, project_dir: str) -> None:
+        """Ensure an existing bridge transport is healthy or start one."""
+        ...
+
+    def ensure_session(
+        self, session_id: str, project_dir: str, agent: str = "artisan"
+    ) -> None:
+        """Ensure the current session is registered once per healthy runtime."""
+        ...
+
+    def clear_session(self, session_id: str, project_dir: str) -> None:
+        """Forget local ensured-session tracking for a completed session."""
+        ...
+
     def shutdown(self) -> None:
         """Send lifecycle.shutdown and terminate the subprocess."""
         ...

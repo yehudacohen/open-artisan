@@ -81,6 +81,67 @@ class TestSubprocessLifecycle:
         mock_spawn.assert_called_once()
         assert client._socket_path is None
 
+    def test_ensure_started_reuses_healthy_shared_bridge_without_restarting(self):
+        client = StdioBridgeClient()
+        client._project_dir = "/tmp/project"
+        client._socket_path = "/tmp/project/.openartisan/.bridge.sock"
+
+        with (
+            patch.object(client, "_probe_shared_bridge") as mock_probe,
+            patch.object(client, "start") as mock_start,
+        ):
+            client.ensure_started("/tmp/project")
+
+        mock_probe.assert_called_once()
+        mock_start.assert_not_called()
+        assert client._transport_mode == "shared-socket"
+
+    def test_ensure_started_recovers_from_unhealthy_shared_bridge(self):
+        client = StdioBridgeClient()
+        client._project_dir = "/tmp/project"
+        client._socket_path = "/tmp/project/.openartisan/.bridge.sock"
+
+        with (
+            patch.object(
+                client,
+                "_probe_shared_bridge",
+                side_effect=BridgeError("probe failed"),
+            ),
+            patch.object(client, "start") as mock_start,
+        ):
+            client.ensure_started("/tmp/project")
+
+        mock_start.assert_called_once_with("/tmp/project")
+        assert client._last_health_status == "recovering"
+
+    def test_ensure_session_is_idempotent_within_same_runtime(self):
+        client = StdioBridgeClient()
+
+        with (
+            patch.object(client, "ensure_started") as mock_started,
+            patch.object(client, "call", return_value=None) as mock_call,
+        ):
+            client.ensure_session("s1", "/tmp/project", agent="hermes")
+            client.ensure_session("s1", "/tmp/project", agent="hermes")
+
+        mock_started.assert_called()
+        mock_call.assert_called_once_with(
+            "lifecycle.sessionCreated", {"sessionId": "s1", "agent": "hermes"}
+        )
+
+    def test_restart_clears_ensured_session_cache(self, tmp_path):
+        client = StdioBridgeClient()
+        client._ensured_sessions.add((str(tmp_path), "s1"))
+
+        with (
+            patch.object(client, "discover_bridge", return_value={"kind": "no_bridge"}),
+            patch.object(client, "_spawn_process"),
+            patch.object(client, "_send_rpc", return_value="ready"),
+        ):
+            client.start(str(tmp_path))
+
+        assert client._ensured_sessions == set()
+
     def test_start_can_take_over_existing_bridge_when_enabled(self, tmp_path):
         client = StdioBridgeClient()
         state_dir = tmp_path / ".openartisan"
@@ -239,11 +300,13 @@ class TestJsonRpcRoundTrip:
         short_dir = Path(tempfile.mkdtemp(prefix="oa-bridge-"))
         socket_path = short_dir / "bridge.sock"
         result_holder: dict[str, object] = {}
+        ready = threading.Event()
 
         def serve_once() -> None:
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
                 server.bind(str(socket_path))
                 server.listen(1)
+                ready.set()
                 conn, _ = server.accept()
                 with conn:
                     buffer = b""
@@ -258,10 +321,7 @@ class TestJsonRpcRoundTrip:
         thread = threading.Thread(target=serve_once)
         thread.start()
         try:
-            for _ in range(50):
-                if socket_path.exists():
-                    break
-                time.sleep(0.01)
+            assert ready.wait(timeout=2)
             client._socket_path = str(socket_path)
             result = client.call(
                 "lifecycle.sessionCreated", {"sessionId": "test-session"}
@@ -426,6 +486,15 @@ class TestJsonRpcRoundTrip:
 
         assert result == "pong"
         mock_rpc.assert_called_once_with("lifecycle.ping", {})
+
+    def test_health_transition_logging_is_suppressed_for_identical_status(self):
+        client = StdioBridgeClient()
+
+        with patch("hermes_adapter.bridge_client.logger.info") as mock_info:
+            client._log_health_transition("healthy", "shared socket")
+            client._log_health_transition("healthy", "shared socket")
+
+        mock_info.assert_called_once()
 
 
 # ---------------------------------------------------------------------------

@@ -2748,6 +2748,14 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
               }
               return planContent ? extractApprovedFileAllowlist(planContent, cwd) : []
             }
+            const validateReviewedArtifactFilesAgainstAllowlist = (allowlist: string[]): string[] => {
+              if (state.reviewArtifactFiles.length === 0) return []
+              const cwd = context.directory || process.cwd()
+              const normalizedAllowlist = new Set(allowlist.map((path) => path.startsWith("/") ? path : resolve(cwd, path)))
+              return state.reviewArtifactFiles
+                .map((path) => path.startsWith("/") ? path : resolve(cwd, path))
+                .filter((path) => !normalizedAllowlist.has(path))
+            }
 
             // Forward-pass skip: in INCREMENTAL mode, if the fileAllowlist proves
             // the next phase has no relevant files (e.g. no interface files for
@@ -2765,7 +2773,11 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
               if (state.phase === "PLANNING" && state.mode === "INCREMENTAL") {
                 return deriveIncrementalAllowlist()
               }
-              if (state.phase === "IMPL_PLAN" && state.mode === "INCREMENTAL" && state.fileAllowlist.length === 0) {
+              if (
+                state.mode === "INCREMENTAL" &&
+                state.fileAllowlist.length === 0 &&
+                (state.phase === "INTERFACES" || state.phase === "TESTS" || state.phase === "IMPL_PLAN")
+              ) {
                 return deriveIncrementalAllowlist()
               }
               return state.fileAllowlist
@@ -2780,6 +2792,18 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                 "Error: INCREMENTAL planning approval requires an explicit file allowlist source. " +
                 "Pass `approved_files`, or include an `Allowlist`/`Narrow allowlist` section in the approved plan artifact."
               )
+            }
+            if (
+              state.mode === "INCREMENTAL" &&
+              (state.phase === "INTERFACES" || state.phase === "TESTS")
+            ) {
+              const reviewedOutsideAllowlist = validateReviewedArtifactFilesAgainstAllowlist(effectiveAllowlist)
+              if (reviewedOutsideAllowlist.length > 0) {
+                return (
+                  `Error: ${state.phase} approval failed allowlist validation: reviewed artifact files fall outside the approved INCREMENTAL allowlist: ` +
+                  `${reviewedOutsideAllowlist.join(", ")}. Update the planning allowlist or narrow the artifact scope before approval.`
+                )
+              }
             }
             const forwardSkip = computeForwardSkip(
               outcome.nextPhase,
@@ -2856,7 +2880,12 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
               // rejects relative paths, so we resolve them against the project dir.
               if (state.phase === "PLANNING" && state.mode === "INCREMENTAL") {
                 draft.fileAllowlist = effectiveAllowlist
-              } else if (state.phase === "IMPL_PLAN" && state.mode === "INCREMENTAL" && draft.fileAllowlist.length === 0 && effectiveAllowlist.length > 0) {
+              } else if (
+                state.mode === "INCREMENTAL" &&
+                draft.fileAllowlist.length === 0 &&
+                effectiveAllowlist.length > 0 &&
+                (state.phase === "INTERFACES" || state.phase === "TESTS" || state.phase === "IMPL_PLAN")
+              ) {
                 draft.fileAllowlist = effectiveAllowlist
               }
               // S3: Record artifact hash for drift detection (approvedArtifacts).

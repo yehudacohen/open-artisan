@@ -96,12 +96,16 @@ const LIST_ITEM_RE = /^\s*[-*]\s+(.+)$/
 // ---------------------------------------------------------------------------
 
 /** Splits a comma/space-separated list, returning [] for "none"/empty/"-". */
+function normalizeListEntry(raw: string): string {
+  return raw.trim().replace(/^`(.+)`$/, "$1")
+}
+
 function parseList(raw: string): string[] {
   const trimmed = raw.trim()
   if (/^none$/i.test(trimmed) || trimmed === "" || trimmed === "-") return []
   return trimmed
     .split(/[,\s]+/)
-    .map((s) => s.trim())
+    .map(normalizeListEntry)
     .filter((s) => s.length > 0 && !/^none$/i.test(s))
 }
 
@@ -231,7 +235,7 @@ function extractRawBlocks(text: string): RawBlock[] {
 
     const listItemMatch = pendingListField ? LIST_ITEM_RE.exec(line) : null
     if (pendingListField && listItemMatch) {
-      const value = listItemMatch[1]!.trim()
+      const value = normalizeListEntry(listItemMatch[1]!.trim())
       if (value.length > 0) {
         if (pendingListField === "deps") {
           current.rawDeps = current.rawDeps ? `${current.rawDeps}, ${value}` : value

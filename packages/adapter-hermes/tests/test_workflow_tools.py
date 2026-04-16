@@ -212,6 +212,7 @@ class TestOaState:
         state_calls = started_bridge.get_calls("state.get")
         assert len(state_calls) == 1
         assert state_calls[0][1]["sessionId"] == "test-session"
+        assert state_calls[0][1]["includeRuntimeHealth"] is True
         # Should NOT have called tool.execute
         tool_calls = started_bridge.get_calls("tool.execute")
         assert len(tool_calls) == 0
@@ -219,10 +220,21 @@ class TestOaState:
     def test_returns_state_as_json(self, started_bridge):
         """oa_state should return the state as a JSON string."""
         state = {"phase": "INTERFACES", "phaseState": "REVIEW", "mode": "GREENFIELD"}
-        started_bridge.set_response("state.get", state)
+        started_bridge.set_response(
+            "state.get",
+            {
+                "state": state,
+                "runtimeHealth": {
+                    "bridgeTransport": "unix-socket",
+                    "lastRecoveryAction": "attached-shared-bridge",
+                    "noopReason": None,
+                },
+            },
+        )
         result = _handle_oa_state(started_bridge, "s1")
         parsed = json.loads(result)
         assert parsed["phase"] == "INTERFACES"
+        assert parsed["runtimeHealth"]["bridgeTransport"] == "unix-socket"
 
 
 # ---------------------------------------------------------------------------

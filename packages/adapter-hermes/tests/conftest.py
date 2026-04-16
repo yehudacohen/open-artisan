@@ -52,6 +52,11 @@ class MockBridgeClient:
             ("lifecycle.sessionCreated", {"sessionId": session_id, "agent": agent})
         )
 
+    def clear_session(self, session_id: str, project_dir: str) -> None:
+        self._calls.append(
+            ("clear_session", {"sessionId": session_id, "projectDir": project_dir})
+        )
+
     def call(self, method: str, params: dict[str, Any] | None = None) -> Any:
         self._calls.append((method, params))
         if method in self._responses:

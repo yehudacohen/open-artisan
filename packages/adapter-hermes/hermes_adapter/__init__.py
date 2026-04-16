@@ -95,10 +95,15 @@ def _on_session_end(
     """
 
     session_id = str(kwargs.get("session_id", "default"))
+    project_dir = os.getcwd()
     try:
         bridge.call("lifecycle.sessionDeleted", {"sessionId": session_id})
     except Exception as e:
         logger.debug("lifecycle.sessionDeleted failed (bridge may be dead): %s", e)
+    try:
+        bridge.clear_session(session_id, project_dir)
+    except Exception:
+        pass
 
     try:
         bridge.shutdown()

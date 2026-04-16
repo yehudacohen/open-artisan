@@ -180,6 +180,27 @@ describe("Bridge integration — lifecycle", () => {
     expect(state.phase).toBe("MODE_SELECT")
   })
 
+  it("state.get can include runtime health summary", async () => {
+    await client.call("lifecycle.init", { projectDir: tmpDir })
+    await client.call("lifecycle.sessionCreated", { sessionId: "s1", agent: "hermes" })
+    const result = await client.call("state.get", { sessionId: "s1", includeRuntimeHealth: true }) as any
+    expect(result.state).not.toBeNull()
+    expect(result.state.sessionId).toBe("s1")
+    expect(result.runtimeHealth.phase).toBe("MODE_SELECT")
+    expect(result.runtimeHealth.bridgeTransport).toBe("unix-socket")
+    expect(result.runtimeHealth.bridgeActiveClientKinds).toContain("hermes")
+    expect(result.runtimeHealth.awaitingUserGate).toBe(false)
+  })
+
+  it("state.health returns runtime health directly", async () => {
+    await client.call("lifecycle.init", { projectDir: tmpDir })
+    await client.call("lifecycle.sessionCreated", { sessionId: "s1", agent: "hermes" })
+    const result = await client.call("state.health", { sessionId: "s1" }) as any
+    expect(result.phase).toBe("MODE_SELECT")
+    expect(result.bridgeTransport).toBe("unix-socket")
+    expect(result.bridgeActiveClientKinds).toContain("hermes")
+  })
+
   it("methods before init return NOT_INITIALIZED error", async () => {
     await expect(
       client.call("state.get", { sessionId: "s1" }),

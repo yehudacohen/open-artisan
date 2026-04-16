@@ -898,6 +898,39 @@ describe("SessionStateStore — load", () => {
     expect(loaded?.currentTaskId).toBe("T2")
     expect(loaded?.implDag?.find((task) => task.id === "T1")?.status).toBe("complete")
   })
+
+  it("repairs malformed markdown-derived incremental allowlists from the approved plan on load", async () => {
+    const featureName = "repair-allowlist-from-plan"
+    const featureDir = join(tmpDir, ".openartisan", featureName)
+    mkdirSync(featureDir, { recursive: true })
+    const planPath = join(featureDir, "plan.md")
+    writeFileSync(
+      planPath,
+      "# Plan\n\n## Narrow allowlist\n- `src/a.ts`\n- Existing DAG/state model files already used by workflow execution:\n  - `src/b.ts`\n",
+      "utf-8",
+    )
+
+    writePerFeatureState(tmpDir, featureName, makeState("repair-allowlist-session", featureName, {
+      mode: "INCREMENTAL",
+      phase: "INTERFACES",
+      phaseState: "USER_GATE",
+      artifactDiskPaths: { plan: planPath },
+      fileAllowlist: [
+        "/repo/`src/a.ts`",
+        "/repo/Existing DAG/state model files already used by workflow execution:",
+        "/repo/`src/b.ts`",
+      ],
+    }))
+
+    const store2 = createSessionStateStore(createFileSystemStateBackend(tmpDir))
+    const result = await store2.load()
+    expect(result.success).toBe(true)
+    const loaded = store2.get("repair-allowlist-session")
+    expect(loaded?.fileAllowlist).toEqual([
+      join(tmpDir, "src/a.ts"),
+      join(tmpDir, "src/b.ts"),
+    ])
+  })
 })
 
 // ---------------------------------------------------------------------------

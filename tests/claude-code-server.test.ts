@@ -98,6 +98,15 @@ describe("artisan-server", () => {
     expect(response.result.phase).toBe("MODE_SELECT")
   }, 15000)
 
+  it("exposes state.health over the shared socket", async () => {
+    await startServer()
+    await rpc("lifecycle.sessionCreated", { sessionId: "health-session", agent: "hermes" })
+    const response = await rpc("state.health", { sessionId: "health-session" })
+    expect(response.result.phase).toBe("MODE_SELECT")
+    expect(response.result.bridgeTransport).toBe("unix-socket")
+    expect(response.result.bridgeActiveClientKinds).toContain("hermes")
+  }, 15000)
+
   it("executes workflow tools via socket", async () => {
     await startServer()
     await rpc("lifecycle.sessionCreated", { sessionId: "tool-test" })

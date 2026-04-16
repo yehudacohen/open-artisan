@@ -1680,6 +1680,117 @@ describe("fileAllowlist — relative paths are normalized to absolute", () => {
     expect(state.fileAllowlist).toContain(`${tempDir}/tests/allowed.test.ts`)
   })
 
+  it("approves IMPL_PLAN when task files and tests are markdown-wrapped but in scope", async () => {
+    const sid = `int-test-${Date.now()}-impl-backticks`
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: sid } } },
+    })
+    const ctx = { directory: tempDir, sessionId: sid }
+
+    await plugin.tool.select_mode.execute(
+      { mode: "INCREMENTAL", feature_name: "impl-backticks-test" },
+      ctx,
+    )
+
+    const store = plugin._testStore
+    await store.update(sid, (draft: any) => {
+      draft.phase = "IMPL_PLAN"
+      draft.phaseState = "USER_GATE"
+      draft.userGateMessageReceived = true
+      draft.fileAllowlist = [`${tempDir}/src/allowed.ts`, `${tempDir}/tests/allowed.test.ts`]
+    })
+
+    const implPlan = `# Implementation Plan
+
+## Task T1: In-scope work
+**Dependencies:** none
+**Files:** \0src/allowed.ts\0
+**Expected tests:** \0tests/allowed.test.ts\0
+**Complexity:** medium
+`.replaceAll("\u00060", "`")
+
+    const result = await plugin.tool.submit_feedback.execute(
+      {
+        feedback_type: "approve",
+        feedback_text: "approved",
+        artifact_content: implPlan,
+      },
+      ctx,
+    )
+
+    expect(result).not.toContain("outside the approved INCREMENTAL allowlist")
+  })
+
+  it("rejects TESTS approval when reviewed artifact files fall outside the approved allowlist", async () => {
+    const sid = `int-test-${Date.now()}-tests-allowlist-check`
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: sid } } },
+    })
+    const ctx = { directory: tempDir, sessionId: sid }
+
+    await plugin.tool.select_mode.execute(
+      { mode: "INCREMENTAL", feature_name: "tests-allowlist-check-test" },
+      ctx,
+    )
+
+    const store = plugin._testStore
+    await store.update(sid, (draft: any) => {
+      draft.phase = "TESTS"
+      draft.phaseState = "USER_GATE"
+      draft.userGateMessageReceived = true
+      draft.fileAllowlist = [`${tempDir}/tests/allowed.test.ts`]
+      draft.reviewArtifactFiles = ["tests/out-of-scope.test.ts"]
+    })
+
+    const result = await plugin.tool.submit_feedback.execute(
+      {
+        feedback_type: "approve",
+        feedback_text: "approved",
+      },
+      ctx,
+    )
+
+    expect(result).toContain("TESTS approval failed allowlist validation")
+    expect(result).toContain(`${tempDir}/tests/out-of-scope.test.ts`)
+  })
+
+  it("derives missing INCREMENTAL allowlist from approved plan for TESTS approval", async () => {
+    const sid = `int-test-${Date.now()}-tests-allowlist-recovery`
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: sid } } },
+    })
+    const ctx = { directory: tempDir, sessionId: sid }
+
+    await plugin.tool.select_mode.execute(
+      { mode: "INCREMENTAL", feature_name: "tests-allowlist-recovery-test" },
+      ctx,
+    )
+
+    const store = plugin._testStore
+    const planPath = `${tempDir}/.openartisan/tests-allowlist-recovery-test/plan.md`
+    await Bun.write(planPath, "# Planning\n\n## Narrow allowlist\n- tests/in-scope.test.ts\n")
+    await store.update(sid, (draft: any) => {
+      draft.phase = "TESTS"
+      draft.phaseState = "USER_GATE"
+      draft.userGateMessageReceived = true
+      draft.artifactDiskPaths.plan = planPath
+      draft.fileAllowlist = []
+      draft.reviewArtifactFiles = ["tests/in-scope.test.ts"]
+    })
+
+    const result = await plugin.tool.submit_feedback.execute(
+      {
+        feedback_type: "approve",
+        feedback_text: "approved",
+      },
+      ctx,
+    )
+
+    expect(result).not.toContain("approval failed allowlist validation")
+    const state = store.get(sid)
+    expect(state.fileAllowlist).toContain(`${tempDir}/tests/in-scope.test.ts`)
+  })
+
   it("normalizes preserved fileAllowlist from prior cycle at select_mode time", async () => {
     const sid = `int-test-${Date.now()}-selectmode-normalize`
     await plugin.event({

@@ -121,6 +121,21 @@ class StdioBridgeClient:
         self._project_dir: str | None = None
         self._state_dir: str | None = None
         self._socket_path: str | None = None
+        self._transport_mode = "uninitialized"
+        self._last_health_status: str | None = None
+        self._ensured_sessions: set[tuple[str, str]] = set()
+
+    def _set_transport_mode(self, mode: str) -> None:
+        self._transport_mode = mode
+
+    def _reset_runtime_tracking(self) -> None:
+        self._ensured_sessions.clear()
+
+    def _log_health_transition(self, status: str, detail: str) -> None:
+        if self._last_health_status == status:
+            return
+        self._last_health_status = status
+        logger.info("Hermes bridge status: %s (%s)", status, detail)
 
     def _socket_error(
         self, method: str, detail: str, *, recoverable: bool = True
@@ -132,6 +147,9 @@ class StdioBridgeClient:
 
     def _clear_shared_bridge_attachment(self) -> None:
         self._socket_path = None
+        if self._transport_mode == "shared-socket":
+            self._set_transport_mode("uninitialized")
+        self._reset_runtime_tracking()
 
     def _probe_shared_bridge(self) -> None:
         if not self._socket_path:
@@ -151,6 +169,7 @@ class StdioBridgeClient:
         """
         self._project_dir = project_dir
         self._state_dir = f"{project_dir}/{DEFAULT_STATE_DIR_NAME}"
+        self._reset_runtime_tracking()
 
         discovery = self.discover_bridge(project_dir, self._state_dir)
         if discovery.get("kind") == "live_compatible_bridge":
@@ -165,16 +184,22 @@ class StdioBridgeClient:
                         "Attached Hermes adapter to shared bridge socket %s",
                         socket_path,
                     )
+                    self._set_transport_mode("shared-socket")
+                    self._log_health_transition(
+                        "healthy", f"shared socket {socket_path}"
+                    )
                     return
                 except BridgeError as e:
                     logger.warning(
                         "Shared bridge probe failed, spawning local bridge fallback: %s",
                         e,
                     )
+                    self._log_health_transition("recovering", str(e))
                     self._clear_shared_bridge_attachment()
 
         self._socket_path = None
         self._spawn_process()
+        self._set_transport_mode("local-stdio")
         payload = {
             "projectDir": project_dir,
             "stateDir": self._state_dir,
@@ -189,6 +214,7 @@ class StdioBridgeClient:
                 raise
         if result != "ready":
             logger.warning("Bridge init returned unexpected result: %s", result)
+        self._log_health_transition("healthy", "local stdio bridge")
 
     def call(self, method: str, params: dict[str, Any] | None = None) -> Any:
         """Send a JSON-RPC request and return the result."""
@@ -206,6 +232,7 @@ class StdioBridgeClient:
                         method,
                         e,
                     )
+                    self._log_health_transition("recovering", str(e))
                     self._clear_shared_bridge_attachment()
                     self.start(self._project_dir)
                     if not self._socket_path:
@@ -236,6 +263,18 @@ class StdioBridgeClient:
     def ensure_started(self, project_dir: str) -> None:
         """Ensure the bridge subprocess is running for a project directory."""
         self._project_dir = project_dir
+        if self._socket_path:
+            try:
+                self._probe_shared_bridge()
+                self._set_transport_mode("shared-socket")
+                return
+            except BridgeError as e:
+                logger.warning(
+                    "Shared bridge probe failed during ensure_started, recovering: %s",
+                    e,
+                )
+                self._log_health_transition("recovering", str(e))
+                self._clear_shared_bridge_attachment()
         if self._process is None or self._process.poll() is not None:
             self.start(project_dir)
 
@@ -244,7 +283,15 @@ class StdioBridgeClient:
     ) -> None:
         """Ensure the bridge is running and the current session exists."""
         self.ensure_started(project_dir)
+        session_key = (project_dir, session_id)
+        if session_key in self._ensured_sessions:
+            return
         self.call("lifecycle.sessionCreated", {"sessionId": session_id, "agent": agent})
+        self._ensured_sessions.add(session_key)
+
+    def clear_session(self, session_id: str, project_dir: str) -> None:
+        """Forget local ensured-session tracking for a completed session."""
+        self._ensured_sessions.discard((project_dir, session_id))
 
     def discover_bridge(
         self, project_dir: str, state_dir: str

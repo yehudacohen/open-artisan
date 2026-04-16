@@ -30,7 +30,7 @@ import {
   handleSessionCreated,
   handleSessionDeleted,
 } from "#bridge/methods/lifecycle"
-import { handleStateGet } from "#bridge/methods/state"
+import { handleStateGet, handleStateHealth } from "#bridge/methods/state"
 import { handleGuardCheck, handleGuardPolicy } from "#bridge/methods/guard"
 import { handlePromptBuild, handlePromptCompaction } from "#bridge/methods/prompt"
 import { handleMessageProcess } from "#bridge/methods/message"
@@ -132,6 +132,7 @@ async function main() {
     "lifecycle.sessionCreated": handleSessionCreated,
     "lifecycle.sessionDeleted": handleSessionDeleted,
     "state.get": handleStateGet,
+    "state.health": handleStateHealth,
     "guard.check": handleGuardCheck,
     "guard.policy": handleGuardPolicy,
     "prompt.build": handlePromptBuild,

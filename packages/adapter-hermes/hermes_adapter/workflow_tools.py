@@ -22,7 +22,9 @@ def ensure_workflow_session(
     agent: str = "hermes",
 ) -> None:
     """Ensure a workflow session exists using the shared adapter contract."""
-    bridge.ensure_session(session_id or "default", project_dir or os.getcwd(), agent=agent)
+    bridge.ensure_session(
+        session_id or "default", project_dir or os.getcwd(), agent=agent
+    )
 
 
 def register_workflow_tools(
@@ -164,9 +166,16 @@ def _handle_oa_state(
     try:
         effective_project_dir = project_dir or os.getcwd()
         ensure_workflow_session(bridge, session_id, effective_project_dir)
-        result = bridge.call("state.get", {"sessionId": session_id or "default"})
+        result = bridge.call(
+            "state.get",
+            {"sessionId": session_id or "default", "includeRuntimeHealth": True},
+        )
         if result is None:
             return make_error_response("No active workflow session.")
+        if isinstance(result, dict) and isinstance(result.get("state"), dict):
+            merged = dict(result["state"])
+            merged["runtimeHealth"] = result.get("runtimeHealth")
+            return json.dumps(merged, indent=2)
         return json.dumps(result, indent=2)
     except BridgeError as e:
         return make_error_response(f"Bridge communication failed: {e}")

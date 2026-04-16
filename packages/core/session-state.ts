@@ -12,6 +12,8 @@
  * - G4: update() validates invariants via validateWorkflowState() before persisting
  * - G5: load() clears in-memory store before populating to avoid resurrection of stale sessions
  */
+import { readFileSync } from "node:fs"
+import { dirname } from "node:path"
 import {
   SCHEMA_VERSION,
   validateWorkflowState,
@@ -22,6 +24,7 @@ import {
   type StoreLoadError,
 } from "./types"
 import { readDecisionInput, nextSchedulerDecisionForInput, nextSchedulerDecision } from "./scheduler"
+import { extractApprovedFileAllowlist } from "./tools/plan-allowlist"
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -183,6 +186,24 @@ function migrateState(migrated: Record<string, unknown>): void {
 }
 
 function repairStateInconsistencies(state: WorkflowState): void {
+  if (
+    state.mode === "INCREMENTAL" &&
+    state.artifactDiskPaths.plan &&
+    state.fileAllowlist.some((entry) => entry.includes("`") || entry.endsWith(":") || /\s/.test(entry))
+  ) {
+    try {
+      const planPath = state.artifactDiskPaths.plan
+      const planContent = readFileSync(planPath, "utf-8")
+      const cwd = dirname(dirname(dirname(planPath)))
+      const repaired = extractApprovedFileAllowlist(planContent, cwd)
+      if (repaired.length > 0) {
+        state.fileAllowlist = repaired
+      }
+    } catch {
+      // non-fatal — keep the persisted allowlist if plan-based repair fails
+    }
+  }
+
   if (state.phase !== "IMPLEMENTATION") {
     state.currentTaskId = null
     state.taskCompletionInProgress = null

@@ -15,7 +15,7 @@ export {
   handleSessionCreated,
   handleSessionDeleted,
 } from "./methods/lifecycle"
-export { handleStateGet } from "./methods/state"
+export { handleStateGet, handleStateHealth, resolveRuntimeHealth } from "./methods/state"
 export { handleGuardCheck, handleGuardPolicy } from "./methods/guard"
 export { handlePromptBuild, handlePromptCompaction } from "./methods/prompt"
 export { handleMessageProcess } from "./methods/message"

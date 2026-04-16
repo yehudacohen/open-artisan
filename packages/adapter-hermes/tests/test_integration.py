@@ -180,6 +180,9 @@ class TestSessionLifecycle:
         mock_bridge.set_response("lifecycle.sessionDeleted", None)
         _on_session_end(mock_ctx, mock_bridge, session_id=mock_ctx.session_id)
         assert not mock_bridge.is_alive
+        clear_calls = mock_bridge.get_calls("clear_session")
+        assert len(clear_calls) == 1
+        assert clear_calls[0][1]["sessionId"] == mock_ctx.session_id
 
     def test_live_bridge_session_created_returns_no_synthetic_dogfooding_contract(
         self, live_bridge_server
@@ -485,6 +488,34 @@ class TestSharedBridgeReuse:
                 ]
             finally:
                 _stop_bridge_server(proc)
+        finally:
+            shutil.rmtree(project_dir, ignore_errors=True)
+
+    def test_client_recovers_after_real_shared_bridge_dies_between_turns(self):
+        project_dir = Path(tempfile.mkdtemp(prefix="oa-live-recover-"))
+        try:
+            proc, socket_path = _start_bridge_server(project_dir)
+            bridge = StdioBridgeClient()
+            try:
+                _socket_request(
+                    socket_path,
+                    "lifecycle.sessionCreated",
+                    {"sessionId": "claude-a", "agent": "claude-code"},
+                )
+
+                bridge.start(str(project_dir))
+                bridge.ensure_session(
+                    "hermes-session", str(project_dir), agent="hermes"
+                )
+                assert bridge.call("lifecycle.ping") == "pong"
+
+                _stop_bridge_server(proc)
+
+                recovered = bridge.call("lifecycle.ping")
+                assert recovered == "pong"
+                assert bridge.is_alive
+            finally:
+                bridge.shutdown()
         finally:
             shutil.rmtree(project_dir, ignore_errors=True)
 

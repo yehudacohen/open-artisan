@@ -17,7 +17,7 @@ import {
   handleSessionDeleted,
 } from "#bridge/methods/lifecycle"
 import { loadBridgeLeaseSnapshot, loadBridgeMetadata } from "#bridge/bridge-meta"
-import { handleStateGet } from "#bridge/methods/state"
+import { handleStateGet, handleStateHealth } from "#bridge/methods/state"
 import type { BridgeContext } from "#bridge/server"
 import type { EngineContext } from "#core/engine-context"
 
@@ -177,9 +177,34 @@ describe("state.get", () => {
     expect(result).toBeNull()
   })
 
+  it("can include runtime health summary alongside session state", async () => {
+    await handleInit({ projectDir: tmpDir }, ctx)
+    await handleSessionCreated({ sessionId: "s1", agent: "hermes" }, ctx)
+    const result = await handleStateGet({ sessionId: "s1", includeRuntimeHealth: true }, ctx) as any
+    expect(result.state).not.toBeNull()
+    expect(result.state.sessionId).toBe("s1")
+    expect(result.runtimeHealth.phase).toBe("MODE_SELECT")
+    expect(result.runtimeHealth.bridgeTransport).toBe("unix-socket")
+    expect(result.runtimeHealth.bridgeAttachedClients).toBeGreaterThan(0)
+    expect(result.runtimeHealth.bridgeActiveClientKinds).toContain("hermes")
+    expect(result.runtimeHealth.pendingTaskReview).toBe(false)
+    expect(result.runtimeHealth.lastRecoveryAction).toBe("attached-shared-bridge")
+    expect(result.runtimeHealth.awaitingUserGate).toBe(false)
+    expect(result.runtimeHealth.noopReason).toBeNull()
+  })
+
   it("rejects missing sessionId", async () => {
     await handleInit({ projectDir: tmpDir }, ctx)
     await expect(handleStateGet({}, ctx)).rejects.toThrow("sessionId")
+  })
+
+  it("state.health returns runtime health directly", async () => {
+    await handleInit({ projectDir: tmpDir }, ctx)
+    await handleSessionCreated({ sessionId: "s1", agent: "hermes" }, ctx)
+    const result = await handleStateHealth({ sessionId: "s1" }, ctx) as any
+    expect(result.phase).toBe("MODE_SELECT")
+    expect(result.bridgeTransport).toBe("unix-socket")
+    expect(result.bridgeActiveClientKinds).toContain("hermes")
   })
 })
 

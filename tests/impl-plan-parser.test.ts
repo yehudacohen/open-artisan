@@ -102,6 +102,20 @@ describe("parseImplPlan — happy path", () => {
       expect(t.status).toBe("pending")
     }
   })
+
+  it("strips markdown backticks from files and expected tests", () => {
+    const plan = `
+## Task T1: Backticked paths
+**Dependencies:** none
+**Files:** \`src/a.ts\`, \`src/b.ts\`
+**Expected tests:** \`tests/a.test.ts\`, \`tests/b.test.ts\`
+`
+    const result = parseImplPlan(plan)
+    if (!result.success) throw new Error(result.errors.join("; "))
+    const task = Array.from(result.dag.tasks)[0]!
+    expect(task.expectedFiles).toEqual(["src/a.ts", "src/b.ts"])
+    expect(task.expectedTests).toEqual(["tests/a.test.ts", "tests/b.test.ts"])
+  })
 })
 
 describe("parseImplPlan — ignores non-task section headings", () => {

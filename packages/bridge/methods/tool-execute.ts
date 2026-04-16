@@ -512,6 +512,13 @@ const handleSubmitFeedback: ToolHandler = async (args, toolCtx, ctx) => {
     derivedApprovedFiles = planContent ? extractApprovedFileAllowlist(planContent, cwd) : []
     return derivedApprovedFiles
   }
+  const validateReviewedArtifactFilesAgainstAllowlist = (allowlist: string[]): string[] => {
+    if (!state.reviewArtifactFiles.length) return []
+    const normalizedAllowlist = new Set(allowlist.map((path) => (path.startsWith("/") ? path : resolve(cwd, path))))
+    return state.reviewArtifactFiles
+      .map((path) => (path.startsWith("/") ? path : resolve(cwd, path)))
+      .filter((path) => !normalizedAllowlist.has(path))
+  }
 
   if (state.phaseState !== "USER_GATE" && state.phaseState !== "ESCAPE_HATCH") {
     return `Error: submit_feedback can only be called at USER_GATE or ESCAPE_HATCH (current: ${state.phaseState}).`
@@ -666,6 +673,21 @@ const handleSubmitFeedback: ToolHandler = async (args, toolCtx, ctx) => {
       }
     }
 
+    if (
+      state.mode === "INCREMENTAL" &&
+      (state.phase === "INTERFACES" || state.phase === "TESTS")
+    ) {
+      const effectiveAllowlist =
+        state.fileAllowlist.length === 0 ? getEffectiveIncrementalAllowlist() : state.fileAllowlist
+      const reviewedOutsideAllowlist = validateReviewedArtifactFilesAgainstAllowlist(effectiveAllowlist)
+      if (reviewedOutsideAllowlist.length > 0) {
+        return (
+          `Error: ${state.phase} approval failed allowlist validation: reviewed artifact files fall outside the approved INCREMENTAL allowlist: ` +
+          `${reviewedOutsideAllowlist.join(", ")}. Update the planning allowlist or narrow the artifact scope before approval.`
+        )
+      }
+    }
+
     if (state.phase === "PLANNING" && state.mode === "INCREMENTAL" && !args.approved_files) {
       let planContent = args.artifact_content as string | undefined
       if (!planContent && state.artifactDiskPaths.plan) {
@@ -758,7 +780,11 @@ const handleSubmitFeedback: ToolHandler = async (args, toolCtx, ctx) => {
         )
       } else if (state.phase === "PLANNING" && state.mode === "INCREMENTAL" && derivedApprovedFiles) {
         draft.fileAllowlist = derivedApprovedFiles
-      } else if (state.phase === "IMPL_PLAN" && state.mode === "INCREMENTAL" && draft.fileAllowlist.length === 0) {
+      } else if (
+        state.mode === "INCREMENTAL" &&
+        draft.fileAllowlist.length === 0 &&
+        (state.phase === "INTERFACES" || state.phase === "TESTS" || state.phase === "IMPL_PLAN")
+      ) {
         const effectiveAllowlist = getEffectiveIncrementalAllowlist()
         if (effectiveAllowlist.length > 0) {
           draft.fileAllowlist = effectiveAllowlist

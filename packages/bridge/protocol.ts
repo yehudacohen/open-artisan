@@ -77,7 +77,32 @@ export interface LifecycleShutdownParams {
 
 export interface StateGetParams {
   sessionId: string
+  includeRuntimeHealth?: boolean
   traceId?: string
+}
+
+export interface StateHealthParams {
+  sessionId: string
+  traceId?: string
+}
+
+export interface BridgeRuntimeHealthSummary {
+  featureName: string | null
+  phase: string
+  phaseState: string
+  bridgeTransport: "stdio" | "unix-socket"
+  bridgeAttachedClients: number
+  bridgeActiveClientKinds: string[]
+  pendingTaskReview: boolean
+  currentTaskId: string | null
+  lastRecoveryAction: string
+  awaitingUserGate: boolean
+  noopReason: string | null
+}
+
+export interface StateGetWithRuntimeHealthResult {
+  state: Record<string, unknown> | null
+  runtimeHealth: BridgeRuntimeHealthSummary | null
 }
 
 export interface GuardCheckParams {

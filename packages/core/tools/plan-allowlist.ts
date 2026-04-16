@@ -5,6 +5,16 @@ export function extractApprovedFileAllowlist(planContent: string, cwd: string): 
   const collected: string[] = []
   let inAllowlist = false
 
+  const pushCandidate = (candidate: string): void => {
+    const normalized = candidate.trim()
+    if (!normalized || /^none$/i.test(normalized)) return
+    if (normalized.endsWith(":")) return
+    if (/\s/.test(normalized)) return
+    if (!/^[./`A-Za-z0-9_-]/.test(normalized)) return
+    const unquoted = normalized.replace(/^`(.+)`$/, "$1")
+    collected.push(unquoted.startsWith("/") ? unquoted : resolve(cwd, unquoted))
+  }
+
   for (const line of lines) {
     const trimmed = line.trim()
     const normalizedHeading = trimmed.replace(/^#{1,6}\s+/, "")
@@ -41,8 +51,12 @@ export function extractApprovedFileAllowlist(planContent: string, cwd: string): 
     }
 
     const rawPath = bulletMatch[1]!.trim()
-    if (!rawPath || /^none$/i.test(rawPath)) continue
-    collected.push(rawPath.startsWith("/") ? rawPath : resolve(cwd, rawPath))
+    const inlineCodeMatches = Array.from(rawPath.matchAll(/`([^`]+)`/g), (match) => match[1]!.trim())
+    if (inlineCodeMatches.length > 0) {
+      for (const candidate of inlineCodeMatches) pushCandidate(candidate)
+      continue
+    }
+    pushCandidate(rawPath)
   }
 
   return collected

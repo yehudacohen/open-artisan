@@ -1791,6 +1791,40 @@ describe("fileAllowlist — relative paths are normalized to absolute", () => {
     expect(state.fileAllowlist).toContain(`${tempDir}/tests/in-scope.test.ts`)
   })
 
+  it("ignores saved artifact disk paths when validating TESTS approval allowlist scope", async () => {
+    const sid = `int-test-${Date.now()}-tests-artifact-path`
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: sid } } },
+    })
+    const ctx = { directory: tempDir, sessionId: sid }
+
+    await plugin.tool.select_mode.execute(
+      { mode: "INCREMENTAL", feature_name: "tests-artifact-path-test" },
+      ctx,
+    )
+
+    const store = plugin._testStore
+    const artifactPath = `${tempDir}/.openartisan/tests-artifact-path-test/tests.md`
+    await store.update(sid, (draft: any) => {
+      draft.phase = "TESTS"
+      draft.phaseState = "USER_GATE"
+      draft.userGateMessageReceived = true
+      draft.fileAllowlist = [`${tempDir}/tests/in-scope.test.ts`]
+      draft.artifactDiskPaths.tests = artifactPath
+      draft.reviewArtifactFiles = [artifactPath]
+    })
+
+    const result = await plugin.tool.submit_feedback.execute(
+      {
+        feedback_type: "approve",
+        feedback_text: "approved",
+      },
+      ctx,
+    )
+
+    expect(result).not.toContain("approval failed allowlist validation")
+  })
+
   it("normalizes preserved fileAllowlist from prior cycle at select_mode time", async () => {
     const sid = `int-test-${Date.now()}-selectmode-normalize`
     await plugin.event({

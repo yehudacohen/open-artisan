@@ -515,8 +515,13 @@ const handleSubmitFeedback: ToolHandler = async (args, toolCtx, ctx) => {
   const validateReviewedArtifactFilesAgainstAllowlist = (allowlist: string[]): string[] => {
     if (!state.reviewArtifactFiles.length) return []
     const normalizedAllowlist = new Set(allowlist.map((path) => (path.startsWith("/") ? path : resolve(cwd, path))))
+    const artifactPaths = new Set(
+      Object.values(state.artifactDiskPaths)
+        .filter((path): path is string => typeof path === "string"),
+    )
     return state.reviewArtifactFiles
       .map((path) => (path.startsWith("/") ? path : resolve(cwd, path)))
+      .filter((path) => !artifactPaths.has(path))
       .filter((path) => !normalizedAllowlist.has(path))
   }
 

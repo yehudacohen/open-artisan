@@ -464,6 +464,26 @@ describe("tool.execute — submit_feedback", () => {
     expect(state?.fileAllowlist).toContain(resolve(tmpDir, "tests/in-scope.test.ts"))
   })
 
+  it("ignores saved artifact disk paths when validating TESTS approval allowlist scope", async () => {
+    await exec("select_mode", { mode: "INCREMENTAL", feature_name: "tests-artifact-path-feat" })
+    const artifactPath = resolve(tmpDir, ".openartisan/tests-artifact-path-feat/tests.md")
+    await ctx.engine!.store.update("s1", (d) => {
+      d.phase = "TESTS"
+      d.phaseState = "USER_GATE"
+      d.userGateMessageReceived = true
+      d.fileAllowlist = [resolve(tmpDir, "tests/in-scope.test.ts")]
+      d.artifactDiskPaths.tests = artifactPath
+      d.reviewArtifactFiles = [artifactPath]
+    })
+
+    const result = await exec("submit_feedback", {
+      feedback_type: "approve",
+      feedback_text: "approved",
+    })
+
+    expect(result).not.toContain("approval failed allowlist validation")
+  })
+
   it("approves IMPL_PLAN from previously written disk artifact when content is omitted", async () => {
     await exec("select_mode", { mode: "GREENFIELD", feature_name: "disk-dag-feat" })
     await ctx.engine!.store.update("s1", (d) => {

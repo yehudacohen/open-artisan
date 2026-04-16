@@ -273,11 +273,13 @@ describe("tool.execute — submit_feedback", () => {
 
 ### T1: Set up project structure
 - **Dependencies:** none
+- **Files:** src/setup.ts
 - **Complexity:** small
 - **Tests:** tests/setup.test.ts
 
 ### T2: Implement core logic
 - **Dependencies:** T1
+- **Files:** src/core.ts
 - **Complexity:** medium
 - **Tests:** tests/core.test.ts
 `
@@ -323,6 +325,38 @@ describe("tool.execute — submit_feedback", () => {
     expect(state?.implDag).toBeNull()
   })
 
+  it("rejects IMPL_PLAN approval when task scope exceeds the approved INCREMENTAL allowlist", async () => {
+    await exec("select_mode", { mode: "INCREMENTAL", feature_name: "bad-contract-feat" })
+    await ctx.engine!.store.update("s1", (d) => {
+      d.phase = "IMPL_PLAN"
+      d.phaseState = "USER_GATE"
+      d.userGateMessageReceived = true
+      d.fileAllowlist = [resolve(tmpDir, "src/allowed.ts"), resolve(tmpDir, "tests/allowed.test.ts")]
+    })
+
+    const implPlan = `# Implementation Plan
+
+## Task T1: Out of scope work
+**Dependencies:** none
+**Files:** src/other.ts
+**Expected tests:** tests/other.test.ts
+**Complexity:** medium
+`
+
+    const result = await exec("submit_feedback", {
+      feedback_type: "approve",
+      feedback_text: "approved",
+      artifact_content: implPlan,
+    })
+
+    expect(result).toContain("IMPL_PLAN approval failed executable-contract validation")
+    expect(result).toContain("outside the approved INCREMENTAL allowlist")
+
+    const state = ctx.engine!.store.get("s1")
+    expect(state?.phase).toBe("IMPL_PLAN")
+    expect(state?.phaseState).toBe("USER_GATE")
+  })
+
   it("approves IMPL_PLAN from previously written disk artifact when content is omitted", async () => {
     await exec("select_mode", { mode: "GREENFIELD", feature_name: "disk-dag-feat" })
     await ctx.engine!.store.update("s1", (d) => {
@@ -338,6 +372,8 @@ describe("tool.execute — submit_feedback", () => {
 
 ### T1. Disk-backed task
 - **Dependencies:** none
+- **Files:** src/disk-backed.ts
+- **Expected tests:** none
 `
     const artifactPath = join(tmpDir, ".openartisan", "disk-dag-feat", "impl-plan.md")
     await Bun.write(artifactPath, implPlan)
@@ -361,7 +397,7 @@ describe("tool.execute — submit_feedback", () => {
   it("derives INCREMENTAL allowlist from approved planning artifact when approved_files is omitted", async () => {
     await exec("select_mode", { mode: "INCREMENTAL", feature_name: "derived-allowlist-feat" })
     const planPath = join(tmpDir, ".openartisan", "derived-allowlist-feat", "plan.md")
-    await Bun.write(planPath, "# Planning\n\nAllowlist\n- src/a.ts\n- tests/a.test.ts\n")
+    await Bun.write(planPath, "# Planning\n\n## Narrow allowlist\n- src/a.ts\n- tests/a.test.ts\n")
     await ctx.engine!.store.update("s1", (d) => {
       d.phase = "PLANNING"
       d.phaseState = "USER_GATE"
@@ -378,6 +414,26 @@ describe("tool.execute — submit_feedback", () => {
     const state = ctx.engine!.store.get("s1")
     expect(state?.fileAllowlist).toContain(resolve(tmpDir, "src/a.ts"))
     expect(state?.fileAllowlist).toContain(resolve(tmpDir, "tests/a.test.ts"))
+  })
+
+  it("rejects INCREMENTAL planning approval without an allowlist source", async () => {
+    await exec("select_mode", { mode: "INCREMENTAL", feature_name: "missing-allowlist-feat" })
+    const planPath = join(tmpDir, ".openartisan", "missing-allowlist-feat", "plan.md")
+    await Bun.write(planPath, "# Planning\n\nNo allowlist here.\n")
+    await ctx.engine!.store.update("s1", (d) => {
+      d.phase = "PLANNING"
+      d.phaseState = "USER_GATE"
+      d.userGateMessageReceived = true
+      d.featureName = "missing-allowlist-feat"
+      d.artifactDiskPaths.plan = planPath
+    })
+
+    const result = await exec("submit_feedback", {
+      feedback_type: "approve",
+      feedback_text: "approved",
+    })
+
+    expect(result).toContain("INCREMENTAL planning approval requires an explicit file allowlist source")
   })
 
   it("revise routes directly to REVISE in default agent-only bridge mode", async () => {
@@ -480,10 +536,12 @@ describe("tool.execute — mark_task_complete", () => {
     expect(result).toContain("T1")
     expect(result).toContain("Per-task review required")
     expect(result).toContain("submit_task_review")
+    expect(result).not.toContain("**Next task ready:**")
 
     const state = ctx.engine!.store.get("s1")
     expect(state?.implDag?.find((t) => t.id === "T1")?.status).toBe("complete")
     expect(state?.taskCompletionInProgress).toBe("T1")
+    expect(state?.currentTaskId).toBe("T1")
   })
 
   it("submit_task_review advances on pass", async () => {
@@ -495,7 +553,7 @@ describe("tool.execute — mark_task_complete", () => {
         { id: "T1", description: "Setup", dependencies: [], expectedTests: [], expectedFiles: [], estimatedComplexity: "small", status: "complete" },
         { id: "T2", description: "Core", dependencies: ["T1"], expectedTests: [], expectedFiles: [], estimatedComplexity: "medium", status: "pending" },
       ]
-      d.currentTaskId = "T2"
+      d.currentTaskId = "T1"
       d.taskCompletionInProgress = "T1"
     })
 
@@ -507,6 +565,7 @@ describe("tool.execute — mark_task_complete", () => {
     const state = ctx.engine!.store.get("s1")
     expect(state?.taskCompletionInProgress).toBeNull()
     expect(state?.taskReviewCount).toBe(0)
+    expect(state?.currentTaskId).toBe("T2")
   })
 
   it("submit_task_review reverts task on fail", async () => {
@@ -517,7 +576,7 @@ describe("tool.execute — mark_task_complete", () => {
       d.implDag = [
         { id: "T1", description: "Setup", dependencies: [], expectedTests: [], expectedFiles: [], estimatedComplexity: "small", status: "complete" },
       ]
-      d.currentTaskId = null
+      d.currentTaskId = "T1"
       d.taskCompletionInProgress = "T1"
     })
 
@@ -660,13 +719,19 @@ describe("tool.execute — agent-only mode", () => {
     }))
     await agentExec("mark_satisfied", { criteria_met: passingCriteria })
     // Simulate user message for USER_GATE
-    await agentCtx.engine!.store.update("ao-session", (d) => { d.userGateMessageReceived = true })
+    await agentCtx.engine!.store.update("ao-session", (d) => {
+      d.userGateMessageReceived = true
+      d.reviewArtifactHash = "stale-review-hash"
+      d.latestReviewResults = [{ criterion: "Old", met: false, evidence: "stale" }]
+    })
 
     const result = await agentExec("submit_feedback", { feedback_type: "revise", feedback_text: "Add more detail" })
     expect(result).not.toContain("SubagentDispatcher")
     expect(result).toContain("REVISE")
     const state = agentCtx.engine!.store.get("ao-session")
     expect(state?.phaseState).toBe("REVISE")
+    expect(state?.reviewArtifactHash).toBeNull()
+    expect(state?.latestReviewResults).toBeNull()
   })
 
   it("propose_backtrack works in agent-only mode", async () => {
@@ -811,7 +876,7 @@ describe("tool.execute — agent-only mode", () => {
 })
 
 describe("tool.execute — submit_auto_approve", () => {
-  it("routes invalid auto-approve output to REVISE", async () => {
+  it("routes non-JSON auto-approve output to REVISE as a rejection", async () => {
     const agentCtx = makeBridgeContext()
     await handleInit({ projectDir: tmpDir }, agentCtx)
     await handleSessionCreated({ sessionId: "robot-session", agent: "robot-artisan" }, agentCtx)
@@ -819,6 +884,8 @@ describe("tool.execute — submit_auto_approve", () => {
       d.mode = "GREENFIELD"
       d.phase = "PLANNING"
       d.phaseState = "USER_GATE"
+      d.reviewArtifactHash = "stale-review-hash"
+      d.latestReviewResults = [{ criterion: "Old", met: false, evidence: "stale" }]
     })
 
     const result = await handleToolExecute({
@@ -827,9 +894,11 @@ describe("tool.execute — submit_auto_approve", () => {
       context: { sessionId: "robot-session", directory: tmpDir },
     }, agentCtx) as string
 
-    expect(result).toContain("Auto-approve failed")
+    expect(result).toContain("Auto-approve rejected")
     const state = agentCtx.engine!.store.get("robot-session")
     expect(state?.phaseState).toBe("REVISE")
+    expect(state?.reviewArtifactHash).toBeNull()
+    expect(state?.latestReviewResults).toBeNull()
   })
 })
 
@@ -1035,7 +1104,7 @@ describe("tool.execute — submit_task_review quality scoring", () => {
       d.implDag = [
         { id: "T1", description: "Setup", dependencies: [], expectedTests: [], expectedFiles: [], estimatedComplexity: "small", status: "complete" },
       ]
-      d.currentTaskId = null
+      d.currentTaskId = "T1"
       d.taskCompletionInProgress = "T1"
     })
 
@@ -1065,7 +1134,7 @@ describe("tool.execute — submit_task_review quality scoring", () => {
       d.implDag = [
         { id: "T1", description: "Setup", dependencies: [], expectedTests: [], expectedFiles: [], estimatedComplexity: "small", status: "complete" },
       ]
-      d.currentTaskId = null
+      d.currentTaskId = "T1"
       d.taskCompletionInProgress = "T1"
     })
 
@@ -1093,7 +1162,7 @@ describe("tool.execute — submit_task_review quality scoring", () => {
       d.implDag = [
         { id: "T1", description: "Setup", dependencies: [], expectedTests: [], expectedFiles: [], estimatedComplexity: "small", status: "complete" },
       ]
-      d.currentTaskId = null
+      d.currentTaskId = "T1"
       d.taskCompletionInProgress = "T1"
       d.taskReviewCount = 0
     })
@@ -1145,7 +1214,7 @@ describe("task.getReviewContext", () => {
         { id: "T1", description: "Setup project", dependencies: [], expectedTests: ["tests/setup.test.ts"], expectedFiles: ["src/setup.ts"], estimatedComplexity: "small", status: "complete" },
         { id: "T2", description: "Core logic", dependencies: ["T1"], expectedTests: [], expectedFiles: [], estimatedComplexity: "medium", status: "pending" },
       ]
-      d.currentTaskId = "T2"
+      d.currentTaskId = "T1"
       d.taskCompletionInProgress = "T1"
     })
 
@@ -1225,7 +1294,7 @@ describe("tool.execute — task review edge cases", () => {
       d.implDag = [
         { id: "T1", description: "Stubborn task", dependencies: [], expectedTests: [], expectedFiles: [], estimatedComplexity: "small", status: "complete" },
       ]
-      d.currentTaskId = null
+      d.currentTaskId = "T1"
       d.taskCompletionInProgress = "T1"
       d.taskReviewCount = 10 // At the cap
     })
@@ -1239,6 +1308,7 @@ describe("tool.execute — task review edge cases", () => {
     const state = ctx.engine!.store.get("s1")
     expect(state?.taskCompletionInProgress).toBeNull()
     expect(state?.taskReviewCount).toBe(0)
+    expect(state?.currentTaskId).toBeNull()
   })
 
   it("passes implementation_summary to review prompt", async () => {

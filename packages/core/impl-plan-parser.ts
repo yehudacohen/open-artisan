@@ -30,8 +30,10 @@
  * Returns a ParseResult with either the ImplDAG or a list of parse errors.
  */
 
+import { resolve } from "node:path"
 import { createImplDAG } from "./dag"
 import type { ImplDAG, TaskNode, TaskComplexity, TaskCategory } from "./dag"
+import type { WorkflowMode } from "./types"
 
 // ---------------------------------------------------------------------------
 // Types
@@ -135,6 +137,9 @@ interface RawBlock {
   rawFiles: string
   rawComplexity: string
   rawCategory: string
+  hasDepsField: boolean
+  hasTestsField: boolean
+  hasFilesField: boolean
   bodyLines: string[]
 }
 
@@ -175,6 +180,9 @@ function extractRawBlocks(text: string): RawBlock[] {
         rawFiles: "",
         rawComplexity: "",
         rawCategory: "",
+        hasDepsField: false,
+        hasTestsField: false,
+        hasFilesField: false,
         bodyLines: [],
       }
       pendingListField = null
@@ -185,6 +193,7 @@ function extractRawBlocks(text: string): RawBlock[] {
 
     const depsMatch = DEPS_RE.exec(line)
     if (depsMatch) {
+      current.hasDepsField = true
       current.rawDeps = depsMatch[1]!.trim()
       pendingListField = current.rawDeps === "" ? "deps" : null
       continue
@@ -192,6 +201,7 @@ function extractRawBlocks(text: string): RawBlock[] {
 
     const testsMatch = TESTS_RE.exec(line)
     if (testsMatch) {
+      current.hasTestsField = true
       current.rawTests = testsMatch[1]!.trim()
       pendingListField = current.rawTests === "" ? "tests" : null
       continue
@@ -199,6 +209,7 @@ function extractRawBlocks(text: string): RawBlock[] {
 
     const filesMatch = FILES_RE.exec(line)
     if (filesMatch) {
+      current.hasFilesField = true
       current.rawFiles = filesMatch[1]!.trim()
       pendingListField = current.rawFiles === "" ? "files" : null
       continue
@@ -318,4 +329,61 @@ export function parseImplPlan(artifactText: string): ParseResult {
   }
 
   return { success: true, dag }
+}
+
+export function validateExecutableImplPlan(
+  artifactText: string,
+  mode: WorkflowMode | null,
+  fileAllowlist: string[],
+  cwd: string,
+): string[] {
+  const errors: string[] = []
+  const rawBlocks = extractRawBlocks(artifactText)
+
+  for (const block of rawBlocks) {
+    if (!block.hasDepsField) {
+      errors.push(`Task "${block.id}" must declare **Dependencies:** explicitly.`)
+    }
+    if (!block.hasTestsField) {
+      errors.push(`Task "${block.id}" must declare **Expected tests:** explicitly (use \`none\` if there are none).`)
+    }
+    if (!block.hasFilesField) {
+      errors.push(`Task "${block.id}" must declare **Files:** explicitly.`)
+    }
+  }
+
+  if (mode !== "INCREMENTAL") {
+    return errors
+  }
+
+  const parsed = parseImplPlan(artifactText)
+  if (!parsed.success) {
+    return errors
+  }
+
+  const normalizedAllowlist = new Set(
+    fileAllowlist.map((path) => (path.startsWith("/") ? path : resolve(cwd, path))),
+  )
+
+  for (const task of parsed.dag.tasks) {
+    const scopedPaths = [...task.expectedFiles, ...task.expectedTests].map((path) =>
+      path.startsWith("/") ? path : resolve(cwd, path),
+    )
+
+    if (scopedPaths.length > 0 && normalizedAllowlist.size === 0) {
+      errors.push(
+        `Task "${task.id}" declares executable file/test scope, but the approved INCREMENTAL allowlist is empty.`,
+      )
+      continue
+    }
+
+    const outOfScope = scopedPaths.filter((path) => !normalizedAllowlist.has(path))
+    if (outOfScope.length > 0) {
+      errors.push(
+        `Task "${task.id}" references files outside the approved INCREMENTAL allowlist: ${outOfScope.join(", ")}`,
+      )
+    }
+  }
+
+  return errors
 }

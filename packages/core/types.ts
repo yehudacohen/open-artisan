@@ -912,6 +912,9 @@ export function validateWorkflowState(state: WorkflowState): string | null {
   // v11: revisionBaseline
   if (state.revisionBaseline !== null && state.revisionBaseline !== undefined) {
     const rb = state.revisionBaseline as Record<string, unknown>
+  if (state.phase !== "IMPLEMENTATION" && state.currentTaskId !== null) {
+    return `currentTaskId must be null outside IMPLEMENTATION, got "${state.currentTaskId}" in ${state.phase}`
+  }
     if (typeof rb !== "object" || Array.isArray(rb)) {
       return `revisionBaseline must be null or an object, got ${typeof rb}`
     }
@@ -1091,11 +1094,20 @@ export interface OrchestratorDivergeError {
 
 export type OrchestratorDivergeResult = OrchestratorDivergeSuccess | OrchestratorDivergeError
 
+    if (state.phase !== "IMPLEMENTATION") {
+      return `taskCompletionInProgress must be null outside IMPLEMENTATION, got "${state.taskCompletionInProgress}" in ${state.phase}`
+    }
+    if (state.currentTaskId !== state.taskCompletionInProgress) {
+      return `taskCompletionInProgress "${state.taskCompletionInProgress}" must match currentTaskId while review is pending`
+    }
 export interface RevisionStep {
   artifact: ArtifactKey
   phase: Phase
   phaseState: "REVISE" | "DRAFT"
   instructions: string
+  if (state.phase !== "IMPLEMENTATION" && state.taskReviewCount !== 0) {
+    return `taskReviewCount must be 0 outside IMPLEMENTATION, got ${state.taskReviewCount} in ${state.phase}`
+  }
 }
 
 export interface OrchestratorPlanResult {
@@ -1181,6 +1193,21 @@ export interface CriterionResult {
    * Absent for standard boolean criteria.
    */
   score?: number
+  if (state.implDag !== null) {
+    const taskIds = new Set(state.implDag.map((task) => task.id))
+    if (state.currentTaskId !== null && !taskIds.has(state.currentTaskId)) {
+      return `currentTaskId "${state.currentTaskId}" does not exist in implDag`
+    }
+    if (state.taskCompletionInProgress !== null && !taskIds.has(state.taskCompletionInProgress)) {
+      return `taskCompletionInProgress "${state.taskCompletionInProgress}" does not exist in implDag`
+    }
+    if (state.phase === "DONE") {
+      const unfinished = state.implDag.filter((task) => task.status !== "complete" && task.status !== "aborted")
+      if (unfinished.length > 0) {
+        return `DONE cannot contain unresolved implDag work: ${unfinished.map((task) => task.id).join(", ")}`
+      }
+    }
+  }
 }
 
 export interface SelfReviewSuccess {

@@ -67,7 +67,7 @@ import { createOpenCodeSubagentDispatcher } from "./opencode-subagent-dispatcher
 import { getAcceptanceCriteria } from "../../../packages/core/hooks/system-transform"
 import { runDiscoveryFleet } from "../../../packages/core/discovery/index"
 import { createPluginHooks } from "./plugin-hooks"
-import { parseImplPlan } from "../../../packages/core/impl-plan-parser"
+import { parseImplPlan, validateExecutableImplPlan } from "../../../packages/core/impl-plan-parser"
 import { createImplDAG, type TaskCategory, type HumanGateInfo } from "../../../packages/core/dag"
 import { nextSchedulerDecision, nextSchedulerDecisionForInput, readDecisionInput, resolveHumanGate } from "../../../packages/core/scheduler"
 import { resolveArtifactPaths } from "../../../packages/core/tools/artifact-paths"
@@ -1460,6 +1460,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                 draft.revisionBaseline = autoRevisionBaseline
                 draft.retryCount = 0
                 draft.reviewArtifactHash = null
+                draft.latestReviewResults = null
                 draft.reviewArtifactFiles = []
                 draft.feedbackHistory.push({
                   phase: state.phase,
@@ -1590,6 +1591,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                       draft.revisionBaseline = autoRevisionBaseline
                       draft.retryCount = 0
                       draft.reviewArtifactHash = null
+                      draft.latestReviewResults = null
                       draft.reviewArtifactFiles = []
                       draft.feedbackHistory.push({
                         phase: state.phase,
@@ -2763,6 +2765,17 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
               }
               return state.fileAllowlist
             })()
+            if (
+              state.phase === "PLANNING" &&
+              state.mode === "INCREMENTAL" &&
+              !args.approved_files &&
+              effectiveAllowlist.length === 0
+            ) {
+              return (
+                "Error: INCREMENTAL planning approval requires an explicit file allowlist source. " +
+                "Pass `approved_files`, or include an `Allowlist`/`Narrow allowlist` section in the approved plan artifact."
+              )
+            }
             const forwardSkip = computeForwardSkip(
               outcome.nextPhase,
               state.mode,
@@ -2948,6 +2961,18 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                     `Fix the plan format and re-submit approval with corrected \`artifact_content\`.`
                   )
                 }
+                const contractErrors = validateExecutableImplPlan(
+                  args.artifact_content,
+                  state.mode,
+                  state.fileAllowlist,
+                  context.directory || process.cwd(),
+                )
+                if (contractErrors.length > 0) {
+                  return (
+                    `Error: IMPL_PLAN approval failed executable-contract validation: ${contractErrors.join("; ")}. ` +
+                    `Fix the plan metadata or expand the approved allowlist before approving this implementation plan.`
+                  )
+                }
               }
             }
 
@@ -3077,6 +3102,8 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
               draft.phaseState = effectivePhaseState
               draft.pendingRevisionSteps = handlerOutcome.pendingRevisionSteps
               draft.revisionBaseline = revisionBaseline
+              draft.reviewArtifactHash = null
+              draft.latestReviewResults = null
               // Reset artifact file tracking: revision may reorder DAG tasks or change
               // which files are produced. The agent re-accumulates via mark_task_complete
               // as tasks re-complete, and can supplement via request_review.artifact_files.

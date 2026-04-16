@@ -43,7 +43,7 @@ import { createGitCheckpoint } from "../../core/hooks/git-checkpoint"
 import type { AutoApproveResult } from "../../core/auto-approve"
 import { extractApprovedFileAllowlist } from "../../core/tools/plan-allowlist"
 import { writeArtifact } from "../../core/artifact-store"
-import { parseImplPlan } from "../../core/impl-plan-parser"
+import { parseImplPlan, validateExecutableImplPlan } from "../../core/impl-plan-parser"
 import { PHASE_TO_ARTIFACT } from "../../core/artifacts"
 import { createImplDAG } from "../../core/dag"
 import { nextSchedulerDecision, nextSchedulerDecisionForInput, readDecisionInput, resolveHumanGate } from "../../core/scheduler"
@@ -96,6 +96,31 @@ function buildRuntimeSchedulerDecision(state: {
       ? nextSchedulerDecision(input.dag)
       : evaluation.decision
   return { evaluation, fallbackDecision }
+}
+
+function buildTaskReviewPendingMessage(taskId: string, implementationSummary: string): string {
+  return `Task "${taskId}" marked complete.\nSummary: ${implementationSummary}`
+}
+
+function buildTaskReviewResolvedMessage(
+  taskId: string,
+  implDag: import("../../core/dag").TaskNode[] | null,
+  concurrency: { maxParallelTasks: number },
+): string {
+  const { evaluation, fallbackDecision } = buildRuntimeSchedulerDecision({ implDag, concurrency })
+
+  if (fallbackDecision.action === "dispatch") {
+    return (
+      `${evaluation.decision.action === "unsupported" ? `Parallel runtime unsupported: ${evaluation.decision.reason}. Applying ${evaluation.decision.fallback} fallback.\n\n` : ""}` +
+      `**Next task ready:**\n${fallbackDecision.prompt}`
+    )
+  }
+
+  if (fallbackDecision.action === "complete") {
+    return `**All DAG tasks complete.** ${fallbackDecision.message}`
+  }
+
+  return `**${fallbackDecision.message}**`
 }
 
 async function readCurrentArtifactHash(state: WorkflowState): Promise<string | null> {
@@ -610,6 +635,13 @@ const handleSubmitFeedback: ToolHandler = async (args, toolCtx, ctx) => {
           "Fix the plan format and re-submit approval with corrected `artifact_content`."
         )
       }
+      const contractErrors = validateExecutableImplPlan(planContent, state.mode, state.fileAllowlist, cwd)
+      if (contractErrors.length > 0) {
+        return (
+          `Error: IMPL_PLAN approval failed executable-contract validation: ${contractErrors.join("; ")}. ` +
+          "Fix the plan metadata or expand the approved allowlist before approving this implementation plan."
+        )
+      }
     }
 
     let derivedApprovedFiles: string[] | null = null
@@ -625,6 +657,18 @@ const handleSubmitFeedback: ToolHandler = async (args, toolCtx, ctx) => {
       if (planContent) {
         derivedApprovedFiles = extractApprovedFileAllowlist(planContent, cwd)
       }
+    }
+
+    if (
+      state.phase === "PLANNING" &&
+      state.mode === "INCREMENTAL" &&
+      !args.approved_files &&
+      (!derivedApprovedFiles || derivedApprovedFiles.length === 0)
+    ) {
+      return (
+        "Error: INCREMENTAL planning approval requires an explicit file allowlist source. " +
+        "Pass `approved_files`, or include an `Allowlist`/`Narrow allowlist` section in the approved plan artifact."
+      )
     }
 
     const outcome = sm.transition(state.phase, state.phaseState, "user_approve", state.mode)
@@ -735,6 +779,8 @@ const handleSubmitFeedback: ToolHandler = async (args, toolCtx, ctx) => {
       draft.phase = t.nextPhase
       draft.phaseState = t.nextPhaseState
       draft.retryCount = 0
+      draft.reviewArtifactHash = null
+      draft.latestReviewResults = null
       draft.reviewArtifactFiles = []
       draft.pendingRevisionSteps = null
       draft.feedbackHistory.push(t.feedbackEntry)
@@ -769,17 +815,9 @@ const handleMarkTaskComplete: ToolHandler = async (args, toolCtx, ctx) => {
   // Persist DAG changes and set review gate
   await store.update(toolCtx.sessionId, (draft) => {
     draft.implDag = result.updatedNodes
-    draft.currentTaskId = result.nextTaskId
+    draft.currentTaskId = (args.task_id as string) ?? null
     draft.taskCompletionInProgress = (args.task_id as string) ?? null
-    // Orchestrator-driven artifact tracking (v22): accumulate expected files
-    if (result.completedTaskFiles.length > 0) {
-      const existing = new Set(draft.reviewArtifactFiles)
-      for (const f of result.completedTaskFiles) {
-        if (!existing.has(f)) {
-          draft.reviewArtifactFiles.push(f)
-        }
-      }
-    }
+    draft.taskReviewCount = (draft.taskReviewCount ?? 0) + 1
   })
 
   // Build the isolated review prompt for the adapter to dispatch.
@@ -798,7 +836,7 @@ const handleMarkTaskComplete: ToolHandler = async (args, toolCtx, ctx) => {
   }
 
   return (
-    result.responseMessage +
+    buildTaskReviewPendingMessage(taskId, implSummary) +
     "\n\n**Per-task review required.** Spawn an isolated reviewer (e.g. `claude --print`) with the prompt below. " +
     "The reviewer must have NO access to this conversation — only the prompt and project files. " +
     "Then call `submit_task_review` with the reviewer's output.\n\n" +
@@ -833,24 +871,38 @@ const handleSubmitTaskReview: ToolHandler = async (args, toolCtx, ctx) => {
   // Check iteration cap — force accept after MAX_TASK_REVIEW_ITERATIONS
   const hitCap = state.taskReviewCount >= MAX_TASK_REVIEW_ITERATIONS
   if (hitCap && !review.passed) {
-    // Force accept — too many review iterations. Full impl review will catch issues.
+    const completionNode = state.implDag?.find((t) => t.id === taskId)
+    const nextMessage = buildTaskReviewResolvedMessage(taskId, state.implDag, state.concurrency)
     await store.update(toolCtx.sessionId, (draft) => {
+      const existing = new Set(draft.reviewArtifactFiles)
+      for (const f of completionNode?.expectedFiles ?? []) {
+        if (!existing.has(f)) draft.reviewArtifactFiles.push(f)
+      }
+      const refreshed = buildRuntimeSchedulerDecision({ implDag: draft.implDag, concurrency: draft.concurrency }).fallbackDecision
+      draft.currentTaskId = refreshed.action === "dispatch" ? refreshed.task.id : null
       draft.taskCompletionInProgress = null
       draft.taskReviewCount = 0
     })
     return (
       `Task "${taskId}" force-accepted after ${MAX_TASK_REVIEW_ITERATIONS} review iterations. ` +
-      `Issues will be caught in the full implementation review. Proceeding to next task.`
+      `Issues will be caught in the full implementation review.\n\n${nextMessage}`
     )
   }
 
   if (review.passed) {
-    // Review passed — clear gate, advance to next task
+    const completionNode = state.implDag?.find((t) => t.id === taskId)
+    const nextMessage = buildTaskReviewResolvedMessage(taskId, state.implDag, state.concurrency)
     await store.update(toolCtx.sessionId, (draft) => {
+      const existing = new Set(draft.reviewArtifactFiles)
+      for (const f of completionNode?.expectedFiles ?? []) {
+        if (!existing.has(f)) draft.reviewArtifactFiles.push(f)
+      }
+      const refreshed = buildRuntimeSchedulerDecision({ implDag: draft.implDag, concurrency: draft.concurrency }).fallbackDecision
+      draft.currentTaskId = refreshed.action === "dispatch" ? refreshed.task.id : null
       draft.taskCompletionInProgress = null
       draft.taskReviewCount = 0
     })
-    return `Task "${taskId}" review passed. Proceeding to next task.`
+    return `Task "${taskId}" review passed.\n\n${nextMessage}`
   }
 
   // Review failed — revert task status and return issues
@@ -859,7 +911,7 @@ const handleSubmitTaskReview: ToolHandler = async (args, toolCtx, ctx) => {
     if (task) task.status = "pending"
     draft.currentTaskId = taskId
     draft.taskCompletionInProgress = null
-    draft.taskReviewCount = (draft.taskReviewCount ?? 0) + 1
+    draft.taskReviewCount = Math.max(draft.taskReviewCount ?? 0, 1)
   })
 
   const issuesList = review.issues.map((i) => `  - ${i}`).join("\n")
@@ -1066,6 +1118,8 @@ const handleSubmitAutoApprove: ToolHandler = async (args, toolCtx, ctx) => {
       draft.phase = t.nextPhase
       draft.phaseState = t.nextPhaseState
       draft.retryCount = 0
+      draft.reviewArtifactHash = null
+      draft.latestReviewResults = null
       draft.reviewArtifactFiles = []
       draft.pendingRevisionSteps = null
       draft.feedbackHistory.push(t.feedbackEntry)
@@ -1103,6 +1157,8 @@ const handleSubmitAutoApprove: ToolHandler = async (args, toolCtx, ctx) => {
     draft.phase = t.nextPhase
     draft.phaseState = t.nextPhaseState
     draft.retryCount = 0
+    draft.reviewArtifactHash = null
+    draft.latestReviewResults = null
     draft.reviewArtifactFiles = []
     draft.pendingRevisionSteps = null
     draft.feedbackHistory.push(t.feedbackEntry)

@@ -12,7 +12,7 @@
  * - Partial tasks (missing optional fields) still parse
  */
 import { describe, expect, it } from "bun:test"
-import { parseImplPlan } from "#core/impl-plan-parser"
+import { parseImplPlan, validateExecutableImplPlan } from "#core/impl-plan-parser"
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -256,6 +256,39 @@ describe("parseImplPlan — error cases", () => {
     expect(result.success).toBe(false)
     if (result.success) return
     expect(result.errors.some((e) => e.toLowerCase().includes("circular"))).toBe(true)
+  })
+})
+
+describe("validateExecutableImplPlan", () => {
+  it("requires explicit dependency, file, and test metadata for every task", () => {
+    const plan = `
+## Task T1: Missing metadata
+**Complexity:** medium
+`
+
+    const errors = validateExecutableImplPlan(plan, "GREENFIELD", [], "/project")
+    expect(errors).toContain('Task "T1" must declare **Dependencies:** explicitly.')
+    expect(errors).toContain('Task "T1" must declare **Expected tests:** explicitly (use `none` if there are none).')
+    expect(errors).toContain('Task "T1" must declare **Files:** explicitly.')
+  })
+
+  it("rejects INCREMENTAL task scope outside the approved allowlist", () => {
+    const plan = `
+## Task T1: Scoped work
+**Dependencies:** none
+**Files:** src/out-of-scope.ts
+**Expected tests:** tests/out-of-scope.test.ts
+**Complexity:** medium
+`
+
+    const errors = validateExecutableImplPlan(
+      plan,
+      "INCREMENTAL",
+      ["/project/src/allowed.ts", "/project/tests/allowed.test.ts"],
+      "/project",
+    )
+
+    expect(errors.some((error) => error.includes("outside the approved INCREMENTAL allowlist"))).toBe(true)
   })
 })
 

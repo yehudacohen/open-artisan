@@ -21,6 +21,7 @@ import {
   type StoreLoadResult,
   type StoreLoadError,
 } from "./types"
+import { readDecisionInput, nextSchedulerDecisionForInput, nextSchedulerDecision } from "./scheduler"
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -181,12 +182,63 @@ function migrateState(migrated: Record<string, unknown>): void {
   migrated["schemaVersion"] = SCHEMA_VERSION
 }
 
+function repairStateInconsistencies(state: WorkflowState): void {
+  if (state.phase !== "IMPLEMENTATION") {
+    state.currentTaskId = null
+    state.taskCompletionInProgress = null
+    state.taskReviewCount = 0
+  }
+
+  if (state.phase === "DONE" && state.implDag) {
+    const unfinished = state.implDag.filter((task) => task.status !== "complete" && task.status !== "aborted")
+    if (unfinished.length > 0) {
+      const input = readDecisionInput({ implDag: state.implDag, concurrency: state.concurrency })
+      const evaluation = nextSchedulerDecisionForInput(input)
+      const decision =
+        evaluation.decision.action === "unsupported" && evaluation.decision.fallback === "sequential"
+          ? nextSchedulerDecision(input.dag)
+          : evaluation.decision
+
+      state.phase = "IMPLEMENTATION"
+      state.phaseState = decision.action === "awaiting-human" ? "USER_GATE" : "DRAFT"
+      state.currentTaskId = decision.action === "dispatch" ? decision.task.id : null
+      state.taskCompletionInProgress = null
+      state.taskReviewCount = 0
+      state.userGateMessageReceived = false
+    }
+  }
+
+  if (!state.implDag) {
+    state.currentTaskId = null
+    state.taskCompletionInProgress = null
+    state.taskReviewCount = 0
+    return
+  }
+
+  const taskIds = new Set(state.implDag.map((task) => task.id))
+  if (state.currentTaskId !== null && !taskIds.has(state.currentTaskId)) {
+    const input = readDecisionInput({ implDag: state.implDag, concurrency: state.concurrency })
+    const evaluation = nextSchedulerDecisionForInput(input)
+    const decision =
+      evaluation.decision.action === "unsupported" && evaluation.decision.fallback === "sequential"
+        ? nextSchedulerDecision(input.dag)
+        : evaluation.decision
+    state.currentTaskId = decision.action === "dispatch" ? decision.task.id : null
+  }
+
+  if (state.taskCompletionInProgress !== null && !taskIds.has(state.taskCompletionInProgress)) {
+    state.taskCompletionInProgress = null
+    state.taskReviewCount = 0
+  }
+}
+
 /**
  * Validate and migrate a raw state value. Returns the state if valid, null otherwise.
  */
 function validateAndMigrate(value: unknown): WorkflowState | null {
   if (!isValidState(value)) return null
   migrateState(value as unknown as Record<string, unknown>)
+  repairStateInconsistencies(value as WorkflowState)
   const validationError = validateWorkflowState(value)
   if (validationError) return null
   return value

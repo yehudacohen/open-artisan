@@ -298,7 +298,12 @@ describe("resolveSessionId — field resolution", () => {
 
 describe("validateWorkflowState — v6 fields", () => {
   it("accepts valid currentTaskId (string)", () => {
-    const state = makeValidState({ currentTaskId: "T1" })
+    const state = makeValidState({
+      phase: "IMPLEMENTATION",
+      phaseState: "DRAFT",
+      implDag: [{ id: "T1", description: "d", dependencies: [], expectedTests: [], expectedFiles: [], estimatedComplexity: "small", status: "pending" }],
+      currentTaskId: "T1",
+    })
     expect(validateWorkflowState(state)).toBeNull()
   })
 
@@ -798,5 +803,32 @@ describe("validateWorkflowState — v22 implDag expectedFiles", () => {
       }],
     }))
     expect(err).toContain('expectedFiles[1] must be a string')
+  })
+})
+
+describe("validateWorkflowState — implementation pointer invariants", () => {
+  it("rejects currentTaskId outside IMPLEMENTATION", () => {
+    const err = validateWorkflowState(makeValidState({ phase: "PLANNING", currentTaskId: "T1" }))
+    expect(err).toContain("currentTaskId must be null outside IMPLEMENTATION")
+  })
+
+  it("rejects taskCompletionInProgress that does not match currentTaskId", () => {
+    const err = validateWorkflowState(makeValidState({
+      phase: "IMPLEMENTATION",
+      phaseState: "DRAFT",
+      implDag: [{ id: "T1", description: "d", dependencies: [], expectedTests: [], expectedFiles: [], estimatedComplexity: "small", status: "complete" }],
+      currentTaskId: "T2",
+      taskCompletionInProgress: "T1",
+      taskReviewCount: 1,
+    }))
+    expect(err).toContain("must match currentTaskId")
+  })
+
+  it("rejects DONE with unresolved DAG work", () => {
+    const err = validateWorkflowState(makeValidState({
+      phase: "DONE",
+      implDag: [{ id: "T1", description: "d", dependencies: [], expectedTests: [], expectedFiles: [], estimatedComplexity: "small", status: "pending" }],
+    }))
+    expect(err).toContain("DONE cannot contain unresolved implDag work")
   })
 })

@@ -518,6 +518,8 @@ describe("SessionStateStore — transient field cleanup on load", () => {
       d.mode = "GREENFIELD"
       d.phase = "IMPLEMENTATION"
       d.phaseState = "DRAFT"
+      d.implDag = [{ id: "task-3", description: "d", dependencies: [], expectedTests: [], expectedFiles: [], estimatedComplexity: "small", status: "complete" }]
+      d.currentTaskId = "task-3"
       d.taskCompletionInProgress = "task-3"
     })
     // Verify it was set
@@ -554,8 +556,10 @@ describe("SessionStateStore — transient field cleanup on load", () => {
     await store.update("session-transient-3", (d) => {
       d.featureName = "transient-3"
       d.mode = "GREENFIELD"
-      d.phase = "PLANNING"
+      d.phase = "IMPLEMENTATION"
       d.phaseState = "DRAFT"
+      d.implDag = [{ id: "T1", description: "d", dependencies: [], expectedTests: [], expectedFiles: [], estimatedComplexity: "small", status: "pending" }]
+      d.currentTaskId = "T1"
       d.taskReviewCount = 5
     })
     // Reload from disk
@@ -812,6 +816,44 @@ describe("SessionStateStore — load", () => {
     const loaded = store2.get("good-allowlist")
     expect(loaded).not.toBeNull()
     expect(loaded!.fileAllowlist).toEqual(["/project/src/foo.ts", "/project/src/bar.ts"])
+  })
+
+  it("repairs invalid currentTaskId on load by recomputing the next ready task", async () => {
+    writePerFeatureState(tmpDir, "repair-current-task", makeState("repair-session", "repair-current-task", {
+      mode: "GREENFIELD",
+      phase: "IMPLEMENTATION",
+      phaseState: "DRAFT",
+      implDag: [
+        { id: "T1", description: "done", dependencies: [], expectedTests: [], expectedFiles: [], estimatedComplexity: "small", status: "complete" },
+        { id: "T2", description: "next", dependencies: ["T1"], expectedTests: [], expectedFiles: [], estimatedComplexity: "small", status: "pending" },
+      ],
+      currentTaskId: "T99",
+    }))
+
+    const store2 = createSessionStateStore(createFileSystemStateBackend(tmpDir))
+    const result = await store2.load()
+    expect(result.success).toBe(true)
+    const loaded = store2.get("repair-session")
+    expect(loaded?.currentTaskId).toBe("T2")
+  })
+
+  it("reopens DONE with unfinished DAG work on load", async () => {
+    writePerFeatureState(tmpDir, "repair-done", makeState("repair-done-session", "repair-done", {
+      mode: "GREENFIELD",
+      phase: "DONE",
+      phaseState: "DRAFT",
+      implDag: [
+        { id: "T1", description: "unfinished", dependencies: [], expectedTests: [], expectedFiles: [], estimatedComplexity: "small", status: "pending" },
+      ],
+    }))
+
+    const store2 = createSessionStateStore(createFileSystemStateBackend(tmpDir))
+    const result = await store2.load()
+    expect(result.success).toBe(true)
+    const loaded = store2.get("repair-done-session")
+    expect(loaded?.phase).toBe("IMPLEMENTATION")
+    expect(loaded?.phaseState).toBe("DRAFT")
+    expect(loaded?.currentTaskId).toBe("T1")
   })
 })
 

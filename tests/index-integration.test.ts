@@ -622,10 +622,12 @@ describe("robot-artisan autonomy", () => {
     const state = plugin._testStore.get(sid)
     expect(state.phase).toBe("PLANNING")
     expect(state.phaseState).toBe("REVISE")
+    expect(state.reviewArtifactHash).toBeNull()
+    expect(state.latestReviewResults).toBeNull()
     expect(state.feedbackHistory[state.feedbackHistory.length - 1]?.feedback).toContain("Add the missing deployment")
   })
 
-  it("moves directly to REVISE when auto-approval fails", async () => {
+  it("moves directly to REVISE when auto-approval returns non-JSON output", async () => {
     let promptCallCount = 0
     ;(client.session.prompt as ReturnType<typeof mock>).mockImplementation(async () => {
       promptCallCount += 1
@@ -703,13 +705,15 @@ describe("robot-artisan autonomy", () => {
       ctx,
     )
 
-    expect(result).toContain("Auto-approve failed")
+    expect(result).toContain("Auto-approve rejected")
     expect(result).toContain("Transitioned to **PLANNING/REVISE**")
 
     const state = plugin._testStore.get(sid)
     expect(state.phase).toBe("PLANNING")
     expect(state.phaseState).toBe("REVISE")
-    expect(state.feedbackHistory[state.feedbackHistory.length - 1]?.feedback).toContain("could not complete")
+    expect(state.reviewArtifactHash).toBeNull()
+    expect(state.latestReviewResults).toBeNull()
+    expect(state.feedbackHistory[state.feedbackHistory.length - 1]?.feedback).toContain("not valid json")
   })
 })
 
@@ -917,6 +921,11 @@ describe("userGateMessageReceived — blocks self-approval", () => {
       ctx,
     )
 
+    await plugin._testStore.update(sid, (draft: any) => {
+      draft.reviewArtifactHash = "stale-review-hash"
+      draft.latestReviewResults = [{ criterion: "Old", met: false, evidence: "stale" }]
+    })
+
     // Attempt to revise WITHOUT sending a user message first — should still work
     // (revise isn't blocked by the user gate flag, only approve is)
     const result = await plugin.tool.submit_feedback.execute(
@@ -925,6 +934,10 @@ describe("userGateMessageReceived — blocks self-approval", () => {
     )
     // Should not contain the "no user message" error
     expect(result).not.toContain("no user message")
+
+    const updated = plugin._testStore.get(sid)
+    expect(updated.reviewArtifactHash).toBeNull()
+    expect(updated.latestReviewResults).toBeNull()
   })
 })
 
@@ -1090,13 +1103,10 @@ describe("DONE → MODE_SELECT auto-reset", () => {
       draft.phaseState = "DRAFT"
       draft.iterationCount = 5
       draft.retryCount = 3
-      draft.currentTaskId = "T7"
       draft.feedbackHistory = [{ phase: "PLANNING", feedback: "old feedback", timestamp: Date.now() }]
       // escapePending cannot be true at DONE (validator requires ESCAPE_HATCH phaseState)
       // so we set it to false and verify it stays false after reset
       draft.escapePending = false
-      draft.taskCompletionInProgress = "T7"
-      draft.taskReviewCount = 4
       draft.pendingFeedback = "stale feedback"
       draft.revisionBaseline = { type: "content-hash", hash: "abc123" }
       draft.userGateMessageReceived = true
@@ -1567,7 +1577,7 @@ describe("fileAllowlist — relative paths are normalized to absolute", () => {
 
     const store = plugin._testStore
     const planPath = `${tempDir}/.openartisan/allowlist-derived-test/plan.md`
-    await Bun.write(planPath, "# Planning\n\nAllowlist\n- src/a.ts\n- tests/a.test.ts\n")
+    await Bun.write(planPath, "# Planning\n\n## Narrow allowlist\n- src/a.ts\n- tests/a.test.ts\n")
     await store.update(sid, (draft: any) => {
       draft.phase = "PLANNING"
       draft.phaseState = "USER_GATE"
@@ -1587,6 +1597,39 @@ describe("fileAllowlist — relative paths are normalized to absolute", () => {
     const state = store.get(sid)
     expect(state.fileAllowlist).toContain(`${tempDir}/src/a.ts`)
     expect(state.fileAllowlist).toContain(`${tempDir}/tests/a.test.ts`)
+  })
+
+  it("rejects INCREMENTAL planning approval without an allowlist source", async () => {
+    const sid = `int-test-${Date.now()}-allowlist-missing`
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: sid } } },
+    })
+    const ctx = { directory: tempDir, sessionId: sid }
+
+    await plugin.tool.select_mode.execute(
+      { mode: "INCREMENTAL", feature_name: "allowlist-missing-test" },
+      ctx,
+    )
+
+    const store = plugin._testStore
+    const planPath = `${tempDir}/.openartisan/allowlist-missing-test/plan.md`
+    await Bun.write(planPath, "# Planning\n\nNo allowlist here.\n")
+    await store.update(sid, (draft: any) => {
+      draft.phase = "PLANNING"
+      draft.phaseState = "USER_GATE"
+      draft.userGateMessageReceived = true
+      draft.artifactDiskPaths.plan = planPath
+    })
+
+    const result = await plugin.tool.submit_feedback.execute(
+      {
+        feedback_type: "approve",
+        feedback_text: "approved",
+      },
+      ctx,
+    )
+
+    expect(result).toContain("INCREMENTAL planning approval requires an explicit file allowlist source")
   })
 
   it("normalizes preserved fileAllowlist from prior cycle at select_mode time", async () => {

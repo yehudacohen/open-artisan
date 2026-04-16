@@ -132,7 +132,10 @@ describe("dispatchAutoApproval — error handling", () => {
       promptText: "not json at all",
     })
     const result = await dispatchAutoApproval(dispatcher, makeRequest())
-    expect(result.success).toBe(false)
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    expect(result.approve).toBe(false)
+    expect(result.feedback).toContain("not json at all")
   })
 
   it("passes parentModel to session create", async () => {

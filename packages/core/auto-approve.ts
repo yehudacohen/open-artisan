@@ -192,6 +192,16 @@ export function parseAutoApproveResult(raw: string): AutoApproveResult {
     const json = extractJsonFromText(raw)
     parsed = JSON.parse(json)
   } catch (err) {
+    const trimmed = raw.trim()
+    if (trimmed.length > 0) {
+      return {
+        success: true,
+        approve: false,
+        confidence: 0,
+        reasoning: "Auto-approver returned non-JSON output; treating it as rejection.",
+        feedback: trimmed,
+      }
+    }
     return { success: false, error: `Failed to parse auto-approve response: ${err instanceof Error ? err.message : String(err)}` }
   }
 

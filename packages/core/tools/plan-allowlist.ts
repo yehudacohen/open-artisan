@@ -7,13 +7,16 @@ export function extractApprovedFileAllowlist(planContent: string, cwd: string): 
 
   for (const line of lines) {
     const trimmed = line.trim()
-    const lower = trimmed.toLowerCase()
+    const normalizedHeading = trimmed.replace(/^#{1,6}\s+/, "")
+    const lower = normalizedHeading.toLowerCase()
 
     if (!inAllowlist) {
       if (
         lower === "allowlist" ||
         lower === "file allowlist:" ||
         lower === "allowlist:" ||
+        lower === "narrow allowlist" ||
+        lower === "narrow allowlist:" ||
         lower === "minimal incremental file allowlist" ||
         lower === "minimal incremental file allowlist:"
       ) {
@@ -31,7 +34,7 @@ export function extractApprovedFileAllowlist(planContent: string, cwd: string): 
       break
     }
 
-    const bulletMatch = /^-\s+(.+)$/.exec(trimmed)
+    const bulletMatch = /^[-*]\s+(.+)$/.exec(trimmed)
     if (!bulletMatch) {
       if (collected.length > 0) break
       continue

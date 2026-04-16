@@ -54,6 +54,33 @@ class TestSubprocessLifecycle:
             assert call_args[0][0] == "lifecycle.init"
             assert call_args[0][1]["projectDir"] == str(tmp_path)
 
+    def test_start_falls_back_to_local_bridge_when_shared_socket_probe_fails(
+        self, tmp_path
+    ):
+        client = StdioBridgeClient()
+        state_dir = tmp_path / ".openartisan"
+        state_dir.mkdir()
+
+        with (
+            patch.object(
+                client,
+                "discover_bridge",
+                return_value={
+                    "kind": "live_compatible_bridge",
+                    "metadata": {"socketPath": str(state_dir / ".bridge.sock")},
+                },
+            ),
+            patch.object(
+                client, "_probe_shared_bridge", side_effect=BridgeError("probe failed")
+            ),
+            patch.object(client, "_spawn_process") as mock_spawn,
+            patch.object(client, "_send_rpc", return_value="ready"),
+        ):
+            client.start(str(tmp_path))
+
+        mock_spawn.assert_called_once()
+        assert client._socket_path is None
+
     def test_start_can_take_over_existing_bridge_when_enabled(self, tmp_path):
         client = StdioBridgeClient()
         state_dir = tmp_path / ".openartisan"
@@ -311,6 +338,94 @@ class TestJsonRpcRoundTrip:
         assert result == "ok"
         assert result_holder["method"] == "tool.execute"
         assert result_holder["post_request_probe"] == "still-open"
+
+    def test_socket_call_classifies_empty_reply_for_mutation_methods(self):
+        client = StdioBridgeClient()
+        short_dir = Path(tempfile.mkdtemp(prefix="oa-bridge-"))
+        socket_path = short_dir / "bridge.sock"
+
+        def serve_once() -> None:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
+                server.bind(str(socket_path))
+                server.listen(1)
+                conn, _ = server.accept()
+                with conn:
+                    conn.recv(4096)
+
+        thread = threading.Thread(target=serve_once)
+        thread.start()
+        try:
+            for _ in range(50):
+                if socket_path.exists():
+                    break
+                time.sleep(0.01)
+            client._socket_path = str(socket_path)
+            with pytest.raises(
+                BridgeError, match="socket closed before sending a JSON-RPC reply"
+            ):
+                client.call("tool.execute", {"name": "request_review", "args": {}})
+        finally:
+            thread.join(timeout=5)
+            try:
+                socket_path.unlink(missing_ok=True)
+                short_dir.rmdir()
+            except OSError:
+                pass
+
+    def test_socket_call_classifies_invalid_json_reply(self):
+        client = StdioBridgeClient()
+        short_dir = Path(tempfile.mkdtemp(prefix="oa-bridge-"))
+        socket_path = short_dir / "bridge.sock"
+
+        def serve_once() -> None:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
+                server.bind(str(socket_path))
+                server.listen(1)
+                conn, _ = server.accept()
+                with conn:
+                    while b"\n" not in (buffer := conn.recv(4096)):
+                        if not buffer:
+                            return
+                    conn.sendall(b"not-json\n")
+
+        thread = threading.Thread(target=serve_once)
+        thread.start()
+        try:
+            for _ in range(50):
+                if socket_path.exists():
+                    break
+                time.sleep(0.01)
+            client._socket_path = str(socket_path)
+            with pytest.raises(BridgeError, match="invalid JSON reply"):
+                client.call("tool.execute", {"name": "request_review", "args": {}})
+        finally:
+            thread.join(timeout=5)
+            try:
+                socket_path.unlink(missing_ok=True)
+                short_dir.rmdir()
+            except OSError:
+                pass
+
+    def test_shared_socket_failure_recovers_by_restarting_bridge(self):
+        client = StdioBridgeClient()
+        client._socket_path = "/tmp/missing.sock"
+        client._project_dir = "/tmp/project"
+
+        with (
+            patch.object(
+                client,
+                "start",
+                side_effect=lambda project_dir: (
+                    setattr(client, "_socket_path", None),
+                    setattr(client, "_process", MagicMock()),
+                ),
+            ),
+            patch.object(client, "_send_rpc", return_value="pong") as mock_rpc,
+        ):
+            result = client.call("lifecycle.ping")
+
+        assert result == "pong"
+        mock_rpc.assert_called_once_with("lifecycle.ping", {})
 
 
 # ---------------------------------------------------------------------------

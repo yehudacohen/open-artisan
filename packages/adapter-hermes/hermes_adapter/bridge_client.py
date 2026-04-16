@@ -44,6 +44,7 @@ _RUNNING_BRIDGE_RE = re.compile(
 _SHARED_BRIDGE_PROTOCOL_VERSION = "1"
 _ALLOWED_DETACH_REASONS = {"shutdown", "disconnect", "stale", "force"}
 _NO_RESPONSE_SOCKET_METHODS = {"lifecycle.sessionCreated", "lifecycle.sessionDeleted"}
+_SOCKET_RECOVERY_LIMIT = 1
 
 
 def _metadata_path(state_dir: str) -> Path:
@@ -121,6 +122,24 @@ class StdioBridgeClient:
         self._state_dir: str | None = None
         self._socket_path: str | None = None
 
+    def _socket_error(
+        self, method: str, detail: str, *, recoverable: bool = True
+    ) -> BridgeError:
+        return BridgeError(
+            f"Shared bridge transport failed for {method}: {detail}",
+            recoverable=recoverable,
+        )
+
+    def _clear_shared_bridge_attachment(self) -> None:
+        self._socket_path = None
+
+    def _probe_shared_bridge(self) -> None:
+        if not self._socket_path:
+            raise self._socket_error(
+                "lifecycle.ping", "socket is not configured", recoverable=False
+            )
+        self._send_socket_rpc("lifecycle.ping", {})
+
     def start(self, project_dir: str) -> None:
         """Attach to an existing shared bridge when possible, otherwise spawn one.
 
@@ -140,7 +159,19 @@ class StdioBridgeClient:
             if isinstance(socket_path, str) and socket_path:
                 self._socket_path = socket_path
                 self._process = None
-                return
+                try:
+                    self._probe_shared_bridge()
+                    logger.info(
+                        "Attached Hermes adapter to shared bridge socket %s",
+                        socket_path,
+                    )
+                    return
+                except BridgeError as e:
+                    logger.warning(
+                        "Shared bridge probe failed, spawning local bridge fallback: %s",
+                        e,
+                    )
+                    self._clear_shared_bridge_attachment()
 
         self._socket_path = None
         self._spawn_process()
@@ -162,7 +193,26 @@ class StdioBridgeClient:
     def call(self, method: str, params: dict[str, Any] | None = None) -> Any:
         """Send a JSON-RPC request and return the result."""
         if self._socket_path:
-            return self._send_socket_rpc(method, params or {})
+            last_error: BridgeError | None = None
+            for attempt in range(_SOCKET_RECOVERY_LIMIT + 1):
+                try:
+                    return self._send_socket_rpc(method, params or {})
+                except BridgeError as e:
+                    last_error = e
+                    if attempt >= _SOCKET_RECOVERY_LIMIT or not self._project_dir:
+                        break
+                    logger.warning(
+                        "Shared bridge request failed for %s, attempting recovery: %s",
+                        method,
+                        e,
+                    )
+                    self._clear_shared_bridge_attachment()
+                    self.start(self._project_dir)
+                    if not self._socket_path:
+                        break
+            if last_error:
+                if self._socket_path:
+                    raise last_error
 
         if self._process is None and self._project_dir:
             self.start(self._project_dir)
@@ -551,21 +601,29 @@ class StdioBridgeClient:
                         if not chunk:
                             break
                         chunks.append(chunk)
+            except TimeoutError:
+                raise self._socket_error(method, "timed out waiting for a socket reply")
+            except socket.timeout:
+                raise self._socket_error(method, "timed out waiting for a socket reply")
+            except ConnectionRefusedError as e:
+                raise self._socket_error(method, f"connection refused ({e})")
+            except FileNotFoundError as e:
+                raise self._socket_error(method, f"socket missing ({e})")
             except OSError as e:
-                raise BridgeError(
-                    f"Failed to communicate with shared bridge socket: {e}"
-                )
+                raise self._socket_error(method, f"socket I/O error ({e})")
 
             raw = b"".join(chunks).decode("utf-8").strip()
             if not raw:
                 if method in _NO_RESPONSE_SOCKET_METHODS:
                     return None
-                raise BridgeError("Shared bridge socket returned no response")
+                raise self._socket_error(
+                    method, "socket closed before sending a JSON-RPC reply"
+                )
 
             try:
                 response = json.loads(raw)
             except json.JSONDecodeError as e:
-                raise BridgeError(f"Malformed JSON from shared bridge socket: {e}")
+                raise self._socket_error(method, f"invalid JSON reply ({e})")
 
             if "error" in response:
                 err = response["error"]

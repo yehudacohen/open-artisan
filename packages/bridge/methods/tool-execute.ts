@@ -46,7 +46,7 @@ import { writeArtifact } from "../../core/artifact-store"
 import { parseImplPlan } from "../../core/impl-plan-parser"
 import { PHASE_TO_ARTIFACT } from "../../core/artifacts"
 import { createImplDAG } from "../../core/dag"
-import { nextSchedulerDecision, resolveHumanGate } from "../../core/scheduler"
+import { nextSchedulerDecision, nextSchedulerDecisionForInput, readDecisionInput, resolveHumanGate } from "../../core/scheduler"
 import {
   buildAutoApproveRequest,
   buildRobotArtisanAutoApproveFailureFeedback,
@@ -83,6 +83,19 @@ function subagentError(toolName: string, feature: string): string {
 
 function artifactHash(text: string): string {
   return createHash("sha256").update(text).digest("hex").slice(0, 16)
+}
+
+function buildRuntimeSchedulerDecision(state: {
+  implDag: import("../../core/dag").TaskNode[] | null
+  concurrency: { maxParallelTasks: number }
+}) {
+  const input = readDecisionInput({ implDag: state.implDag, concurrency: state.concurrency })
+  const evaluation = nextSchedulerDecisionForInput(input)
+  const fallbackDecision =
+    evaluation.decision.action === "unsupported" && evaluation.decision.fallback === "sequential"
+      ? nextSchedulerDecision(input.dag)
+      : evaluation.decision
+  return { evaluation, fallbackDecision }
 }
 
 async function readCurrentArtifactHash(state: WorkflowState): Promise<string | null> {
@@ -517,11 +530,14 @@ const handleSubmitFeedback: ToolHandler = async (args, toolCtx, ctx) => {
         return `Error resolving human gates:\n${errors.map((e) => `  - ${e}`).join("\n")}`
       }
 
-      const nextDecision = nextSchedulerDecision(dag)
       const updatedNodes = Array.from(dag.tasks).map((t) => ({
         ...t,
         ...(t.humanGate ? { humanGate: { ...t.humanGate } } : {}),
       }))
+      const { evaluation, fallbackDecision: nextDecision } = buildRuntimeSchedulerDecision({
+        implDag: updatedNodes,
+        concurrency: state.concurrency,
+      })
 
       const remainingGates = Array.from(dag.tasks).filter(
         (t) => t.status === "human-gated" && (!t.humanGate || !t.humanGate.resolved),
@@ -550,7 +566,7 @@ const handleSubmitFeedback: ToolHandler = async (args, toolCtx, ctx) => {
         })
         return (
           `Resolved ${resolvedIds.length} human gate(s): ${resolvedIds.join(", ")}.\n\n` +
-          "Returning to IMPLEMENTATION/DRAFT — downstream tasks are now unblocked."
+          `${evaluation.decision.action === "unsupported" ? `Parallel runtime unsupported: ${evaluation.decision.reason}. Applying ${evaluation.decision.fallback} fallback.\n\n` : ""}Returning to IMPLEMENTATION/DRAFT — downstream tasks are now unblocked.`
         )
       }
 

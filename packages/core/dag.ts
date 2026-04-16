@@ -19,6 +19,18 @@ export type TaskStatus = "pending" | "in-flight" | "complete" | "aborted" | "hum
 
 export type TaskComplexity = "small" | "medium" | "large"
 
+export type TaskIsolationMode = "sequential-only" | "shared-worktree" | "isolated-worktree"
+
+export type TaskIsolationFailureReason = "overlapping-writes" | "runtime-unsupported" | "ownership-unknown"
+
+export interface TaskIsolation {
+  mode: TaskIsolationMode
+  ownershipKey: string
+  writablePaths: string[]
+  safeForParallelDispatch: boolean
+  failureReason?: TaskIsolationFailureReason
+}
+
 /**
  * Task category — classifies what kind of work a task represents.
  * Used for stub detection (stubs allowed in "scaffold" but not "integration"/"standalone")
@@ -79,6 +91,12 @@ export interface TaskNode {
 
   /** Current execution state */
   status: TaskStatus
+
+  /**
+   * Optional isolation metadata for future parallel dispatch.
+   * Absent means the task is only known-safe for sequential execution.
+   */
+  isolation?: TaskIsolation
 
   /**
    * Task category — classifies what kind of work this task represents.
@@ -179,6 +197,14 @@ export function createImplDAG(tasks: TaskNode[]): ImplDAG {
     dependencies: [...t.dependencies],
     expectedTests: [...t.expectedTests],
     expectedFiles: [...(t.expectedFiles ?? [])],
+    ...(t.isolation
+      ? {
+          isolation: {
+            ...t.isolation,
+            writablePaths: [...t.isolation.writablePaths],
+          },
+        }
+      : {}),
     // Deep copy humanGate if present (nested object)
     ...(t.humanGate ? { humanGate: { ...t.humanGate } } : {}),
   }))
@@ -206,6 +232,14 @@ export function createImplDAG(tasks: TaskNode[]): ImplDAG {
 
     // Dependency reference check
     for (const t of nodes) {
+      if (t.isolation?.safeForParallelDispatch) {
+        if (!t.isolation.ownershipKey.trim()) {
+          errors.push(`Task "${t.id}" is marked parallel-safe but has no ownershipKey`)
+        }
+        if (t.isolation.writablePaths.length === 0) {
+          errors.push(`Task "${t.id}" is marked parallel-safe but has no writablePaths`)
+        }
+      }
       for (const dep of t.dependencies) {
         if (!ids.has(dep)) {
           errors.push(`Task "${t.id}" has unknown dependency "${dep}"`)

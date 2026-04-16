@@ -122,6 +122,10 @@ export type ArtifactKey =
  */
 export const SCHEMA_VERSION = 22
 
+export interface WorkflowConcurrency {
+  maxParallelTasks: number
+}
+
 export interface WorkflowState {
   /** Schema version for forward-compatibility. Must equal SCHEMA_VERSION. */
   schemaVersion: typeof SCHEMA_VERSION
@@ -400,7 +404,7 @@ export interface WorkflowState {
    * - maxParallelTasks: how many DAG tasks can run simultaneously (Phase 6)
    * Set at select_mode time. Defaults to sequential (1).
    */
-  concurrency: { maxParallelTasks: number }
+  concurrency: WorkflowConcurrency
 
   // ── Orchestrator-driven artifact tracking (v22) ────────────────────
 

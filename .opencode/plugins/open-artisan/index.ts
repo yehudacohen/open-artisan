@@ -69,7 +69,7 @@ import { runDiscoveryFleet } from "../../../packages/core/discovery/index"
 import { createPluginHooks } from "./plugin-hooks"
 import { parseImplPlan } from "../../../packages/core/impl-plan-parser"
 import { createImplDAG, type TaskCategory, type HumanGateInfo } from "../../../packages/core/dag"
-import { nextSchedulerDecision, resolveHumanGate } from "../../../packages/core/scheduler"
+import { nextSchedulerDecision, nextSchedulerDecisionForInput, readDecisionInput, resolveHumanGate } from "../../../packages/core/scheduler"
 import { resolveArtifactPaths } from "../../../packages/core/tools/artifact-paths"
 import { writeArtifact, detectDesignDoc } from "../../../packages/core/artifact-store"
 import { dispatchTaskReview, type AdjacentTask } from "../../../packages/core/task-review"
@@ -1896,7 +1896,14 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                   const refreshed = store.get(sessionId)
                   if (refreshed?.implDag) {
                     const dag = createImplDAG(Array.from(refreshed.implDag))
-                    const newDecision = nextSchedulerDecision(dag)
+                    const evaluation = nextSchedulerDecisionForInput(readDecisionInput({
+                      implDag: refreshed.implDag,
+                      concurrency: refreshed.concurrency,
+                    }))
+                    const newDecision =
+                      evaluation.decision.action === "unsupported" && evaluation.decision.fallback === "sequential"
+                        ? nextSchedulerDecision(dag)
+                        : evaluation.decision
                     const timeoutMsg = timedOut.map(
                       (to) => `Sub-workflow "${to.featureName}" for task "${to.taskId}" timed out after ${Math.round(to.elapsedMs / 60000)} minutes.`,
                     ).join("\n")
@@ -1906,7 +1913,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                       await store.update(sessionId, (draft) => {
                         draft.currentTaskId = newDecision.task.id
                       })
-                      nextAction = `**Next task ready:**\n${newDecision.prompt}`
+                      nextAction = `${evaluation.decision.action === "unsupported" ? `**Parallel runtime unsupported:** ${evaluation.decision.reason}. Applying ${evaluation.decision.fallback} fallback.\n\n` : ""}**Next task ready:**\n${newDecision.prompt}`
                     } else if (newDecision.action === "complete") {
                       nextAction = `**All tasks complete.** ${newDecision.message}`
                     } else {
@@ -2566,11 +2573,18 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
               }
 
               // Check if there's still work to do after resolving gates
-              const nextDecision = nextSchedulerDecision(dag)
               const updatedNodes = Array.from(dag.tasks).map((t) => ({
                 ...t,
                 ...(t.humanGate ? { humanGate: { ...t.humanGate } } : {}),
               }))
+              const evaluation = nextSchedulerDecisionForInput(readDecisionInput({
+                implDag: updatedNodes,
+                concurrency: state.concurrency,
+              }))
+              const nextDecision =
+                evaluation.decision.action === "unsupported" && evaluation.decision.fallback === "sequential"
+                  ? nextSchedulerDecision(dag)
+                  : evaluation.decision
 
               // Check for any remaining unresolved human gates
               const remainingGates = Array.from(dag.tasks).filter(

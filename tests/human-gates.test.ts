@@ -531,14 +531,14 @@ describe("buildTaskReviewPrompt — stub detection", () => {
     expect(prompt).toContain("stubs are NOT acceptable")
   })
 
-  it("references ALL seven checks in the response format instructions", () => {
+  it("references ALL nine checks in the response format instructions", () => {
     const prompt = buildTaskReviewPrompt({
       task: makeTask({ id: "T1" }),
       implementationSummary: "test",
       mode: "GREENFIELD",
       cwd: "/test",
     })
-    expect(prompt).toContain("ALL seven checks pass")
+    expect(prompt).toContain("ALL nine checks pass")
   })
 })
 

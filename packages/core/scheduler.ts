@@ -14,7 +14,8 @@
  * Mutations are applied by the caller after the decision is made.
  */
 
-import type { TaskNode, ImplDAG } from "./dag"
+import { createImplDAG, type TaskIsolation, type TaskNode, type ImplDAG } from "./dag"
+import type { WorkflowState } from "./types"
 
 // ---------------------------------------------------------------------------
 // Types
@@ -22,10 +23,45 @@ import type { TaskNode, ImplDAG } from "./dag"
 
 export type SchedulerDecision =
   | SchedulerDispatch
+  | SchedulerDispatchBatch
   | SchedulerComplete
   | SchedulerBlocked
   | SchedulerAwaitingHuman
+  | SchedulerUnsupported
   | SchedulerError
+
+export type SchedulerIssueCode =
+  | "in-flight"
+  | "delegated"
+  | "deps-unresolved"
+  | "no-slots"
+  | "isolation-missing"
+  | "capability-missing"
+  | "dag-inconsistent"
+
+export interface SchedulerIssue {
+  code: SchedulerIssueCode
+  taskId?: string
+  detail: string
+}
+
+export interface SchedulerSlots {
+  maxParallelTasks: number
+  activeTasks: number
+  availableSlots: number
+  readyTasks: number
+  dispatchableNow: number
+}
+
+export interface SchedulerEvaluateInput {
+  dag: ImplDAG
+  maxParallelTasks: number
+}
+
+export interface SchedulerEvaluateResult {
+  decision: SchedulerDecision
+  slots: SchedulerSlots
+}
 
 export interface SchedulerDispatch {
   action: "dispatch"
@@ -34,6 +70,13 @@ export interface SchedulerDispatch {
   /** Human-readable prompt to give the agent for this task */
   prompt: string
   /** Total tasks, complete count, and remaining count for progress reporting */
+  progress: TaskProgress
+}
+
+export interface SchedulerDispatchBatch {
+  action: "dispatch-batch"
+  tasks: TaskNode[]
+  prompts: Array<{ taskId: string; prompt: string }>
   progress: TaskProgress
 }
 
@@ -53,6 +96,9 @@ export interface SchedulerBlocked {
    * Callers should check blockedTasks.length to distinguish waiting (1,2) from error (3).
    */
   message: string
+  reason?: SchedulerIssueCode
+  issues?: SchedulerIssue[]
+  retryable?: true
   blockedTasks: Array<{ id: string; waitingFor: string[] }>
 }
 
@@ -76,6 +122,14 @@ export interface SchedulerAwaitingHuman {
 export interface SchedulerError {
   action: "error"
   message: string
+}
+
+export interface SchedulerUnsupported {
+  action: "unsupported"
+  reason: "bridge-capability-missing" | "runtime-isolation-missing"
+  issues: SchedulerIssue[]
+  fallback: "sequential" | "block"
+  retryable: false
 }
 
 export interface TaskProgress {
@@ -102,6 +156,108 @@ function computeProgress(dag: ImplDAG): TaskProgress {
     aborted: tasks.filter((t) => t.status === "aborted").length,
     humanGated: tasks.filter((t) => t.status === "human-gated").length,
     delegated: tasks.filter((t) => t.status === "delegated").length,
+  }
+}
+
+function computeSlots(progress: TaskProgress, readyTasks: number, dispatchableNow: number, maxParallelTasks: number): SchedulerSlots {
+  const activeTasks = progress.inFlight + progress.delegated
+  return {
+    maxParallelTasks,
+    activeTasks,
+    availableSlots: Math.max(maxParallelTasks - activeTasks, 0),
+    readyTasks,
+    dispatchableNow,
+  }
+}
+
+function isIsolationDispatchable(isolation: TaskIsolation | undefined): boolean {
+  if (!isolation) return false
+  return (
+    isolation.safeForParallelDispatch &&
+    isolation.ownershipKey.trim().length > 0 &&
+    isolation.writablePaths.length > 0
+  )
+}
+
+function hasOverlappingWritablePaths(tasks: TaskNode[]): boolean {
+  const seen = new Set<string>()
+  for (const task of tasks) {
+    for (const rawPath of task.isolation?.writablePaths ?? []) {
+      const normalized = rawPath.trim()
+      if (!normalized) continue
+      if (seen.has(normalized)) return true
+      seen.add(normalized)
+    }
+  }
+  return false
+}
+
+function buildParallelDecision(input: SchedulerEvaluateInput): SchedulerEvaluateResult | null {
+  const ready = input.dag.getReady()
+  if (input.maxParallelTasks <= 1 || ready.length === 0) return null
+
+  const progress = computeProgress(input.dag)
+  const availableSlots = Math.max(input.maxParallelTasks - (progress.inFlight + progress.delegated), 0)
+  const parallelReady = ready.filter((task) => isIsolationDispatchable(task.isolation))
+  const slots = computeSlots(progress, ready.length, Math.min(parallelReady.length, availableSlots), input.maxParallelTasks)
+
+  if (availableSlots === 0) {
+    return {
+      decision: {
+        action: "blocked",
+        message: "Scheduler is blocked: no parallel execution slots are currently available.",
+        reason: "no-slots",
+        issues: [{ code: "no-slots", detail: "All configured parallel slots are already occupied." }],
+        retryable: true,
+        blockedTasks: [],
+      },
+      slots,
+    }
+  }
+
+  if (parallelReady.length >= 2) {
+    if (hasOverlappingWritablePaths(parallelReady)) {
+      return {
+        decision: {
+          action: "blocked",
+          message: "Scheduler is blocked: parallel-ready tasks have overlapping writable ownership.",
+          reason: "isolation-missing",
+          issues: parallelReady.map((task) => ({
+            code: "isolation-missing",
+            taskId: task.id,
+            detail: "Parallel-ready task overlaps writable ownership with another ready task.",
+          })),
+          retryable: true,
+          blockedTasks: parallelReady.map((task) => ({ id: task.id, waitingFor: [] })),
+        },
+        slots,
+      }
+    }
+
+    return {
+      decision: {
+        action: "unsupported",
+        reason: "runtime-isolation-missing",
+        issues: [{
+          code: "capability-missing",
+          detail: "Parallel dispatch contract is defined, but runtime batch execution is not implemented yet.",
+        }],
+        fallback: "sequential",
+        retryable: false,
+      },
+      slots,
+    }
+  }
+
+  return null
+}
+
+function withSequentialEnvelope(input: SchedulerEvaluateInput, decision: SchedulerDecision): SchedulerEvaluateResult {
+  const ready = input.dag.getReady()
+  const progress = computeProgress(input.dag)
+  return {
+    decision,
+    slots: computeSlots(progress, ready.length, decision.action === "dispatch" ? 1 : 0, input.maxParallelTasks),
   }
 }
 
@@ -284,6 +440,46 @@ export function nextSchedulerDecision(dag: ImplDAG): SchedulerDecision {
       "User intervention required.",
     blockedTasks,
   }
+}
+
+export function readDecisionInput(state: Pick<WorkflowState, "implDag" | "concurrency">): SchedulerEvaluateInput {
+  return {
+    dag: createImplDAG(state.implDag ?? []),
+    maxParallelTasks: state.concurrency.maxParallelTasks,
+  }
+}
+
+export function nextSchedulerDecisionForInput(input: SchedulerEvaluateInput): SchedulerEvaluateResult {
+  const parallelDecision = buildParallelDecision(input)
+  if (parallelDecision) return parallelDecision
+  return withSequentialEnvelope(input, nextSchedulerDecision(input.dag))
+}
+
+export function applyDispatch(state: Pick<WorkflowState, "implDag">, taskId: string): WorkflowState["implDag"] {
+  if (!state.implDag) return null
+  return state.implDag.map((task) => ({
+    ...task,
+    ...(task.isolation ? { isolation: { ...task.isolation, writablePaths: [...task.isolation.writablePaths] } } : {}),
+    status: task.id === taskId ? "in-flight" : task.status,
+  }))
+}
+
+export function applyDispatchBatch(state: Pick<WorkflowState, "implDag">, taskIds: string[]): WorkflowState["implDag"] {
+  if (!state.implDag) return null
+  const ids = new Set(taskIds)
+  return state.implDag.map((task) => ({
+    ...task,
+    ...(task.isolation ? { isolation: { ...task.isolation, writablePaths: [...task.isolation.writablePaths] } } : {}),
+    status: ids.has(task.id) ? "in-flight" : task.status,
+  }))
+}
+
+export function applyFallback(state: Pick<WorkflowState, "implDag">, _fallback: "sequential" | "block"): WorkflowState["implDag"] {
+  if (!state.implDag) return null
+  return state.implDag.map((task) => ({
+    ...task,
+    ...(task.isolation ? { isolation: { ...task.isolation, writablePaths: [...task.isolation.writablePaths] } } : {}),
+  }))
 }
 
 /**

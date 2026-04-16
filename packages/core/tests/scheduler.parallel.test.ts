@@ -1,0 +1,98 @@
+import { describe, expect, it } from "bun:test"
+
+import { createImplDAG, type TaskNode } from "#core/dag"
+import {
+  applyDispatch,
+  applyDispatchBatch,
+  applyFallback,
+  nextSchedulerDecisionForInput,
+  readDecisionInput,
+} from "#core/scheduler"
+
+function makeTask(id: string, overrides: Partial<TaskNode> = {}): TaskNode {
+  return {
+    id,
+    description: id,
+    dependencies: [],
+    expectedTests: [],
+    expectedFiles: [`src/${id}.ts`],
+    estimatedComplexity: "small",
+    status: "pending",
+    ...overrides,
+  }
+}
+
+describe("parallel scheduler contract", () => {
+  it("wraps sequential dispatch in a result envelope with slot accounting", () => {
+    const dag = createImplDAG([makeTask("T1")])
+    const result = nextSchedulerDecisionForInput({ dag, maxParallelTasks: 1 })
+
+    expect(result.decision.action).toBe("dispatch")
+    expect(result.slots.maxParallelTasks).toBe(1)
+    expect(result.slots.activeTasks).toBe(0)
+    expect(result.slots.availableSlots).toBe(1)
+    expect(result.slots.readyTasks).toBe(1)
+    expect(result.slots.dispatchableNow).toBe(1)
+  })
+
+  it("treats absent isolation as not parallel-safe and falls back to sequential dispatch", () => {
+    const dag = createImplDAG([makeTask("T1"), makeTask("T2")])
+    const result = nextSchedulerDecisionForInput({ dag, maxParallelTasks: 2 })
+    expect(result.decision.action).toBe("dispatch")
+    expect(result.slots.readyTasks).toBe(2)
+    expect(result.slots.dispatchableNow).toBe(1)
+  })
+
+  it("reports unsupported with sequential fallback when multiple parallel-safe tasks are ready", () => {
+    const dag = createImplDAG([
+      makeTask("T1", { isolation: { mode: "isolated-worktree", ownershipKey: "T1", writablePaths: ["src/t1.ts"], safeForParallelDispatch: true } }),
+      makeTask("T2", { isolation: { mode: "isolated-worktree", ownershipKey: "T2", writablePaths: ["src/t2.ts"], safeForParallelDispatch: true } }),
+    ])
+    const result = nextSchedulerDecisionForInput({ dag, maxParallelTasks: 2 })
+
+    expect(result.decision.action).toBe("unsupported")
+    if (result.decision.action !== "unsupported") return
+    expect(result.decision.reason).toBe("runtime-isolation-missing")
+    expect(result.decision.fallback).toBe("sequential")
+    expect(result.slots.readyTasks).toBe(2)
+    expect(result.slots.dispatchableNow).toBe(2)
+  })
+
+  it("fails closed when parallel-ready tasks overlap writable paths", () => {
+    const dag = createImplDAG([
+      makeTask("T1", { isolation: { mode: "isolated-worktree", ownershipKey: "one", writablePaths: ["src/shared.ts"], safeForParallelDispatch: true } }),
+      makeTask("T2", { isolation: { mode: "isolated-worktree", ownershipKey: "two", writablePaths: ["src/shared.ts"], safeForParallelDispatch: true } }),
+    ])
+    const result = nextSchedulerDecisionForInput({ dag, maxParallelTasks: 2 })
+
+    expect(result.decision.action).toBe("blocked")
+    if (result.decision.action !== "blocked") return
+    expect(result.decision.reason).toBe("isolation-missing")
+    expect(result.decision.retryable).toBeTrue()
+  })
+
+  it("derives scheduler input from workflow state", () => {
+    const dag = createImplDAG([makeTask("T1")])
+    const input = readDecisionInput({
+      implDag: Array.from(dag.tasks).map((task) => ({ ...task })),
+      concurrency: { maxParallelTasks: 3 },
+    })
+    expect(input.maxParallelTasks).toBe(3)
+    expect(input.dag.tasks.length).toBe(1)
+  })
+
+  it("applies dispatch helpers without mutating unrelated tasks", () => {
+    const state = { implDag: [makeTask("T1"), makeTask("T2")] }
+
+    const dispatched = applyDispatch(state, "T1")
+    expect(dispatched?.find((task) => task.id === "T1")?.status).toBe("in-flight")
+    expect(dispatched?.find((task) => task.id === "T2")?.status).toBe("pending")
+
+    const batch = applyDispatchBatch(state, ["T1", "T2"])
+    expect(batch?.every((task) => task.status === "in-flight")).toBeTrue()
+
+    const fallback = applyFallback(state, "sequential")
+    expect(fallback).not.toBe(state.implDag)
+    expect(fallback?.map((task) => task.status)).toEqual(["pending", "pending"])
+  })
+})

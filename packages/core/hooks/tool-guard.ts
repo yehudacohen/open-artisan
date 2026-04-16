@@ -19,7 +19,15 @@
  * - IMPLEMENTATION (INCREMENTAL): only files in the allowlist; .env always blocked
  * - MODE_SELECT / DONE: no writes, no edits
  */
+import type { TaskIsolation, TaskIsolationFailureReason, TaskNode } from "../dag"
 import type { Phase, PhaseState, WorkflowMode, PhaseToolPolicy } from "../types"
+
+export interface ParallelIsolationAssessment {
+  allowed: boolean
+  reason?: TaskIsolationFailureReason
+  taskIds: string[]
+  normalizedWritablePaths: string[]
+}
 
 // Predicates ---------------------------------------------------------------
 
@@ -109,6 +117,67 @@ export function isTestFile(path: string): boolean {
   if (dirs.some((d) => TEST_DIRS.has(d))) return true
 
   return false
+}
+
+export function normalizeParallelWritablePath(path: string): string | null {
+  const normalized = path.replace(/\\/g, "/").trim().replace(/^\.\//, "")
+  if (!normalized) return null
+  if (normalized.startsWith("/") || normalized.startsWith("../") || normalized.includes("/../")) return null
+  return normalized
+}
+
+function isParallelSafeIsolation(isolation: TaskIsolation | undefined): boolean {
+  if (!isolation) return false
+  return isolation.mode !== "sequential-only" && isolation.safeForParallelDispatch
+}
+
+export function assessParallelTaskIsolation(tasks: Array<Pick<TaskNode, "id" | "isolation">>): ParallelIsolationAssessment {
+  const normalizedWritablePaths: string[] = []
+  const seenPaths = new Set<string>()
+  const taskIds = tasks.map((task) => task.id)
+
+  for (const task of tasks) {
+    const isolation = task.isolation
+    if (!isParallelSafeIsolation(isolation)) {
+      return {
+        allowed: false,
+        reason: isolation?.failureReason ?? "runtime-unsupported",
+        taskIds,
+        normalizedWritablePaths,
+      }
+    }
+    if (!isolation.ownershipKey.trim()) {
+      return {
+        allowed: false,
+        reason: "ownership-unknown",
+        taskIds,
+        normalizedWritablePaths,
+      }
+    }
+    for (const rawPath of isolation.writablePaths) {
+      const normalized = normalizeParallelWritablePath(rawPath)
+      if (!normalized) {
+        return {
+          allowed: false,
+          reason: "ownership-unknown",
+          taskIds,
+          normalizedWritablePaths,
+        }
+      }
+      if (seenPaths.has(normalized)) {
+        return {
+          allowed: false,
+          reason: "overlapping-writes",
+          taskIds,
+          normalizedWritablePaths,
+        }
+      }
+      seenPaths.add(normalized)
+      normalizedWritablePaths.push(normalized)
+    }
+  }
+
+  return { allowed: true, taskIds, normalizedWritablePaths }
 }
 
 // ---------------------------------------------------------------------------

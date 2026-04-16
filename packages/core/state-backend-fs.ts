@@ -7,14 +7,27 @@
  * Cross-process locking via lockfiles:
  *   <baseDir>/<featureName>/.lock  (O_CREAT|O_EXCL, stale-PID detection)
  */
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 import { existsSync, readdirSync, lstatSync } from "node:fs"
 import { open, writeFile, readFile, mkdir, unlink } from "node:fs/promises"
-import type { StateBackend } from "./types"
+import { validateRoadmapDocument, type RoadmapDocument, type RoadmapResult, type RoadmapStateBackend, type StateBackend } from "./types"
 import { LOCK_TIMEOUT_MS, LOCK_POLL_MS } from "./constants"
 
 const STATE_FILE = "workflow-state.json"
 const LOCK_FILE = ".lock"
+const ROADMAP_NAMESPACE_DIR = ".roadmap"
+const ROADMAP_STATE_FILE = "roadmap-state.json"
+const ROADMAP_SCHEMA_VERSION = 1
+
+export interface FileLockOptions {
+  timeoutMs?: number
+  pollMs?: number
+}
+
+export interface FileSystemRoadmapStateBackendOptions extends FileLockOptions {
+  lockTimeoutMs?: number
+  lockPollMs?: number
+}
 
 // ---------------------------------------------------------------------------
 // File-level locking
@@ -42,11 +55,12 @@ function isProcessAlive(pid: number): boolean {
  * @returns A release function that removes the lockfile.
  */
 async function acquireFileLock(
-  baseDir: string,
-  featureName: string,
-  timeoutMs: number = LOCK_TIMEOUT_MS,
+  lockDir: string,
+  lockName: string,
+  options: FileLockOptions = {},
 ): Promise<{ release(): Promise<void> }> {
-  const lockDir = join(baseDir, featureName)
+  const timeoutMs = options.timeoutMs ?? LOCK_TIMEOUT_MS
+  const pollMs = options.pollMs ?? LOCK_POLL_MS
   await mkdir(lockDir, { recursive: true })
   const lockPath = join(lockDir, LOCK_FILE)
   const startTime = Date.now()
@@ -81,12 +95,76 @@ async function acquireFileLock(
       }
       // Lock held by a live process — check timeout
       if (Date.now() - startTime > timeoutMs) {
-        throw new Error(`Failed to acquire file lock for feature "${featureName}" after ${timeoutMs}ms`)
+        throw new Error(`Failed to acquire file lock for ${lockName} after ${timeoutMs}ms`)
       }
       // Poll
-      await new Promise((resolve) => setTimeout(resolve, LOCK_POLL_MS))
+      await new Promise((resolve) => setTimeout(resolve, pollMs))
     }
   }
+}
+
+function roadmapOk<T>(value: T): RoadmapResult<T> {
+  return { ok: true, value }
+}
+
+function roadmapError(
+  code: "not-found" | "invalid-document" | "invalid-slice" | "schema-mismatch" | "lock-timeout" | "storage-failure",
+  message: string,
+  retryable: boolean,
+  details?: Record<string, unknown>,
+): RoadmapResult<never> {
+  return {
+    ok: false,
+    error: {
+      code,
+      message,
+      retryable,
+      ...(details ? { details } : {}),
+    },
+  }
+}
+
+function validatePersistableRoadmapDocument(document: RoadmapDocument): RoadmapResult<RoadmapDocument> {
+  if (document.schemaVersion !== ROADMAP_SCHEMA_VERSION) {
+    return roadmapError(
+      "schema-mismatch",
+      `Unsupported roadmap schema version ${document.schemaVersion}; expected ${ROADMAP_SCHEMA_VERSION}`,
+      false,
+      { expectedSchemaVersion: ROADMAP_SCHEMA_VERSION, actualSchemaVersion: document.schemaVersion },
+    )
+  }
+
+  const validationError = validateRoadmapDocument(document)
+  if (validationError) {
+    return roadmapError("invalid-document", validationError, false, { schemaVersion: document.schemaVersion })
+  }
+
+  return roadmapOk(document)
+}
+
+async function readRoadmapDocument(filePath: string): Promise<RoadmapResult<RoadmapDocument | null>> {
+  if (!existsSync(filePath)) return roadmapOk(null)
+
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(await readFile(filePath, "utf-8")) as unknown
+  } catch (error) {
+    return roadmapError(
+      "invalid-document",
+      error instanceof Error ? error.message : "Failed to parse roadmap document",
+      false,
+    )
+  }
+
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return roadmapError("invalid-document", "Roadmap document must be a JSON object", false)
+  }
+
+  const document = parsed as RoadmapDocument
+  const validation = validatePersistableRoadmapDocument(document)
+  if (!validation.ok) return validation
+
+  return roadmapOk(document)
 }
 
 // ---------------------------------------------------------------------------
@@ -153,7 +231,100 @@ export function createFileSystemStateBackend(baseDir: string): StateBackend {
     },
 
     async lock(featureName: string): Promise<{ release(): Promise<void> }> {
-      return acquireFileLock(baseDir, featureName)
+      return acquireFileLock(join(baseDir, featureName), `feature "${featureName}"`)
+    },
+  }
+}
+
+/**
+ * Create a filesystem-backed RoadmapStateBackend.
+ *
+ * Stores roadmap state in a hidden namespace:
+ *   <baseDir>/.roadmap/roadmap-state.json
+ *
+ * Locking is isolated from per-feature workflow locks:
+ *   <baseDir>/.roadmap/.lock
+ */
+export function createFileSystemRoadmapStateBackend(
+  baseDir: string,
+  options: FileSystemRoadmapStateBackendOptions = {},
+): RoadmapStateBackend {
+  const roadmapDir = join(baseDir, ROADMAP_NAMESPACE_DIR)
+  const roadmapPath = join(roadmapDir, ROADMAP_STATE_FILE)
+
+  async function writeRoadmapDocument(document: RoadmapDocument): Promise<RoadmapResult<RoadmapDocument>> {
+    const validation = validatePersistableRoadmapDocument(document)
+    if (!validation.ok) return validation
+
+    try {
+      await mkdir(dirname(roadmapPath), { recursive: true })
+      await writeFile(roadmapPath, JSON.stringify(document, null, 2), "utf-8")
+      return roadmapOk(document)
+    } catch (error) {
+      return roadmapError(
+        "storage-failure",
+        error instanceof Error ? error.message : "Failed to persist roadmap document",
+        true,
+      )
+    }
+  }
+
+  return {
+    async createRoadmap(document: RoadmapDocument): Promise<RoadmapResult<RoadmapDocument>> {
+      return writeRoadmapDocument(document)
+    },
+
+    async readRoadmap(): Promise<RoadmapResult<RoadmapDocument | null>> {
+      try {
+        return await readRoadmapDocument(roadmapPath)
+      } catch (error) {
+        return roadmapError(
+          "storage-failure",
+          error instanceof Error ? error.message : "Failed to read roadmap document",
+          true,
+        )
+      }
+    },
+
+    async updateRoadmap(document: RoadmapDocument): Promise<RoadmapResult<RoadmapDocument>> {
+      return writeRoadmapDocument(document)
+    },
+
+    async deleteRoadmap(): Promise<RoadmapResult<null>> {
+      try {
+        await unlink(roadmapPath)
+      } catch (error) {
+        const errno = error as NodeJS.ErrnoException
+        if (errno.code !== "ENOENT") {
+          return roadmapError(
+            "storage-failure",
+            error instanceof Error ? error.message : "Failed to delete roadmap document",
+            true,
+          )
+        }
+      }
+
+      return roadmapOk(null)
+    },
+
+    async lockRoadmap(): Promise<RoadmapResult<{ release(): Promise<void> }>> {
+      try {
+        return roadmapOk(
+          await acquireFileLock(roadmapDir, "roadmap namespace", {
+            timeoutMs: options.lockTimeoutMs ?? options.timeoutMs,
+            pollMs: options.lockPollMs ?? options.pollMs,
+          }),
+        )
+      } catch (error) {
+        if (error instanceof Error && error.message.includes("Failed to acquire file lock")) {
+          return roadmapError("lock-timeout", error.message, true)
+        }
+        return roadmapError(
+          "storage-failure",
+          error instanceof Error ? error.message : "Failed to acquire roadmap lock",
+          true,
+        )
+      }
     },
   }
 }

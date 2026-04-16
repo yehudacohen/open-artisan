@@ -580,6 +580,199 @@ export interface StateBackend {
 }
 
 // ---------------------------------------------------------------------------
+// Roadmap types and contracts
+// ---------------------------------------------------------------------------
+
+export type RoadmapItemKind = "feature" | "bug" | "debt" | "chore"
+
+export type RoadmapItemStatus =
+  | "todo"
+  | "in-progress"
+  | "blocked"
+  | "done"
+  | "dropped"
+
+export type RoadmapEdgeKind = "depends-on"
+
+export type RoadmapErrorCode =
+  | "not-found"
+  | "invalid-document"
+  | "invalid-slice"
+  | "schema-mismatch"
+  | "lock-timeout"
+  | "storage-failure"
+
+export interface RoadmapError {
+  code: RoadmapErrorCode
+  message: string
+  retryable: boolean
+  details?: {
+    itemId?: string
+    edge?: { from: string; to: string }
+    schemaVersion?: number
+  }
+}
+
+export type RoadmapResult<T> =
+  | { ok: true; value: T }
+  | { ok: false; error: RoadmapError }
+
+export interface RoadmapItem {
+  id: string
+  kind: RoadmapItemKind
+  title: string
+  description?: string
+  status: RoadmapItemStatus
+  priority: number
+  featureName?: string
+  createdAt: string
+  updatedAt: string
+}
+
+export interface RoadmapEdge {
+  from: string
+  to: string
+  kind: RoadmapEdgeKind
+}
+
+export interface RoadmapDocument {
+  schemaVersion: number
+  items: RoadmapItem[]
+  edges: RoadmapEdge[]
+}
+
+/**
+ * Standalone roadmap persistence. Separate from WorkflowState persistence.
+ * Implementations must not store roadmap state in per-feature workflow-state files.
+ */
+export interface RoadmapStateBackend {
+  createRoadmap(document: RoadmapDocument): Promise<RoadmapResult<RoadmapDocument>>
+  readRoadmap(): Promise<RoadmapResult<RoadmapDocument | null>>
+  updateRoadmap(document: RoadmapDocument): Promise<RoadmapResult<RoadmapDocument>>
+  deleteRoadmap(): Promise<RoadmapResult<null>>
+  lockRoadmap(): Promise<RoadmapResult<{ release(): Promise<void> }>>
+}
+
+export interface RoadmapQuery {
+  itemIds?: string[]
+  kinds?: RoadmapItemKind[]
+  statuses?: RoadmapItemStatus[]
+  featureName?: string
+  minPriority?: number
+}
+
+export interface DerivedExecutionSlice {
+  roadmapItemIds: string[]
+  roadmapItems: RoadmapItem[]
+  edges: RoadmapEdge[]
+  featureName?: string
+}
+
+export interface RoadmapSliceService {
+  queryRoadmap(query: RoadmapQuery): Promise<RoadmapResult<RoadmapItem[]>>
+  deriveExecutionSlice(input: {
+    roadmapItemIds: string[]
+    featureName?: string
+  }): Promise<RoadmapResult<DerivedExecutionSlice>>
+}
+
+export interface WorkflowRoadmapLink {
+  featureName: string
+  roadmapItemIds: string[]
+}
+
+/**
+ * Validates that a RoadmapDocument is internally consistent.
+ * Returns null if valid, or an error message describing the first violation found.
+ */
+export function validateRoadmapDocument(document: RoadmapDocument): string | null {
+  if (!Number.isInteger(document.schemaVersion) || document.schemaVersion < 1) {
+    return `RoadmapDocument.schemaVersion must be a positive integer, got ${document.schemaVersion}`
+  }
+  if (!Array.isArray(document.items)) {
+    return `RoadmapDocument.items must be an array, got ${typeof document.items}`
+  }
+  if (!Array.isArray(document.edges)) {
+    return `RoadmapDocument.edges must be an array, got ${typeof document.edges}`
+  }
+
+  const validKinds: RoadmapItemKind[] = ["feature", "bug", "debt", "chore"]
+  const validStatuses: RoadmapItemStatus[] = ["todo", "in-progress", "blocked", "done", "dropped"]
+  const itemIds = new Set<string>()
+
+  for (let i = 0; i < document.items.length; i++) {
+    const item = document.items[i]
+    if (!item || typeof item !== "object") {
+      return `RoadmapDocument.items[${i}] must be an object`
+    }
+    if (typeof item.id !== "string" || item.id.trim().length === 0) {
+      return `RoadmapDocument.items[${i}].id must be a non-empty string`
+    }
+    if (itemIds.has(item.id)) {
+      return `Duplicate RoadmapItem.id "${item.id}"`
+    }
+    itemIds.add(item.id)
+    if (!validKinds.includes(item.kind)) {
+      return `RoadmapDocument.items[${i}].kind must be one of ${validKinds.join(", ")}, got "${item.kind}"`
+    }
+    if (typeof item.title !== "string" || item.title.trim().length === 0) {
+      return `RoadmapDocument.items[${i}].title must be a non-empty string`
+    }
+    if (item.description !== undefined && typeof item.description !== "string") {
+      return `RoadmapDocument.items[${i}].description must be a string when provided`
+    }
+    if (!validStatuses.includes(item.status)) {
+      return `RoadmapDocument.items[${i}].status must be one of ${validStatuses.join(", ")}, got "${item.status}"`
+    }
+    if (typeof item.priority !== "number" || !Number.isFinite(item.priority)) {
+      return `RoadmapDocument.items[${i}].priority must be a finite number`
+    }
+    if (item.featureName !== undefined && (typeof item.featureName !== "string" || item.featureName.trim().length === 0)) {
+      return `RoadmapDocument.items[${i}].featureName must be a non-empty string when provided`
+    }
+    if (typeof item.createdAt !== "string" || item.createdAt.length === 0) {
+      return `RoadmapDocument.items[${i}].createdAt must be a non-empty string`
+    }
+    if (typeof item.updatedAt !== "string" || item.updatedAt.length === 0) {
+      return `RoadmapDocument.items[${i}].updatedAt must be a non-empty string`
+    }
+  }
+
+  const seenEdges = new Set<string>()
+  for (let i = 0; i < document.edges.length; i++) {
+    const edge = document.edges[i]
+    if (!edge || typeof edge !== "object") {
+      return `RoadmapDocument.edges[${i}] must be an object`
+    }
+    if (typeof edge.from !== "string" || edge.from.trim().length === 0) {
+      return `RoadmapDocument.edges[${i}].from must be a non-empty string`
+    }
+    if (typeof edge.to !== "string" || edge.to.trim().length === 0) {
+      return `RoadmapDocument.edges[${i}].to must be a non-empty string`
+    }
+    if (edge.kind !== "depends-on") {
+      return `RoadmapDocument.edges[${i}].kind must be "depends-on", got "${edge.kind}"`
+    }
+    if (!itemIds.has(edge.from)) {
+      return `RoadmapDocument.edges[${i}].from references missing item "${edge.from}"`
+    }
+    if (!itemIds.has(edge.to)) {
+      return `RoadmapDocument.edges[${i}].to references missing item "${edge.to}"`
+    }
+    if (edge.from === edge.to) {
+      return `RoadmapDocument.edges[${i}] must not self-reference "${edge.from}"`
+    }
+    const edgeKey = `${edge.from}->${edge.to}:${edge.kind}`
+    if (seenEdges.has(edgeKey)) {
+      return `Duplicate RoadmapEdge "${edgeKey}"`
+    }
+    seenEdges.add(edgeKey)
+  }
+
+  return null
+}
+
+// ---------------------------------------------------------------------------
 // Session state store
 // ---------------------------------------------------------------------------
 
@@ -718,6 +911,9 @@ export function validateWorkflowState(state: WorkflowState): string | null {
   }
   if (state.currentTaskId !== null && typeof state.currentTaskId !== "string") {
     return `currentTaskId must be null or a string, got ${typeof state.currentTaskId}`
+  }
+  if (state.phase !== "IMPLEMENTATION" && state.currentTaskId !== null) {
+    return `currentTaskId must be null outside IMPLEMENTATION, got "${state.currentTaskId}" in ${state.phase}`
   }
   if (!Array.isArray(state.feedbackHistory)) {
     return `feedbackHistory must be an array, got ${typeof state.feedbackHistory}`
@@ -898,10 +1094,19 @@ export function validateWorkflowState(state: WorkflowState): string | null {
     if (state.taskCompletionInProgress.length === 0) {
       return `taskCompletionInProgress must not be an empty string (use null when no completion is in progress)`
     }
+    if (state.phase !== "IMPLEMENTATION") {
+      return `taskCompletionInProgress must be null outside IMPLEMENTATION, got "${state.taskCompletionInProgress}" in ${state.phase}`
+    }
+    if (state.currentTaskId !== state.taskCompletionInProgress) {
+      return `taskCompletionInProgress "${state.taskCompletionInProgress}" must match currentTaskId while review is pending`
+    }
   }
   // v15: taskReviewCount
   if (typeof state.taskReviewCount !== "number" || state.taskReviewCount < 0 || !Number.isInteger(state.taskReviewCount)) {
     return `taskReviewCount must be a non-negative integer, got ${state.taskReviewCount}`
+  }
+  if (state.phase !== "IMPLEMENTATION" && state.taskReviewCount !== 0) {
+    return `taskReviewCount must be 0 outside IMPLEMENTATION, got ${state.taskReviewCount} in ${state.phase}`
   }
   // v15: pendingFeedback
   if (state.pendingFeedback !== null && state.pendingFeedback !== undefined) {
@@ -912,9 +1117,6 @@ export function validateWorkflowState(state: WorkflowState): string | null {
   // v11: revisionBaseline
   if (state.revisionBaseline !== null && state.revisionBaseline !== undefined) {
     const rb = state.revisionBaseline as Record<string, unknown>
-  if (state.phase !== "IMPLEMENTATION" && state.currentTaskId !== null) {
-    return `currentTaskId must be null outside IMPLEMENTATION, got "${state.currentTaskId}" in ${state.phase}`
-  }
     if (typeof rb !== "object" || Array.isArray(rb)) {
       return `revisionBaseline must be null or an object, got ${typeof rb}`
     }
@@ -989,6 +1191,31 @@ export function validateWorkflowState(state: WorkflowState): string | null {
     }
     if (typeof pw.taskId !== "string" || !pw.taskId) {
       return `parentWorkflow.taskId must be a non-empty string`
+    }
+  }
+  if (state.implDag !== null) {
+    const taskIds = new Set(state.implDag.map((task) => task.id))
+    if (state.currentTaskId !== null && !taskIds.has(state.currentTaskId)) {
+      return `currentTaskId "${state.currentTaskId}" does not exist in implDag`
+    }
+    const currentTask = state.currentTaskId !== null
+      ? state.implDag.find((task) => task.id === state.currentTaskId) ?? null
+      : null
+    if (
+      currentTask &&
+      (currentTask.status === "complete" || currentTask.status === "aborted") &&
+      state.taskCompletionInProgress !== state.currentTaskId
+    ) {
+      return `currentTaskId "${state.currentTaskId}" cannot point to a terminal task with status "${currentTask.status}"`
+    }
+    if (state.taskCompletionInProgress !== null && !taskIds.has(state.taskCompletionInProgress)) {
+      return `taskCompletionInProgress "${state.taskCompletionInProgress}" does not exist in implDag`
+    }
+    if (state.phase === "DONE") {
+      const unfinished = state.implDag.filter((task) => task.status !== "complete" && task.status !== "aborted")
+      if (unfinished.length > 0) {
+        return `DONE cannot contain unresolved implDag work: ${unfinished.map((task) => task.id).join(", ")}`
+      }
     }
   }
   // v21: childWorkflows
@@ -1094,20 +1321,11 @@ export interface OrchestratorDivergeError {
 
 export type OrchestratorDivergeResult = OrchestratorDivergeSuccess | OrchestratorDivergeError
 
-    if (state.phase !== "IMPLEMENTATION") {
-      return `taskCompletionInProgress must be null outside IMPLEMENTATION, got "${state.taskCompletionInProgress}" in ${state.phase}`
-    }
-    if (state.currentTaskId !== state.taskCompletionInProgress) {
-      return `taskCompletionInProgress "${state.taskCompletionInProgress}" must match currentTaskId while review is pending`
-    }
 export interface RevisionStep {
   artifact: ArtifactKey
   phase: Phase
   phaseState: "REVISE" | "DRAFT"
   instructions: string
-  if (state.phase !== "IMPLEMENTATION" && state.taskReviewCount !== 0) {
-    return `taskReviewCount must be 0 outside IMPLEMENTATION, got ${state.taskReviewCount} in ${state.phase}`
-  }
 }
 
 export interface OrchestratorPlanResult {
@@ -1193,30 +1411,6 @@ export interface CriterionResult {
    * Absent for standard boolean criteria.
    */
   score?: number
-  if (state.implDag !== null) {
-    const taskIds = new Set(state.implDag.map((task) => task.id))
-    if (state.currentTaskId !== null && !taskIds.has(state.currentTaskId)) {
-      return `currentTaskId "${state.currentTaskId}" does not exist in implDag`
-    }
-    const currentTask = state.currentTaskId !== null
-      ? state.implDag.find((task) => task.id === state.currentTaskId) ?? null
-      : null
-    if (
-      currentTask &&
-      (currentTask.status === "complete" || currentTask.status === "aborted") &&
-      state.taskCompletionInProgress !== state.currentTaskId
-    ) {
-      return `currentTaskId "${state.currentTaskId}" cannot point to a terminal task with status "${currentTask.status}"`
-    if (state.taskCompletionInProgress !== null && !taskIds.has(state.taskCompletionInProgress)) {
-      return `taskCompletionInProgress "${state.taskCompletionInProgress}" does not exist in implDag`
-    }
-    if (state.phase === "DONE") {
-      const unfinished = state.implDag.filter((task) => task.status !== "complete" && task.status !== "aborted")
-      if (unfinished.length > 0) {
-        return `DONE cannot contain unresolved implDag work: ${unfinished.map((task) => task.id).join(", ")}`
-      }
-    }
-  }
 }
 
 export interface SelfReviewSuccess {

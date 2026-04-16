@@ -280,6 +280,8 @@ Status update:
 
 **Goal:** make roadmap and shared state queryable and persistent.
 
+**Execution note:** this is the recommended next named feature after `persistent-roadmap-dag` completes.
+
 **Recommendation**
 
 - local-first database

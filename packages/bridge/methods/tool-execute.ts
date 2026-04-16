@@ -495,6 +495,24 @@ const handleSubmitFeedback: ToolHandler = async (args, toolCtx, ctx) => {
   const state = requireState(ctx, toolCtx.sessionId)
   const cwd = toolCtx.directory || process.cwd()
 
+  let derivedApprovedFiles: string[] | null = null
+  const getEffectiveIncrementalAllowlist = (): string[] => {
+    if (args.approved_files) {
+      return (args.approved_files as string[]).map((p) => (p.startsWith("/") ? p : resolve(cwd, p)))
+    }
+    if (derivedApprovedFiles) return derivedApprovedFiles
+    let planContent: string | undefined
+    if (state.artifactDiskPaths.plan) {
+      try {
+        planContent = readFileSync(state.artifactDiskPaths.plan, "utf-8")
+      } catch {
+        // non-fatal
+      }
+    }
+    derivedApprovedFiles = planContent ? extractApprovedFileAllowlist(planContent, cwd) : []
+    return derivedApprovedFiles
+  }
+
   if (state.phaseState !== "USER_GATE" && state.phaseState !== "ESCAPE_HATCH") {
     return `Error: submit_feedback can only be called at USER_GATE or ESCAPE_HATCH (current: ${state.phaseState}).`
   }
@@ -635,7 +653,11 @@ const handleSubmitFeedback: ToolHandler = async (args, toolCtx, ctx) => {
           "Fix the plan format and re-submit approval with corrected `artifact_content`."
         )
       }
-      const contractErrors = validateExecutableImplPlan(planContent, state.mode, state.fileAllowlist, cwd)
+      const effectiveAllowlist =
+        state.mode === "INCREMENTAL" && state.fileAllowlist.length === 0
+          ? getEffectiveIncrementalAllowlist()
+          : state.fileAllowlist
+      const contractErrors = validateExecutableImplPlan(planContent, state.mode, effectiveAllowlist, cwd)
       if (contractErrors.length > 0) {
         return (
           `Error: IMPL_PLAN approval failed executable-contract validation: ${contractErrors.join("; ")}. ` +
@@ -644,7 +666,6 @@ const handleSubmitFeedback: ToolHandler = async (args, toolCtx, ctx) => {
       }
     }
 
-    let derivedApprovedFiles: string[] | null = null
     if (state.phase === "PLANNING" && state.mode === "INCREMENTAL" && !args.approved_files) {
       let planContent = args.artifact_content as string | undefined
       if (!planContent && state.artifactDiskPaths.plan) {
@@ -737,6 +758,11 @@ const handleSubmitFeedback: ToolHandler = async (args, toolCtx, ctx) => {
         )
       } else if (state.phase === "PLANNING" && state.mode === "INCREMENTAL" && derivedApprovedFiles) {
         draft.fileAllowlist = derivedApprovedFiles
+      } else if (state.phase === "IMPL_PLAN" && state.mode === "INCREMENTAL" && draft.fileAllowlist.length === 0) {
+        const effectiveAllowlist = getEffectiveIncrementalAllowlist()
+        if (effectiveAllowlist.length > 0) {
+          draft.fileAllowlist = effectiveAllowlist
+        }
       }
       // Reset artifact file tracking for the new phase
       draft.reviewArtifactFiles = []

@@ -1632,6 +1632,54 @@ describe("fileAllowlist — relative paths are normalized to absolute", () => {
     expect(result).toContain("INCREMENTAL planning approval requires an explicit file allowlist source")
   })
 
+  it("derives missing INCREMENTAL allowlist from the approved plan at IMPL_PLAN approval time", async () => {
+    const sid = `int-test-${Date.now()}-impl-allowlist-recovery`
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: sid } } },
+    })
+    const ctx = { directory: tempDir, sessionId: sid }
+
+    await plugin.tool.select_mode.execute(
+      { mode: "INCREMENTAL", feature_name: "impl-allowlist-recovery-test" },
+      ctx,
+    )
+
+    const store = plugin._testStore
+    const planPath = `${tempDir}/.openartisan/impl-allowlist-recovery-test/plan.md`
+    await Bun.write(planPath, "# Planning\n\n## Narrow allowlist\n- src/allowed.ts\n- tests/allowed.test.ts\n")
+    await store.update(sid, (draft: any) => {
+      draft.phase = "IMPL_PLAN"
+      draft.phaseState = "USER_GATE"
+      draft.userGateMessageReceived = true
+      draft.artifactDiskPaths.plan = planPath
+      draft.fileAllowlist = []
+    })
+
+    const implPlan = `# Implementation Plan
+
+## Task T1: In-scope work
+**Dependencies:** none
+**Files:** src/allowed.ts
+**Expected tests:** tests/allowed.test.ts
+**Complexity:** medium
+`
+
+    const result = await plugin.tool.submit_feedback.execute(
+      {
+        feedback_type: "approve",
+        feedback_text: "approved",
+        artifact_content: implPlan,
+      },
+      ctx,
+    )
+
+    expect(result).not.toContain("IMPL_PLAN approval failed executable-contract validation")
+    expect(result).toContain("workflow will advance")
+    const state = store.get(sid)
+    expect(state.fileAllowlist).toContain(`${tempDir}/src/allowed.ts`)
+    expect(state.fileAllowlist).toContain(`${tempDir}/tests/allowed.test.ts`)
+  })
+
   it("normalizes preserved fileAllowlist from prior cycle at select_mode time", async () => {
     const sid = `int-test-${Date.now()}-selectmode-normalize`
     await plugin.event({

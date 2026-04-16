@@ -164,17 +164,27 @@ Status:
 
 ## Recommendation for the Next Session
 
-Resume the active Hermes-driven cleanup workflow before starting another backlog item.
+Resume the currently active Hermes-driven workflow first, then move directly to the next roadmap-stack feature rather than re-running an already-completed cleanup feature.
 
-Recommended next feature/workflow name:
+Immediate active workflow:
 
-- `post-feature-cleanup-quality-pass`
+- `persistent-roadmap-dag`
 
-Recommended scope inside that workflow:
+Immediate scope inside that workflow:
 
-1. Finish cleanup/parity tasks already in progress
-2. Fix any residual workflow/runtime defects immediately and return to Hermes
-3. Only after that, move to the next planned backlog item
+1. resolve the current `TESTS/REVIEW` backtrack by adding roadmap cycle-detection coverage
+2. return Hermes to the corrected workflow state
+3. complete the current roadmap slice before starting another feature
+
+Recommended next feature/workflow name after that:
+
+- `durable-roadmap-backend`
+
+Recommended scope inside that next workflow:
+
+1. add bridge-owned durable local persistence for roadmap state
+2. keep the model local-first and Studio-compatible without building Studio sync yet
+3. continue using Hermes as the primary driver and fix harness issues immediately if exposed
 
 ## Instruction for the Next Session
 
@@ -182,7 +192,9 @@ At the start of the next session:
 
 1. Read this file.
 2. Confirm recent commits/worktree state.
-3. Start or resume a Hermes-driven workflow for `post-feature-cleanup-quality-pass`.
-4. Continue using Hermes as the main execution driver.
-5. Fix framework issues directly in the repo when Hermes exposes them.
-6. Return to Hermes after each fix.
+3. Resume the Hermes-driven workflow for `persistent-roadmap-dag`.
+4. Finish the current roadmap slice from its real persisted state before starting another feature.
+5. After completion, start the next Hermes-driven workflow for `durable-roadmap-backend`.
+6. Continue using Hermes as the main execution driver.
+7. Fix framework issues directly in the repo when Hermes exposes them.
+8. Return to Hermes after each fix.

@@ -2733,6 +2733,22 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
 
             logTransition(state, outcome, "submit_feedback/approve", notify)
 
+            const deriveIncrementalAllowlist = async (): Promise<string[]> => {
+              const cwd = context.directory || process.cwd()
+              if (args.approved_files) {
+                return args.approved_files.map((p) => p.startsWith("/") ? p : resolve(cwd, p))
+              }
+              let planContent = state.phase === "PLANNING" ? args.artifact_content : undefined
+              if (!planContent && state.artifactDiskPaths.plan) {
+                try {
+                  planContent = await readFile(state.artifactDiskPaths.plan, "utf-8")
+                } catch {
+                  // non-fatal
+                }
+              }
+              return planContent ? extractApprovedFileAllowlist(planContent, cwd) : []
+            }
+
             // Forward-pass skip: in INCREMENTAL mode, if the fileAllowlist proves
             // the next phase has no relevant files (e.g. no interface files for
             // INTERFACES), skip directly past it. This avoids forcing the agent
@@ -2746,22 +2762,11 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             // at PLANNING approval time, forcing the agent through INTERFACES/TESTS/IMPL_PLAN
             // even when approved_files was intentionally empty (operational-only tasks).
             const effectiveAllowlist: string[] = await (async () => {
-              const cwd = context.directory || process.cwd()
               if (state.phase === "PLANNING" && state.mode === "INCREMENTAL") {
-                if (args.approved_files) {
-                  return args.approved_files.map((p) => p.startsWith("/") ? p : resolve(cwd, p))
-                }
-                let planContent = args.artifact_content
-                if (!planContent && state.artifactDiskPaths.plan) {
-                  try {
-                    planContent = await readFile(state.artifactDiskPaths.plan, "utf-8")
-                  } catch {
-                    // non-fatal
-                  }
-                }
-                if (planContent) {
-                  return extractApprovedFileAllowlist(planContent, cwd)
-                }
+                return deriveIncrementalAllowlist()
+              }
+              if (state.phase === "IMPL_PLAN" && state.mode === "INCREMENTAL" && state.fileAllowlist.length === 0) {
+                return deriveIncrementalAllowlist()
               }
               return state.fileAllowlist
             })()
@@ -2850,6 +2855,8 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
               // (e.g. ".gitignore" instead of "/project/.gitignore"). The validator
               // rejects relative paths, so we resolve them against the project dir.
               if (state.phase === "PLANNING" && state.mode === "INCREMENTAL") {
+                draft.fileAllowlist = effectiveAllowlist
+              } else if (state.phase === "IMPL_PLAN" && state.mode === "INCREMENTAL" && draft.fileAllowlist.length === 0 && effectiveAllowlist.length > 0) {
                 draft.fileAllowlist = effectiveAllowlist
               }
               // S3: Record artifact hash for drift detection (approvedArtifacts).
@@ -2964,7 +2971,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                 const contractErrors = validateExecutableImplPlan(
                   args.artifact_content,
                   state.mode,
-                  state.fileAllowlist,
+                  effectiveAllowlist,
                   context.directory || process.cwd(),
                 )
                 if (contractErrors.length > 0) {

@@ -357,6 +357,42 @@ describe("tool.execute — submit_feedback", () => {
     expect(state?.phaseState).toBe("USER_GATE")
   })
 
+  it("derives missing INCREMENTAL allowlist from the approved plan at IMPL_PLAN approval time", async () => {
+    await exec("select_mode", { mode: "INCREMENTAL", feature_name: "impl-allowlist-recovery-feat" })
+    const planPath = join(tmpDir, ".openartisan", "impl-allowlist-recovery-feat", "plan.md")
+    await Bun.write(planPath, "# Planning\n\n## Narrow allowlist\n- src/allowed.ts\n- tests/allowed.test.ts\n")
+    await ctx.engine!.store.update("s1", (d) => {
+      d.phase = "IMPL_PLAN"
+      d.phaseState = "USER_GATE"
+      d.userGateMessageReceived = true
+      d.featureName = "impl-allowlist-recovery-feat"
+      d.artifactDiskPaths.plan = planPath
+      d.fileAllowlist = []
+    })
+
+    const implPlan = `# Implementation Plan
+
+## Task T1: In-scope work
+**Dependencies:** none
+**Files:** src/allowed.ts
+**Expected tests:** tests/allowed.test.ts
+**Complexity:** medium
+`
+
+    const result = await exec("submit_feedback", {
+      feedback_type: "approve",
+      feedback_text: "approved",
+      artifact_content: implPlan,
+    })
+
+    expect(result).toContain("Approved")
+    expect(result).toContain("IMPLEMENTATION")
+
+    const state = ctx.engine!.store.get("s1")
+    expect(state?.fileAllowlist).toContain(resolve(tmpDir, "src/allowed.ts"))
+    expect(state?.fileAllowlist).toContain(resolve(tmpDir, "tests/allowed.test.ts"))
+  })
+
   it("approves IMPL_PLAN from previously written disk artifact when content is omitted", async () => {
     await exec("select_mode", { mode: "GREENFIELD", feature_name: "disk-dag-feat" })
     await ctx.engine!.store.update("s1", (d) => {

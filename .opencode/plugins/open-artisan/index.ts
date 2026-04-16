@@ -2633,7 +2633,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
 
                 return (
                   `Resolved ${resolvedIds.length} human gate(s): ${resolvedIds.join(", ")}.\n\n` +
-                  `Returning to IMPLEMENTATION/DRAFT — downstream tasks are now unblocked.\n\n` +
+                  `${evaluation.decision.action === "unsupported" ? `**Parallel runtime unsupported:** ${evaluation.decision.reason}. Applying ${evaluation.decision.fallback} fallback.\n\n` : ""}Returning to IMPLEMENTATION/DRAFT — downstream tasks are now unblocked.\n\n` +
                   `**Next task ready:**\n${nextDecision.prompt}\n\n` +
                   `Progress: ${nextDecision.progress.complete}/${nextDecision.progress.total} tasks complete.` +
                   approvalWarning

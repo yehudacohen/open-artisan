@@ -544,10 +544,6 @@ class StdioBridgeClient:
                     client.settimeout(10)
                     client.connect(self._socket_path)
                     client.sendall((json.dumps(request) + "\n").encode("utf-8"))
-                    try:
-                        client.shutdown(socket.SHUT_WR)
-                    except OSError:
-                        pass
 
                     chunks: list[bytes] = []
                     while True:

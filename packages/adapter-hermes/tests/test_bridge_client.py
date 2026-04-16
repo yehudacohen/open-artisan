@@ -250,6 +250,68 @@ class TestJsonRpcRoundTrip:
         assert result is None
         assert result_holder["method"] == "lifecycle.sessionCreated"
 
+    def test_socket_call_keeps_write_side_open_until_response(self):
+        """tool.execute should not half-close the socket before the bridge replies."""
+        client = StdioBridgeClient()
+        short_dir = Path(tempfile.mkdtemp(prefix="oa-bridge-"))
+        socket_path = short_dir / "bridge.sock"
+        result_holder: dict[str, object] = {}
+
+        def serve_once() -> None:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
+                server.bind(str(socket_path))
+                server.listen(1)
+                conn, _ = server.accept()
+                with conn:
+                    buffer = b""
+                    while b"\n" not in buffer:
+                        chunk = conn.recv(4096)
+                        if not chunk:
+                            return
+                        buffer += chunk
+                    request = json.loads(buffer.decode("utf-8").strip())
+                    result_holder["method"] = request["method"]
+                    result_holder["params"] = request["params"]
+                    conn.settimeout(0.05)
+                    try:
+                        extra = conn.recv(1)
+                    except TimeoutError:
+                        extra = b"still-open"
+                    except socket.timeout:
+                        extra = b"still-open"
+                    result_holder["post_request_probe"] = extra.decode(
+                        "utf-8", errors="ignore"
+                    )
+                    if extra == b"":
+                        return
+                    response = {
+                        "jsonrpc": "2.0",
+                        "id": request["id"],
+                        "result": "ok",
+                    }
+                    conn.sendall((json.dumps(response) + "\n").encode("utf-8"))
+
+        thread = threading.Thread(target=serve_once)
+        thread.start()
+        try:
+            for _ in range(50):
+                if socket_path.exists():
+                    break
+                time.sleep(0.01)
+            client._socket_path = str(socket_path)
+            result = client.call("tool.execute", {"name": "request_review", "args": {}})
+        finally:
+            thread.join(timeout=5)
+            try:
+                socket_path.unlink(missing_ok=True)
+                short_dir.rmdir()
+            except OSError:
+                pass
+
+        assert result == "ok"
+        assert result_holder["method"] == "tool.execute"
+        assert result_holder["post_request_probe"] == "still-open"
+
 
 # ---------------------------------------------------------------------------
 # Auto-reconnect

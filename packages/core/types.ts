@@ -610,6 +610,8 @@ export interface RoadmapError {
     itemId?: string
     edge?: { from: string; to: string }
     schemaVersion?: number
+    expectedSchemaVersion?: number
+    actualSchemaVersion?: number
   }
 }
 
@@ -739,6 +741,11 @@ export function validateRoadmapDocument(document: RoadmapDocument): string | nul
   }
 
   const seenEdges = new Set<string>()
+  const adjacency = new Map<string, string[]>()
+  for (const itemId of Array.from(itemIds)) {
+    adjacency.set(itemId, [])
+  }
+
   for (let i = 0; i < document.edges.length; i++) {
     const edge = document.edges[i]
     if (!edge || typeof edge !== "object") {
@@ -767,6 +774,45 @@ export function validateRoadmapDocument(document: RoadmapDocument): string | nul
       return `Duplicate RoadmapEdge "${edgeKey}"`
     }
     seenEdges.add(edgeKey)
+    adjacency.get(edge.from)?.push(edge.to)
+  }
+
+  const visited = new Set<string>()
+  const visiting = new Set<string>()
+  const stack: string[] = []
+
+  const findCycle = (node: string): string[] | null => {
+    visiting.add(node)
+    stack.push(node)
+
+    for (const next of adjacency.get(node) ?? []) {
+      if (visiting.has(next)) {
+        const cycleStart = stack.indexOf(next)
+        return [...stack.slice(cycleStart), next]
+      }
+      if (visited.has(next)) {
+        continue
+      }
+      const cycle = findCycle(next)
+      if (cycle) {
+        return cycle
+      }
+    }
+
+    stack.pop()
+    visiting.delete(node)
+    visited.add(node)
+    return null
+  }
+
+  for (const itemId of Array.from(itemIds)) {
+    if (visited.has(itemId)) {
+      continue
+    }
+    const cycle = findCycle(itemId)
+    if (cycle) {
+      return `RoadmapDocument.edges must form a DAG; found cycle "${cycle.join("->")}"`
+    }
   }
 
   return null

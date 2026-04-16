@@ -15,7 +15,7 @@ import { LOCK_TIMEOUT_MS, LOCK_POLL_MS } from "./constants"
 
 const STATE_FILE = "workflow-state.json"
 const LOCK_FILE = ".lock"
-const ROADMAP_NAMESPACE_DIR = ".roadmap"
+const ROADMAP_NAMESPACE_DIR = "roadmap"
 const ROADMAP_STATE_FILE = "roadmap-state.json"
 const ROADMAP_SCHEMA_VERSION = 1
 
@@ -130,7 +130,7 @@ function validatePersistableRoadmapDocument(document: RoadmapDocument): RoadmapR
       "schema-mismatch",
       `Unsupported roadmap schema version ${document.schemaVersion}; expected ${ROADMAP_SCHEMA_VERSION}`,
       false,
-      { expectedSchemaVersion: ROADMAP_SCHEMA_VERSION, actualSchemaVersion: document.schemaVersion },
+      { schemaVersion: document.schemaVersion },
     )
   }
 
@@ -239,11 +239,11 @@ export function createFileSystemStateBackend(baseDir: string): StateBackend {
 /**
  * Create a filesystem-backed RoadmapStateBackend.
  *
- * Stores roadmap state in a hidden namespace:
- *   <baseDir>/.roadmap/roadmap-state.json
+ * Stores roadmap state in a separate namespace:
+ *   <baseDir>/roadmap/roadmap-state.json
  *
  * Locking is isolated from per-feature workflow locks:
- *   <baseDir>/.roadmap/.lock
+ *   <baseDir>/roadmap/.lock
  */
 export function createFileSystemRoadmapStateBackend(
   baseDir: string,
@@ -309,12 +309,17 @@ export function createFileSystemRoadmapStateBackend(
 
     async lockRoadmap(): Promise<RoadmapResult<{ release(): Promise<void> }>> {
       try {
-        return roadmapOk(
-          await acquireFileLock(roadmapDir, "roadmap namespace", {
-            timeoutMs: options.lockTimeoutMs ?? options.timeoutMs,
-            pollMs: options.lockPollMs ?? options.pollMs,
-          }),
-        )
+        const lockOptions: FileLockOptions = {}
+        const timeoutMs = options.lockTimeoutMs ?? options.timeoutMs
+        const pollMs = options.lockPollMs ?? options.pollMs
+        if (timeoutMs !== undefined) {
+          lockOptions.timeoutMs = timeoutMs
+        }
+        if (pollMs !== undefined) {
+          lockOptions.pollMs = pollMs
+        }
+
+        return roadmapOk(await acquireFileLock(roadmapDir, "roadmap namespace", lockOptions))
       } catch (error) {
         if (error instanceof Error && error.message.includes("Failed to acquire file lock")) {
           return roadmapError("lock-timeout", error.message, true)

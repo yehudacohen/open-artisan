@@ -48,7 +48,10 @@ Status update:
 
 - Completed: `harness-quality-hardening`
 - Completed: `cross-client-shared-bridge-e2e`
-- In progress: `post-feature-cleanup-quality-pass`
+- Completed: `post-feature-cleanup-quality-pass`
+- Completed: `harden-hermes-adapter-runtime-behavior`
+- Completed: `make-hermes-dogfooding-explicit-rule`
+- Completed: `parallel-dag-execution-via-hermes` (contract/fallback foundation slice)
 - Landed commits from that slice:
   - `d2e61e3` `fix: handle Hermes shared bridge socket RPC`
   - `c4bb86c` `fix: resume workflows from persisted feature state`
@@ -56,6 +59,12 @@ Status update:
   - `7f19a02` `fix: harden shared bridge workflow parity`
   - `39c0779` `test: cover shared bridge lifecycle end to end`
   - `840eafb` `fix: restore bridge impl-plan approval parity`
+  - `8a5c35b` `fix: clean up workflow parity follow-ups`
+  - `9f29188` `fix: harden Hermes adapter runtime integrity`
+  - `c9b9366` `fix: harden workflow engine review and allowlist state`
+  - `200f79e` `fix: remove synthetic dogfooding contract`
+  - `aede04a` `feat: add parallel dag contract foundations`
+  - `a373b1b` `fix: surface parallel fallback parity in plugin runtime`
 - Historical-state policy: do not backfill already-completed persisted workflow-state files just to mirror parser/runtime fixes discovered after completion unless a concrete runtime/product need requires migration.
 
 ### 1. Tighten artifact revision discipline

@@ -18,7 +18,10 @@ The operating model is:
 - Shared bridge implementation landed in multiple commits and reached `DONE`.
 - `harness-quality-hardening` was completed successfully in Hermes and reached `DONE`.
 - `cross-client-shared-bridge-e2e` was completed successfully in Hermes and reached `DONE`.
-- `post-feature-cleanup-quality-pass` is the current active Hermes-driven cleanup slice.
+- `post-feature-cleanup-quality-pass` was completed successfully in Hermes and reached `DONE`.
+- `harden-hermes-adapter-runtime-behavior` was completed successfully in Hermes and reached `DONE`.
+- `make-hermes-dogfooding-explicit-rule` was completed successfully in Hermes and reached `DONE`.
+- `parallel-dag-execution-via-hermes` was completed successfully in Hermes and reached `DONE`.
 - Hermes dogfooding exposed and fixed multiple framework issues:
   - approval routing at `USER_GATE`
   - Hermes hook/tool API mismatches
@@ -48,6 +51,12 @@ Recent commits of note:
 - `7f19a02` `fix: harden shared bridge workflow parity`
 - `39c0779` `test: cover shared bridge lifecycle end to end`
 - `840eafb` `fix: restore bridge impl-plan approval parity`
+- `8a5c35b` `fix: clean up workflow parity follow-ups`
+- `9f29188` `fix: harden Hermes adapter runtime integrity`
+- `c9b9366` `fix: harden workflow engine review and allowlist state`
+- `200f79e` `fix: remove synthetic dogfooding contract`
+- `aede04a` `feat: add parallel dag contract foundations`
+- `a373b1b` `fix: surface parallel fallback parity in plugin runtime`
 
 ## Completed Harness-Quality Slice
 
@@ -115,6 +124,11 @@ Be token-efficient by:
 8. Harden Hermes adapter/runtime behavior further
 9. Keep Hermes as the primary dogfood driver while framework fixes stay external/operator-driven
 10. Use Hermes to implement parallel DAG execution explicitly
+
+Status:
+- 8 completed
+- 9 completed operationally/docs-wise without introducing synthetic runtime dogfooding state
+- 10 completed for the contract/fallback foundation slice; true multi-dispatch execution remains future work
 
 ### C. Roadmap DAG + durable backend
 

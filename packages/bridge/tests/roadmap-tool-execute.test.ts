@@ -7,6 +7,7 @@ import { handleInit, handleSessionCreated } from "#bridge/methods/lifecycle"
 import { handleToolExecute } from "#bridge/methods/tool-execute"
 import type { BridgeContext } from "#bridge/server"
 import type { EngineContext } from "#core/engine-context"
+import { createPGliteRoadmapStateBackend } from "#core/roadmap-state-backend-pglite"
 import { createFileSystemRoadmapStateBackend } from "#core/state-backend-fs"
 import type { RoadmapDocument } from "#core/types"
 
@@ -195,6 +196,64 @@ describe("bridge roadmap tool execution", () => {
     const after = ctx.engine!.store.get("s1")
     expect(after?.phase).toBe(before?.phase)
     expect(after?.phaseState).toBe(before?.phaseState)
+  })
+
+  it("derives roadmap results through bridge-owned tools from the PGlite backend without mutating execution state", async () => {
+    const roadmapBackend = createPGliteRoadmapStateBackend(ctx.stateDir!, {
+      connection: {
+        dataDir: join(ctx.stateDir!, "roadmap", "bridge-pglite-db"),
+        debugName: "bridge-roadmap-test",
+      },
+    })
+    await roadmapBackend.createRoadmap(makeRoadmapDocument())
+
+    await ctx.engine!.store.update("s1", (draft) => {
+      draft.mode = "INCREMENTAL"
+      draft.phase = "IMPLEMENTATION"
+      draft.phaseState = "DRAFT"
+      draft.currentTaskId = "T1"
+      draft.implDag = [
+        {
+          id: "T1",
+          description: "Existing execution task",
+          dependencies: [],
+          expectedTests: [],
+          expectedFiles: [],
+          estimatedComplexity: "small",
+          status: "in-flight",
+        },
+      ]
+    })
+
+    const before = JSON.parse(JSON.stringify(ctx.engine!.store.get("s1")))
+    const queryResponse = await handleToolExecute({
+      name: "roadmap_query",
+      args: { query: { featureName: "persistent-roadmap-dag", minPriority: 9 } },
+      context: { sessionId: "s1", directory: tmpDir },
+    }, ctx)
+    expect(JSON.parse(queryResponse as string)).toEqual({
+      ok: true,
+      value: [makeRoadmapDocument().items[0]],
+    })
+
+    const deriveResponse = await handleToolExecute({
+      name: "roadmap_derive_execution_slice",
+      args: { roadmap_item_ids: ["item-1", "item-2"], feature_name: "persistent-roadmap-dag" },
+      context: { sessionId: "s1", directory: tmpDir },
+    }, ctx)
+    expect(JSON.parse(deriveResponse as string)).toEqual({
+      ok: true,
+      value: {
+        roadmapItemIds: ["item-1", "item-2"],
+        roadmapItems: makeRoadmapDocument().items.slice(0, 2),
+        edges: makeRoadmapDocument().edges,
+        featureName: "persistent-roadmap-dag",
+      },
+    })
+
+    const after = ctx.engine!.store.get("s1")
+    expect(after?.currentTaskId).toBe(before?.currentTaskId)
+    expect(after?.implDag).toEqual(before?.implDag)
   })
 
   it("allows normal workflow execution behavior when roadmap state is absent", async () => {

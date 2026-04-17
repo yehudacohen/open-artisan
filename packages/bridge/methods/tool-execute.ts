@@ -55,9 +55,9 @@ import {
 } from "../../core/autonomous-user-gate"
 import { activateHumanGateTasks, resolveAwaitingHumanState } from "../../core/human-gate-policy"
 import { buildWorkflowSwitchMessage, parkCurrentWorkflowSession } from "../../core/session-switch"
-import { createFileSystemRoadmapStateBackend } from "../../core/state-backend-fs"
+import { createPGliteRoadmapStateBackend } from "../../core/roadmap-state-backend-pglite"
 import { createRoadmapSliceService } from "../../core/roadmap-slice-service"
-import type { RoadmapQuery } from "../../core/types"
+import type { RoadmapQuery, RoadmapServiceFactoryOptions } from "../../core/types"
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -69,11 +69,33 @@ interface ToolContext {
   agent?: string
 }
 
-function createRoadmapServices(toolCtx: ToolContext, ctx: BridgeContext) {
-  const baseDir = ctx.stateDir ?? resolve(toolCtx.directory || process.cwd())
-  const roadmapBackend = createFileSystemRoadmapStateBackend(baseDir)
+function createRoadmapServices(stateDir: string) {
+  const roadmapOptions: RoadmapServiceFactoryOptions = {
+    stateDir,
+    persistence: {
+      kind: "pglite",
+      pglite: {
+        connection: {
+          dataDir: resolve(stateDir, "roadmap", "bridge-pglite-db"),
+          debugName: "bridge-roadmap",
+        },
+      },
+    },
+  }
+  const roadmapBackend = createPGliteRoadmapStateBackend(stateDir, roadmapOptions.persistence.pglite!)
   const roadmapService = createRoadmapSliceService(roadmapBackend)
   return { roadmapBackend, roadmapService }
+}
+
+function roadmapStorageFailure(message: string, retryable: boolean) {
+  return JSON.stringify({
+    ok: false,
+    error: {
+      code: "storage-failure",
+      message,
+      retryable,
+    },
+  })
 }
 
 function requireState(ctx: BridgeContext, sessionId: string): WorkflowState {
@@ -1326,23 +1348,32 @@ const handleResetTask: ToolHandler = async (args, toolCtx, ctx) => {
 
 // ---- roadmap_read ----
 
-const handleRoadmapRead: ToolHandler = async (_args, toolCtx, ctx) => {
-  const { roadmapBackend } = createRoadmapServices(toolCtx, ctx)
+const handleRoadmapRead: ToolHandler = async (_args, _toolCtx, ctx) => {
+  if (!ctx.stateDir) {
+    return roadmapStorageFailure("Bridge stateDir is required for roadmap tools", false)
+  }
+  const { roadmapBackend } = createRoadmapServices(ctx.stateDir)
   return JSON.stringify(await roadmapBackend.readRoadmap())
 }
 
 // ---- roadmap_query ----
 
-const handleRoadmapQuery: ToolHandler = async (args, toolCtx, ctx) => {
-  const { roadmapService } = createRoadmapServices(toolCtx, ctx)
+const handleRoadmapQuery: ToolHandler = async (args, _toolCtx, ctx) => {
+  if (!ctx.stateDir) {
+    return roadmapStorageFailure("Bridge stateDir is required for roadmap tools", false)
+  }
+  const { roadmapService } = createRoadmapServices(ctx.stateDir)
   const query = (args.query ?? {}) as RoadmapQuery
   return JSON.stringify(await roadmapService.queryRoadmap(query))
 }
 
 // ---- roadmap_derive_execution_slice ----
 
-const handleRoadmapDeriveExecutionSlice: ToolHandler = async (args, toolCtx, ctx) => {
-  const { roadmapService } = createRoadmapServices(toolCtx, ctx)
+const handleRoadmapDeriveExecutionSlice: ToolHandler = async (args, _toolCtx, ctx) => {
+  if (!ctx.stateDir) {
+    return roadmapStorageFailure("Bridge stateDir is required for roadmap tools", false)
+  }
+  const { roadmapService } = createRoadmapServices(ctx.stateDir)
   const roadmapItemIds = Array.isArray(args.roadmap_item_ids)
     ? (args.roadmap_item_ids as string[])
     : Array.isArray(args.roadmapItemIds)

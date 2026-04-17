@@ -514,7 +514,21 @@ export function createSessionStateStore(backend: StateBackend): SessionStateStor
     async migrateSession(oldSessionId: string, newSessionId: string): Promise<WorkflowState> {
       const oldLockKey = lockKeyFor(oldSessionId)
       return acquireInProcessLock(oldLockKey, async () => {
-        const oldState = memory.get(oldSessionId)
+        let oldState = memory.get(oldSessionId)
+        if (!oldState) {
+          for (const featureName of await backend.list()) {
+            const raw = await backend.read(featureName)
+            if (!raw) continue
+            const { state, changed } = parseAndMigrateDetailed(raw)
+            if (!state || state.sessionId !== oldSessionId) continue
+            if (changed) {
+              await persistState(state)
+            }
+            memory.set(oldSessionId, state)
+            oldState = state
+            break
+          }
+        }
         if (!oldState) {
           throw new Error(`Session "${oldSessionId}" not found for migration`)
         }

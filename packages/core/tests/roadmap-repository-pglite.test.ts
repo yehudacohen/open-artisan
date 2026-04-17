@@ -94,7 +94,7 @@ describe("createPGliteRoadmapRepository", () => {
     expect(await repository.readRoadmap()).toEqual({ ok: true, value: roadmap })
     expect(await repository.queryRoadmapItems({ featureName: "persistent-roadmap-dag", minPriority: 9 })).toEqual({
       ok: true,
-      value: [roadmap.items[0]],
+      value: [roadmap.items[0]!],
     })
 
     const workflowStatePath = join(stateDir, "persistent-roadmap-dag", "workflow-state.json")
@@ -115,7 +115,7 @@ describe("createPGliteRoadmapRepository", () => {
 
     expect(await repository.queryRoadmapItems({ statuses: ["todo", "blocked"], minPriority: 8 })).toEqual({
       ok: true,
-      value: [original.items[0], original.items[1]],
+      value: [original.items[0]!, original.items[1]!],
     })
 
     const updated = makeRoadmapDocument({
@@ -128,7 +128,7 @@ describe("createPGliteRoadmapRepository", () => {
     expect(await repository.updateRoadmap(updated)).toEqual({ ok: true, value: updated })
     expect(await repository.queryRoadmapItems({ statuses: ["in-progress"] })).toEqual({
       ok: true,
-      value: [updated.items[0]],
+      value: [updated.items[0]!],
     })
 
     expect(await repository.deleteRoadmap()).toEqual({ ok: true, value: null })

@@ -40,6 +40,8 @@ def register_workflow_tools(
         ctx: Hermes plugin context for tool registration.
         bridge: Active bridge client for JSON-RPC calls.
     """
+    default_session_id = str(getattr(ctx, "session_id", "default") or "default")
+
     for hermes_name, bridge_name, description, schema in WORKFLOW_TOOLS:
         # Capture bridge_name in closure
         _bridge_name = bridge_name
@@ -55,6 +57,7 @@ def register_workflow_tools(
                 bridge,
                 _bn,
                 args,
+                default_session_id=default_session_id,
                 **kwargs,
             ),
             description=description,
@@ -73,7 +76,7 @@ def register_workflow_tools(
         },
         handler=lambda args, **kwargs: _handle_oa_state(
             bridge,
-            str(kwargs.get("session_id", "default")),
+            str(kwargs.get("session_id") or default_session_id),
             str(kwargs.get("cwd") or os.getcwd()),
         ),
         description=OA_STATE_SCHEMA.get("description", "Show current workflow state."),
@@ -85,6 +88,7 @@ def _handle_workflow_tool(
     bridge_tool_name: str,
     args: dict[str, Any] | str,
     *rest: Any,
+    default_session_id: str = "default",
     **kwargs: Any,
 ) -> str:
     """Dispatch a workflow tool call to the bridge via tool.execute.
@@ -114,21 +118,25 @@ def _handle_workflow_tool(
             if not isinstance(tool_args, dict):
                 raise TypeError("args must be a dict")
         else:
-            session_id = str(kwargs.get("session_id", "default"))
+            session_id = str(kwargs.get("session_id") or default_session_id)
             project_dir = str(kwargs.get("cwd") or os.getcwd())
             tool_args = args
 
         ensure_workflow_session(bridge, session_id, project_dir)
         if bridge_tool_name == "submit_feedback":
             feedback_text = tool_args.get("feedback_text")
-            if isinstance(feedback_text, str) and feedback_text.strip():
-                bridge.call(
-                    "message.process",
-                    {
-                        "sessionId": session_id,
-                        "parts": [{"type": "text", "text": feedback_text}],
-                    },
-                )
+            message_text = (
+                feedback_text.strip() if isinstance(feedback_text, str) else ""
+            )
+            if not message_text:
+                message_text = "(user invoked submit_feedback via Hermes)"
+            bridge.call(
+                "message.process",
+                {
+                    "sessionId": session_id,
+                    "parts": [{"type": "text", "text": message_text}],
+                },
+            )
         result = bridge.call(
             "tool.execute",
             {

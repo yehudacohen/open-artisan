@@ -54,7 +54,7 @@ function isProcessAlive(pid: number): boolean {
  *
  * @returns A release function that removes the lockfile.
  */
-async function acquireFileLock(
+export async function acquireFileLock(
   lockDir: string,
   lockName: string,
   options: FileLockOptions = {},

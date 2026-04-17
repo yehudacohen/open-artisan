@@ -16,7 +16,7 @@ import tempfile
 import time
 from pathlib import Path
 from subprocess import Popen
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -174,15 +174,119 @@ class TestSessionLifecycle:
         assert len(session_calls) == 1
         assert session_calls[0][1]["sessionId"] == mock_ctx.session_id
 
+    def test_session_start_forwards_robot_artisan_agent(self, mock_ctx, mock_bridge):
+        """robot-artisan sessions should preserve the explicit agent name."""
+        mock_bridge.set_response("lifecycle.sessionCreated", None)
+
+        _on_session_start(
+            mock_ctx,
+            mock_bridge,
+            session_id=mock_ctx.session_id,
+            agent="robot-artisan",
+        )
+
+        session_calls = mock_bridge.get_calls("lifecycle.sessionCreated")
+        assert len(session_calls) == 1
+        assert session_calls[0][1] == {
+            "sessionId": mock_ctx.session_id,
+            "agent": "robot-artisan",
+        }
+
     def test_session_end_shuts_down_bridge(self, mock_ctx, mock_bridge):
         """on_session_end should call lifecycle.sessionDeleted and shutdown."""
         mock_bridge.start(mock_ctx.project_dir)
+        mock_bridge.set_response("idle.check", {"action": "ignore"})
         mock_bridge.set_response("lifecycle.sessionDeleted", None)
         _on_session_end(mock_ctx, mock_bridge, session_id=mock_ctx.session_id)
         assert not mock_bridge.is_alive
         clear_calls = mock_bridge.get_calls("clear_session")
         assert len(clear_calls) == 1
         assert clear_calls[0][1]["sessionId"] == mock_ctx.session_id
+
+    def test_session_end_resumes_runnable_cli_session(
+        self, mock_ctx, mock_bridge, monkeypatch
+    ):
+        """Runnable non-gated workflows should re-enter Hermes automatically."""
+        mock_bridge.start(mock_ctx.project_dir)
+        mock_bridge.set_response(
+            "idle.check",
+            {
+                "action": "reprompt",
+                "message": "Continue with the next ready Open Artisan task.",
+                "retryCount": 1,
+            },
+        )
+        mock_bridge.set_response("lifecycle.sessionDeleted", None)
+        monkeypatch.setenv("OPENARTISAN_HERMES_CLI", "/usr/local/bin/hermes")
+
+        with patch("hermes_adapter.subprocess.Popen") as popen:
+            _on_session_end(
+                mock_ctx,
+                mock_bridge,
+                session_id=mock_ctx.session_id,
+                completed=True,
+                interrupted=False,
+                platform="cli",
+            )
+
+        popen.assert_called_once()
+        command = popen.call_args.args[0]
+        assert command == [
+            "/usr/local/bin/hermes",
+            "chat",
+            "--resume",
+            mock_ctx.session_id,
+            "--quiet",
+            "--query",
+            "Continue with the next ready Open Artisan task.",
+        ]
+        assert mock_bridge.is_alive
+        assert mock_bridge.get_calls("idle.check") == [
+            ("idle.check", {"sessionId": mock_ctx.session_id})
+        ]
+
+    def test_session_end_does_not_resume_at_user_gate(
+        self, mock_ctx, mock_bridge, monkeypatch
+    ):
+        """Real stop conditions should shut down instead of re-invoking Hermes."""
+        mock_bridge.start(mock_ctx.project_dir)
+        mock_bridge.set_response("idle.check", {"action": "ignore"})
+        mock_bridge.set_response("lifecycle.sessionDeleted", None)
+        monkeypatch.setenv("OPENARTISAN_HERMES_CLI", "/usr/local/bin/hermes")
+
+        with patch("hermes_adapter.subprocess.Popen") as popen:
+            _on_session_end(
+                mock_ctx,
+                mock_bridge,
+                session_id=mock_ctx.session_id,
+                completed=True,
+                interrupted=False,
+                platform="cli",
+            )
+
+        popen.assert_not_called()
+        assert not mock_bridge.is_alive
+
+    def test_session_end_skips_autonomous_resume_for_interrupted_turn(
+        self, mock_ctx, mock_bridge
+    ):
+        """User-interrupted turns should not spawn a new autonomous run."""
+        mock_bridge.start(mock_ctx.project_dir)
+        mock_bridge.set_response("lifecycle.sessionDeleted", None)
+
+        with patch("hermes_adapter.subprocess.Popen") as popen:
+            _on_session_end(
+                mock_ctx,
+                mock_bridge,
+                session_id=mock_ctx.session_id,
+                completed=False,
+                interrupted=True,
+                platform="cli",
+            )
+
+        popen.assert_not_called()
+        assert mock_bridge.get_calls("idle.check") == []
+        assert not mock_bridge.is_alive
 
     def test_live_bridge_session_created_returns_no_synthetic_dogfooding_contract(
         self, live_bridge_server

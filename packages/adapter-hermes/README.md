@@ -29,7 +29,7 @@ Hermes v0.5.0 hooks are **observation-only** — `pre_tool_call` return values a
 
 ### Why per-turn prompt injection?
 
-Hermes's `pre_llm_call` hook can return `{"context": "text"}` to inject into the system prompt for that specific LLM call. This is better than one-shot injection — the agent always sees the current phase instructions, even after the workflow advances mid-session.
+Hermes's `pre_llm_call` hook can return `{"context": "text"}` to inject ephemeral context into the current turn's user message. This is better than one-shot injection — the agent always sees the current phase instructions, even after the workflow advances mid-session.
 
 ### Why stdio subprocess (not Unix socket)?
 
@@ -166,7 +166,7 @@ The wrapper registers with the same tool name, overriding the built-in. Plugins 
 Registered via `ctx.register_hook("pre_llm_call", callback)`. On every LLM call:
 
 1. Calls `bridge.call("prompt.build", {"sessionId": session_id})`
-2. Returns `{"context": prompt_text}` which Hermes injects into the ephemeral system prompt
+2. Returns `{"context": prompt_text}` which Hermes appends to the current turn's user message
 
 This means the agent always sees:
 - Current phase and sub-state
@@ -180,8 +180,10 @@ The prompt is rebuilt from scratch each turn — no stale state.
 
 ### Session Lifecycle
 
-- `on_session_start` hook → `bridge.call("lifecycle.sessionCreated", {"sessionId": ...})`
-- `on_session_end` hook → `bridge.call("lifecycle.sessionDeleted", {"sessionId": ...})`
+- `on_session_start` hook → `bridge.call("lifecycle.sessionCreated", {"sessionId": ..., "agent": ...})`
+- `on_session_end` hook first asks bridge `idle.check` whether the workflow should continue
+- runnable CLI sessions auto-resume the same Hermes session with the bridge-provided continuation prompt
+- real stop conditions (`USER_GATE`, unresolved human gates, explicit interruption, escalation, DONE) detach the session and stop normally
 - Session ID comes from Hermes's `session_id` kwarg on hook callbacks
 
 ## Self-Review Mode
@@ -243,11 +245,11 @@ bridge.call("lifecycle.sessionCreated", {
 })
 ```
 
-When `activeAgent` is `"robot-artisan"`, the `pre_llm_call` hook automatically:
+When `activeAgent` is `"robot-artisan"`, the adapter keeps running autonomously and the `pre_llm_call` hook automatically:
 1. Detects USER_GATE state
-2. Spawns an isolated auto-approver subprocess (`claude --print`)
-3. Evaluates the artifact against phase-specific criteria
-4. Auto-approves if confidence >= 0.7, otherwise routes to REVISE with feedback
+2. Spawns an isolated maintainer-style reviewer subprocess (`claude --print`)
+3. Evaluates the artifact against phase-specific criteria as simulated meticulous maintainer feedback
+4. Auto-approves if confidence >= 0.7, otherwise routes to REVISE with reviewer feedback
 
 **Requirements:**
 - `claude` CLI must be installed and on PATH (for the auto-approver subprocess)

@@ -75,6 +75,26 @@ class TestToolRegistration:
             assert "type" in schema, f"Schema for {name} missing 'type'"
             assert "properties" in schema, f"Schema for {name} missing 'properties'"
 
+    def test_registered_handlers_fall_back_to_context_session_id(
+        self, mock_ctx, mock_bridge
+    ):
+        """Hermes tool calls without session_id should reuse ctx.session_id, not 'default'."""
+        mock_bridge.set_response("tool.execute", "Mode set to GREENFIELD.")
+        register_workflow_tools(mock_ctx, mock_bridge)
+
+        tool = mock_ctx.get_registered_tool("oa_select_mode")
+        assert tool is not None
+
+        result = tool["handler"](
+            {"mode": "GREENFIELD", "feature_name": "ctx-session-feat"},
+            cwd="/tmp/project",
+        )
+
+        assert "GREENFIELD" in result
+        calls = mock_bridge.get_calls("tool.execute")
+        assert len(calls) == 1
+        assert calls[0][1]["context"]["sessionId"] == mock_ctx.session_id
+
 
 # ---------------------------------------------------------------------------
 # Bridge delegation
@@ -159,6 +179,33 @@ class TestBridgeDelegation:
         assert len(message_calls) == 1
         assert message_calls[0][1]["sessionId"] == "test-session"
         assert message_calls[0][1]["parts"][0]["text"] == "approved"
+
+    def test_submit_feedback_without_feedback_text_still_marks_user_message(
+        self, started_bridge
+    ):
+        """submit_feedback should still call message.process when Hermes omits feedback_text."""
+        started_bridge.set_response(
+            "message.process", {"intercepted": True, "parts": []}
+        )
+        started_bridge.set_response(
+            "tool.execute", "Approval recorded. Transitioning to PLANNING/DRAFT."
+        )
+
+        result = _handle_workflow_tool(
+            started_bridge,
+            "submit_feedback",
+            "test-session",
+            "/tmp/project",
+            {"feedback_type": "approve"},
+        )
+
+        assert "Approval recorded" in result
+        message_calls = started_bridge.get_calls("message.process")
+        assert len(message_calls) == 1
+        assert (
+            message_calls[0][1]["parts"][0]["text"]
+            == "(user invoked submit_feedback via Hermes)"
+        )
 
     def test_returns_bridge_response_as_string(self, started_bridge):
         """Handler should return the bridge result as a string."""

@@ -1319,6 +1319,35 @@ describe("tool.execute — select_mode resume", () => {
     expect(state?.featureName).toBe("resume-feat")
   })
 
+  it("resumes a persisted prior workflow even when the old session is not loaded in memory", async () => {
+    await handleSessionCreated({ sessionId: "writer" }, ctx)
+    await ctx.engine!.store.update("writer", (d) => {
+      d.featureName = "persisted-resume-feat"
+      d.mode = "INCREMENTAL"
+      d.phase = "DISCOVERY"
+      d.phaseState = "ANALYZE"
+    })
+
+    const freshCtx = makeBridgeContext()
+    await handleInit({ projectDir: tmpDir }, freshCtx)
+    await handleSessionCreated({ sessionId: "reader" }, freshCtx)
+
+    const result = await handleToolExecute({
+      name: "select_mode",
+      args: { mode: "INCREMENTAL", feature_name: "persisted-resume-feat" },
+      context: { sessionId: "reader", directory: tmpDir },
+    }, freshCtx) as string
+
+    expect(result).toContain("Resumed prior workflow")
+    expect(result).toContain("DISCOVERY/ANALYZE")
+
+    const state = freshCtx.engine!.store.get("reader")
+    expect(state?.phase).toBe("DISCOVERY")
+    expect(state?.phaseState).toBe("ANALYZE")
+    expect(state?.featureName).toBe("persisted-resume-feat")
+    expect(state?.sessionId).toBe("reader")
+  })
+
   it("does not resume if prior state is at MODE_SELECT", async () => {
     // Create a session with feature at MODE_SELECT (fresh)
     await handleSessionCreated({ sessionId: "stale-session" }, ctx)

@@ -8,7 +8,6 @@ import { handleToolExecute } from "#bridge/methods/tool-execute"
 import type { BridgeContext } from "#bridge/server"
 import type { EngineContext } from "#core/engine-context"
 import { createPGliteRoadmapStateBackend } from "#core/roadmap-state-backend-pglite"
-import { createFileSystemRoadmapStateBackend } from "#core/state-backend-fs"
 import type { RoadmapDocument } from "#core/types"
 
 const NOW = "2026-04-16T00:00:00.000Z"
@@ -61,6 +60,15 @@ function makeRoadmapDocument(overrides: Partial<RoadmapDocument> = {}): RoadmapD
   }
 }
 
+function createBridgeRoadmapBackend(stateDir: string) {
+  return createPGliteRoadmapStateBackend(stateDir, {
+    connection: {
+      dataDir: join(stateDir, "roadmap", "bridge-pglite-db"),
+      debugName: "bridge-roadmap-test",
+    },
+  })
+}
+
 beforeEach(async () => {
   tmpDir = await mkdtemp(join(tmpdir(), "bridge-roadmap-"))
   ctx = makeBridgeContext()
@@ -74,7 +82,7 @@ afterEach(async () => {
 
 describe("bridge roadmap tool execution", () => {
   it("reads roadmap state through tool.execute using roadmap-specific result shapes", async () => {
-    const roadmapBackend = createFileSystemRoadmapStateBackend(ctx.stateDir!)
+    const roadmapBackend = createBridgeRoadmapBackend(ctx.stateDir!)
     await roadmapBackend.createRoadmap(makeRoadmapDocument())
 
     const response = await handleToolExecute({
@@ -90,7 +98,7 @@ describe("bridge roadmap tool execution", () => {
   })
 
   it("reads roadmap state from the bridge state directory instead of the request working directory", async () => {
-    const roadmapBackend = createFileSystemRoadmapStateBackend(ctx.stateDir!)
+    const roadmapBackend = createBridgeRoadmapBackend(ctx.stateDir!)
     await roadmapBackend.createRoadmap(makeRoadmapDocument())
 
     const unrelatedDir = join(tmpDir, "nested", "workspace")
@@ -109,7 +117,7 @@ describe("bridge roadmap tool execution", () => {
   })
 
   it("queries roadmap state through tool.execute and returns roadmap-specific collections", async () => {
-    const roadmapBackend = createFileSystemRoadmapStateBackend(ctx.stateDir!)
+    const roadmapBackend = createBridgeRoadmapBackend(ctx.stateDir!)
     await roadmapBackend.createRoadmap(makeRoadmapDocument())
 
     const response = await handleToolExecute({
@@ -125,7 +133,7 @@ describe("bridge roadmap tool execution", () => {
   })
 
   it("derives an execution slice through tool.execute without bypassing the existing execution DAG path", async () => {
-    const roadmapBackend = createFileSystemRoadmapStateBackend(ctx.stateDir!)
+    const roadmapBackend = createBridgeRoadmapBackend(ctx.stateDir!)
     await roadmapBackend.createRoadmap(makeRoadmapDocument())
 
     await ctx.engine!.store.update("s1", (draft) => {
@@ -168,43 +176,168 @@ describe("bridge roadmap tool execution", () => {
     expect(after?.implDag).toEqual(before?.implDag)
   })
 
-  it("surfaces roadmap-specific failures without corrupting workflow runtime state", async () => {
-    await mkdir(join(ctx.stateDir!, "roadmap"), { recursive: true })
-    await Bun.write(join(ctx.stateDir!, "roadmap", "roadmap-state.json"), "{not-json")
+  it("requires a bridge-owned stateDir for roadmap tool execution", async () => {
+    await ctx.engine!.store.update("s1", (draft) => {
+      draft.mode = "INCREMENTAL"
+      draft.phase = "IMPLEMENTATION"
+      draft.phaseState = "DRAFT"
+      draft.currentTaskId = "T1"
+      draft.implDag = [
+        {
+          id: "T1",
+          description: "Existing execution task",
+          dependencies: [],
+          expectedTests: [],
+          expectedFiles: [],
+          estimatedComplexity: "small",
+          status: "in-flight",
+        },
+      ]
+    })
+
+    const before = JSON.parse(JSON.stringify(ctx.engine!.store.get("s1")))
+    const originalStateDir = ctx.stateDir
+    ctx.stateDir = null
+
+    try {
+      const response = await handleToolExecute({
+        name: "roadmap_read",
+        args: {},
+        context: { sessionId: "s1", directory: tmpDir },
+      }, ctx)
+      expect(JSON.parse(response as string)).toEqual({
+        ok: false,
+        error: {
+          code: "storage-failure",
+          message: "Bridge stateDir is required for roadmap tools",
+          retryable: false,
+        },
+      })
+
+      const after = ctx.engine!.store.get("s1")
+      expect(after?.currentTaskId).toBe(before?.currentTaskId)
+      expect(after?.implDag).toEqual(before?.implDag)
+      expect(after?.phase).toBe(before?.phase)
+      expect(after?.phaseState).toBe(before?.phaseState)
+    } finally {
+      ctx.stateDir = originalStateDir
+    }
+  })
+
+  it("surfaces roadmap_read and roadmap_query storage failures without corrupting workflow runtime state", async () => {
+    await ctx.engine!.store.update("s1", (draft) => {
+      draft.mode = "INCREMENTAL"
+      draft.phase = "IMPLEMENTATION"
+      draft.phaseState = "DRAFT"
+      draft.currentTaskId = "T1"
+      draft.implDag = [
+        {
+          id: "T1",
+          description: "Existing execution task",
+          dependencies: [],
+          expectedTests: [],
+          expectedFiles: [],
+          estimatedComplexity: "small",
+          status: "in-flight",
+        },
+      ]
+    })
+
+    const before = JSON.parse(JSON.stringify(ctx.engine!.store.get("s1")))
+    const originalStateDir = ctx.stateDir!
+    const blockedStateDir = join(tmpDir, "state-dir-blocker")
+    await Bun.write(blockedStateDir, "not-a-directory")
+    ctx.stateDir = blockedStateDir
+
+    try {
+      const readResponse = await handleToolExecute({
+        name: "roadmap_read",
+        args: {},
+        context: { sessionId: "s1", directory: tmpDir },
+      }, ctx)
+      expect(JSON.parse(readResponse as string)).toEqual({
+        ok: false,
+        error: {
+          code: "storage-failure",
+          message: expect.any(String),
+          retryable: true,
+        },
+      })
+
+      const afterRead = ctx.engine!.store.get("s1")
+      expect(afterRead?.currentTaskId).toBe(before?.currentTaskId)
+      expect(afterRead?.implDag).toEqual(before?.implDag)
+
+      const queryResponse = await handleToolExecute({
+        name: "roadmap_query",
+        args: { query: { minPriority: 1 } },
+        context: { sessionId: "s1", directory: tmpDir },
+      }, ctx)
+      expect(JSON.parse(queryResponse as string)).toEqual({
+        ok: false,
+        error: {
+          code: "storage-failure",
+          message: expect.any(String),
+          retryable: true,
+        },
+      })
+
+      const afterQuery = ctx.engine!.store.get("s1")
+      expect(afterQuery?.currentTaskId).toBe(before?.currentTaskId)
+      expect(afterQuery?.implDag).toEqual(before?.implDag)
+    } finally {
+      ctx.stateDir = originalStateDir
+    }
+  })
+
+  it("surfaces roadmap_derive_execution_slice failures without corrupting workflow runtime state", async () => {
+    const roadmapBackend = createBridgeRoadmapBackend(ctx.stateDir!)
+    await roadmapBackend.createRoadmap(makeRoadmapDocument())
 
     await ctx.engine!.store.update("s1", (draft) => {
-      draft.phase = "MODE_SELECT"
+      draft.mode = "INCREMENTAL"
+      draft.phase = "IMPLEMENTATION"
       draft.phaseState = "DRAFT"
+      draft.currentTaskId = "T1"
+      draft.implDag = [
+        {
+          id: "T1",
+          description: "Existing execution task",
+          dependencies: [],
+          expectedTests: [],
+          expectedFiles: [],
+          estimatedComplexity: "small",
+          status: "in-flight",
+        },
+      ]
     })
 
     const before = JSON.parse(JSON.stringify(ctx.engine!.store.get("s1")))
     const response = await handleToolExecute({
-      name: "roadmap_read",
-      args: {},
+      name: "roadmap_derive_execution_slice",
+      args: { roadmap_item_ids: ["missing-item"], feature_name: "persistent-roadmap-dag" },
       context: { sessionId: "s1", directory: tmpDir },
     }, ctx)
 
     expect(JSON.parse(response as string)).toEqual({
       ok: false,
       error: {
-        code: "invalid-document",
+        code: "invalid-slice",
         message: expect.any(String),
         retryable: false,
+        details: { itemId: "missing-item" },
       },
     })
 
     const after = ctx.engine!.store.get("s1")
+    expect(after?.currentTaskId).toBe(before?.currentTaskId)
+    expect(after?.implDag).toEqual(before?.implDag)
     expect(after?.phase).toBe(before?.phase)
     expect(after?.phaseState).toBe(before?.phaseState)
   })
 
   it("derives roadmap results through bridge-owned tools from the PGlite backend without mutating execution state", async () => {
-    const roadmapBackend = createPGliteRoadmapStateBackend(ctx.stateDir!, {
-      connection: {
-        dataDir: join(ctx.stateDir!, "roadmap", "bridge-pglite-db"),
-        debugName: "bridge-roadmap-test",
-      },
-    })
+    const roadmapBackend = createBridgeRoadmapBackend(ctx.stateDir!)
     await roadmapBackend.createRoadmap(makeRoadmapDocument())
 
     await ctx.engine!.store.update("s1", (draft) => {

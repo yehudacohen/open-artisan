@@ -98,7 +98,7 @@ describe("roadmap slice service contracts", () => {
       featureName: "persistent-roadmap-dag",
       minPriority: 9,
     })
-    expect(filtered).toEqual({ ok: true, value: [roadmap.items[0]] })
+    expect(filtered).toEqual({ ok: true, value: [roadmap.items[0]!] })
 
     const allItems = await service.queryRoadmap({})
     expect(allItems).toEqual({ ok: true, value: roadmap.items })

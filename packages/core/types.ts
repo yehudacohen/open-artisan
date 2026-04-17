@@ -641,6 +641,46 @@ export interface RoadmapDocument {
   edges: RoadmapEdge[]
 }
 
+export type RoadmapPersistenceKind = "filesystem" | "pglite"
+
+export interface RoadmapPGliteConnectionOptions {
+  dataDir: string
+  databaseFileName?: string
+  debugName?: string
+}
+
+export interface RoadmapPGliteRepositoryOptions {
+  connection: RoadmapPGliteConnectionOptions
+  schemaName?: string
+  lockTimeoutMs?: number
+  lockPollMs?: number
+}
+
+/**
+ * Typed roadmap persistence/query boundary for Postgres-friendly adapters.
+ * Bridge-owned services compose this repository rather than exposing it directly to callers.
+ */
+export interface RoadmapRepository {
+  initialize(): Promise<RoadmapResult<null>>
+  createRoadmap(document: RoadmapDocument): Promise<RoadmapResult<RoadmapDocument>>
+  readRoadmap(): Promise<RoadmapResult<RoadmapDocument | null>>
+  updateRoadmap(document: RoadmapDocument): Promise<RoadmapResult<RoadmapDocument>>
+  deleteRoadmap(): Promise<RoadmapResult<null>>
+  queryRoadmapItems(query: RoadmapQuery): Promise<RoadmapResult<RoadmapItem[]>>
+}
+
+/**
+ * Bridge-owned assembly input for roadmap services/backends.
+ * Keeps roadmap backend selection/configuration separate from WorkflowState persistence.
+ */
+export interface RoadmapServiceFactoryOptions {
+  stateDir: string
+  persistence: {
+    kind: RoadmapPersistenceKind
+    pglite?: RoadmapPGliteRepositoryOptions
+  }
+}
+
 /**
  * Standalone roadmap persistence. Separate from WorkflowState persistence.
  * Implementations must not store roadmap state in per-feature workflow-state files.

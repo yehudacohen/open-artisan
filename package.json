@@ -15,10 +15,15 @@
   },
   "devDependencies": {
     "@types/bun": "latest",
+    "@types/emscripten": "^1.41.5",
+    "gel": "^2.2.0",
+    "mysql2": "^3.22.0",
     "typescript": "^5.4.0"
   },
   "dependencies": {
+    "@electric-sql/pglite": "^0.4.4",
     "@modelcontextprotocol/sdk": "^1.28.0",
+    "drizzle-orm": "^0.45.2",
     "json-rpc-2.0": "^1.7.1",
     "pino": "^10.3.1"
   }

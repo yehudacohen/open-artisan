@@ -931,6 +931,41 @@ describe("SessionStateStore — load", () => {
       join(tmpDir, "src/b.ts"),
     ])
   })
+
+  it("reopens implementation at USER_GATE when only unresolved human gates remain", async () => {
+    writePerFeatureState(tmpDir, "repair-awaiting-human", makeState("repair-awaiting-human-session", "repair-awaiting-human", {
+      mode: "GREENFIELD",
+      phase: "IMPLEMENTATION",
+      phaseState: "DRAFT",
+      implDag: [
+        {
+          id: "T1",
+          description: "Needs human input",
+          dependencies: [],
+          expectedTests: [],
+          expectedFiles: [],
+          estimatedComplexity: "small",
+          status: "human-gated",
+          category: "human-gate",
+          humanGate: { whatIsNeeded: "Approve", why: "Needed", verificationSteps: "Verify", resolved: false },
+        },
+      ],
+      currentTaskId: null,
+      taskCompletionInProgress: null,
+    }))
+
+    const store2 = createSessionStateStore(createFileSystemStateBackend(tmpDir))
+    const result = await store2.load()
+    expect(result.success).toBe(true)
+    const loaded = store2.get("repair-awaiting-human-session")
+    expect(loaded?.phase).toBe("IMPLEMENTATION")
+    expect(loaded?.phaseState).toBe("USER_GATE")
+    expect(loaded?.currentTaskId).toBeNull()
+    expect(loaded?.userGateMessageReceived).toBe(false)
+
+    const persisted = JSON.parse(readFileSync(join(tmpDir, "repair-awaiting-human", "workflow-state.json"), "utf-8"))
+    expect(persisted.phaseState).toBe("USER_GATE")
+  })
 })
 
 // ---------------------------------------------------------------------------

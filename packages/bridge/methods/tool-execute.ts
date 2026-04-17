@@ -55,6 +55,9 @@ import {
 } from "../../core/autonomous-user-gate"
 import { activateHumanGateTasks, resolveAwaitingHumanState } from "../../core/human-gate-policy"
 import { buildWorkflowSwitchMessage, parkCurrentWorkflowSession } from "../../core/session-switch"
+import { createFileSystemRoadmapStateBackend } from "../../core/state-backend-fs"
+import { createRoadmapSliceService } from "../../core/roadmap-slice-service"
+import type { RoadmapQuery } from "../../core/types"
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -64,6 +67,13 @@ interface ToolContext {
   sessionId: string
   directory: string
   agent?: string
+}
+
+function createRoadmapServices(toolCtx: ToolContext, ctx: BridgeContext) {
+  const baseDir = ctx.stateDir ?? resolve(toolCtx.directory || process.cwd())
+  const roadmapBackend = createFileSystemRoadmapStateBackend(baseDir)
+  const roadmapService = createRoadmapSliceService(roadmapBackend)
+  return { roadmapBackend, roadmapService }
 }
 
 function requireState(ctx: BridgeContext, sessionId: string): WorkflowState {
@@ -750,6 +760,11 @@ const handleSubmitFeedback: ToolHandler = async (args, toolCtx, ctx) => {
       if (state.phase === "DISCOVERY" && artifactContent) {
         draft.conventions = artifactContent
       }
+      if (state.phase === "IMPLEMENTATION") {
+        draft.currentTaskId = null
+        draft.taskCompletionInProgress = null
+        draft.taskReviewCount = 0
+      }
       // Parse IMPL_PLAN into DAG at IMPL_PLAN approval.
       // If artifact_content was not passed in the approve call, fall back to
       // reading from the disk path written by request_review. This prevents
@@ -937,6 +952,10 @@ const handleSubmitTaskReview: ToolHandler = async (args, toolCtx, ctx) => {
       }
       const refreshed = buildRuntimeSchedulerDecision({ implDag: draft.implDag, concurrency: draft.concurrency }).fallbackDecision
       draft.currentTaskId = refreshed.action === "dispatch" ? refreshed.task.id : null
+      draft.phaseState = refreshed.action === "awaiting-human" ? "USER_GATE" : "DRAFT"
+      if (refreshed.action === "awaiting-human") {
+        draft.userGateMessageReceived = false
+      }
       draft.taskCompletionInProgress = null
       draft.taskReviewCount = 0
     })
@@ -956,6 +975,10 @@ const handleSubmitTaskReview: ToolHandler = async (args, toolCtx, ctx) => {
       }
       const refreshed = buildRuntimeSchedulerDecision({ implDag: draft.implDag, concurrency: draft.concurrency }).fallbackDecision
       draft.currentTaskId = refreshed.action === "dispatch" ? refreshed.task.id : null
+      draft.phaseState = refreshed.action === "awaiting-human" ? "USER_GATE" : "DRAFT"
+      if (refreshed.action === "awaiting-human") {
+        draft.userGateMessageReceived = false
+      }
       draft.taskCompletionInProgress = null
       draft.taskReviewCount = 0
     })
@@ -1074,6 +1097,13 @@ const handleResolveHumanGate: ToolHandler = async (args, toolCtx, ctx) => {
       `**Unresolved human gates:**\n${gateList}`
     )
   }
+
+  const refreshedDecision = nextSchedulerDecision(createImplDAG(resolution.updatedNodes))
+  await store.update(toolCtx.sessionId, (draft) => {
+    draft.implDag = resolution.updatedNodes
+    draft.currentTaskId = refreshedDecision.action === "dispatch" ? refreshedDecision.task.id : null
+    draft.phaseState = "DRAFT"
+  })
 
   return `Human gate set for task "${taskId}". The user will resolve it at USER_GATE.`
 }
@@ -1294,6 +1324,41 @@ const handleResetTask: ToolHandler = async (args, toolCtx, ctx) => {
   return `Reset ${ids.length} task(s) to pending: ${taskList}. Current task: ${ids[0]}.`
 }
 
+// ---- roadmap_read ----
+
+const handleRoadmapRead: ToolHandler = async (_args, toolCtx, ctx) => {
+  const { roadmapBackend } = createRoadmapServices(toolCtx, ctx)
+  return JSON.stringify(await roadmapBackend.readRoadmap())
+}
+
+// ---- roadmap_query ----
+
+const handleRoadmapQuery: ToolHandler = async (args, toolCtx, ctx) => {
+  const { roadmapService } = createRoadmapServices(toolCtx, ctx)
+  const query = (args.query ?? {}) as RoadmapQuery
+  return JSON.stringify(await roadmapService.queryRoadmap(query))
+}
+
+// ---- roadmap_derive_execution_slice ----
+
+const handleRoadmapDeriveExecutionSlice: ToolHandler = async (args, toolCtx, ctx) => {
+  const { roadmapService } = createRoadmapServices(toolCtx, ctx)
+  const roadmapItemIds = Array.isArray(args.roadmap_item_ids)
+    ? (args.roadmap_item_ids as string[])
+    : Array.isArray(args.roadmapItemIds)
+      ? (args.roadmapItemIds as string[])
+      : []
+  const featureName =
+    typeof args.feature_name === "string"
+      ? args.feature_name
+      : typeof args.featureName === "string"
+        ? args.featureName
+        : undefined
+  const input = featureName === undefined ? { roadmapItemIds } : { roadmapItemIds, featureName }
+
+  return JSON.stringify(await roadmapService.deriveExecutionSlice(input))
+}
+
 // ---------------------------------------------------------------------------
 // Dispatch table
 // ---------------------------------------------------------------------------
@@ -1315,6 +1380,9 @@ const TOOL_HANDLERS: Record<string, ToolHandler> = {
   spawn_sub_workflow: handleSpawnSubWorkflow,
   query_parent_workflow: handleQueryParentWorkflow,
   query_child_workflow: handleQueryChildWorkflow,
+  roadmap_read: handleRoadmapRead,
+  roadmap_query: handleRoadmapQuery,
+  roadmap_derive_execution_slice: handleRoadmapDeriveExecutionSlice,
 }
 
 // ---------------------------------------------------------------------------

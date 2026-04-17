@@ -2141,6 +2141,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                 ...t,
                 ...(t.humanGate ? { humanGate: { ...t.humanGate } } : {}),
               }))
+              draft.currentTaskId = decision.action === "dispatch" ? decision.task.id : null
             })
 
             // There's still dispatchable work — tell the agent to continue
@@ -2878,6 +2879,10 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                   // We set conventions to a sentinel so downstream code knows it's on disk
                   draft.conventions = null  // system-transform uses artifactDiskPaths["conventions"]
                 }
+              } else if (state.phase === "IMPLEMENTATION") {
+                draft.currentTaskId = null
+                draft.taskCompletionInProgress = null
+                draft.taskReviewCount = 0
               }
               // S2: Capture file allowlist at PLANNING approval in INCREMENTAL mode.
               // Normalize to absolute paths — the agent may pass relative paths

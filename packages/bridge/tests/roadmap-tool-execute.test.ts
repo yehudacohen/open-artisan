@@ -73,7 +73,7 @@ afterEach(async () => {
 
 describe("bridge roadmap tool execution", () => {
   it("reads roadmap state through tool.execute using roadmap-specific result shapes", async () => {
-    const roadmapBackend = createFileSystemRoadmapStateBackend(tmpDir)
+    const roadmapBackend = createFileSystemRoadmapStateBackend(ctx.stateDir!)
     await roadmapBackend.createRoadmap(makeRoadmapDocument())
 
     const response = await handleToolExecute({
@@ -88,8 +88,27 @@ describe("bridge roadmap tool execution", () => {
     })
   })
 
+  it("reads roadmap state from the bridge state directory instead of the request working directory", async () => {
+    const roadmapBackend = createFileSystemRoadmapStateBackend(ctx.stateDir!)
+    await roadmapBackend.createRoadmap(makeRoadmapDocument())
+
+    const unrelatedDir = join(tmpDir, "nested", "workspace")
+    await mkdir(unrelatedDir, { recursive: true })
+
+    const response = await handleToolExecute({
+      name: "roadmap_read",
+      args: {},
+      context: { sessionId: "s1", directory: unrelatedDir },
+    }, ctx)
+
+    expect(JSON.parse(response as string)).toEqual({
+      ok: true,
+      value: makeRoadmapDocument(),
+    })
+  })
+
   it("queries roadmap state through tool.execute and returns roadmap-specific collections", async () => {
-    const roadmapBackend = createFileSystemRoadmapStateBackend(tmpDir)
+    const roadmapBackend = createFileSystemRoadmapStateBackend(ctx.stateDir!)
     await roadmapBackend.createRoadmap(makeRoadmapDocument())
 
     const response = await handleToolExecute({
@@ -105,7 +124,7 @@ describe("bridge roadmap tool execution", () => {
   })
 
   it("derives an execution slice through tool.execute without bypassing the existing execution DAG path", async () => {
-    const roadmapBackend = createFileSystemRoadmapStateBackend(tmpDir)
+    const roadmapBackend = createFileSystemRoadmapStateBackend(ctx.stateDir!)
     await roadmapBackend.createRoadmap(makeRoadmapDocument())
 
     await ctx.engine!.store.update("s1", (draft) => {
@@ -149,8 +168,8 @@ describe("bridge roadmap tool execution", () => {
   })
 
   it("surfaces roadmap-specific failures without corrupting workflow runtime state", async () => {
-    await mkdir(join(tmpDir, "roadmap"), { recursive: true })
-    await Bun.write(join(tmpDir, "roadmap", "roadmap-state.json"), "{not-json")
+    await mkdir(join(ctx.stateDir!, "roadmap"), { recursive: true })
+    await Bun.write(join(ctx.stateDir!, "roadmap", "roadmap-state.json"), "{not-json")
 
     await ctx.engine!.store.update("s1", (draft) => {
       draft.phase = "MODE_SELECT"

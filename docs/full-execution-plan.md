@@ -52,6 +52,7 @@ Status update:
 - Completed: `harden-hermes-adapter-runtime-behavior`
 - Completed: `make-hermes-dogfooding-explicit-rule`
 - Completed: `parallel-dag-execution-via-hermes` (contract/fallback foundation slice)
+- Completed: `persistent-roadmap-dag` (first roadmap slice: standalone contracts, separate filesystem roadmap state, derive-slice service, and narrow bridge read/query/derive support)
 - Landed commits from that slice:
   - `d2e61e3` `fix: handle Hermes shared bridge socket RPC`
   - `c4bb86c` `fix: resume workflows from persisted feature state`
@@ -260,6 +261,18 @@ Status update:
 
 **Goal:** move from isolated per-feature workflows to a continuous project roadmap graph.
 
+**Status:** first slice landed via `persistent-roadmap-dag`.
+
+**Landed in the first slice**
+
+1. Standalone roadmap contracts and DAG validation in core.
+2. Durable roadmap persistence in a separate filesystem namespace from workflow state (`roadmap/roadmap-state.json` with separate locking), preserving existing feature-based workflow resume behavior.
+3. A minimal roadmap slice service that can query roadmap items and derive an execution slice from selected roadmap item ids without mutating workflow execution state on failure.
+4. Narrow bridge-facing roadmap support through existing tool execution for:
+   - `roadmap_read`
+   - `roadmap_query`
+   - `roadmap_derive_execution_slice`
+
 **Core model**
 
 1. **Roadmap DAG**
@@ -269,6 +282,12 @@ Status update:
    - selected slice/subgraph for current implementation
 3. **Workflow state**
    - phase/gate/review state for the current execution slice
+
+**Still deferred beyond this slice**
+
+1. Database-backed roadmap storage and migrations.
+2. Broader bridge mutation APIs for create/update/reprioritize/grooming.
+3. Rich orchestration semantics beyond the first read/query/derive path.
 
 **Acceptance criteria**
 

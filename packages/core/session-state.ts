@@ -274,6 +274,28 @@ function repairStateInconsistencies(state: WorkflowState): void {
     }
     state.taskReviewCount = 0
   }
+
+  if (
+    state.phase === "IMPLEMENTATION" &&
+    state.implDag &&
+    state.taskCompletionInProgress === null &&
+    state.currentTaskId === null
+  ) {
+    const input = readDecisionInput({ implDag: state.implDag, concurrency: state.concurrency })
+    const evaluation = nextSchedulerDecisionForInput(input)
+    const decision =
+      evaluation.decision.action === "unsupported" && evaluation.decision.fallback === "sequential"
+        ? nextSchedulerDecision(input.dag)
+        : evaluation.decision
+
+    if (decision.action === "dispatch") {
+      state.currentTaskId = decision.task.id
+      state.phaseState = "DRAFT"
+    } else if (decision.action === "awaiting-human") {
+      state.phaseState = "USER_GATE"
+      state.userGateMessageReceived = false
+    }
+  }
 }
 
 /**
@@ -288,16 +310,24 @@ function validateAndMigrate(value: unknown): WorkflowState | null {
   return value
 }
 
+function parseAndMigrateDetailed(json: string): { state: WorkflowState | null; changed: boolean } {
+  try {
+    const parsed = JSON.parse(json) as unknown
+    const before = JSON.stringify(parsed)
+    const state = validateAndMigrate(parsed)
+    if (!state) return { state: null, changed: false }
+    return { state, changed: JSON.stringify(state) !== before }
+  } catch {
+    return { state: null, changed: false }
+  }
+}
+
 /**
  * Parse and validate a raw JSON string into a WorkflowState.
  * Applies schema migrations. Returns null if invalid.
  */
 function parseAndMigrate(json: string): WorkflowState | null {
-  try {
-    return validateAndMigrate(JSON.parse(json) as unknown)
-  } catch {
-    return null
-  }
+  return parseAndMigrateDetailed(json).state
 }
 
 // ---------------------------------------------------------------------------
@@ -460,12 +490,15 @@ export function createSessionStateStore(backend: StateBackend): SessionStateStor
         for (const featureName of features) {
           const raw = await backend.read(featureName)
           if (!raw) continue
-          const state = parseAndMigrate(raw)
+          const { state, changed } = parseAndMigrateDetailed(raw)
           // Guard: state.featureName must match the backend key. If it doesn't,
           // the data is inconsistent and loading it would cause writes to go to
           // a different location, orphaning this entry.
           if (state && state.featureName === featureName) {
             memory.set(state.sessionId, state)
+            if (changed) {
+              await persistState(state)
+            }
           }
         }
 

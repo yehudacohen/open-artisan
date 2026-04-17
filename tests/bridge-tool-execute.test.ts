@@ -695,6 +695,64 @@ describe("tool.execute — mark_task_complete", () => {
     expect(state?.currentTaskId).toBe("T2")
   })
 
+  it("submit_task_review moves to USER_GATE when only unresolved human gates remain", async () => {
+    await exec("select_mode", { mode: "GREENFIELD", feature_name: "awaiting-human-after-review" })
+    await ctx.engine!.store.update("s1", (d) => {
+      d.phase = "IMPLEMENTATION"
+      d.phaseState = "DRAFT"
+      d.implDag = [
+        {
+          id: "T1",
+          description: "Completed task",
+          dependencies: [],
+          expectedTests: [],
+          expectedFiles: [],
+          estimatedComplexity: "small",
+          status: "complete",
+        },
+        {
+          id: "T2",
+          description: "Needs human input",
+          dependencies: [],
+          expectedTests: [],
+          expectedFiles: [],
+          estimatedComplexity: "small",
+          status: "human-gated",
+          category: "human-gate",
+          humanGate: {
+            whatIsNeeded: "Approve external action",
+            why: "Needed",
+            verificationSteps: "Verify",
+            resolved: false,
+          },
+        },
+        {
+          id: "T3",
+          description: "Blocked downstream work",
+          dependencies: ["T2"],
+          expectedTests: [],
+          expectedFiles: [],
+          estimatedComplexity: "small",
+          status: "pending",
+        },
+      ] as any
+      d.currentTaskId = "T1"
+      d.taskCompletionInProgress = "T1"
+      d.userGateMessageReceived = true
+    })
+
+    const result = await exec("submit_task_review", {
+      review_output: JSON.stringify({ passed: true, issues: [], reasoning: "All checks pass" }),
+    })
+
+    expect(result).toContain("review passed")
+    const state = ctx.engine!.store.get("s1")
+    expect(state?.phase).toBe("IMPLEMENTATION")
+    expect(state?.phaseState).toBe("USER_GATE")
+    expect(state?.currentTaskId).toBeNull()
+    expect(state?.userGateMessageReceived).toBe(false)
+  })
+
   it("submit_task_review reverts task on fail", async () => {
     await exec("select_mode", { mode: "GREENFIELD", feature_name: "fail-feat" })
     await ctx.engine!.store.update("s1", (d) => {
@@ -1059,6 +1117,47 @@ describe("tool.execute — resolve_human_gate", () => {
     const state = ctx.engine!.store.get("s1")
     expect(state?.phaseState).toBe("USER_GATE")
   })
+
+  it("dispatches the next ready task when work remains after a human gate", async () => {
+    await ctx.engine!.store.update("s1", (d) => {
+      d.phase = "IMPLEMENTATION"
+      d.phaseState = "DRAFT"
+      d.implDag = [
+        {
+          id: "T1",
+          description: "Needs human input",
+          dependencies: [],
+          expectedTests: [],
+          expectedFiles: [],
+          estimatedComplexity: "small",
+          status: "pending",
+          category: "human-gate",
+        },
+        {
+          id: "T2",
+          description: "Independent task",
+          dependencies: [],
+          expectedTests: [],
+          expectedFiles: [],
+          estimatedComplexity: "small",
+          status: "pending",
+          category: "standalone",
+        },
+      ]
+    })
+
+    const result = await exec("resolve_human_gate", {
+      task_id: "T1",
+      what_is_needed: "Human approval",
+      why: "Needed",
+      verification_steps: "Verify",
+    })
+
+    expect(result).toContain("Human gate set for task \"T1\"")
+    const state = ctx.engine!.store.get("s1")
+    expect(state?.phaseState).toBe("DRAFT")
+    expect(state?.currentTaskId).toBe("T2")
+  })
 })
 
 describe("tool.execute — submit_feedback human gate handling", () => {
@@ -1139,6 +1238,46 @@ describe("tool.execute — submit_feedback human gate handling", () => {
     expect(state?.phase).toBe("IMPLEMENTATION")
     expect(state?.phaseState).toBe("DRAFT")
     expect(state?.currentTaskId).toBe("T2")
+  })
+
+  it("completes IMPLEMENTATION cleanly when the final human gate is resolved", async () => {
+    await ctx.engine!.store.update("s1", (d) => {
+      d.phase = "IMPLEMENTATION"
+      d.phaseState = "USER_GATE"
+      d.userGateMessageReceived = true
+      d.taskReviewCount = 2
+      d.implDag = [
+        {
+          id: "T1",
+          description: "Final doc task",
+          dependencies: [],
+          expectedTests: [],
+          expectedFiles: ["docs/full-execution-plan.md"],
+          estimatedComplexity: "small",
+          status: "human-gated",
+          category: "human-gate",
+          humanGate: {
+            whatIsNeeded: "Maintainer decision",
+            why: "Needed",
+            verificationSteps: "Verify",
+            resolved: false,
+          },
+        },
+      ]
+    })
+
+    const result = await exec("submit_feedback", {
+      feedback_type: "approve",
+      feedback_text: "approved",
+      resolved_human_gates: ["T1"],
+    })
+
+    expect(result).toContain("Approved")
+    const state = ctx.engine!.store.get("s1")
+    expect(state?.phase).toBe("DONE")
+    expect(state?.phaseState).toBe("DRAFT")
+    expect(state?.taskReviewCount).toBe(0)
+    expect(state?.currentTaskId).toBeNull()
   })
 })
 

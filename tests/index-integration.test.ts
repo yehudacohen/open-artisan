@@ -1825,6 +1825,63 @@ describe("fileAllowlist — relative paths are normalized to absolute", () => {
     expect(result).not.toContain("approval failed allowlist validation")
   })
 
+  it("dispatches the next ready task when work remains after a human gate", async () => {
+    const sid = `int-test-${Date.now()}-human-gate-dispatch`
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: sid } } },
+    })
+    const ctx = { directory: tempDir, sessionId: sid }
+
+    await plugin.tool.select_mode.execute(
+      { mode: "GREENFIELD", feature_name: "human-gate-dispatch-test" },
+      ctx,
+    )
+
+    const store = plugin._testStore
+    await store.update(sid, (draft: any) => {
+      draft.phase = "IMPLEMENTATION"
+      draft.phaseState = "DRAFT"
+      draft.implDag = [
+        {
+          id: "T1",
+          description: "Needs human input",
+          dependencies: [],
+          expectedTests: [],
+          expectedFiles: [],
+          estimatedComplexity: "small",
+          status: "pending",
+          category: "human-gate",
+        },
+        {
+          id: "T2",
+          description: "Independent task",
+          dependencies: [],
+          expectedTests: [],
+          expectedFiles: [],
+          estimatedComplexity: "small",
+          status: "pending",
+          category: "standalone",
+        },
+      ]
+    })
+
+    const result = await plugin.tool.resolve_human_gate.execute(
+      {
+        task_id: "T1",
+        what_is_needed: "Human approval",
+        why: "Needed",
+        verification_steps: "Verify",
+      },
+      ctx,
+    )
+
+    expect(result).toContain("Next task ready")
+    expect(result).toContain("T2")
+    const state = store.get(sid)
+    expect(state.currentTaskId).toBe("T2")
+    expect(state.phaseState).toBe("DRAFT")
+  })
+
   it("normalizes preserved fileAllowlist from prior cycle at select_mode time", async () => {
     const sid = `int-test-${Date.now()}-selectmode-normalize`
     await plugin.event({

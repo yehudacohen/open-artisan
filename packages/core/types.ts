@@ -610,8 +610,6 @@ export interface RoadmapError {
     itemId?: string
     edge?: { from: string; to: string }
     schemaVersion?: number
-    expectedSchemaVersion?: number
-    actualSchemaVersion?: number
   }
 }
 

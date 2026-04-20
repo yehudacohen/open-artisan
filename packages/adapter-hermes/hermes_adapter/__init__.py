@@ -9,10 +9,9 @@ from __future__ import annotations
 
 import logging
 import os
-import shutil
-import subprocess
 from typing import Any
 
+from . import continuation
 from .types import HermesContext, BridgeClient
 from .bridge_client import StdioBridgeClient
 from .workflow_tools import register_workflow_tools
@@ -105,15 +104,40 @@ def _on_session_end(
     idle_decision = _get_idle_decision(bridge, session_id, kwargs)
 
     if idle_decision and idle_decision.get("action") == "reprompt":
-        message = idle_decision.get("message")
-        if isinstance(message, str) and message.strip():
-            if _launch_session_resume(session_id, project_dir, message):
+        try:
+            request = continuation.build_continuation_request(
+                session_id=session_id,
+                project_dir=project_dir,
+                agent=_resolve_agent_name(kwargs),
+                idle_decision=idle_decision,
+                session_context=_build_session_context(kwargs),
+                workflow_state={},
+            )
+            outcome = continuation.execute_continuation(
+                request,
+                continuation.NativeSessionDirectContinuationRunner(),
+                continuation.GatewayBackgroundContinuationHandoff(),
+            )
+        except Exception as e:
+            logger.warning(
+                "Autonomous continuation failed for session %s: %s",
+                session_id,
+                e,
+            )
+        else:
+            if outcome.get("kind") in {"continued", "handoff_requested"}:
                 _detach_session(bridge, session_id, project_dir)
-                logger.info("Autonomously resumed Hermes session %s", session_id)
+                logger.info(
+                    "Autonomous continuation outcome for session %s: %s",
+                    session_id,
+                    outcome.get("detail", outcome.get("kind", "continued")),
+                )
                 return
             logger.warning(
-                "Autonomous continuation failed to launch for session %s; stopping instead",
+                "Autonomous continuation did not proceed for session %s: %s%s",
                 session_id,
+                outcome.get("detail", outcome.get("kind", "blocked")),
+                _format_missing_fields_suffix(outcome),
             )
 
     if idle_decision and idle_decision.get("action") == "escalate":
@@ -133,6 +157,26 @@ def _on_session_end(
     logger.info("Bridge shut down for session %s", session_id)
 
 
+def _build_session_context(kwargs: dict[str, Any]) -> dict[str, Any]:
+    context: dict[str, Any] = {}
+    env_fallbacks = {
+        "platform": "OPENARTISAN_CONTINUE_PLATFORM",
+        "source": "OPENARTISAN_CONTINUE_SOURCE",
+        "chat_id": "OPENARTISAN_CONTINUE_CHAT_ID",
+        "thread_id": "OPENARTISAN_CONTINUE_THREAD_ID",
+        "user_id": "OPENARTISAN_CONTINUE_USER_ID",
+        "message_id": "OPENARTISAN_CONTINUE_MESSAGE_ID",
+        "session_origin": "OPENARTISAN_CONTINUE_SESSION_ORIGIN",
+    }
+    for key, env_name in env_fallbacks.items():
+        value = kwargs.get(key)
+        if value is None:
+            value = os.environ.get(env_name)
+        if value is not None:
+            context[key] = value
+    return context
+
+
 def _resolve_agent_name(kwargs: dict[str, Any]) -> str:
     agent = kwargs.get("agent")
     if isinstance(agent, str) and agent.strip():
@@ -140,9 +184,19 @@ def _resolve_agent_name(kwargs: dict[str, Any]) -> str:
     return _DEFAULT_AGENT
 
 
+def _format_missing_fields_suffix(outcome: dict[str, Any]) -> str:
+    missing_fields = outcome.get("missingFields")
+    if not isinstance(missing_fields, list):
+        return ""
+
+    normalized_fields = [field for field in missing_fields if isinstance(field, str) and field]
+    if not normalized_fields:
+        return ""
+
+    return f"; missing fields: {', '.join(normalized_fields)}"
+
+
 def _should_attempt_autonomous_continue(kwargs: dict[str, Any]) -> bool:
-    if kwargs.get("platform") not in (None, "cli"):
-        return False
     if kwargs.get("completed") is False:
         return False
     if bool(kwargs.get("interrupted")):
@@ -167,49 +221,6 @@ def _get_idle_decision(
     return result if isinstance(result, dict) else None
 
 
-def _resolve_hermes_command() -> str | None:
-    env_cli = os.environ.get("OPENARTISAN_HERMES_CLI")
-    if env_cli:
-        return env_cli
-    return shutil.which("hermes")
-
-
-def _launch_session_resume(session_id: str, project_dir: str, message: str) -> bool:
-    hermes_cli = _resolve_hermes_command()
-    if not hermes_cli:
-        logger.warning(
-            "Cannot launch autonomous continuation for session %s: Hermes CLI not found",
-            session_id,
-        )
-        return False
-
-    command = [
-        hermes_cli,
-        "chat",
-        "--resume",
-        session_id,
-        "--quiet",
-        "--query",
-        message,
-    ]
-
-    try:
-        subprocess.Popen(
-            command,
-            cwd=project_dir,
-            stdin=subprocess.DEVNULL,
-            start_new_session=True,
-        )
-        return True
-    except Exception as e:
-        logger.warning(
-            "Failed to launch Hermes resume for session %s: %s",
-            session_id,
-            e,
-        )
-        return False
-
-
 def _detach_session(bridge: BridgeClient, session_id: str, project_dir: str) -> None:
     try:
         bridge.call("lifecycle.sessionDeleted", {"sessionId": session_id})
@@ -218,5 +229,5 @@ def _detach_session(bridge: BridgeClient, session_id: str, project_dir: str) -> 
 
     try:
         bridge.clear_session(session_id, project_dir)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("bridge.clear_session failed for session %s: %s", session_id, e)

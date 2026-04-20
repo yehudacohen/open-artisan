@@ -8,6 +8,7 @@ guard enforcement → phase progression. Also tests resume after crash.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 import socket
@@ -203,10 +204,31 @@ class TestSessionLifecycle:
         assert len(clear_calls) == 1
         assert clear_calls[0][1]["sessionId"] == mock_ctx.session_id
 
-    def test_session_end_resumes_runnable_cli_session(
-        self, mock_ctx, mock_bridge, monkeypatch
+    def test_build_session_context_falls_back_to_continuation_environment(self, monkeypatch):
+        monkeypatch.setenv("OPENARTISAN_CONTINUE_PLATFORM", "telegram")
+        monkeypatch.setenv("OPENARTISAN_CONTINUE_SOURCE", "gateway")
+        monkeypatch.setenv("OPENARTISAN_CONTINUE_CHAT_ID", "-100500")
+        monkeypatch.setenv("OPENARTISAN_CONTINUE_THREAD_ID", "77")
+        monkeypatch.setenv("OPENARTISAN_CONTINUE_USER_ID", "1234")
+        monkeypatch.setenv("OPENARTISAN_CONTINUE_MESSAGE_ID", "999")
+        monkeypatch.setenv("OPENARTISAN_CONTINUE_SESSION_ORIGIN", "telegram:-100500:77")
+
+        from hermes_adapter import _build_session_context
+
+        assert _build_session_context({}) == {
+            "platform": "telegram",
+            "source": "gateway",
+            "chat_id": "-100500",
+            "thread_id": "77",
+            "user_id": "1234",
+            "message_id": "999",
+            "session_origin": "telegram:-100500:77",
+        }
+
+    def test_session_end_delegates_cli_reprompt_through_continuation_helpers(
+        self, mock_ctx, mock_bridge
     ):
-        """Runnable non-gated workflows should re-enter Hermes automatically."""
+        """Runnable CLI continuation should flow through structured continuation helpers."""
         mock_bridge.start(mock_ctx.project_dir)
         mock_bridge.set_response(
             "idle.check",
@@ -217,9 +239,26 @@ class TestSessionLifecycle:
             },
         )
         mock_bridge.set_response("lifecycle.sessionDeleted", None)
-        monkeypatch.setenv("OPENARTISAN_HERMES_CLI", "/usr/local/bin/hermes")
 
-        with patch("hermes_adapter.subprocess.Popen") as popen:
+        with (
+            patch(
+                "hermes_adapter.continuation.build_continuation_request",
+                return_value={
+                    "sessionId": mock_ctx.session_id,
+                    "surface": {"kind": "direct_cli", "platform": "cli"},
+                    "message": "Continue with the next ready Open Artisan task.",
+                },
+            ) as build_request,
+            patch(
+                "hermes_adapter.continuation.execute_continuation",
+                return_value={
+                    "kind": "continued",
+                    "strategy": "direct_runner",
+                    "sessionId": mock_ctx.session_id,
+                    "detail": "continued in-process",
+                },
+            ) as execute_continuation,
+        ):
             _on_session_end(
                 mock_ctx,
                 mock_bridge,
@@ -227,34 +266,139 @@ class TestSessionLifecycle:
                 completed=True,
                 interrupted=False,
                 platform="cli",
+                source="terminal",
             )
 
-        popen.assert_called_once()
-        command = popen.call_args.args[0]
-        assert command == [
-            "/usr/local/bin/hermes",
-            "chat",
-            "--resume",
-            mock_ctx.session_id,
-            "--quiet",
-            "--query",
-            "Continue with the next ready Open Artisan task.",
-        ]
-        assert mock_bridge.is_alive
+        build_request.assert_called_once()
+        execute_continuation.assert_called_once()
         assert mock_bridge.get_calls("idle.check") == [
             ("idle.check", {"sessionId": mock_ctx.session_id})
         ]
+        assert mock_bridge.is_alive
 
-    def test_session_end_does_not_resume_at_user_gate(
-        self, mock_ctx, mock_bridge, monkeypatch
+    def test_session_end_gateway_reprompt_uses_gateway_handoff_strategy(
+        self, mock_ctx, mock_bridge
     ):
-        """Real stop conditions should shut down instead of re-invoking Hermes."""
+        """Messaging-originated reprompts should flow through gateway handoff semantics."""
+        mock_bridge.start(mock_ctx.project_dir)
+        mock_bridge.set_response(
+            "idle.check",
+            {
+                "action": "reprompt",
+                "message": "Continue with the next ready Open Artisan task.",
+            },
+        )
+        mock_bridge.set_response("lifecycle.sessionDeleted", None)
+
+        with (
+            patch(
+                "hermes_adapter.continuation.build_continuation_request",
+                return_value={
+                    "sessionId": mock_ctx.session_id,
+                    "surface": {"kind": "gateway_messaging", "platform": "telegram"},
+                    "gatewayRouting": {
+                        "platform": "telegram",
+                        "chatId": "-100500",
+                        "threadId": "77",
+                        "userId": "1234",
+                        "messageId": "999",
+                        "sessionOrigin": "telegram:-100500:77",
+                    },
+                    "message": "Continue with the next ready Open Artisan task.",
+                },
+            ) as build_request,
+            patch(
+                "hermes_adapter.continuation.execute_continuation",
+                return_value={
+                    "kind": "handoff_requested",
+                    "strategy": "gateway_handoff",
+                    "sessionId": mock_ctx.session_id,
+                    "detail": "queued for gateway delivery",
+                },
+            ) as execute_continuation,
+        ):
+            _on_session_end(
+                mock_ctx,
+                mock_bridge,
+                session_id=mock_ctx.session_id,
+                completed=True,
+                interrupted=False,
+                platform="telegram",
+                source="gateway",
+                chat_id="-100500",
+                thread_id="77",
+                user_id="1234",
+                message_id="999",
+                session_origin="telegram:-100500:77",
+            )
+
+        build_request.assert_called_once()
+        execute_continuation.assert_called_once()
+        assert mock_bridge.is_alive
+
+    def test_session_end_gateway_blocked_outcome_shuts_down_truthfully(
+        self, mock_ctx, mock_bridge, caplog
+    ):
+        """Blocked gateway continuation should log/stop instead of pretending delivery happened."""
+        mock_bridge.start(mock_ctx.project_dir)
+        mock_bridge.set_response(
+            "idle.check",
+            {
+                "action": "reprompt",
+                "message": "Continue with the next ready Open Artisan task.",
+            },
+        )
+        mock_bridge.set_response("lifecycle.sessionDeleted", None)
+
+        with (
+            patch(
+                "hermes_adapter.continuation.build_continuation_request",
+                return_value={
+                    "sessionId": mock_ctx.session_id,
+                    "surface": {"kind": "gateway_messaging", "platform": "telegram"},
+                    "message": "Continue with the next ready Open Artisan task.",
+                },
+            ) as build_request,
+            patch(
+                "hermes_adapter.continuation.execute_continuation",
+                return_value={
+                    "kind": "blocked",
+                    "strategy": "none",
+                    "sessionId": mock_ctx.session_id,
+                    "detail": "missing gateway routing metadata",
+                    "missingFields": ["chatId", "threadId", "userId", "messageId", "sessionOrigin"],
+                },
+            ) as execute_continuation,
+            caplog.at_level(logging.WARNING),
+        ):
+            _on_session_end(
+                mock_ctx,
+                mock_bridge,
+                session_id=mock_ctx.session_id,
+                completed=True,
+                interrupted=False,
+                platform="telegram",
+                source="gateway",
+            )
+
+        build_request.assert_called_once()
+        execute_continuation.assert_called_once()
+        assert not mock_bridge.is_alive
+        assert "missing fields: chatId, threadId, userId, messageId, sessionOrigin" in caplog.text
+
+    def test_session_end_clear_session_failure_is_logged_not_silently_swallowed(
+        self, mock_ctx, mock_bridge, caplog
+    ):
+        """clear_session failures should be logged for diagnosis instead of silently swallowed."""
         mock_bridge.start(mock_ctx.project_dir)
         mock_bridge.set_response("idle.check", {"action": "ignore"})
         mock_bridge.set_response("lifecycle.sessionDeleted", None)
-        monkeypatch.setenv("OPENARTISAN_HERMES_CLI", "/usr/local/bin/hermes")
 
-        with patch("hermes_adapter.subprocess.Popen") as popen:
+        with patch.object(
+            mock_bridge,
+            "clear_session",
+            side_effect=RuntimeError("clear failed"),
+        ), caplog.at_level(logging.DEBUG):
             _on_session_end(
                 mock_ctx,
                 mock_bridge,
@@ -264,17 +408,76 @@ class TestSessionLifecycle:
                 platform="cli",
             )
 
-        popen.assert_not_called()
+        assert "bridge.clear_session failed for session test-session: clear failed" in caplog.text
+        assert not mock_bridge.is_alive
+
+    def test_session_end_continuation_failure_does_not_crash_lifecycle(
+        self, mock_ctx, mock_bridge
+    ):
+        """Continuation helper failures should degrade gracefully to normal shutdown."""
+        mock_bridge.start(mock_ctx.project_dir)
+        mock_bridge.set_response(
+            "idle.check",
+            {
+                "action": "reprompt",
+                "message": "Continue with the next ready Open Artisan task.",
+            },
+        )
+        mock_bridge.set_response("lifecycle.sessionDeleted", None)
+
+        with patch(
+            "hermes_adapter.continuation.build_continuation_request",
+            side_effect=RuntimeError("boom"),
+        ) as build_request:
+            _on_session_end(
+                mock_ctx,
+                mock_bridge,
+                session_id=mock_ctx.session_id,
+                completed=True,
+                interrupted=False,
+                platform="cli",
+                source="terminal",
+            )
+
+        build_request.assert_called_once()
+        assert not mock_bridge.is_alive
+
+    def test_session_end_does_not_resume_at_user_gate(
+        self, mock_ctx, mock_bridge
+    ):
+        """Real stop conditions should shut down instead of invoking continuation helpers."""
+        mock_bridge.start(mock_ctx.project_dir)
+        mock_bridge.set_response("idle.check", {"action": "ignore"})
+        mock_bridge.set_response("lifecycle.sessionDeleted", None)
+
+        with (
+            patch("hermes_adapter.continuation.build_continuation_request") as build_request,
+            patch("hermes_adapter.continuation.execute_continuation") as execute_continuation,
+        ):
+            _on_session_end(
+                mock_ctx,
+                mock_bridge,
+                session_id=mock_ctx.session_id,
+                completed=True,
+                interrupted=False,
+                platform="cli",
+            )
+
+        build_request.assert_not_called()
+        execute_continuation.assert_not_called()
         assert not mock_bridge.is_alive
 
     def test_session_end_skips_autonomous_resume_for_interrupted_turn(
         self, mock_ctx, mock_bridge
     ):
-        """User-interrupted turns should not spawn a new autonomous run."""
+        """User-interrupted turns should not invoke continuation helpers."""
         mock_bridge.start(mock_ctx.project_dir)
         mock_bridge.set_response("lifecycle.sessionDeleted", None)
 
-        with patch("hermes_adapter.subprocess.Popen") as popen:
+        with (
+            patch("hermes_adapter.continuation.build_continuation_request") as build_request,
+            patch("hermes_adapter.continuation.execute_continuation") as execute_continuation,
+        ):
             _on_session_end(
                 mock_ctx,
                 mock_bridge,
@@ -284,7 +487,8 @@ class TestSessionLifecycle:
                 platform="cli",
             )
 
-        popen.assert_not_called()
+        build_request.assert_not_called()
+        execute_continuation.assert_not_called()
         assert mock_bridge.get_calls("idle.check") == []
         assert not mock_bridge.is_alive
 

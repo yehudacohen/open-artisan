@@ -8,9 +8,13 @@ runtime implementation.
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import pytest
 
 from hermes_adapter.continuation import (
+    NativeSessionDirectContinuationRunner,
+    GatewayBackgroundContinuationHandoff,
     build_continuation_request,
     classify_continuation_surface,
     execute_continuation,
@@ -191,6 +195,79 @@ class TestContinuationStrategyResolution:
 
 
 class TestContinuationExecution:
+    def test_native_direct_runner_launches_sync_session_worker(self, monkeypatch) -> None:
+        runner = NativeSessionDirectContinuationRunner()
+        request = {
+            "sessionId": "ses-native",
+            "projectDir": "/tmp/project",
+            "message": "Continue with the next task.",
+            "surface": {"kind": "direct_cli", "platform": "cli"},
+            "rawSessionContext": {"platform": "cli", "source": "terminal"},
+        }
+
+        monkeypatch.setattr("hermes_adapter.continuation._resolve_python_command", lambda: "/usr/bin/python3")
+
+        with patch("hermes_adapter.continuation.subprocess.Popen") as popen:
+            outcome = runner.run(request)
+
+        assert outcome == {
+            "kind": "continued",
+            "strategy": "direct_runner",
+            "sessionId": "ses-native",
+            "detail": "Launched Hermes native session continuation worker",
+        }
+        popen.assert_called_once()
+        command = popen.call_args.args[0]
+        assert command[:2] == ["/usr/bin/python3", "-c"]
+        assert "AIAgent" in command[2]
+        assert "SessionDB" in command[2]
+        assert "run_conversation" in command[2]
+        assert "hermes chat --resume" not in command[2]
+
+    def test_gateway_handoff_launches_gateway_worker_with_routing_context(self, monkeypatch) -> None:
+        handoff = GatewayBackgroundContinuationHandoff()
+        request = {
+            "sessionId": "ses-gateway",
+            "projectDir": "/tmp/project",
+            "message": "Continue with the next task.",
+            "surface": {"kind": "gateway_messaging", "platform": "telegram"},
+            "gatewayRouting": {
+                "platform": "telegram",
+                "chatId": "-100500",
+                "threadId": "77",
+                "userId": "1234",
+                "messageId": "999",
+                "sessionOrigin": "telegram:-100500:77",
+            },
+            "rawSessionContext": {
+                "platform": "telegram",
+                "source": "gateway",
+            },
+        }
+
+        monkeypatch.setattr("hermes_adapter.continuation._resolve_python_command", lambda: "/usr/bin/python3")
+
+        with patch("hermes_adapter.continuation.subprocess.Popen") as popen:
+            outcome = handoff.handoff(request)
+
+        assert outcome == {
+            "kind": "handoff_requested",
+            "strategy": "gateway_handoff",
+            "sessionId": "ses-gateway",
+            "detail": "Launched telegram gateway continuation worker",
+        }
+        popen.assert_called_once()
+        command = popen.call_args.args[0]
+        env = popen.call_args.kwargs["env"]
+        assert command[:2] == ["/usr/bin/python3", "-c"]
+        assert "GatewayRunner" in command[2]
+        assert "SessionSource" in command[2]
+        assert env["OPENARTISAN_CONTINUE_CHAT_ID"] == "-100500"
+        assert env["OPENARTISAN_CONTINUE_THREAD_ID"] == "77"
+        assert env["OPENARTISAN_CONTINUE_USER_ID"] == "1234"
+        assert env["OPENARTISAN_CONTINUE_MESSAGE_ID"] == "999"
+        assert env["OPENARTISAN_CONTINUE_SESSION_ORIGIN"] == "telegram:-100500:77"
+
     def test_execute_continuation_dispatches_direct_runner(self) -> None:
         request = {
             "sessionId": "ses-4",

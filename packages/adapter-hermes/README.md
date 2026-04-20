@@ -181,9 +181,13 @@ The prompt is rebuilt from scratch each turn — no stale state.
 ### Session Lifecycle
 
 - `on_session_start` hook → `bridge.call("lifecycle.sessionCreated", {"sessionId": ..., "agent": ...})`
-- `on_session_end` hook first asks bridge `idle.check` whether the workflow should continue
-- runnable CLI sessions auto-resume the same Hermes session with the bridge-provided continuation prompt
+- `on_session_end` first asks bridge `idle.check` whether the workflow should continue
+- if `idle.check` returns `reprompt`, the adapter builds a structured continuation request and routes it through `hermes_adapter.continuation`
+- direct CLI sessions now use `NativeSessionDirectContinuationRunner`, which launches a Hermes-native continuation worker that restores the existing session through `SessionDB`, constructs `AIAgent`, and calls `run_conversation(...)` with the bridge-provided continuation prompt
+- messaging-originated sessions now use `GatewayBackgroundContinuationHandoff`, which launches a gateway-owned continuation worker with the originating routing context so delivery happens through the real Hermes gateway adapter path; if required routing metadata is missing, the adapter returns a truthful `blocked` outcome with `missingFields`
+- `/background` remains a separate Hermes background session primitive; it is not same-session Open Artisan continuation
 - real stop conditions (`USER_GATE`, unresolved human gates, explicit interruption, escalation, DONE) detach the session and stop normally
+- `pre_llm_call` remains observational/per-turn context injection; it is not the continuation trigger
 - Session ID comes from Hermes's `session_id` kwarg on hook callbacks
 
 ## Self-Review Mode
@@ -350,6 +354,7 @@ packages/adapter-hermes/
   hermes_adapter/
     __init__.py          register(ctx) entry point
     bridge_client.py     JSON-RPC stdio subprocess transport
+    continuation.py      Continuation request/strategy helpers + runner/handoff implementations
     workflow_tools.py    13 workflow tool registrations + oa_state
     guard_wrappers.py    Wrapper tools for file-write enforcement
     prompt_hook.py       pre_llm_call -> prompt.build injection
@@ -363,6 +368,7 @@ packages/adapter-hermes/
     test_workflow_tools.py
     test_guard_wrappers.py
     test_prompt_hook.py
+    test_continuation.py
     test_integration.py
 ```
 

@@ -10,7 +10,7 @@
 import { dirname, join } from "node:path"
 import { existsSync, readdirSync, lstatSync } from "node:fs"
 import { open, writeFile, readFile, mkdir, unlink } from "node:fs/promises"
-import { validateRoadmapDocument, type RoadmapDocument, type RoadmapResult, type RoadmapStateBackend, type StateBackend } from "./types"
+import { roadmapError, roadmapOk, validateRoadmapDocument, type RoadmapDocument, type RoadmapResult, type RoadmapStateBackend, type StateBackend } from "./types"
 import { LOCK_TIMEOUT_MS, LOCK_POLL_MS } from "./constants"
 
 const STATE_FILE = "workflow-state.json"
@@ -100,27 +100,6 @@ export async function acquireFileLock(
       // Poll
       await new Promise((resolve) => setTimeout(resolve, pollMs))
     }
-  }
-}
-
-function roadmapOk<T>(value: T): RoadmapResult<T> {
-  return { ok: true, value }
-}
-
-function roadmapError(
-  code: "not-found" | "invalid-document" | "invalid-slice" | "schema-mismatch" | "lock-timeout" | "storage-failure",
-  message: string,
-  retryable: boolean,
-  details?: Record<string, unknown>,
-): RoadmapResult<never> {
-  return {
-    ok: false,
-    error: {
-      code,
-      message,
-      retryable,
-      ...(details ? { details } : {}),
-    },
   }
 }
 

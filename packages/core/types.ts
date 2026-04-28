@@ -617,6 +617,27 @@ export type RoadmapResult<T> =
   | { ok: true; value: T }
   | { ok: false; error: RoadmapError }
 
+export function roadmapOk<T>(value: T): RoadmapResult<T> {
+  return { ok: true, value }
+}
+
+export function roadmapError(
+  code: RoadmapErrorCode,
+  message: string,
+  retryable: boolean,
+  details?: RoadmapError["details"],
+): RoadmapResult<never> {
+  return {
+    ok: false,
+    error: {
+      code,
+      message,
+      retryable,
+      ...(details ? { details } : {}),
+    },
+  }
+}
+
 export interface RoadmapItem {
   id: string
   kind: RoadmapItemKind
@@ -699,6 +720,15 @@ export interface RoadmapQuery {
   statuses?: RoadmapItemStatus[]
   featureName?: string
   minPriority?: number
+}
+
+export function matchesRoadmapQuery(item: RoadmapItem, query: RoadmapQuery): boolean {
+  if (query.itemIds && !query.itemIds.includes(item.id)) return false
+  if (query.kinds && !query.kinds.includes(item.kind)) return false
+  if (query.statuses && !query.statuses.includes(item.status)) return false
+  if (query.featureName !== undefined && item.featureName !== query.featureName) return false
+  if (query.minPriority !== undefined && item.priority < query.minPriority) return false
+  return true
 }
 
 export interface DerivedExecutionSlice {

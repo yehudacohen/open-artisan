@@ -11,38 +11,14 @@ import type {
   RoadmapEdge,
   RoadmapItem,
   RoadmapQuery,
+  RoadmapRepository,
   RoadmapResult,
   RoadmapSliceService,
   RoadmapStateBackend,
 } from "./types"
+import { roadmapError, roadmapOk } from "./types"
 
-function roadmapOk<T>(value: T): RoadmapResult<T> {
-  return { ok: true, value }
-}
-
-function roadmapError(
-  message: string,
-  details?: { itemId?: string },
-): RoadmapResult<never> {
-  return {
-    ok: false,
-    error: {
-      code: "invalid-slice",
-      message,
-      retryable: false,
-      ...(details ? { details } : {}),
-    },
-  }
-}
-
-function matchesQuery(item: RoadmapItem, query: RoadmapQuery): boolean {
-  if (query.itemIds && !query.itemIds.includes(item.id)) return false
-  if (query.kinds && !query.kinds.includes(item.kind)) return false
-  if (query.statuses && !query.statuses.includes(item.status)) return false
-  if (query.featureName !== undefined && item.featureName !== query.featureName) return false
-  if (query.minPriority !== undefined && item.priority < query.minPriority) return false
-  return true
-}
+type RoadmapQuerySource = Pick<RoadmapRepository, "queryRoadmapItems">
 
 function deriveSlice(
   document: RoadmapDocument,
@@ -50,7 +26,7 @@ function deriveSlice(
   featureName?: string,
 ): RoadmapResult<DerivedExecutionSlice> {
   if (roadmapItemIds.length === 0) {
-    return roadmapError("deriveExecutionSlice requires at least one roadmap item id")
+    return roadmapError("invalid-slice", "deriveExecutionSlice requires at least one roadmap item id", false)
   }
 
   const itemsById = new Map(document.items.map((item) => [item.id, item]))
@@ -59,7 +35,7 @@ function deriveSlice(
   for (const itemId of roadmapItemIds) {
     const item = itemsById.get(itemId)
     if (!item) {
-      return roadmapError(`Unknown roadmap item id: ${itemId}`, { itemId })
+      return roadmapError("invalid-slice", `Unknown roadmap item id: ${itemId}`, false, { itemId })
     }
     roadmapItems.push(item)
   }
@@ -83,24 +59,18 @@ async function loadRoadmapDocument(
   const result = await roadmapBackend.readRoadmap()
   if (!result.ok) return result
   if (result.value === null) {
-    return {
-      ok: false,
-      error: {
-        code: "not-found",
-        message: "No roadmap document exists",
-        retryable: false,
-      },
-    }
+    return roadmapError("not-found", "No roadmap document exists", false)
   }
   return roadmapOk(result.value)
 }
 
-export function createRoadmapSliceService(roadmapBackend: RoadmapStateBackend): RoadmapSliceService {
+export function createRoadmapSliceService(
+  roadmapBackend: RoadmapStateBackend,
+  roadmapQuerySource: RoadmapQuerySource,
+): RoadmapSliceService {
   return {
     async queryRoadmap(query: RoadmapQuery): Promise<RoadmapResult<RoadmapItem[]>> {
-      const document = await loadRoadmapDocument(roadmapBackend)
-      if (!document.ok) return document
-      return roadmapOk(document.value.items.filter((item) => matchesQuery(item, query)))
+      return roadmapQuerySource.queryRoadmapItems(query)
     },
 
     async deriveExecutionSlice(input: {

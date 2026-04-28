@@ -19,7 +19,7 @@ import { JSONRPCErrorException } from "json-rpc-2.0"
 import type { MethodHandler, BridgeContext } from "../server"
 import type { ToolExecuteParams } from "../protocol"
 import { SESSION_NOT_FOUND, INVALID_PARAMS } from "../protocol"
-import type { WorkflowState } from "../../core/types"
+import type { ArtifactKey, WorkflowState } from "../../core/types"
 
 import { createHash } from "node:crypto"
 import { resolve } from "node:path"
@@ -30,6 +30,7 @@ import { processMarkScanComplete } from "../../core/tools/mark-scan-complete"
 import { processMarkTaskComplete } from "../../core/tools/mark-task-complete"
 import { buildTaskReviewPrompt, parseTaskReviewResult } from "../../core/task-review"
 import type { AdjacentTask } from "../../core/task-review"
+import { buildReviewPrompt, parseReviewResult } from "../../core/self-review"
 import { MAX_TASK_REVIEW_ITERATIONS } from "../../core/constants"
 import { processQueryParentWorkflow, processQueryChildWorkflow } from "../../core/tools/query-workflow"
 import {
@@ -56,8 +57,13 @@ import {
 import { activateHumanGateTasks, resolveAwaitingHumanState } from "../../core/human-gate-policy"
 import { buildWorkflowSwitchMessage, parkCurrentWorkflowSession } from "../../core/session-switch"
 import { createPGliteRoadmapStateBackend } from "../../core/roadmap-state-backend-pglite"
+import { createPGliteRoadmapRepository } from "../../core/roadmap-repository-pglite"
 import { createRoadmapSliceService } from "../../core/roadmap-slice-service"
 import type { RoadmapQuery, RoadmapServiceFactoryOptions } from "../../core/types"
+import { getAcceptanceCriteria } from "../../core/hooks/system-transform"
+import { resolveArtifactPaths } from "../../core/tools/artifact-paths"
+import { extractJsonFromText } from "../../core/utils"
+import { countExpectedBlockingCriteria } from "../../core/tools/mark-satisfied"
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -82,9 +88,11 @@ function createRoadmapServices(stateDir: string) {
       },
     },
   }
-  const roadmapBackend = createPGliteRoadmapStateBackend(stateDir, roadmapOptions.persistence.pglite!)
-  const roadmapService = createRoadmapSliceService(roadmapBackend)
-  return { roadmapBackend, roadmapService }
+  const pgliteOptions = roadmapOptions.persistence.pglite!
+  const roadmapRepository = createPGliteRoadmapRepository(pgliteOptions)
+  const roadmapBackend = createPGliteRoadmapStateBackend(stateDir, pgliteOptions, roadmapRepository)
+  const roadmapService = createRoadmapSliceService(roadmapBackend, roadmapRepository)
+  return { roadmapBackend, roadmapRepository, roadmapService }
 }
 
 function roadmapStorageFailure(message: string, retryable: boolean) {
@@ -117,6 +125,24 @@ function artifactHash(text: string): string {
   return createHash("sha256").update(text).digest("hex").slice(0, 16)
 }
 
+function buildApprovedArtifactMarker(
+  state: WorkflowState,
+  artifactKey: ArtifactKey,
+  artifactContent?: string,
+  artifactDiskPath?: string | null,
+): string {
+  if (artifactContent) return artifactHash(artifactContent)
+  const diskPath = artifactDiskPath ?? state.artifactDiskPaths[artifactKey]
+  if (diskPath) {
+    try {
+      return artifactHash(readFileSync(diskPath, "utf-8"))
+    } catch {
+      // Fall through to timestamp marker if the artifact path is unavailable.
+    }
+  }
+  return `approved-at-${Date.now()}`
+}
+
 function buildRuntimeSchedulerDecision(state: {
   implDag: import("../../core/dag").TaskNode[] | null
   concurrency: { maxParallelTasks: number }
@@ -128,6 +154,22 @@ function buildRuntimeSchedulerDecision(state: {
       ? nextSchedulerDecision(input.dag)
       : evaluation.decision
   return { evaluation, fallbackDecision }
+}
+
+function formatSchedulerDecisionMessage(decision: ReturnType<typeof buildRuntimeSchedulerDecision>["fallbackDecision"]): string {
+  switch (decision.action) {
+    case "dispatch":
+      return decision.prompt
+    case "dispatch-batch":
+      return `Ready to dispatch ${decision.tasks.length} task(s).`
+    case "complete":
+    case "blocked":
+    case "awaiting-human":
+    case "error":
+      return decision.message
+    case "unsupported":
+      return `Unsupported scheduler decision: ${decision.reason}; fallback=${decision.fallback}.`
+  }
 }
 
 function buildTaskReviewPendingMessage(taskId: string, implementationSummary: string): string {
@@ -152,7 +194,7 @@ function buildTaskReviewResolvedMessage(
     return `**All DAG tasks complete.** ${fallbackDecision.message}`
   }
 
-  return `**${fallbackDecision.message}**`
+  return `**${formatSchedulerDecisionMessage(fallbackDecision)}**`
 }
 
 async function readCurrentArtifactHash(state: WorkflowState): Promise<string | null> {
@@ -222,6 +264,57 @@ function buildReviewContextForTask(
     artifactDiskPaths: state.artifactDiskPaths as Record<string, string>,
     ...(adjacentTasks.length > 0 ? { adjacentTasks } : {}),
   })
+}
+
+function buildPhaseReviewContext(
+  state: WorkflowState,
+  directory: string,
+): string | null {
+  if (state.phaseState !== "REVIEW") return null
+  const criteriaText = getAcceptanceCriteria(state.phase, state.phaseState, state.mode, state.artifactDiskPaths?.design ?? null)
+  if (!criteriaText) return null
+
+  const explicitReviewFiles = state.reviewArtifactFiles.map((p) =>
+    p.startsWith("/") ? p : resolve(directory, p)
+  )
+  const artifactPaths = explicitReviewFiles.length > 0
+    ? explicitReviewFiles
+    : resolveArtifactPaths(
+        state.phase,
+        state.mode,
+        directory,
+        state.fileAllowlist,
+        state.artifactDiskPaths,
+      )
+
+  const conventionsPath = state.artifactDiskPaths["conventions"]
+  const upstreamSummary = conventionsPath
+    ? `Conventions document is at \`${conventionsPath}\`. Read it before evaluating.`
+    : (state.conventions ?? undefined)
+
+  return buildReviewPrompt({
+    phase: state.phase,
+    mode: state.mode,
+    artifactPaths,
+    criteriaText,
+    ...(upstreamSummary ? { upstreamSummary } : {}),
+    featureName: state.featureName,
+    ...(state.intentBaseline ? { intentBaseline: state.intentBaseline } : {}),
+    ...(state.fileAllowlist.length > 0 ? { fileAllowlist: state.fileAllowlist } : {}),
+    ...(Object.keys(state.approvedArtifacts).length > 0 ? { approvedArtifacts: state.approvedArtifacts } : {}),
+    ...(Object.keys(state.artifactDiskPaths).length > 0 ? { artifactDiskPaths: state.artifactDiskPaths } : {}),
+  })
+}
+
+function buildReviewerFailureCriteria(state: WorkflowState, reason: string) {
+  const criteriaText = getAcceptanceCriteria(state.phase, state.phaseState, state.mode, state.artifactDiskPaths?.design ?? null)
+  const expectedCount = Math.max(countExpectedBlockingCriteria(criteriaText), 1)
+  return Array.from({ length: expectedCount }, (_, i) => ({
+    criterion: `Isolated reviewer failed to evaluate criterion ${i + 1}`,
+    met: false,
+    evidence: `Isolated phase review failed: ${reason}. The artifact must be revised or review infrastructure fixed before approval.`,
+    severity: "blocking" as const,
+  }))
 }
 
 // ---------------------------------------------------------------------------
@@ -663,7 +756,7 @@ const handleSubmitFeedback: ToolHandler = async (args, toolCtx, ctx) => {
         })
         return (
           `Resolved ${resolvedIds.length} human gate(s): ${resolvedIds.join(", ")}.\n\n` +
-          `However, the scheduler reports: ${nextDecision.message}`
+          `However, the scheduler reports: ${formatSchedulerDecisionMessage(nextDecision)}`
         )
       }
 
@@ -763,6 +856,9 @@ const handleSubmitFeedback: ToolHandler = async (args, toolCtx, ctx) => {
         approveArtifactPath = await writeArtifact(toolCtx.directory, approveArtifactKey, artifactContent, state.featureName)
       } catch { /* non-fatal */ }
     }
+    const approvedArtifactMarker = approveArtifactKey
+      ? buildApprovedArtifactMarker(state, approveArtifactKey, artifactContent, approveArtifactPath)
+      : null
 
     const phaseCount = (state.phaseApprovalCounts[state.phase] ?? 0) + 1
     await store.update(toolCtx.sessionId, (draft) => {
@@ -777,6 +873,9 @@ const handleSubmitFeedback: ToolHandler = async (args, toolCtx, ctx) => {
       draft.latestReviewResults = null
       if (approveArtifactPath && approveArtifactKey) {
         draft.artifactDiskPaths[approveArtifactKey] = approveArtifactPath
+      }
+      if (approveArtifactKey && approvedArtifactMarker) {
+        draft.approvedArtifacts[approveArtifactKey] = approvedArtifactMarker
       }
       // Capture conventions at DISCOVERY approval
       if (state.phase === "DISCOVERY" && artifactContent) {
@@ -1025,6 +1124,61 @@ const handleSubmitTaskReview: ToolHandler = async (args, toolCtx, ctx) => {
   )
 }
 
+// ---- submit_phase_review ----
+
+const handleSubmitPhaseReview: ToolHandler = async (args, toolCtx, ctx) => {
+  const { store } = ctx.engine!
+  const state = requireState(ctx, toolCtx.sessionId)
+
+  if (state.phaseState !== "REVIEW") {
+    return `Error: submit_phase_review can only be called in REVIEW state (current: ${state.phase}/${state.phaseState}).`
+  }
+
+  const reviewOutput = (args.review_output as string)?.trim()
+  if (!reviewOutput) {
+    return "Error: review_output is required. Pass the raw output from the isolated phase reviewer."
+  }
+
+  let rawCriteria: Array<{
+    criterion: string; met: boolean; evidence: string;
+    severity?: "blocking" | "suggestion" | "design-invariant"; score?: string | number
+  }>
+  if (reviewOutput.startsWith("ISOLATED_PHASE_REVIEW_FAILED:")) {
+    rawCriteria = buildReviewerFailureCriteria(state, reviewOutput)
+  } else try {
+    const parsed = parseReviewResult(extractJsonFromText(reviewOutput))
+    if (!parsed.success) {
+      rawCriteria = buildReviewerFailureCriteria(state, parsed.error)
+    } else {
+      rawCriteria = parsed.criteriaResults.map((criterion) => ({
+        criterion: criterion.criterion,
+        met: criterion.met,
+        evidence: criterion.evidence,
+        ...(criterion.severity ? { severity: criterion.severity } : {}),
+        ...(typeof criterion.score === "number" ? { score: criterion.score } : {}),
+      }))
+    }
+  } catch (err) {
+    rawCriteria = buildReviewerFailureCriteria(state, err instanceof Error ? err.message : String(err))
+  }
+
+  const result = computeMarkSatisfiedTransition(rawCriteria, state, ctx.engine!.sm)
+  if (!result.success) return `Error: ${result.error}`
+  const t = result.transition
+  await store.update(toolCtx.sessionId, (draft) => {
+    draft.phase = t.nextPhase
+    draft.phaseState = t.nextPhaseState
+    draft.iterationCount = t.nextIterationCount
+    draft.retryCount = 0
+    draft.latestReviewResults = t.latestReviewResults
+    if (t.clearReviewArtifactHash) draft.reviewArtifactHash = null
+    if (t.resetUserGateMessage) draft.userGateMessageReceived = false
+    if (t.clearRevisionBaseline) draft.revisionBaseline = null
+  })
+
+  return `Isolated phase review submitted. ${t.responseMessage}`
+}
+
 // ---- check_prior_workflow ----
 
 const handleCheckPriorWorkflow: ToolHandler = async (args, toolCtx, ctx) => {
@@ -1242,6 +1396,10 @@ const handleSubmitAutoApprove: ToolHandler = async (args, toolCtx, ctx) => {
   if (result.approve) {
     // Auto-approve: transition to next phase
     const phaseCount = (state.phaseApprovalCounts[state.phase] ?? 0) + 1
+    const autoArtifactKey = PHASE_TO_ARTIFACT[state.phase]
+    const autoArtifactMarker = autoArtifactKey
+      ? buildApprovedArtifactMarker(state, autoArtifactKey)
+      : null
     await store.update(toolCtx.sessionId, (draft) => {
       draft.phase = autoTransition.nextPhase
       draft.phaseState = autoTransition.nextPhaseState
@@ -1253,6 +1411,9 @@ const handleSubmitAutoApprove: ToolHandler = async (args, toolCtx, ctx) => {
       draft.reviewArtifactHash = null
       draft.latestReviewResults = null
       draft.reviewArtifactFiles = []
+      if (autoArtifactKey && autoArtifactMarker) {
+        draft.approvedArtifacts[autoArtifactKey] = autoArtifactMarker
+      }
     })
     return `Auto-approved (confidence: ${result.confidence.toFixed(2)}). Transitioning to ${autoTransition.nextPhase}/${autoTransition.nextPhaseState}.`
   }
@@ -1403,6 +1564,7 @@ const TOOL_HANDLERS: Record<string, ToolHandler> = {
   submit_feedback: handleSubmitFeedback,
   mark_task_complete: handleMarkTaskComplete,
   submit_task_review: handleSubmitTaskReview,
+  submit_phase_review: handleSubmitPhaseReview,
   submit_auto_approve: handleSubmitAutoApprove,
   reset_task: handleResetTask,
   check_prior_workflow: handleCheckPriorWorkflow,
@@ -1429,6 +1591,21 @@ export const handleTaskGetReviewContext: MethodHandler = async (params, ctx) => 
   if (!state || !state.taskCompletionInProgress) return null
 
   return buildReviewContextForTask(state, state.taskCompletionInProgress, ctx.projectDir ?? process.cwd())
+}
+
+// ---------------------------------------------------------------------------
+// task.getPhaseReviewContext — returns review prompt for phase-level review
+// ---------------------------------------------------------------------------
+
+export const handlePhaseGetReviewContext: MethodHandler = async (params, ctx) => {
+  const p = params as { sessionId?: string }
+  if (!p.sessionId) {
+    throw new JSONRPCErrorException("sessionId is required", INVALID_PARAMS)
+  }
+  const state = ctx.engine!.store.get(p.sessionId)
+  if (!state || state.phaseState !== "REVIEW") return null
+
+  return buildPhaseReviewContext(state, ctx.projectDir ?? process.cwd())
 }
 
 // ---------------------------------------------------------------------------

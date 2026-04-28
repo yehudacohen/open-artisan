@@ -9,6 +9,7 @@
     "#claude-code/*": "./packages/claude-code/*"
   },
   "scripts": {
+    "dogfood:discord": "bun run tools/discord-dogfood-harness.ts",
     "test": "bun test",
     "test:watch": "bun test --watch",
     "typecheck": "tsc --noEmit"

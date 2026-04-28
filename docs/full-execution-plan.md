@@ -261,14 +261,15 @@ Status update:
 
 **Goal:** move from isolated per-feature workflows to a continuous project roadmap graph.
 
-**Status:** first slice landed via `persistent-roadmap-dag`.
+**Status:** first slice landed via `persistent-roadmap-dag`; durable bridge-owned PGlite storage landed via `pglite-roadmap-backend`.
 
 **Landed in the first slice**
 
 1. Standalone roadmap contracts and DAG validation in core.
-2. Durable roadmap persistence in a separate filesystem namespace from workflow state (`roadmap/roadmap-state.json` with separate locking), preserving existing feature-based workflow resume behavior.
-3. A minimal roadmap slice service that can query roadmap items and derive an execution slice from selected roadmap item ids without mutating workflow execution state on failure.
-4. Narrow bridge-facing roadmap support through existing tool execution for:
+2. Durable roadmap persistence in a separate roadmap namespace from workflow state, preserving existing feature-based workflow resume behavior.
+3. A PGlite-backed bridge repository at `.openartisan/roadmap/bridge-pglite-db` with Kysely query wiring for roadmap item filtering.
+4. A minimal roadmap slice service that derives an execution slice from selected roadmap item ids without mutating workflow execution state on failure.
+5. Narrow bridge-facing roadmap support through existing tool execution for:
    - `roadmap_read`
    - `roadmap_query`
    - `roadmap_derive_execution_slice`
@@ -285,7 +286,7 @@ Status update:
 
 **Still deferred beyond this slice**
 
-1. Database-backed roadmap storage and migrations.
+1. Schema migrations beyond the current initialized PGlite schema.
 2. Broader bridge mutation APIs for create/update/reprioritize/grooming.
 3. Rich orchestration semantics beyond the first read/query/derive path.
 
@@ -299,20 +300,21 @@ Status update:
 
 **Goal:** make roadmap and shared state queryable and persistent.
 
-**Execution note:** this is the recommended next named feature after `persistent-roadmap-dag` completes.
+**Status:** the first durable local backend slice landed via `pglite-roadmap-backend`.
+
+**Execution note:** future work should build on the bridge-owned PGlite repository instead of reintroducing filesystem roadmap storage as the runtime query path.
 
 **Recommendation**
 
-- local-first database
-- SQLite
-- Drizzle or Kysely-style access layer
+- local-first database: PGlite under `.openartisan/roadmap/bridge-pglite-db`
+- Kysely-style access layer
 - bridge as authoritative local state/query surface
 
 **Work**
 
 1. Define schema for roadmap items, edges, priorities, status, provenance, timestamps.
-2. Add migrations.
-3. Add bridge-owned persistence/query layer.
+2. Add migrations beyond the current initialized schema.
+3. Continue hardening the bridge-owned persistence/query layer.
 
 **Acceptance criteria**
 

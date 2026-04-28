@@ -8,7 +8,7 @@ import {
   createFileSystemRoadmapStateBackend,
   createFileSystemStateBackend,
 } from "#core/state-backend-fs"
-import type { RoadmapDocument, RoadmapSliceService } from "#core/types"
+import { matchesRoadmapQuery, roadmapOk, type RoadmapDocument, type RoadmapSliceService } from "#core/types"
 
 const NOW = "2026-04-16T00:00:00.000Z"
 const tempDirs: string[] = []
@@ -77,9 +77,22 @@ function makeRoadmapDocument(overrides: Partial<RoadmapDocument> = {}): RoadmapD
 
 async function loadRoadmapSliceService(stateDir: string): Promise<RoadmapSliceService> {
   const module = await import("#core/roadmap-slice-service") as {
-    createRoadmapSliceService(roadmapBackend: ReturnType<typeof createFileSystemRoadmapStateBackend>): RoadmapSliceService
+    createRoadmapSliceService(
+      roadmapBackend: ReturnType<typeof createFileSystemRoadmapStateBackend>,
+      roadmapQuerySource: {
+        queryRoadmapItems(query: Parameters<RoadmapSliceService["queryRoadmap"]>[0]): ReturnType<RoadmapSliceService["queryRoadmap"]>
+      },
+    ): RoadmapSliceService
   }
-  return module.createRoadmapSliceService(createFileSystemRoadmapStateBackend(stateDir))
+  const roadmapBackend = createFileSystemRoadmapStateBackend(stateDir)
+  return module.createRoadmapSliceService(roadmapBackend, {
+    async queryRoadmapItems(query) {
+      const document = await roadmapBackend.readRoadmap()
+      if (!document.ok) return document
+      if (document.value === null) return roadmapOk([])
+      return roadmapOk(document.value.items.filter((item) => matchesRoadmapQuery(item, query)))
+    },
+  })
 }
 
 describe("roadmap slice service contracts", () => {

@@ -2068,6 +2068,17 @@ export interface SupportedExecutableSeamTestingContract {
   seamKind: SupportedExecutableSeamKind
   importPolicy: SupportedExecutableSeamImportPolicy
   suiteStyle: SupportedExecutableSeamSuiteStyle
+  /**
+   * When true, the generic workflow rule "tests import from interfaces, not implementations"
+   * is intentionally displaced by this seam's approved owner-module public runtime contract.
+   */
+  displacesGenericInterfaceOnlyRule?: boolean
+  /**
+   * When true, the generic TESTS-phase expectation that all reviewed tests be pure
+   * expected-failure/specification tests is intentionally displaced by an approved
+   * characterization/regression or mixed suite style for this seam.
+   */
+  displacesExpectedFailureOnlyRule?: boolean
   rationale: string
   alternativesConsidered: string[]
   tradeoffs: string[]
@@ -2083,6 +2094,10 @@ export interface SupportedExecutableSeamDescriptor {
   importPolicy?: SupportedExecutableSeamImportPolicy
   /** Approved TESTS-phase suite style for this seam. */
   suiteStyle?: SupportedExecutableSeamSuiteStyle
+  /** Whether this seam intentionally displaces the generic interface-only import rule. */
+  displacesGenericInterfaceOnlyRule?: boolean
+  /** Whether this seam intentionally displaces the generic expected-failure-only rule. */
+  displacesExpectedFailureOnlyRule?: boolean
   decision: string
   alternativesConsidered: string[]
   tradeoffs: string[]
@@ -2105,6 +2120,8 @@ export const SUPPORTED_EXECUTABLE_SEAM_DESCRIPTORS: readonly SupportedExecutable
     runtimeCoverageExpectedAt: "TESTS",
     importPolicy: "owner-module-public-runtime-contract",
     suiteStyle: "mixed-characterization-and-target-state",
+    displacesGenericInterfaceOnlyRule: true,
+    displacesExpectedFailureOnlyRule: true,
     decision: "Exercise the real FSM owner module because structural-state legality is itself the public runtime contract.",
     alternativesConsidered: ["interface-only helper assertions", "adapter-only integration coverage"],
     tradeoffs: ["couples tests to the shared runtime owner module", "catches illegal transition drift earlier"],
@@ -2117,6 +2134,8 @@ export const SUPPORTED_EXECUTABLE_SEAM_DESCRIPTORS: readonly SupportedExecutable
     runtimeCoverageExpectedAt: "TESTS",
     importPolicy: "owner-module-public-runtime-contract",
     suiteStyle: "mixed-characterization-and-target-state",
+    displacesGenericInterfaceOnlyRule: true,
+    displacesExpectedFailureOnlyRule: true,
     decision: "Tool legality is a runtime seam owned by the guard policy module, not a prose-only convention.",
     alternativesConsidered: ["prompt-only assertions", "implementation-phase-only verification"],
     tradeoffs: ["tests concrete policy outputs directly", "prevents silent phase-policy regressions"],
@@ -2129,6 +2148,8 @@ export const SUPPORTED_EXECUTABLE_SEAM_DESCRIPTORS: readonly SupportedExecutable
     runtimeCoverageExpectedAt: "TESTS",
     importPolicy: "owner-module-public-runtime-contract",
     suiteStyle: "characterization-regression",
+    displacesGenericInterfaceOnlyRule: true,
+    displacesExpectedFailureOnlyRule: true,
     decision: "File-based review submission is a public runtime contract and must remain executable through the request_review owner module.",
     alternativesConsidered: ["types-only contract checks"],
     tradeoffs: ["keeps review-source-of-truth behavior executable", "binds tests to the public owner module intentionally"],
@@ -2141,6 +2162,8 @@ export const SUPPORTED_EXECUTABLE_SEAM_DESCRIPTORS: readonly SupportedExecutable
     runtimeCoverageExpectedAt: "TESTS",
     importPolicy: "owner-module-public-runtime-contract",
     suiteStyle: "mixed-characterization-and-target-state",
+    displacesGenericInterfaceOnlyRule: true,
+    displacesExpectedFailureOnlyRule: true,
     decision: "Resume repair and validation are public structural seams because stale persisted state must recover truthfully.",
     alternativesConsidered: ["state-machine-only tests"],
     tradeoffs: ["covers persistence repair directly", "requires runtime fixture setup"],
@@ -2153,6 +2176,8 @@ export const SUPPORTED_EXECUTABLE_SEAM_DESCRIPTORS: readonly SupportedExecutable
     runtimeCoverageExpectedAt: "TESTS",
     importPolicy: "owner-module-public-runtime-contract",
     suiteStyle: "characterization-regression",
+    displacesGenericInterfaceOnlyRule: true,
+    displacesExpectedFailureOnlyRule: true,
     decision: "Scheduler parallelism/isolation is an executable contract and must be locked by runtime tests.",
     alternativesConsidered: ["single-threaded helper tests only"],
     tradeoffs: ["requires concurrency-sensitive assertions", "catches slot/isolation regressions"],
@@ -2165,6 +2190,8 @@ export const SUPPORTED_EXECUTABLE_SEAM_DESCRIPTORS: readonly SupportedExecutable
     runtimeCoverageExpectedAt: "TESTS",
     importPolicy: "owner-module-public-runtime-contract",
     suiteStyle: "mixed-characterization-and-target-state",
+    displacesGenericInterfaceOnlyRule: true,
+    displacesExpectedFailureOnlyRule: true,
     decision: "Bridge JSON-RPC/runtime wiring is an approved executable seam for parity testing.",
     alternativesConsidered: ["core-only tests", "OpenCode-only tests"],
     tradeoffs: ["tests bridge handler owners directly", "makes adapter parity drift visible"],
@@ -2177,6 +2204,8 @@ export const SUPPORTED_EXECUTABLE_SEAM_DESCRIPTORS: readonly SupportedExecutable
     runtimeCoverageExpectedAt: "TESTS",
     importPolicy: "owner-module-public-runtime-contract",
     suiteStyle: "mixed-characterization-and-target-state",
+    displacesGenericInterfaceOnlyRule: true,
+    displacesExpectedFailureOnlyRule: true,
     decision: "Hermes immediate continuation is an adapter-owned public seam and must be covered through the adapter runtime path.",
     alternativesConsidered: ["bridge idle tests only"],
     tradeoffs: ["Python adapter tests are required", "captures transport-specific continuation truth"],
@@ -2189,6 +2218,8 @@ export const SUPPORTED_EXECUTABLE_SEAM_DESCRIPTORS: readonly SupportedExecutable
     runtimeCoverageExpectedAt: "TESTS",
     importPolicy: "owner-module-public-runtime-contract",
     suiteStyle: "characterization-regression",
+    displacesGenericInterfaceOnlyRule: true,
+    displacesExpectedFailureOnlyRule: true,
     decision: "Claude hook gating is a public adapter seam whose runtime behavior must stay aligned with shared workflow meaning.",
     alternativesConsidered: ["bridge-only parity tests"],
     tradeoffs: ["exercises hook owners directly", "keeps Claude parity visible despite different runtime model"],
@@ -2201,6 +2232,8 @@ export const SUPPORTED_EXECUTABLE_SEAM_DESCRIPTORS: readonly SupportedExecutable
     runtimeCoverageExpectedAt: "TESTS",
     importPolicy: "owner-module-public-runtime-contract",
     suiteStyle: "mixed-characterization-and-target-state",
+    displacesGenericInterfaceOnlyRule: true,
+    displacesExpectedFailureOnlyRule: true,
     decision: "Analyze/apply boundary revision is a public runtime seam spanning OpenCode and bridge entrypoints, not a private implementation detail.",
     alternativesConsidered: ["types-only argument tests", "implementation-phase-only verification"],
     tradeoffs: ["requires runtime fixture DAGs/allowlists", "prevents hidden ownership-regression gaps"],
@@ -2213,6 +2246,8 @@ export const SUPPORTED_EXECUTABLE_SEAM_DESCRIPTORS: readonly SupportedExecutable
     runtimeCoverageExpectedAt: "TESTS",
     importPolicy: "owner-module-public-runtime-contract",
     suiteStyle: "mixed-characterization-and-target-state",
+    displacesGenericInterfaceOnlyRule: true,
+    displacesExpectedFailureOnlyRule: true,
     decision: "Prompt/tool-legality consistency is a public workflow contract and must be asserted through the prompt-building owner module.",
     alternativesConsidered: ["manual prompt inspection", "tool-guard-only tests"],
     tradeoffs: ["tests prompt content concretely", "catches impossible-guidance regressions early"],

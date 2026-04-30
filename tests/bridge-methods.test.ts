@@ -376,16 +376,19 @@ describe("idle.check", () => {
     expect(result.retryCount).toBe(1)
   })
 
-  // Decision note: treat REDRAFT, SKIP_CHECK, CASCADE_CHECK, SCHEDULING, and TASK_REVISE
-  // as active non-gate states that should keep the workflow moving autonomously.
+  // Decision note: treat REDRAFT, SKIP_CHECK, CASCADE_CHECK, SCHEDULING, TASK_REVIEW,
+  // TASK_REVISE, and DELEGATED_WAIT as active non-gate states that should keep the
+  // workflow moving autonomously through the bridge idle seam.
   // Alternative considered: ignore idle in these states. Rejected because it would leave
-  // the workflow stalled during structural decision/revision work without a truthful gate.
+  // the workflow stalled during structural decision/revision/delegation work without a truthful gate.
   for (const [phase, phaseState] of [
     ["PLANNING", "REDRAFT"],
     ["INTERFACES", "SKIP_CHECK"],
     ["INTERFACES", "CASCADE_CHECK"],
     ["IMPLEMENTATION", "SCHEDULING"],
+    ["IMPLEMENTATION", "TASK_REVIEW"],
     ["IMPLEMENTATION", "TASK_REVISE"],
+    ["IMPLEMENTATION", "DELEGATED_WAIT"],
   ] as const) {
     it(`returns reprompt for ${phase}/${phaseState}`, async () => {
       await ctx.engine!.store.update("s1", (d) => {

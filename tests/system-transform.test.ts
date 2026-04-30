@@ -122,6 +122,18 @@ describe("buildWorkflowSystemPrompt — DRAFT sub-state", () => {
     expect(prompt).toContain("request_review")
   })
 
+  it("does not recommend submit_feedback outside USER_GATE or ESCAPE_HATCH", () => {
+    const prompt = buildWorkflowSystemPrompt(
+      makeState({
+        mode: "INCREMENTAL",
+        phase: "PLANNING",
+        phaseState: "DRAFT",
+        fileAllowlist: ["/project/src/allowed.ts"],
+      }),
+    )
+    expect(prompt).not.toContain("submit_feedback")
+  })
+
   it("instructs agents to resolve uncertainty with documented decisions", () => {
     const prompt = buildWorkflowSystemPrompt(makeState({ phaseState: "DRAFT" }))
     expect(prompt).toContain("Uncertainty Handling")
@@ -172,6 +184,17 @@ describe("buildWorkflowSystemPrompt — REVISE sub-state", () => {
   it("mentions request_review for after revision", () => {
     const prompt = buildWorkflowSystemPrompt(makeState({ phaseState: "REVISE" }))
     expect(prompt).toContain("request_review")
+  })
+
+  it("does not recommend submit_feedback while still in REVISE", () => {
+    const prompt = buildWorkflowSystemPrompt(
+      makeState({
+        mode: "INCREMENTAL",
+        phase: "INTERFACES",
+        phaseState: "REVISE",
+      }),
+    )
+    expect(prompt).not.toContain("submit_feedback")
   })
 
   it("forbids stopping when revision feedback leaves viable alternatives", () => {

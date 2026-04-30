@@ -107,26 +107,37 @@ describe("Tool policy — DISCOVERY/REVIEW allows .openartisan/ writes + bash fo
   })
 })
 
-describe("Tool policy — PLANNING and IMPL_PLAN block writes and bash", () => {
-  it("PLANNING/DRAFT blocks write, edit, bash", () => {
+describe("Tool policy — PLANNING and IMPL_PLAN DRAFT allow artifact writes only", () => {
+  it("PLANNING/DRAFT allows .openartisan/ writes but blocks bash", () => {
     const policy = getPhaseToolPolicy("PLANNING", "DRAFT", "GREENFIELD", [])
-    expect(policy.blocked).toContain("write")
-    expect(policy.blocked).toContain("edit")
+    expect(policy.blocked).not.toContain("write")
+    expect(policy.blocked).not.toContain("edit")
     expect(policy.blocked).toContain("bash")
+    expect(policy.writePathPredicate).toBeDefined()
+    expect(policy.writePathPredicate?.("/project/.openartisan/feature-x/plan.md")).toBe(true)
+    expect(policy.writePathPredicate?.("/project/src/index.ts")).toBe(false)
+    expect(policy.writePathPredicate?.("/project/.openartisan/.env")).toBe(false)
   })
 
-  it("IMPL_PLAN/DRAFT blocks write, edit, bash", () => {
+  it("IMPL_PLAN/DRAFT allows .openartisan/ writes but blocks bash", () => {
     const policy = getPhaseToolPolicy("IMPL_PLAN", "DRAFT", "GREENFIELD", [])
-    expect(policy.blocked).toContain("write")
-    expect(policy.blocked).toContain("edit")
+    expect(policy.blocked).not.toContain("write")
+    expect(policy.blocked).not.toContain("edit")
     expect(policy.blocked).toContain("bash")
+    expect(policy.writePathPredicate).toBeDefined()
+    expect(policy.writePathPredicate?.("/project/.openartisan/feature-x/impl-plan.md")).toBe(true)
+    expect(policy.writePathPredicate?.("/project/src/server.ts")).toBe(false)
+    expect(policy.writePathPredicate?.("/project/.openartisan/.env")).toBe(false)
   })
 
-  it("PLANNING/CONVENTIONS blocks write, edit, bash", () => {
+  it("PLANNING/CONVENTIONS allows .openartisan/ writes but blocks bash", () => {
     const policy = getPhaseToolPolicy("PLANNING", "CONVENTIONS", "GREENFIELD", [])
-    expect(policy.blocked).toContain("write")
-    expect(policy.blocked).toContain("edit")
+    expect(policy.blocked).not.toContain("write")
+    expect(policy.blocked).not.toContain("edit")
     expect(policy.blocked).toContain("bash")
+    expect(policy.writePathPredicate).toBeDefined()
+    expect(policy.writePathPredicate?.("/project/.openartisan/feature-x/plan.md")).toBe(true)
+    expect(policy.writePathPredicate?.("/project/src/index.ts")).toBe(false)
   })
 })
 

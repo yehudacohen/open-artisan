@@ -265,6 +265,93 @@ describe("tool.execute — SubagentDispatcher-dependent tools", () => {
   })
 })
 
+describe("tool.execute — task boundary revision workflow", () => {
+  it("analyzes an ownership change and reports impacted tasks", async () => {
+    await exec("select_mode", { mode: "GREENFIELD", feature_name: "boundary-analyze" })
+    await ctx.engine!.store.update("s1", (d) => {
+      d.phase = "IMPLEMENTATION"
+      d.phaseState = "DRAFT"
+      d.mode = "INCREMENTAL"
+      d.featureName = "boundary-analyze"
+      d.fileAllowlist = ["/repo/src/a.ts", "/repo/src/b.ts", "/repo/tests/a.test.ts", "/repo/tests/b.test.ts"]
+      d.implDag = [
+        { id: "T1", description: "Done task", dependencies: [], expectedFiles: ["/repo/src/a.ts"], expectedTests: ["/repo/tests/a.test.ts"], estimatedComplexity: "small", status: "complete" },
+        { id: "T2", description: "Target task", dependencies: ["T1"], expectedFiles: ["/repo/src/b.ts"], expectedTests: ["/repo/tests/b.test.ts"], estimatedComplexity: "medium", status: "pending" },
+      ]
+      d.currentTaskId = "T2"
+    })
+
+    const result = await exec("analyze_task_boundary_change", {
+      task_id: "T2",
+      add_files: ["/repo/src/a.ts"],
+      remove_files: ["/repo/src/b.ts"],
+      reason: "T2 must absorb the runtime seam already exercised by review.",
+    })
+
+    expect(result).toContain("T1")
+    expect(result).toContain("T2")
+    expect(result).toContain("completed task")
+  })
+
+  it("reports allowlist violations when an added file is outside the approved allowlist", async () => {
+    await exec("select_mode", { mode: "GREENFIELD", feature_name: "boundary-allowlist" })
+    await ctx.engine!.store.update("s1", (d) => {
+      d.phase = "IMPLEMENTATION"
+      d.phaseState = "DRAFT"
+      d.mode = "INCREMENTAL"
+      d.featureName = "boundary-allowlist"
+      d.fileAllowlist = ["/repo/src/b.ts", "/repo/tests/b.test.ts"]
+      d.implDag = [
+        { id: "T2", description: "Target task", dependencies: [], expectedFiles: ["/repo/src/b.ts"], expectedTests: ["/repo/tests/b.test.ts"], estimatedComplexity: "medium", status: "pending" },
+      ]
+      d.currentTaskId = "T2"
+    })
+
+    const result = await exec("analyze_task_boundary_change", {
+      task_id: "T2",
+      add_files: ["/repo/src/outside.ts"],
+      reason: "Need to test the planning escalation path.",
+    })
+
+    expect(result).toContain("allowlist")
+    expect(result).toContain("/repo/src/outside.ts")
+  })
+
+  it("applies an ownership change and resets completed impacted tasks", async () => {
+    await exec("select_mode", { mode: "GREENFIELD", feature_name: "boundary-apply" })
+    await ctx.engine!.store.update("s1", (d) => {
+      d.phase = "IMPLEMENTATION"
+      d.phaseState = "DRAFT"
+      d.mode = "INCREMENTAL"
+      d.featureName = "boundary-apply"
+      d.fileAllowlist = ["/repo/src/a.ts", "/repo/src/b.ts", "/repo/tests/a.test.ts", "/repo/tests/b.test.ts"]
+      d.implDag = [
+        { id: "T1", description: "Done task", dependencies: [], expectedFiles: ["/repo/src/a.ts"], expectedTests: ["/repo/tests/a.test.ts"], estimatedComplexity: "small", status: "complete" },
+        { id: "T2", description: "Target task", dependencies: ["T1"], expectedFiles: ["/repo/src/b.ts"], expectedTests: ["/repo/tests/b.test.ts"], estimatedComplexity: "medium", status: "pending" },
+      ]
+      d.currentTaskId = "T2"
+    })
+
+    const result = await exec("apply_task_boundary_change", {
+      task_id: "T2",
+      add_files: ["/repo/src/a.ts"],
+      remove_files: ["/repo/src/b.ts"],
+      expected_impacted_tasks: ["T1", "T2"],
+      expected_reset_tasks: ["T1"],
+      reason: "T2 must absorb the runtime seam already exercised by review.",
+    })
+
+    expect(result).toContain("applied")
+    const state = ctx.engine!.store.get("s1")
+    const t1 = state?.implDag?.find((t) => t.id === "T1")
+    const t2 = state?.implDag?.find((t) => t.id === "T2")
+    expect(t1?.expectedFiles).not.toContain("/repo/src/a.ts")
+    expect(t1?.status).toBe("pending")
+    expect(t2?.expectedFiles).toContain("/repo/src/a.ts")
+    expect(t2?.expectedFiles).not.toContain("/repo/src/b.ts")
+  })
+})
+
 // ---------------------------------------------------------------------------
 // submit_feedback
 // ---------------------------------------------------------------------------
@@ -1149,6 +1236,28 @@ describe("tool.execute — agent-only mode", () => {
     expect(result).toContain("Error")
     expect(result).toContain(`.openartisan/${feature}/plan.md`)
     expect(ctx.engine!.store.get("s1")?.phaseState).toBe("DRAFT")
+  })
+
+  it("allows IMPL_PLAN request_review from the canonical markdown artifact", async () => {
+    await exec("select_mode", { mode: "GREENFIELD", feature_name: `impl-plan-artifact-${Date.now()}` })
+    await ctx.engine!.store.update("s1", (d) => {
+      d.phase = "IMPL_PLAN"
+      d.phaseState = "DRAFT"
+    })
+    const feature = ctx.engine!.store.get("s1")?.featureName ?? "impl-plan-artifact"
+    const artifactPath = join(tmpDir, ".openartisan", feature, "impl-plan.md")
+    await mkdir(join(tmpDir, ".openartisan", feature), { recursive: true })
+    await Bun.write(artifactPath, "# Implementation Plan\n\n## Task T1: Do work\n**Files:** src/index.ts\n**Depends on:** none\n")
+
+    const result = await exec("request_review", {
+      summary: "Implementation DAG",
+      artifact_description: "Implementation plan artifact",
+      artifact_files: [artifactPath],
+    })
+
+    expect(result).toContain("Transitioning to IMPL_PLAN/REVIEW")
+    expect(ctx.engine!.store.get("s1")?.phaseState).toBe("REVIEW")
+    expect(ctx.engine!.store.get("s1")?.reviewArtifactFiles).toContain(artifactPath)
   })
 
   it("rejects request_review artifact_content for INTERFACES", async () => {

@@ -186,6 +186,102 @@ describe("OpenCode integration — structural workflow parity", () => {
   })
 })
 
+describe("OpenCode integration — task boundary revision workflow", () => {
+  it("analyzes a boundary change and reports impacted tasks", async () => {
+    const sid = `int-test-${Date.now()}-boundary-analyze`
+    await plugin.event({ event: { type: "session.created", properties: { info: { id: sid } } } })
+    const ctx = { directory: tempDir, sessionId: sid }
+    await plugin.tool.select_mode.execute({ mode: "GREENFIELD", feature_name: `boundary-${Date.now()}` }, ctx)
+    await plugin._testStore.update(sid, (d: any) => {
+      d.phase = "IMPLEMENTATION"
+      d.phaseState = "DRAFT"
+      d.mode = "INCREMENTAL"
+      d.featureName = `boundary-${Date.now()}`
+      d.fileAllowlist = ["/repo/src/a.ts", "/repo/src/b.ts", "/repo/tests/a.test.ts", "/repo/tests/b.test.ts"]
+      d.implDag = [
+        { id: "T1", description: "Done task", dependencies: [], expectedFiles: ["/repo/src/a.ts"], expectedTests: ["/repo/tests/a.test.ts"], estimatedComplexity: "small", status: "complete" },
+        { id: "T2", description: "Target task", dependencies: ["T1"], expectedFiles: ["/repo/src/b.ts"], expectedTests: ["/repo/tests/b.test.ts"], estimatedComplexity: "medium", status: "pending" },
+      ]
+      d.currentTaskId = "T2"
+    })
+
+    const result = await plugin.tool.analyze_task_boundary_change.execute({
+      task_id: "T2",
+      add_files: ["/repo/src/a.ts"],
+      remove_files: ["/repo/src/b.ts"],
+      reason: "T2 must absorb the runtime seam already exercised by review.",
+    }, ctx)
+
+    expect(result).toContain("T2")
+    expect(result).toContain("T1")
+    expect(result).toContain("completed task")
+  })
+
+  it("reports allowlist violations through the public plugin seam", async () => {
+    const sid = `int-test-${Date.now()}-boundary-allowlist`
+    await plugin.event({ event: { type: "session.created", properties: { info: { id: sid } } } })
+    const ctx = { directory: tempDir, sessionId: sid }
+    await plugin.tool.select_mode.execute({ mode: "GREENFIELD", feature_name: `boundary-allowlist-${Date.now()}` }, ctx)
+    await plugin._testStore.update(sid, (d: any) => {
+      d.phase = "IMPLEMENTATION"
+      d.phaseState = "DRAFT"
+      d.mode = "INCREMENTAL"
+      d.featureName = `boundary-allowlist-${Date.now()}`
+      d.fileAllowlist = ["/repo/src/b.ts", "/repo/tests/b.test.ts"]
+      d.implDag = [
+        { id: "T2", description: "Target task", dependencies: [], expectedFiles: ["/repo/src/b.ts"], expectedTests: ["/repo/tests/b.test.ts"], estimatedComplexity: "medium", status: "pending" },
+      ]
+      d.currentTaskId = "T2"
+    })
+
+    const result = await plugin.tool.analyze_task_boundary_change.execute({
+      task_id: "T2",
+      add_files: ["/repo/src/outside.ts"],
+      reason: "Need to test the planning escalation path.",
+    }, ctx)
+
+    expect(result).toContain("allowlist")
+    expect(result).toContain("/repo/src/outside.ts")
+  })
+
+  it("applies a boundary change and reassigns overlapping ownership", async () => {
+    const sid = `int-test-${Date.now()}-boundary-apply`
+    await plugin.event({ event: { type: "session.created", properties: { info: { id: sid } } } })
+    const ctx = { directory: tempDir, sessionId: sid }
+    await plugin.tool.select_mode.execute({ mode: "GREENFIELD", feature_name: `boundary-apply-${Date.now()}` }, ctx)
+    await plugin._testStore.update(sid, (d: any) => {
+      d.phase = "IMPLEMENTATION"
+      d.phaseState = "DRAFT"
+      d.mode = "INCREMENTAL"
+      d.featureName = `boundary-apply-${Date.now()}`
+      d.fileAllowlist = ["/repo/src/a.ts", "/repo/src/b.ts", "/repo/tests/a.test.ts", "/repo/tests/b.test.ts"]
+      d.implDag = [
+        { id: "T1", description: "Done task", dependencies: [], expectedFiles: ["/repo/src/a.ts"], expectedTests: ["/repo/tests/a.test.ts"], estimatedComplexity: "small", status: "complete" },
+        { id: "T2", description: "Target task", dependencies: ["T1"], expectedFiles: ["/repo/src/b.ts"], expectedTests: ["/repo/tests/b.test.ts"], estimatedComplexity: "medium", status: "pending" },
+      ]
+      d.currentTaskId = "T2"
+    })
+
+    const result = await plugin.tool.apply_task_boundary_change.execute({
+      task_id: "T2",
+      add_files: ["/repo/src/a.ts"],
+      remove_files: ["/repo/src/b.ts"],
+      expected_impacted_tasks: ["T1", "T2"],
+      expected_reset_tasks: ["T1"],
+      reason: "T2 must absorb the runtime seam already exercised by review.",
+    }, ctx)
+
+    expect(result).toContain("applied")
+    const state = plugin._testStore.get(sid)
+    const t1 = state?.implDag?.find((t: any) => t.id === "T1")
+    const t2 = state?.implDag?.find((t: any) => t.id === "T2")
+    expect(t1?.expectedFiles).not.toContain("/repo/src/a.ts")
+    expect(t1?.status).toBe("pending")
+    expect(t2?.expectedFiles).toContain("/repo/src/a.ts")
+    expect(t2?.expectedFiles).not.toContain("/repo/src/b.ts")
+  })
+})
+
 // ---------------------------------------------------------------------------
 // Plugin shape
 // ---------------------------------------------------------------------------

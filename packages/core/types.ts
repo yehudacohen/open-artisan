@@ -506,21 +506,26 @@ export type TransitionOutcome = TransitionSuccess | TransitionFailure
  * need to guess at structural workflow meaning.
  */
 export interface StructuralTransitionDescriptor {
-  kind: "redraft" | "skip" | "cascade" | "scheduling" | "task-review" | "human-gate" | "delegated-wait"
+  /** Stable identifier for this descriptor instance. */
+  id: string
+  /** Optional kind tag for adapters that need to branch by lifecycle meaning. */
+  kind?: "redraft" | "skip" | "cascade" | "scheduling" | "task-review" | "human-gate" | "delegated-wait"
   source: { phase: Phase; phaseState: PhaseState }
   target: { phase: Phase; phaseState: PhaseState }
   triggeringEvent: WorkflowEvent
   rationale: string
   requiredArtifactFiles: string[]
-  blockedOn: "none" | "human-action" | "delegated-sub-workflow" | "reviewer" | "bridge-runtime"
-  tradeoffs: {
-    chosen: string
-    alternativesConsidered: string[]
-    risks: string[]
-  }
+  blockedOn: null | "human-action" | "delegated-sub-workflow" | "reviewer" | "bridge-runtime"
+  /**
+   * Tradeoff summary for the chosen structural path.
+   * Keep as a flat string array so tests and adapters can record decisions without
+   * constructing extra nested objects during early wiring.
+   */
+  tradeoffs: string[]
   currentTaskId?: string | null
   reviewArtifactFiles?: string[]
   childWorkflowIds?: string[]
+  backtrackContext?: BacktrackContext | null
   humanGate?: {
     taskId: string
     whatIsNeeded: string
@@ -531,6 +536,7 @@ export interface StructuralTransitionDescriptor {
 export interface StructuralTransitionError {
   message: string
   code:
+    | "not-found"
     | "INVALID_SKIP_TARGET"
     | "INVALID_CASCADE_TARGET"
     | "INVALID_IMPLEMENTATION_LIFECYCLE"
@@ -556,26 +562,27 @@ export interface StructuralTransitionInput {
 }
 
 export interface StructuralTransitionDescriptorStore {
-  createDescriptor(sessionId: string, descriptor: StructuralTransitionDescriptor): Promise<StructuralTransitionResult>
-  readDescriptor(sessionId: string, descriptorKind: StructuralTransitionDescriptor["kind"]): Promise<StructuralTransitionResult>
-  updateDescriptor(sessionId: string, descriptor: StructuralTransitionDescriptor): Promise<StructuralTransitionResult>
-  deleteDescriptor(sessionId: string, descriptorKind: StructuralTransitionDescriptor["kind"]): Promise<{ success: true } | { success: false; error: StructuralTransitionError }>
-  listDescriptors(sessionId: string): Promise<{ success: true; value: StructuralTransitionDescriptor[] } | { success: false; error: StructuralTransitionError }>
+  createDescriptor(descriptor: StructuralTransitionDescriptor): Promise<StructuralTransitionResult>
+  readDescriptor(id: string): Promise<StructuralTransitionResult>
+  updateDescriptor(id: string, descriptor: StructuralTransitionDescriptor): Promise<StructuralTransitionResult>
+  deleteDescriptor(id: string): Promise<StructuralTransitionResult>
+  listDescriptors(): Promise<{ success: true; value: StructuralTransitionDescriptor[] } | { success: false; error: StructuralTransitionError }>
 }
 
 export interface StructuralTransitionPlanner {
-  computeRedraftDescriptor(input: StructuralTransitionInput): StructuralTransitionResult
-  computePhaseSkipDescriptor(input: StructuralTransitionInput): StructuralTransitionResult
-  computeCascadeDescriptor(input: StructuralTransitionInput): StructuralTransitionResult
-  computeSchedulingDescriptor(input: StructuralTransitionInput): StructuralTransitionResult
-  computeTaskReviewDescriptor(input: StructuralTransitionInput): StructuralTransitionResult
-  computeHumanGateDescriptor(input: StructuralTransitionInput): StructuralTransitionResult
-  computeDelegatedWaitDescriptor(input: StructuralTransitionInput): StructuralTransitionResult
+  computeRedraftDescriptor(input: StructuralTransitionInput): Promise<StructuralTransitionResult>
+  computePhaseSkipDescriptor(input: StructuralTransitionInput): Promise<StructuralTransitionResult>
+  computeCascadeDescriptor(input: StructuralTransitionInput): Promise<StructuralTransitionResult>
+  computeSchedulingDescriptor(input: StructuralTransitionInput): Promise<StructuralTransitionResult>
+  computeTaskReviewDescriptor(input: StructuralTransitionInput): Promise<StructuralTransitionResult>
+  computeHumanGateDescriptor(input: StructuralTransitionInput): Promise<StructuralTransitionResult>
+  computeDelegatedWaitDescriptor(input: StructuralTransitionInput): Promise<StructuralTransitionResult>
 }
 
-export type StructuralWorkflowHealthStatus = "healthy" | "reviewing" | "blocked" | "stalled" | "bridge-unavailable"
+export type StructuralWorkflowHealthStatus = "healthy" | "degraded" | "blocked" | "stalled" | "bridge-unavailable"
 
 export type StructuralWorkflowIssueKind =
+  | "adapter-parity-drift"
   | "continuation-stall"
   | "review-failure"
   | "bridge-state-issue"
@@ -583,31 +590,44 @@ export type StructuralWorkflowIssueKind =
   | "delegated-wait"
 
 export interface StructuralWorkflowHealthCheck {
-  featureName: string
-  phase: Phase
-  phaseState: PhaseState
+  featureName?: string
+  phase?: Phase
+  phaseState?: PhaseState
   status: StructuralWorkflowHealthStatus
+  issues?: Array<{ kind: StructuralWorkflowIssueKind; message: string }>
   issueKind?: StructuralWorkflowIssueKind
-  currentTaskId: string | null
-  diagnosticsPaths: string[]
-  reviewArtifactFiles: string[]
+  currentTaskId?: string | null
+  diagnosticsPaths?: string[]
+  reviewArtifactFiles?: string[]
 }
 
 export interface StructuralWorkflowMetricsSnapshot {
-  featureName: string
-  activePhase: Phase
-  activePhaseState: PhaseState
-  transitionCount: number
-  skippedPhaseCount: number
-  cascadeSkipCount: number
-  taskReviewFailureCount: number
-  humanGateCount: number
-  delegatedWaitCount: number
-  stallCount: number
+  featureName?: string
+  activePhase?: Phase
+  activePhaseState?: PhaseState
+  transitionCount?: number
+  skippedPhaseCount?: number
+  cascadeSkipCount?: number
+  taskReviewFailureCount?: number
+  humanGateCount?: number
+  delegatedWaitCount?: number
+  stallCount?: number
+  activeNonGateStates: number
+  structuralTransitionsApplied: number
+  directMutationBypassDetections: number
 }
 
 export interface StructuralWorkflowLogEvent {
-  event:
+  kind:
+    | "structural-transition-applied"
+    | "phase-skipped"
+    | "cascade-skipped"
+    | "task-review-failed"
+    | "human-gate-entered"
+    | "delegated-wait-entered"
+    | "stall-detected"
+    | "bridge-state-issue"
+  event?:
     | "state-transition"
     | "phase-skipped"
     | "cascade-skipped"
@@ -616,7 +636,7 @@ export interface StructuralWorkflowLogEvent {
     | "delegated-wait-entered"
     | "stall-detected"
     | "bridge-state-issue"
-  featureName: string
+  featureName?: string
   phase: Phase
   phaseState: PhaseState
   descriptorKind?: StructuralTransitionDescriptor["kind"]
@@ -626,7 +646,10 @@ export interface StructuralWorkflowLogEvent {
 export interface StructuralWorkflowDiagnosticsConfig {
   debugEnabled?: boolean
   reviewTimeoutSeconds?: number
-  diagnosticsPaths: Array<
+  includeTraceIds?: boolean
+  includeTransitionDescriptors?: boolean
+  includeRuntimeHealthSummary?: boolean
+  diagnosticsPaths?: Array<
     | ".openartisan/openartisan-errors.log"
     | ".openartisan/.bridge-meta.json"
     | ".openartisan/.bridge-clients.json"
@@ -1862,6 +1885,95 @@ export interface RequestReviewArgs {
    * Inline artifact content is intentionally not part of the public contract.
    */
   artifact_files?: string[]
+}
+
+/**
+ * Explicit file-based review source of truth.
+ *
+ * Decision note: the approved workflow direction is that public review callers
+ * submit on-disk artifact files, not inline artifact text. An alternative would
+ * keep a dual public contract (`artifact_content` or `artifact_files`), but that
+ * weakens the structural review source of truth and encourages adapter-specific
+ * divergence. The public contract therefore exposes file-based review inputs only.
+ */
+export interface FileArtifactReviewSource {
+  artifact_files: string[]
+}
+
+/**
+ * Public executable seam metadata.
+ *
+ * Decision note: the supported public runtime contract for this feature is a
+ * named seam registry, not direct imports from concrete adapter modules. Tests
+ * may still exercise implementations later, but this descriptor makes the
+ * approved seam explicit now so later phases do not have to guess which runtime
+ * boundary is considered public.
+ */
+export type SupportedExecutableSeamKind =
+  | "state-machine"
+  | "phase-tool-policy"
+  | "request-review-file-artifact"
+  | "session-state-validation"
+  | "scheduler-parallel-contract"
+  | "bridge-runtime"
+  | "hermes-post-tool-continuation"
+  | "claude-hook-phase-gating"
+
+export type SupportedExecutableSeamErrorPattern =
+  | "TransitionOutcome"
+  | "StructuralTransitionResult"
+  | "RoadmapResult"
+  | "validation-string-null"
+  | "throws"
+
+export interface SupportedExecutableSeamDescriptor {
+  kind: SupportedExecutableSeamKind
+  ownerModule: string
+  primaryInterface: string
+  errorPattern: SupportedExecutableSeamErrorPattern
+  runtimeCoverageExpectedAt: "TESTS" | "IMPLEMENTATION"
+  decision: string
+  alternativesConsidered: string[]
+  tradeoffs: string[]
+}
+
+export interface WorkflowPromptPart {
+  type: "text"
+  text: string
+  id?: string
+}
+
+export interface WorkflowIdleDecision {
+  action: "reprompt" | "escalate" | "ignore"
+  message?: string
+  retryCount?: number
+}
+
+export interface ClaudeHookResultContract {
+  stdout: string | null
+  stderr: string | null
+  exitCode: number
+}
+
+/**
+ * Adapter-facing executable seam summary for Hermes continuation behavior.
+ */
+export interface HermesContinuationSeam {
+  kind: "hermes-post-tool-continuation"
+  idleDecision: WorkflowIdleDecision
+  decision: string
+  tradeoffs: string[]
+}
+
+/**
+ * Adapter-facing executable seam summary for Claude hook phase gating.
+ */
+export interface ClaudeHookPhaseGatingSeam {
+  kind: "claude-hook-phase-gating"
+  stop: ClaudeHookResultContract
+  preToolUse: ClaudeHookResultContract
+  decision: string
+  tradeoffs: string[]
 }
 
 export interface MarkScanCompleteArgs {

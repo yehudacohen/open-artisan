@@ -760,6 +760,20 @@ export interface SessionRegistry {
 // ---------------------------------------------------------------------------
 
 /**
+ * Structured persistence error contract for legacy thrown StateBackend failures.
+ *
+ * Decision note: existing runtime code currently throws at this seam instead of
+ * returning a result union. The interface therefore documents the thrown error
+ * shape explicitly without changing the established runtime contract in this phase.
+ */
+export interface StateBackendError {
+  code: "STATE_BACKEND_IO_ERROR" | "STATE_BACKEND_LOCK_ERROR"
+  message: string
+  retryable: boolean
+  cause?: unknown
+}
+
+/**
  * Low-level persistence backend for per-feature workflow state.
  *
  * Implementations handle storage I/O and cross-process locking.
@@ -772,22 +786,35 @@ export interface SessionRegistry {
  * Future implementations could use SQLite, Redis, or JSON-RPC (bridge server).
  */
 export interface StateBackend {
-  /** Read raw JSON for a feature. Returns null if not found. */
+  /**
+   * Read raw JSON for a feature. Returns null if not found.
+   * @throws StateBackendError when storage I/O fails.
+   */
   read(featureName: string): Promise<string | null>
 
-  /** Write raw JSON for a feature. Creates storage location if needed. */
+  /**
+   * Write raw JSON for a feature. Creates storage location if needed.
+   * @throws StateBackendError when storage I/O fails.
+   */
   write(featureName: string, data: string): Promise<void>
 
-  /** Remove stored state for a feature. No-op if not found. */
+  /**
+   * Remove stored state for a feature. No-op if not found.
+   * @throws StateBackendError when storage I/O fails.
+   */
   remove(featureName: string): Promise<void>
 
-  /** List all feature names that have persisted state. */
+  /**
+   * List all feature names that have persisted state.
+   * @throws StateBackendError when storage I/O fails.
+   */
   list(): Promise<string[]>
 
   /**
    * Acquire an exclusive lock for a feature.
    * Returns a release function that must be called when done.
    * Implementations may use lockfiles, database locks, etc.
+   * @throws StateBackendError when locking fails.
    */
   lock(featureName: string): Promise<{ release(): Promise<void> }>
 }
@@ -851,6 +878,10 @@ export function roadmapError(
   }
 }
 
+/**
+ * A single roadmap node tracked by the standalone roadmap store.
+ * featureName is optional because not every roadmap item maps 1:1 to a workflow feature.
+ */
 export interface RoadmapItem {
   id: string
   kind: RoadmapItemKind
@@ -863,12 +894,18 @@ export interface RoadmapItem {
   updatedAt: string
 }
 
+/**
+ * A typed dependency edge between two roadmap items.
+ */
 export interface RoadmapEdge {
   from: string
   to: string
   kind: RoadmapEdgeKind
 }
 
+/**
+ * Full roadmap document persisted by filesystem or PGlite backends.
+ */
 export interface RoadmapDocument {
   schemaVersion: number
   items: RoadmapItem[]
@@ -1190,6 +1227,14 @@ export interface SessionStateStore {
  * - phaseState must be valid for the current phase (per VALID_PHASE_STATES)
  * - iterationCount, retryCount, approvalCount must all be >= 0
  * - fileAllowlist paths must start with "/" in INCREMENTAL mode
+ */
+/**
+ * Structured validation error contract for workflow-state shape/invariant failures.
+ *
+ * Decision note: this remains String-compatible because existing runtime/tests rely
+ * on thrown/returned string behavior. The interface still exposes explicit `code`
+ * and `message` fields so callers have a structured error shape without changing the
+ * compatibility contract in this phase.
  */
 export interface WorkflowStateValidationError extends String {
   code: "INVALID_WORKFLOW_STATE"
@@ -1904,10 +1949,16 @@ export interface FileArtifactReviewSource {
  * Public executable seam metadata.
  *
  * Decision note: the supported public runtime contract for this feature is a
- * named seam registry, not direct imports from concrete adapter modules. Tests
- * may still exercise implementations later, but this descriptor makes the
- * approved seam explicit now so later phases do not have to guess which runtime
- * boundary is considered public.
+ * named seam registry, not direct imports from abstract-only type declarations.
+ * For seams listed here, the `ownerModule` is itself the approved public runtime
+ * boundary for executable TESTS-phase coverage. That means a seam-oriented test may
+ * import the runtime owner module directly when the goal is to verify real wiring,
+ * adapter parity, and boundary behavior rather than helper-only type conformance.
+ *
+ * The generic workflow rule "tests import from interfaces, not from implementations"
+ * still applies to ordinary features whose public contract is an interface/type module.
+ * This feature is different: the approved public contract is the seam registry below,
+ * and each descriptor names the concrete runtime boundary that TESTS should target.
  */
 export type SupportedExecutableSeamKind =
   | "state-machine"
@@ -1925,6 +1976,31 @@ export type SupportedExecutableSeamErrorPattern =
   | "RoadmapResult"
   | "validation-string-null"
   | "throws"
+
+/**
+ * TESTS-phase import policy for an approved executable seam.
+ *
+ * - `owner-module-public-runtime-contract`: the named runtime owner module is the
+ *   public seam, so executable tests should target that module directly.
+ * - `interface-only`: traditional contract shape where tests should stay on the
+ *   abstract interface/type surface and avoid implementation imports.
+ */
+export type SupportedExecutableSeamImportPolicy =
+  | "owner-module-public-runtime-contract"
+  | "interface-only"
+
+/**
+ * Explicit testing-contract summary for executable seam-based features.
+ * This lets earlier phases record when seam-oriented runtime imports are not an
+ * accidental implementation leak but the approved public-test contract.
+ */
+export interface SupportedExecutableSeamTestingContract {
+  seamKind: SupportedExecutableSeamKind
+  importPolicy: SupportedExecutableSeamImportPolicy
+  rationale: string
+  alternativesConsidered: string[]
+  tradeoffs: string[]
+}
 
 export interface SupportedExecutableSeamDescriptor {
   kind: SupportedExecutableSeamKind

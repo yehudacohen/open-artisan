@@ -74,7 +74,7 @@ describe("StateMachine — greenfield happy path", () => {
     expect(result.nextPhaseState).toBe("REVIEW")
   })
 
-  it("PLANNING/USER_GATE + user_approve → INTERFACES/DRAFT", () => {
+  it("PLANNING/USER_GATE + user_approve → INTERFACES/DRAFT when mode=GREENFIELD", () => {
     const result = sm.transition("PLANNING", "USER_GATE", "user_approve", "GREENFIELD")
     expect(result.success).toBe(true)
     if (!result.success) return
@@ -82,7 +82,7 @@ describe("StateMachine — greenfield happy path", () => {
     expect(result.nextPhaseState).toBe("DRAFT")
   })
 
-  it("INTERFACES/USER_GATE + user_approve → TESTS/DRAFT", () => {
+  it("INTERFACES/USER_GATE + user_approve → TESTS/DRAFT when mode=GREENFIELD", () => {
     const result = sm.transition("INTERFACES", "USER_GATE", "user_approve", "GREENFIELD")
     expect(result.success).toBe(true)
     if (!result.success) return
@@ -90,7 +90,7 @@ describe("StateMachine — greenfield happy path", () => {
     expect(result.nextPhaseState).toBe("DRAFT")
   })
 
-  it("TESTS/USER_GATE + user_approve → IMPL_PLAN/DRAFT", () => {
+  it("TESTS/USER_GATE + user_approve → IMPL_PLAN/DRAFT when mode=GREENFIELD", () => {
     const result = sm.transition("TESTS", "USER_GATE", "user_approve", "GREENFIELD")
     expect(result.success).toBe(true)
     if (!result.success) return
@@ -98,7 +98,7 @@ describe("StateMachine — greenfield happy path", () => {
     expect(result.nextPhaseState).toBe("DRAFT")
   })
 
-  it("IMPL_PLAN/USER_GATE + user_approve → IMPLEMENTATION/DRAFT", () => {
+  it("IMPL_PLAN/USER_GATE + user_approve → IMPLEMENTATION/DRAFT when mode=GREENFIELD", () => {
     const result = sm.transition("IMPL_PLAN", "USER_GATE", "user_approve", "GREENFIELD")
     expect(result.success).toBe(true)
     if (!result.success) return
@@ -353,6 +353,142 @@ describe("StateMachine — REVIEW loop behavior", () => {
     expect(result.success).toBe(true)
     if (!result.success) return
     expect(result.nextPhaseState).toBe("USER_GATE")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Structural workflow states planned for structural-state-machine-rigor.
+// Decision note: these tests intentionally assert the approved target behavior
+// from the plan, even where the current implementation has not landed yet.
+// They are expected to fail until the structural FSM work is actually wired.
+// ---------------------------------------------------------------------------
+describe("StateMachine — structural workflow states", () => {
+  it("PLANNING/REDRAFT + draft_complete → PLANNING/REVIEW", () => {
+    const result = sm.transition("PLANNING", "REDRAFT", "draft_complete", "INCREMENTAL")
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    expect(result.nextPhase).toBe("PLANNING")
+    expect(result.nextPhaseState).toBe("REVIEW")
+  })
+
+  it("PLANNING/USER_GATE + user_approve → INTERFACES/SKIP_CHECK", () => {
+    const result = sm.transition("PLANNING", "USER_GATE", "user_approve", "INCREMENTAL")
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    expect(result.nextPhase).toBe("INTERFACES")
+    expect(result.nextPhaseState).toBe("SKIP_CHECK")
+  })
+
+  it("INTERFACES/USER_GATE + user_approve → TESTS/SKIP_CHECK", () => {
+    const result = sm.transition("INTERFACES", "USER_GATE", "user_approve", "INCREMENTAL")
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    expect(result.nextPhase).toBe("TESTS")
+    expect(result.nextPhaseState).toBe("SKIP_CHECK")
+  })
+
+  it("TESTS/USER_GATE + user_approve → IMPL_PLAN/SKIP_CHECK", () => {
+    const result = sm.transition("TESTS", "USER_GATE", "user_approve", "INCREMENTAL")
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    expect(result.nextPhase).toBe("IMPL_PLAN")
+    expect(result.nextPhaseState).toBe("SKIP_CHECK")
+  })
+
+  it("INTERFACES/SKIP_CHECK + scheduling_complete → INTERFACES/DRAFT", () => {
+    const result = sm.transition("INTERFACES", "SKIP_CHECK", "scheduling_complete", "INCREMENTAL")
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    expect(result.nextPhase).toBe("INTERFACES")
+    expect(result.nextPhaseState).toBe("DRAFT")
+  })
+
+  it("INTERFACES/SKIP_CHECK + phase_skipped → TESTS/SKIP_CHECK", () => {
+    const result = sm.transition("INTERFACES", "SKIP_CHECK", "phase_skipped", "INCREMENTAL")
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    expect(result.nextPhase).toBe("TESTS")
+    expect(result.nextPhaseState).toBe("SKIP_CHECK")
+  })
+
+  it("TESTS/SKIP_CHECK + scheduling_complete → TESTS/DRAFT", () => {
+    const result = sm.transition("TESTS", "SKIP_CHECK", "scheduling_complete", "INCREMENTAL")
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    expect(result.nextPhase).toBe("TESTS")
+    expect(result.nextPhaseState).toBe("DRAFT")
+  })
+
+  it("IMPL_PLAN/SKIP_CHECK + phase_skipped → IMPLEMENTATION/SCHEDULING", () => {
+    const result = sm.transition("IMPL_PLAN", "SKIP_CHECK", "phase_skipped", "INCREMENTAL")
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    expect(result.nextPhase).toBe("IMPLEMENTATION")
+    expect(result.nextPhaseState).toBe("SCHEDULING")
+  })
+
+  it("INTERFACES/CASCADE_CHECK + scheduling_complete → INTERFACES/REVISE", () => {
+    const result = sm.transition("INTERFACES", "CASCADE_CHECK", "scheduling_complete", "INCREMENTAL")
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    expect(result.nextPhase).toBe("INTERFACES")
+    expect(result.nextPhaseState).toBe("REVISE")
+  })
+
+  it("INTERFACES/CASCADE_CHECK + cascade_step_skipped → TESTS/CASCADE_CHECK", () => {
+    const result = sm.transition("INTERFACES", "CASCADE_CHECK", "cascade_step_skipped", "INCREMENTAL")
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    expect(result.nextPhase).toBe("TESTS")
+    expect(result.nextPhaseState).toBe("CASCADE_CHECK")
+  })
+
+  it("IMPL_PLAN/USER_GATE + user_approve → IMPLEMENTATION/SCHEDULING", () => {
+    const result = sm.transition("IMPL_PLAN", "USER_GATE", "user_approve", "INCREMENTAL")
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    expect(result.nextPhase).toBe("IMPLEMENTATION")
+    expect(result.nextPhaseState).toBe("SCHEDULING")
+  })
+
+  it("IMPLEMENTATION/TASK_REVIEW + task_review_pass → IMPLEMENTATION/SCHEDULING", () => {
+    const result = sm.transition("IMPLEMENTATION", "TASK_REVIEW", "task_review_pass", "INCREMENTAL")
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    expect(result.nextPhase).toBe("IMPLEMENTATION")
+    expect(result.nextPhaseState).toBe("SCHEDULING")
+  })
+
+  it("IMPLEMENTATION/TASK_REVIEW + task_review_fail → IMPLEMENTATION/TASK_REVISE", () => {
+    const result = sm.transition("IMPLEMENTATION", "TASK_REVIEW", "task_review_fail", "INCREMENTAL")
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    expect(result.nextPhase).toBe("IMPLEMENTATION")
+    expect(result.nextPhaseState).toBe("TASK_REVISE")
+  })
+
+  it("IMPLEMENTATION/TASK_REVISE + revision_complete → IMPLEMENTATION/TASK_REVIEW", () => {
+    const result = sm.transition("IMPLEMENTATION", "TASK_REVISE", "revision_complete", "INCREMENTAL")
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    expect(result.nextPhase).toBe("IMPLEMENTATION")
+    expect(result.nextPhaseState).toBe("TASK_REVIEW")
+  })
+
+  it("IMPLEMENTATION/HUMAN_GATE + human_gate_resolved → IMPLEMENTATION/SCHEDULING", () => {
+    const result = sm.transition("IMPLEMENTATION", "HUMAN_GATE", "human_gate_resolved", "INCREMENTAL")
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    expect(result.nextPhase).toBe("IMPLEMENTATION")
+    expect(result.nextPhaseState).toBe("SCHEDULING")
+  })
+
+  it("IMPLEMENTATION/DELEGATED_WAIT + delegated_task_completed → IMPLEMENTATION/SCHEDULING", () => {
+    const result = sm.transition("IMPLEMENTATION", "DELEGATED_WAIT", "delegated_task_completed", "INCREMENTAL")
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    expect(result.nextPhase).toBe("IMPLEMENTATION")
+    expect(result.nextPhaseState).toBe("SCHEDULING")
   })
 })
 

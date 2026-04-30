@@ -32,6 +32,7 @@ function makeState(overrides: Partial<WorkflowState> = {}): WorkflowState {
     pendingRevisionSteps: null,
     currentTaskId: null,
     feedbackHistory: [],
+    backtrackContext: null,
     userGateMessageReceived: false,
     artifactDiskPaths: {},
     featureName: null,
@@ -61,6 +62,14 @@ function makeState(overrides: Partial<WorkflowState> = {}): WorkflowState {
 describe("handleIdle — ignore at expected idle states", () => {
   it("ignores at USER_GATE (agent should be waiting)", () => {
     const state = makeState({ phaseState: "USER_GATE" })
+    expect(handleIdle(state).action).toBe("ignore")
+  })
+
+  // Decision note: HUMAN_GATE represents a manual-action block, not an
+  // autonomously continuable drafting/reviewing state. It should therefore be
+  // treated like a wait state rather than a reprompt target.
+  it("ignores at HUMAN_GATE (manual action still required)", () => {
+    const state = makeState({ phase: "IMPLEMENTATION", phaseState: "HUMAN_GATE", mode: "INCREMENTAL" })
     expect(handleIdle(state).action).toBe("ignore")
   })
 
@@ -103,10 +112,14 @@ describe("handleIdle — reprompt for active states", () => {
     expect(decision.message).toBeTruthy()
   })
 
-  it("ignores first idle in REVIEW state (agent may still be evaluating)", () => {
+  it("reprompts on first idle in REVIEW state after request_review", () => {
     const state = makeState({ phaseState: "REVIEW", retryCount: 0 })
     const decision = handleIdle(state)
-    expect(decision.action).toBe("ignore")
+    expect(decision.action).toBe("reprompt")
+    if (decision.action !== "reprompt") return
+    expect(decision.retryCount).toBe(1)
+    expect(decision.message).toContain("Continue self-reviewing")
+    expect(decision.message).toContain("mark_satisfied")
   })
 
   it("reprompts in REVIEW state on second idle", () => {
@@ -139,6 +152,28 @@ describe("handleIdle — reprompt for active states", () => {
     expect(decision.message).toContain("mark_analyze_complete")
     expect(decision.message).toContain("do not wait for user input")
   })
+
+  // Decision note: REDRAFT, SKIP_CHECK, CASCADE_CHECK, SCHEDULING, TASK_REVIEW,
+  // TASK_REVISE, and DELEGATED_WAIT are treated as active non-gate states that
+  // must reprompt on idle. HUMAN_GATE is intentionally treated as a waiting state
+  // for manual action and is covered separately below.
+  for (const [phase, phaseState] of [
+    ["PLANNING", "REDRAFT"],
+    ["PLANNING", "SKIP_CHECK"],
+    ["INTERFACES", "CASCADE_CHECK"],
+    ["IMPLEMENTATION", "SCHEDULING"],
+    ["IMPLEMENTATION", "TASK_REVIEW"],
+    ["IMPLEMENTATION", "TASK_REVISE"],
+    ["IMPLEMENTATION", "DELEGATED_WAIT"],
+  ] as const) {
+    it(`reprompts in ${phase}/${phaseState}`, () => {
+      const state = makeState({ phase, phaseState, mode: "INCREMENTAL", retryCount: 0 })
+      const decision = handleIdle(state)
+      expect(decision.action).toBe("reprompt")
+      if (decision.action !== "reprompt") return
+      expect(decision.retryCount).toBe(1)
+    })
+  }
 
   it("increments retryCount on each reprompt", () => {
     const state = makeState({ phaseState: "DRAFT", retryCount: 1 })

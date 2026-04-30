@@ -3,11 +3,11 @@
  */
 import { describe, expect, it, beforeEach, afterEach } from "bun:test"
 import { join, resolve } from "node:path"
-import { mkdtemp, rm } from "node:fs/promises"
+import { mkdir, mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 
 import { handleInit, handleSessionCreated } from "#bridge/methods/lifecycle"
-import { handleToolExecute, handleTaskGetReviewContext } from "#bridge/methods/tool-execute"
+import { handleToolExecute, handleTaskGetReviewContext, handlePhaseGetReviewContext, handleAutoApproveContext } from "#bridge/methods/tool-execute"
 import type { BridgeContext } from "#bridge/server"
 import type { EngineContext } from "#core/engine-context"
 
@@ -47,6 +47,15 @@ function exec(name: string, args: Record<string, unknown> = {}) {
     args,
     context: { sessionId: "s1", directory: tmpDir },
   }, ctx) as Promise<string>
+}
+
+async function writeImplPlanArtifact(featureName: string, content: string) {
+  const artifactPath = join(tmpDir, ".openartisan", featureName, "impl-plan.md")
+  await Bun.write(artifactPath, content)
+  await ctx.engine!.store.update("s1", (d) => {
+    d.artifactDiskPaths.impl_plan = artifactPath
+  })
+  return artifactPath
 }
 
 // ---------------------------------------------------------------------------
@@ -233,6 +242,27 @@ describe("tool.execute — SubagentDispatcher-dependent tools", () => {
     const result = await exec("spawn_sub_workflow")
     expect(result).toContain("bridge mode")
   })
+
+  it("spawn_sub_workflow should move IMPLEMENTATION into DELEGATED_WAIT when a task is delegated", async () => {
+    await exec("select_mode", { mode: "GREENFIELD", feature_name: "delegated-wait-feat" })
+    await ctx.engine!.store.update("s1", (d) => {
+      d.phase = "IMPLEMENTATION"
+      d.phaseState = "DRAFT"
+      d.featureName = "delegated-wait-feat"
+      d.implDag = [
+        { id: "T1", description: "Setup", dependencies: [], expectedTests: [], expectedFiles: [], estimatedComplexity: "small", status: "complete" },
+        { id: "T2", description: "Delegate me", dependencies: ["T1"], expectedTests: [], expectedFiles: [], estimatedComplexity: "medium", status: "pending" },
+      ]
+      d.currentTaskId = "T2"
+    })
+
+    const result = await exec("spawn_sub_workflow", { task_id: "T2", feature_name: "child-delegate" })
+    expect(result).toContain("DELEGATED_WAIT")
+    const state = ctx.engine!.store.get("s1")
+    expect(state?.phase).toBe("IMPLEMENTATION")
+    expect(state?.phaseState).toBe("DELEGATED_WAIT")
+    expect(state?.childWorkflows.length).toBeGreaterThan(0)
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -253,9 +283,12 @@ describe("tool.execute — submit_feedback", () => {
       feedback_text: "Looks good",
     })
     expect(result).toContain("Approved")
+    expect(result).toContain("Continue immediately in this same turn")
+    expect(result).toContain("do not stop")
 
     const state = ctx.engine!.store.get("s1")
     expect(state?.phaseState).not.toBe("USER_GATE")
+    expect(state?.approvedArtifacts.plan).toBeTruthy()
   })
 
   it("parses IMPL_PLAN into DAG on approval", async () => {
@@ -284,10 +317,11 @@ describe("tool.execute — submit_feedback", () => {
 - **Tests:** tests/core.test.ts
 `
 
+    await writeImplPlanArtifact("dag-feat", implPlan)
+
     const result = await exec("submit_feedback", {
       feedback_type: "approve",
       feedback_text: "approved",
-      artifact_content: implPlan,
     })
     expect(result).toContain("Approved")
     expect(result).toContain("IMPLEMENTATION")
@@ -299,6 +333,7 @@ describe("tool.execute — submit_feedback", () => {
     expect(state?.implDag?.[0]?.expectedTests).toEqual(["tests/setup.test.ts"])
     expect(state?.implDag?.[1]?.expectedTests).toEqual(["tests/core.test.ts"])
     expect(state?.currentTaskId).not.toBeNull()
+    expect(state?.approvedArtifacts.impl_plan).toBeTruthy()
   })
 
   it("rejects IMPL_PLAN approval when the plan cannot be parsed into a DAG", async () => {
@@ -311,10 +346,11 @@ describe("tool.execute — submit_feedback", () => {
 
     const badPlan = `# Implementation Plan\n\n## Tasks\n\n### Not a task heading\n- **Dependencies:** none\n`
 
+    await writeImplPlanArtifact("bad-dag-feat", badPlan)
+
     const result = await exec("submit_feedback", {
       feedback_type: "approve",
       feedback_text: "approved",
-      artifact_content: badPlan,
     })
 
     expect(result).toContain("Error: Failed to parse implementation plan into DAG")
@@ -343,10 +379,11 @@ describe("tool.execute — submit_feedback", () => {
 **Complexity:** medium
 `
 
+    await writeImplPlanArtifact("bad-contract-feat", implPlan)
+
     const result = await exec("submit_feedback", {
       feedback_type: "approve",
       feedback_text: "approved",
-      artifact_content: implPlan,
     })
 
     expect(result).toContain("IMPL_PLAN approval failed executable-contract validation")
@@ -379,10 +416,11 @@ describe("tool.execute — submit_feedback", () => {
 **Complexity:** medium
 `
 
+    await writeImplPlanArtifact("impl-allowlist-recovery-feat", implPlan)
+
     const result = await exec("submit_feedback", {
       feedback_type: "approve",
       feedback_text: "approved",
-      artifact_content: implPlan,
     })
 
     expect(result).toContain("Approved")
@@ -411,10 +449,11 @@ describe("tool.execute — submit_feedback", () => {
 **Complexity:** medium
 `.replaceAll("\u00060", "`")
 
+    await writeImplPlanArtifact("backticked-impl-plan-feat", implPlan)
+
     const result = await exec("submit_feedback", {
       feedback_type: "approve",
       feedback_text: "approved",
-      artifact_content: implPlan,
     })
 
     expect(result).toContain("Approved")
@@ -642,7 +681,7 @@ describe("tool.execute — check_prior_workflow", () => {
 })
 
 describe("tool.execute — mark_task_complete", () => {
-  it("completes a task and sets review pending", async () => {
+  it("completes a task and enters explicit TASK_REVIEW", async () => {
     // Get to IMPLEMENTATION with a DAG
     await exec("select_mode", { mode: "GREENFIELD", feature_name: "mtc-feat" })
     await ctx.engine!.store.update("s1", (d) => {
@@ -667,6 +706,7 @@ describe("tool.execute — mark_task_complete", () => {
 
     const state = ctx.engine!.store.get("s1")
     expect(state?.implDag?.find((t) => t.id === "T1")?.status).toBe("complete")
+    expect(state?.phaseState).toBe("TASK_REVIEW")
     expect(state?.taskCompletionInProgress).toBe("T1")
     expect(state?.currentTaskId).toBe("T1")
   })
@@ -690,12 +730,13 @@ describe("tool.execute — mark_task_complete", () => {
     expect(result).toContain("review passed")
 
     const state = ctx.engine!.store.get("s1")
+    expect(state?.phaseState).toBe("SCHEDULING")
     expect(state?.taskCompletionInProgress).toBeNull()
     expect(state?.taskReviewCount).toBe(0)
     expect(state?.currentTaskId).toBe("T2")
   })
 
-  it("submit_task_review moves to USER_GATE when only unresolved human gates remain", async () => {
+  it("submit_task_review moves to HUMAN_GATE when only unresolved human gates remain", async () => {
     await exec("select_mode", { mode: "GREENFIELD", feature_name: "awaiting-human-after-review" })
     await ctx.engine!.store.update("s1", (d) => {
       d.phase = "IMPLEMENTATION"
@@ -748,7 +789,7 @@ describe("tool.execute — mark_task_complete", () => {
     expect(result).toContain("review passed")
     const state = ctx.engine!.store.get("s1")
     expect(state?.phase).toBe("IMPLEMENTATION")
-    expect(state?.phaseState).toBe("USER_GATE")
+    expect(state?.phaseState).toBe("HUMAN_GATE")
     expect(state?.currentTaskId).toBeNull()
     expect(state?.userGateMessageReceived).toBe(false)
   })
@@ -847,10 +888,25 @@ describe("tool.execute — agent-only mode", () => {
       ) as Promise<string>
   })
 
+  async function writeCurrentPlanArtifact(sessionId = "ao-session", bridgeContext = agentCtx, content = "# Plan\n") {
+    const state = bridgeContext.engine!.store.get(sessionId)
+    const feature = state?.featureName ?? `feature-${Date.now()}`
+    const planPath = join(tmpDir, ".openartisan", feature, "plan.md")
+    await mkdir(join(tmpDir, ".openartisan", feature), { recursive: true })
+    await Bun.write(planPath, content)
+    return planPath
+  }
+
+  async function requestCurrentPlanReview(sessionId = "ao-session", bridgeContext = agentCtx, run = agentExec, content = "# Plan\n") {
+    const planPath = await writeCurrentPlanArtifact(sessionId, bridgeContext, content)
+    await run("request_review", { summary: "Plan", artifact_description: "Plan", artifact_files: [planPath] })
+    return planPath
+  }
+
   it("mark_satisfied passes with all blocking criteria met", async () => {
     // Advance to PLANNING/REVIEW
     await agentExec("select_mode", { mode: "GREENFIELD", feature_name: `ao-test-${Date.now()}` })
-    await agentExec("request_review", { summary: "Plan", artifact_description: "Plan doc", artifact_content: "# Plan" })
+    await requestCurrentPlanReview()
 
     // PLANNING has many expected blocking criteria. Provide enough to satisfy the count check.
     const criteria = Array.from({ length: 16 }, (_, i) => ({
@@ -864,7 +920,7 @@ describe("tool.execute — agent-only mode", () => {
 
   it("mark_satisfied fails and routes to REVISE with unmet criteria", async () => {
     await agentExec("select_mode", { mode: "GREENFIELD", feature_name: `ao-fail-${Date.now()}` })
-    await agentExec("request_review", { summary: "Plan", artifact_description: "Plan", artifact_content: "# Plan" })
+    await requestCurrentPlanReview()
 
     // Provide enough criteria but with one unmet blocking
     const criteria = Array.from({ length: 16 }, (_, i) => ({
@@ -897,7 +953,7 @@ describe("tool.execute — agent-only mode", () => {
 
   it("submit_feedback(revise) routes directly to REVISE in agent-only mode", async () => {
     await agentExec("select_mode", { mode: "GREENFIELD", feature_name: `ao-rev-${Date.now()}` })
-    await agentExec("request_review", { summary: "Plan", artifact_description: "Plan", artifact_content: "# Plan" })
+    await requestCurrentPlanReview()
     // mark_satisfied → pass → USER_GATE (provide enough criteria)
     const passingCriteria = Array.from({ length: 16 }, (_, i) => ({
       criterion: `C${i + 1}`, met: true, evidence: "ok", severity: "blocking",
@@ -919,17 +975,17 @@ describe("tool.execute — agent-only mode", () => {
     expect(state?.latestReviewResults).toBeNull()
   })
 
-  it("propose_backtrack works in agent-only mode", async () => {
+  it("propose_backtrack lands in REDRAFT in agent-only mode", async () => {
     await agentExec("select_mode", { mode: "GREENFIELD", feature_name: `ao-bt-${Date.now()}` })
     // Advance to PLANNING/REVIEW → USER_GATE → approve → INTERFACES/DRAFT
-    await agentExec("request_review", { summary: "Plan", artifact_description: "Plan", artifact_content: "# Plan" })
+    await requestCurrentPlanReview()
     const passingCriteria = Array.from({ length: 16 }, (_, i) => ({
       criterion: `C${i + 1}`, met: true, evidence: "ok", severity: "blocking",
     }))
     await agentExec("mark_satisfied", { criteria_met: passingCriteria })
     await agentCtx.engine!.store.update("ao-session", (d) => { d.userGateMessageReceived = true })
     await agentExec("submit_feedback", { feedback_type: "approve", feedback_text: "approved" })
-    // Now in INTERFACES/DRAFT — backtrack to PLANNING
+    // Now in INTERFACES/DRAFT — backtrack to PLANNING/REDRAFT
     const state1 = agentCtx.engine!.store.get("ao-session")
     expect(state1?.phase).toBe("INTERFACES")
 
@@ -941,7 +997,9 @@ describe("tool.execute — agent-only mode", () => {
     expect(result).toContain("PLANNING")
     const state2 = agentCtx.engine!.store.get("ao-session")
     expect(state2?.phase).toBe("PLANNING")
-    expect(state2?.phaseState).toBe("DRAFT")
+    expect(state2?.phaseState).toBe("REDRAFT")
+    expect(state2?.backtrackContext?.sourcePhase).toBe("INTERFACES")
+    expect(state2?.backtrackContext?.targetPhase).toBe("PLANNING")
   })
 
   it("mark_satisfied returns subagent error in isolated mode", async () => {
@@ -953,9 +1011,10 @@ describe("tool.execute — agent-only mode", () => {
       args: { mode: "GREENFIELD", feature_name: `iso-test-${Date.now()}` },
       context: { sessionId: "iso-session", directory: tmpDir },
     }, isolatedCtx)
+    const isoPlanPath = await writeCurrentPlanArtifact("iso-session", isolatedCtx)
     await handleToolExecute({
       name: "request_review",
-      args: { summary: "Plan", artifact_description: "Plan", artifact_content: "# Plan" },
+      args: { summary: "Plan", artifact_description: "Plan", artifact_files: [isoPlanPath] },
       context: { sessionId: "iso-session", directory: tmpDir },
     }, isolatedCtx)
     const result = await handleToolExecute({
@@ -970,7 +1029,7 @@ describe("tool.execute — agent-only mode", () => {
 
   it("mark_satisfied rejects empty criteria without state transition", async () => {
     await agentExec("select_mode", { mode: "GREENFIELD", feature_name: `ao-empty-${Date.now()}` })
-    await agentExec("request_review", { summary: "Plan", artifact_description: "Plan", artifact_content: "# Plan" })
+    await requestCurrentPlanReview()
     // Confirm we're at REVIEW
     const stateBefore = agentCtx.engine!.store.get("ao-session")
     expect(stateBefore?.phaseState).toBe("REVIEW")
@@ -987,11 +1046,7 @@ describe("tool.execute — agent-only mode", () => {
 
   it("blocks mark_satisfied when the reviewed artifact changed on disk", async () => {
     await agentExec("select_mode", { mode: "GREENFIELD", feature_name: `ao-hash-${Date.now()}` })
-    await agentExec("request_review", {
-      summary: "Plan",
-      artifact_description: "Plan",
-      artifact_content: "# Initial plan",
-    })
+    await requestCurrentPlanReview("ao-session", agentCtx, agentExec, "# Initial plan")
 
     const stateBefore = agentCtx.engine!.store.get("ao-session")
     const planPath = stateBefore?.artifactDiskPaths.plan
@@ -1014,22 +1069,23 @@ describe("tool.execute — agent-only mode", () => {
     expect(stateAfter?.phaseState).toBe("REVIEW")
   })
 
-  it("allows request_review at REVIEW to refresh artifact hash and review files", async () => {
+  it("allows request_review at REVIEW to refresh text artifact hash and review files", async () => {
     await exec("select_mode", { mode: "GREENFIELD", feature_name: `review-refresh-${Date.now()}` })
+    const planPath = await writeCurrentPlanArtifact("s1", ctx, "# Old plan artifact")
     await ctx.engine!.store.update("s1", (d) => {
-      d.phase = "TESTS"
+      d.phase = "PLANNING"
       d.phaseState = "REVIEW"
       d.featureName = d.featureName ?? `review-refresh-${Date.now()}`
-      d.artifactDiskPaths.tests = join(tmpDir, ".openartisan", d.featureName!, "tests.md")
+      d.artifactDiskPaths.plan = planPath
       d.reviewArtifactHash = "stale-hash"
       d.latestReviewResults = [{ criterion: "Old", met: false, evidence: "stale" }]
     })
+    await Bun.write(planPath, "# Updated plan artifact")
 
     const result = await exec("request_review", {
-      artifact_content: "# Updated tests artifact",
-      artifact_files: ["tests/bridge-tool-execute.test.ts"],
-      summary: "Updated tests",
-      artifact_description: "Tests artifact",
+      artifact_files: [planPath],
+      summary: "Updated plan",
+      artifact_description: "Plan artifact",
     })
 
     expect(result).toContain("re-submitted")
@@ -1038,7 +1094,7 @@ describe("tool.execute — agent-only mode", () => {
     const state = ctx.engine!.store.get("s1")
     expect(state?.phaseState).toBe("REVIEW")
     expect(state?.reviewArtifactHash).not.toBe("stale-hash")
-    expect(state?.reviewArtifactFiles).toContain("tests/bridge-tool-execute.test.ts")
+    expect(state?.reviewArtifactFiles).toContain(planPath)
     expect(state?.latestReviewResults).toBeNull()
   })
 
@@ -1048,15 +1104,226 @@ describe("tool.execute — agent-only mode", () => {
       d.phase = "DISCOVERY"
       d.phaseState = "CONVENTIONS"
     })
+    const feature = ctx.engine!.store.get("s1")?.featureName ?? "conv"
+    const conventionsPath = join(tmpDir, ".openartisan", feature, "conventions.md")
+    await mkdir(join(tmpDir, ".openartisan", feature), { recursive: true })
+    await Bun.write(conventionsPath, "# Conventions\n")
 
     const result = await exec("request_review", {
       summary: "Conventions",
       artifact_description: "Conventions doc",
-      artifact_content: "# Conventions\n",
+      artifact_files: [conventionsPath],
     })
 
     expect(result).toContain("Transitioning to DISCOVERY/REVIEW")
     expect(ctx.engine!.store.get("s1")?.phaseState).toBe("REVIEW")
+  })
+
+  it("rejects request_review artifact_content for PLANNING", async () => {
+    await exec("select_mode", { mode: "GREENFIELD", feature_name: `planning-content-${Date.now()}` })
+
+    const result = await exec("request_review", {
+      summary: "Plan",
+      artifact_description: "Inline plan",
+      artifact_content: "# Plan\n",
+    })
+
+    expect(result).toContain("Error")
+    expect(result).toContain("artifact_files")
+    expect(ctx.engine!.store.get("s1")?.phaseState).toBe("DRAFT")
+  })
+
+  it("rejects PLANNING artifact files outside the canonical plan path", async () => {
+    await exec("select_mode", { mode: "GREENFIELD", feature_name: `planning-wrong-path-${Date.now()}` })
+    const feature = ctx.engine!.store.get("s1")?.featureName ?? "planning-wrong-path"
+    const wrongPath = join(tmpDir, ".openartisan", feature, "notes.md")
+    await mkdir(join(tmpDir, ".openartisan", feature), { recursive: true })
+    await Bun.write(wrongPath, "# Notes\n")
+
+    const result = await exec("request_review", {
+      summary: "Plan",
+      artifact_description: "Wrong markdown path",
+      artifact_files: [wrongPath],
+    })
+
+    expect(result).toContain("Error")
+    expect(result).toContain(`.openartisan/${feature}/plan.md`)
+    expect(ctx.engine!.store.get("s1")?.phaseState).toBe("DRAFT")
+  })
+
+  it("rejects request_review artifact_content for INTERFACES", async () => {
+    await exec("select_mode", { mode: "GREENFIELD", feature_name: `interfaces-content-${Date.now()}` })
+    await ctx.engine!.store.update("s1", (d) => {
+      d.phase = "INTERFACES"
+      d.phaseState = "DRAFT"
+    })
+
+    const result = await exec("request_review", {
+      summary: "Interfaces",
+      artifact_description: "Markdown interface design doc",
+      artifact_content: "# Interfaces\n",
+    })
+
+    expect(result).toContain("Error")
+    expect(result).toContain("artifact_files")
+    expect(ctx.engine!.store.get("s1")?.phaseState).toBe("DRAFT")
+  })
+
+  it("rejects .openartisan artifact files for INTERFACES", async () => {
+    await exec("select_mode", { mode: "GREENFIELD", feature_name: `interfaces-openartisan-${Date.now()}` })
+    await ctx.engine!.store.update("s1", (d) => {
+      d.phase = "INTERFACES"
+      d.phaseState = "DRAFT"
+    })
+
+    const result = await exec("request_review", {
+      summary: "Interfaces",
+      artifact_description: "Saved markdown artifact",
+      artifact_files: [".openartisan/foo/interfaces.md"],
+    })
+
+    expect(result).toContain("Error")
+    expect(result).toContain(".openartisan")
+    expect(ctx.engine!.store.get("s1")?.phaseState).toBe("DRAFT")
+  })
+
+  it("rejects non-test artifact files for TESTS", async () => {
+    await exec("select_mode", { mode: "GREENFIELD", feature_name: `tests-invalid-file-${Date.now()}` })
+    await ctx.engine!.store.update("s1", (d) => {
+      d.phase = "TESTS"
+      d.phaseState = "DRAFT"
+    })
+
+    await mkdir(join(tmpDir, "src"), { recursive: true })
+    await Bun.write(join(tmpDir, "src", "types.ts"), "export interface X {}\n")
+    const result = await exec("request_review", {
+      summary: "Tests",
+      artifact_description: "Wrong file",
+      artifact_files: ["src/types.ts"],
+    })
+
+    expect(result).toContain("Error")
+    expect(result).toContain("runnable test/spec files")
+    expect(ctx.engine!.store.get("s1")?.phaseState).toBe("DRAFT")
+  })
+
+  it("rejects markdown summaries for IMPLEMENTATION request_review", async () => {
+    await exec("select_mode", { mode: "GREENFIELD", feature_name: `implementation-markdown-${Date.now()}` })
+    await ctx.engine!.store.update("s1", (d) => {
+      d.phase = "IMPLEMENTATION"
+      d.phaseState = "DRAFT"
+    })
+    await mkdir(join(tmpDir, "docs"), { recursive: true })
+    await Bun.write(join(tmpDir, "docs", "implementation.md"), "# Implementation summary\n")
+
+    const result = await exec("request_review", {
+      summary: "Implementation",
+      artifact_description: "Markdown summary",
+      artifact_files: ["docs/implementation.md"],
+    })
+
+    expect(result).toContain("Error")
+    expect(result).toContain("not markdown summaries")
+    expect(ctx.engine!.store.get("s1")?.phaseState).toBe("DRAFT")
+  })
+
+  it("builds phase-level isolated review context from reviewed files", async () => {
+    await exec("select_mode", { mode: "GREENFIELD", feature_name: `phase-review-${Date.now()}` })
+    const planPath = await writeCurrentPlanArtifact("s1", ctx)
+    await exec("request_review", {
+      summary: "Plan",
+      artifact_description: "Plan artifact",
+      artifact_files: [planPath],
+    })
+
+    const prompt = await handlePhaseGetReviewContext({ sessionId: "s1" }, ctx)
+    expect(prompt).toContain("reviewing the **PLANNING** artifact")
+    expect(prompt).toContain("## Acceptance Criteria")
+    expect(prompt).toContain("Artifact to Review")
+  })
+
+  it("submit_phase_review advances using isolated reviewer criteria", async () => {
+    await exec("select_mode", { mode: "GREENFIELD", feature_name: `phase-submit-${Date.now()}` })
+    const planPath = await writeCurrentPlanArtifact("s1", ctx)
+    await exec("request_review", {
+      summary: "Plan",
+      artifact_description: "Plan artifact",
+      artifact_files: [planPath],
+    })
+
+    const criteria = Array.from({ length: 16 }, (_, i) => ({
+      criterion: `Criterion ${i + 1}`,
+      met: true,
+      evidence: "verified by isolated reviewer",
+      severity: "blocking",
+    }))
+    const result = await exec("submit_phase_review", {
+      review_output: JSON.stringify({ satisfied: true, criteria_results: criteria }),
+    })
+
+    expect(result).toContain("Isolated phase review submitted")
+    expect(ctx.engine!.store.get("s1")?.phaseState).toBe("USER_GATE")
+  })
+
+  it("submit_phase_review routes malformed reviewer output to REVISE", async () => {
+    await exec("select_mode", { mode: "GREENFIELD", feature_name: `phase-bad-${Date.now()}` })
+    const planPath = await writeCurrentPlanArtifact("s1", ctx)
+    await exec("request_review", {
+      summary: "Plan",
+      artifact_description: "Plan artifact",
+      artifact_files: [planPath],
+    })
+
+    const result = await exec("submit_phase_review", {
+      review_output: "not json",
+    })
+
+    expect(result).toContain("Isolated phase review submitted")
+    const state = ctx.engine!.store.get("s1")
+    expect(state?.phaseState).toBe("REVISE")
+    expect(state?.latestReviewResults?.[0]?.criterion).toContain("Isolated reviewer failed")
+    expect(state?.latestReviewResults?.[0]?.evidence).toContain("Reviewer output was not valid phase-review JSON")
+    expect(state?.latestReviewResults?.[0]?.evidence).toContain("not json")
+  })
+
+  it("submit_phase_review preserves isolated reviewer subprocess failure text", async () => {
+    await exec("select_mode", { mode: "GREENFIELD", feature_name: `phase-auth-fail-${Date.now()}` })
+    const planPath = await writeCurrentPlanArtifact("s1", ctx)
+    await exec("request_review", {
+      summary: "Plan",
+      artifact_description: "Plan artifact",
+      artifact_files: [planPath],
+    })
+
+    await exec("submit_phase_review", {
+      review_output: "ISOLATED_PHASE_REVIEW_FAILED: reviewer command exited with code 1 | stdout: Not logged in | stderr: Please run /login",
+    })
+
+    const state = ctx.engine!.store.get("s1")
+    expect(state?.phaseState).toBe("REVISE")
+    expect(state?.latestReviewResults?.[0]?.evidence).toContain("Not logged in")
+    expect(state?.latestReviewResults?.[0]?.evidence).toContain("Please run /login")
+  })
+
+  it("submit_phase_review normalizes raw reviewer process results in bridge", async () => {
+    await exec("select_mode", { mode: "GREENFIELD", feature_name: `phase-raw-fail-${Date.now()}` })
+    const planPath = await writeCurrentPlanArtifact("s1", ctx)
+    await exec("request_review", {
+      summary: "Plan",
+      artifact_description: "Plan artifact",
+      artifact_files: [planPath],
+    })
+
+    await exec("submit_phase_review", {
+      review_stdout: "I think this artifact looks good.",
+      review_stderr: "",
+      review_exit_code: 0,
+    })
+
+    const state = ctx.engine!.store.get("s1")
+    expect(state?.phaseState).toBe("REVISE")
+    expect(state?.latestReviewResults?.[0]?.evidence).toContain("Reviewer output was not valid phase-review JSON")
+    expect(state?.latestReviewResults?.[0]?.evidence).toContain("I think this artifact looks good")
   })
 })
 
@@ -1088,7 +1355,7 @@ describe("tool.execute — submit_auto_approve", () => {
 })
 
 describe("tool.execute — resolve_human_gate", () => {
-  it("auto-advances to USER_GATE when all remaining work is human-gated", async () => {
+  it("auto-advances to HUMAN_GATE when all remaining work is human-gated", async () => {
     await ctx.engine!.store.update("s1", (d) => {
       d.phase = "IMPLEMENTATION"
       d.phaseState = "DRAFT"
@@ -1113,12 +1380,12 @@ describe("tool.execute — resolve_human_gate", () => {
       verification_steps: "Run aws s3 ls",
     })
 
-    expect(result).toContain("USER_GATE")
+    expect(result).toContain("HUMAN_GATE")
     const state = ctx.engine!.store.get("s1")
-    expect(state?.phaseState).toBe("USER_GATE")
+    expect(state?.phaseState).toBe("HUMAN_GATE")
   })
 
-  it("dispatches the next ready task when work remains after a human gate", async () => {
+  it("returns to structural scheduling when work remains after a human gate", async () => {
     await ctx.engine!.store.update("s1", (d) => {
       d.phase = "IMPLEMENTATION"
       d.phaseState = "DRAFT"
@@ -1155,16 +1422,16 @@ describe("tool.execute — resolve_human_gate", () => {
 
     expect(result).toContain("Human gate set for task \"T1\"")
     const state = ctx.engine!.store.get("s1")
-    expect(state?.phaseState).toBe("DRAFT")
+    expect(state?.phaseState).toBe("SCHEDULING")
     expect(state?.currentTaskId).toBe("T2")
   })
 })
 
 describe("tool.execute — submit_feedback human gate handling", () => {
-  it("blocks approval when unresolved human gates remain", async () => {
+  it("does not treat HUMAN_GATE as a user approval surface", async () => {
     await ctx.engine!.store.update("s1", (d) => {
       d.phase = "IMPLEMENTATION"
-      d.phaseState = "USER_GATE"
+      d.phaseState = "HUMAN_GATE"
       d.userGateMessageReceived = true
       d.implDag = [{
         id: "T1",
@@ -1191,13 +1458,13 @@ describe("tool.execute — submit_feedback human gate handling", () => {
     expect(result).toContain("Cannot approve")
     const state = ctx.engine!.store.get("s1")
     expect(state?.phase).toBe("IMPLEMENTATION")
-    expect(state?.phaseState).toBe("USER_GATE")
+    expect(state?.phaseState).toBe("HUMAN_GATE")
   })
 
-  it("returns to IMPLEMENTATION/DRAFT when a human gate is resolved and work remains", async () => {
+  it("does not use submit_feedback approval to resolve human gates back into drafting", async () => {
     await ctx.engine!.store.update("s1", (d) => {
       d.phase = "IMPLEMENTATION"
-      d.phaseState = "USER_GATE"
+      d.phaseState = "HUMAN_GATE"
       d.userGateMessageReceived = true
       d.implDag = [
         {
@@ -1233,11 +1500,11 @@ describe("tool.execute — submit_feedback human gate handling", () => {
       resolved_human_gates: ["T1"],
     })
 
-    expect(result).toContain("Returning to IMPLEMENTATION/DRAFT")
+    expect(result).toContain("Cannot approve")
     const state = ctx.engine!.store.get("s1")
     expect(state?.phase).toBe("IMPLEMENTATION")
-    expect(state?.phaseState).toBe("DRAFT")
-    expect(state?.currentTaskId).toBe("T2")
+    expect(state?.phaseState).toBe("HUMAN_GATE")
+    expect(state?.currentTaskId).toBeNull()
   })
 
   it("completes IMPLEMENTATION cleanly when the final human gate is resolved", async () => {
@@ -1246,6 +1513,8 @@ describe("tool.execute — submit_feedback human gate handling", () => {
       d.phaseState = "USER_GATE"
       d.userGateMessageReceived = true
       d.taskReviewCount = 2
+      d.latestReviewResults = [{ criterion: "Final implementation review", met: true, evidence: "24 of 24 blocking criteria met" }]
+      d.reviewArtifactFiles = ["docs/full-execution-plan.md"]
       d.implDag = [
         {
           id: "T1",
@@ -1278,6 +1547,8 @@ describe("tool.execute — submit_feedback human gate handling", () => {
     expect(state?.phaseState).toBe("DRAFT")
     expect(state?.taskReviewCount).toBe(0)
     expect(state?.currentTaskId).toBeNull()
+    expect(state?.latestReviewResults?.[0]?.criterion).toBe("Final implementation review")
+    expect(state?.reviewArtifactFiles).toEqual(["docs/full-execution-plan.md"])
   })
 })
 
@@ -1536,6 +1807,36 @@ describe("task.getReviewContext", () => {
     })
 
     const result = await handleTaskGetReviewContext({ sessionId: "rc-session" }, agentCtx)
+    expect(result).toBeNull()
+  })
+})
+
+describe("task.getAutoApproveContext", () => {
+  it("returns auto-approve prompt for robot-artisan at USER_GATE", async () => {
+    await ctx.engine!.store.update("s1", (d) => {
+      d.mode = "GREENFIELD"
+      d.phase = "PLANNING"
+      d.phaseState = "USER_GATE"
+      d.activeAgent = "robot-artisan"
+      d.featureName = "auto-approve-feat"
+      d.reviewArtifactFiles = [join(tmpDir, "plan.md")]
+      d.latestReviewResults = [{ criterion: "All user requirements explicitly addressed", met: true, evidence: "ok" } as any]
+    })
+    const result = await handleAutoApproveContext({ sessionId: "s1" }, ctx)
+    expect(typeof result).toBe("string")
+    expect(result as string).toContain("auto-approve")
+    expect(result as string).toContain("USER_GATE")
+  })
+
+  it("returns null outside robot-artisan USER_GATE", async () => {
+    await ctx.engine!.store.update("s1", (d) => {
+      d.mode = "GREENFIELD"
+      d.phase = "PLANNING"
+      d.phaseState = "REDRAFT"
+      d.activeAgent = "artisan"
+      d.featureName = "no-auto-approve-feat"
+    })
+    const result = await handleAutoApproveContext({ sessionId: "s1" }, ctx)
     expect(result).toBeNull()
   })
 })

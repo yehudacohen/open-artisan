@@ -82,6 +82,91 @@ function makeInput(overrides: Partial<HookInput> = {}): HookInput {
   return { session_id: "hook-test-session", cwd: tmpDir, ...overrides }
 }
 
+function passingPlanningCriteria() {
+  return Array.from({ length: 16 }, (_, i) => ({
+    criterion: `C${i + 1}`,
+    met: true,
+    evidence: "ok",
+    severity: "blocking",
+  }))
+}
+
+async function moveSessionToPlanningRedraft(sessionId: string): Promise<void> {
+  const featureName = `hook-redraft-${Date.now()}`
+  await sendSocketRequest(socketPath, {
+    jsonrpc: "2.0",
+    method: "lifecycle.sessionCreated",
+    params: { sessionId },
+    id: Date.now(),
+  })
+  await sendSocketRequest(socketPath, {
+    jsonrpc: "2.0",
+    method: "tool.execute",
+    params: {
+      name: "select_mode",
+      args: { mode: "GREENFIELD", feature_name: featureName },
+      context: { sessionId, directory: tmpDir },
+    },
+    id: Date.now() + 1,
+  })
+  const artifactDir = join(tmpDir, ".openartisan", featureName)
+  mkdirSync(artifactDir, { recursive: true })
+  const planPath = join(artifactDir, "plan.md")
+  writeFileSync(planPath, "# Plan\n\nA structurally valid planning artifact.", "utf-8")
+  await sendSocketRequest(socketPath, {
+    jsonrpc: "2.0",
+    method: "tool.execute",
+    params: {
+      name: "request_review",
+      args: { summary: "Plan", artifact_description: "Plan", artifact_files: [planPath] },
+      context: { sessionId, directory: tmpDir },
+    },
+    id: Date.now() + 2,
+  })
+  await sendSocketRequest(socketPath, {
+    jsonrpc: "2.0",
+    method: "tool.execute",
+    params: {
+      name: "mark_satisfied",
+      args: { criteria_met: passingPlanningCriteria() },
+      context: { sessionId, directory: tmpDir },
+    },
+    id: Date.now() + 3,
+  })
+  await sendSocketRequest(socketPath, {
+    jsonrpc: "2.0",
+    method: "message.process",
+    params: {
+      sessionId,
+      parts: [{ type: "text", text: "approved" }],
+    },
+    id: Date.now() + 4,
+  })
+  await sendSocketRequest(socketPath, {
+    jsonrpc: "2.0",
+    method: "tool.execute",
+    params: {
+      name: "submit_feedback",
+      args: { feedback_type: "approve", feedback_text: "approved" },
+      context: { sessionId, directory: tmpDir },
+    },
+    id: Date.now() + 5,
+  })
+  await sendSocketRequest(socketPath, {
+    jsonrpc: "2.0",
+    method: "tool.execute",
+    params: {
+      name: "propose_backtrack",
+      args: {
+        target_phase: "PLANNING",
+        reason: "Interfaces exposed a missing planning invariant that requires a redraft.",
+      },
+      context: { sessionId, directory: tmpDir },
+    },
+    id: Date.now() + 6,
+  })
+}
+
 // ---------------------------------------------------------------------------
 // PreToolUse
 // ---------------------------------------------------------------------------
@@ -202,10 +287,9 @@ describe("hook: Stop", () => {
 
   it("re-prompts during active workflow", async () => {
     const result = await handleStop(makeInput())
-    // In PLANNING/DRAFT, the idle handler should reprompt
-    // (depends on idle handler implementation — may be reprompt or ignore)
-    // Either way, should not crash
-    expect(result.exitCode === 0 || result.exitCode === 2).toBe(true)
+    expect(result.exitCode).toBe(2)
+    expect(result.stderr).not.toBeNull()
+    expect(result.stderr).toContain("not yet complete")
   })
 })
 
@@ -233,6 +317,17 @@ describe("hook: SessionStart", () => {
     const parsed = JSON.parse(result.stdout!)
     expect(parsed.hookSpecificOutput.additionalContext).toBeTruthy()
     expect(parsed.hookSpecificOutput.additionalContext).toContain("PLANNING")
+  })
+
+  it("injects REDRAFT structural context after a backtrack", async () => {
+    const sessionId = `redraft-hook-${Date.now()}`
+    await moveSessionToPlanningRedraft(sessionId)
+    const result = await handleSessionStart({ session_id: sessionId, cwd: tmpDir, source: "startup" })
+    expect(result.exitCode).toBe(0)
+    expect(result.stdout).not.toBeNull()
+    const parsed = JSON.parse(result.stdout!)
+    expect(parsed.hookSpecificOutput.additionalContext).toContain("REDRAFT")
+    expect(parsed.hookSpecificOutput.additionalContext).toContain("INTERFACES")
   })
 
   it("writes session_id to .active-session", async () => {

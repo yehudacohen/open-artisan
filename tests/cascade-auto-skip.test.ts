@@ -11,7 +11,10 @@
  * - Graceful degradation when hasArtifactChanged throws
  * - Safety cap prevents infinite loops
  */
-import { describe, expect, it, mock, beforeEach } from "bun:test"
+import { describe, expect, it, mock, beforeEach, afterEach } from "bun:test"
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs"
+import { join } from "node:path"
+import { tmpdir } from "node:os"
 import { cascadeAutoSkip, type CascadeAutoSkipDeps } from "#core/cascade-auto-skip"
 import { createStateMachine } from "#core/state-machine"
 import { SCHEMA_VERSION } from "#core/types"
@@ -42,6 +45,7 @@ function freshState(overrides: Partial<WorkflowState> = {}): WorkflowState {
     discoveryReport: null,
     currentTaskId: null,
     feedbackHistory: [],
+    backtrackContext: null,
     implDag: null,
     phaseApprovalCounts: {},
     escapePending: false,
@@ -138,17 +142,29 @@ function createMockLogger(): Logger {
 
 describe("cascadeAutoSkip", () => {
   const SID = "test-session"
-  const CWD = "/fake/project"
+  let cwd: string
   let sm: ReturnType<typeof createStateMachine>
   let log: Logger
 
   beforeEach(() => {
+    cwd = mkdtempSync(join(tmpdir(), "cascade-auto-skip-"))
     sm = createStateMachine()
     log = createMockLogger()
   })
 
+  afterEach(() => {
+    rmSync(cwd, { recursive: true, force: true })
+  })
+
   function makeDeps(store: SessionStateStore): CascadeAutoSkipDeps {
     return { store, sm, log }
+  }
+
+  function writeArtifact(relativePath: string, content: string): string {
+    const fullPath = join(cwd, relativePath)
+    mkdirSync(join(fullPath, ".."), { recursive: true })
+    writeFileSync(fullPath, content, "utf-8")
+    return fullPath
   }
 
   // ---------------------------------------------------------------------------
@@ -157,21 +173,21 @@ describe("cascadeAutoSkip", () => {
 
   it("returns null when session does not exist", async () => {
     const store = createMockStore()
-    const result = await cascadeAutoSkip(makeDeps(store), "nonexistent", CWD)
+    const result = await cascadeAutoSkip(makeDeps(store), "nonexistent", cwd)
     expect(result).toBeNull()
   })
 
   it("returns null when not in REVISE state", async () => {
     const state = freshState({ phaseState: "DRAFT" })
     const store = createMockStore(new Map([[SID, state]]))
-    const result = await cascadeAutoSkip(makeDeps(store), SID, CWD)
+    const result = await cascadeAutoSkip(makeDeps(store), SID, cwd)
     expect(result).toBeNull()
   })
 
   it("returns null when no revisionBaseline exists", async () => {
     const state = freshState({ revisionBaseline: null })
     const store = createMockStore(new Map([[SID, state]]))
-    const result = await cascadeAutoSkip(makeDeps(store), SID, CWD)
+    const result = await cascadeAutoSkip(makeDeps(store), SID, cwd)
     expect(result).toBeNull()
   })
 
@@ -194,7 +210,7 @@ describe("cascadeAutoSkip", () => {
     // This is still a valid test — it confirms the function doesn't skip
     // anything when there's no cascade context.
     const store = createMockStore(new Map([[SID, state]]))
-    const result = await cascadeAutoSkip(makeDeps(store), SID, CWD)
+    const result = await cascadeAutoSkip(makeDeps(store), SID, cwd)
     // Either null (changed=true, broke out of loop) or a USER_GATE message
     // Either way, the standalone REVISE guard is covered
     expect(typeof result === "string" || result === null).toBe(true)
@@ -220,7 +236,7 @@ describe("cascadeAutoSkip", () => {
     // 2. hasArtifactChanged will try to use shell.$`git diff...`
     // 3. This will throw because mockShell isn't a real Bun $
     // 4. cascadeAutoSkip catches and returns null
-    const result = await cascadeAutoSkip(makeDeps(store), SID, CWD)
+    const result = await cascadeAutoSkip(makeDeps(store), SID, cwd)
     expect(result).toBeNull()
   })
 
@@ -231,7 +247,7 @@ describe("cascadeAutoSkip", () => {
   it("does not modify state when returning null (no skip possible)", async () => {
     const state = freshState({ phaseState: "DRAFT" }) // Not REVISE → immediate null
     const store = createMockStore(new Map([[SID, state]]))
-    await cascadeAutoSkip(makeDeps(store), SID, CWD)
+    await cascadeAutoSkip(makeDeps(store), SID, cwd)
     const afterState = store.get(SID)!
     expect(afterState.phaseState).toBe("DRAFT")
     expect(afterState.phase).toBe("TESTS")
@@ -242,30 +258,30 @@ describe("cascadeAutoSkip", () => {
   // ---------------------------------------------------------------------------
 
   describe("cascade with content-hash baseline (in-memory phases)", () => {
-    it("skips a cascade step when hasArtifactChanged returns false via content-hash match", async () => {
-      // Use PLANNING phase which is a content-hash phase.
-      // Create a baseline hash, then set up an artifact file path that exists with the same content.
-      // But we can't create real files here. Instead, the test verifies the mechanism:
-      // if we reach the skip guard with no cascade steps, we get USER_GATE fast-forward.
-      //
-      // Actually, content-hash check reads the file from disk. If the file doesn't exist,
-      // hasArtifactChanged returns true (allow through). So with no real files, we can't
-      // make it return false for content-hash. This test verifies the "changed=true" path.
+    it("skips a no-op PLANNING revise step and fast-forwards the final IMPL_PLAN step to USER_GATE", async () => {
+      const planPath = writeArtifact(".openartisan/feat/plan.md", "# Plan\n")
+      const implPlanPath = writeArtifact(".openartisan/feat/impl-plan.md", "# Impl Plan\n")
       const state = freshState({
         phase: "PLANNING" as Phase,
         phaseState: "REVISE",
-        revisionBaseline: { type: "content-hash", hash: "will-not-match" },
+        artifactDiskPaths: {
+          plan: planPath,
+          impl_plan: implPlanPath,
+        },
+        revisionBaseline: { type: "content-hash", hash: "c3964bb3b70a957ec9b233c7dd3653f6" },
         pendingRevisionSteps: [
-          { phase: "INTERFACES" as Phase, phaseState: "REVISE", artifact: "interfaces", instructions: "Redo interfaces." },
+          { phase: "IMPL_PLAN" as Phase, phaseState: "REVISE", artifact: "impl_plan", instructions: "Redo impl plan." },
         ],
       })
       const store = createMockStore(new Map([[SID, state]]))
-      const result = await cascadeAutoSkip(makeDeps(store), SID, CWD)
-      // Changed=true (file doesn't exist → returns true from hasArtifactChanged),
-      // so the function breaks immediately. No skips.
-      expect(result).toBeNull()
-      // State should be unchanged
-      expect(store.get(SID)!.phase).toBe("PLANNING")
+      const result = await cascadeAutoSkip(makeDeps(store), SID, cwd)
+      expect(result).toContain("No changes needed for **PLANNING**, **IMPL_PLAN**")
+      expect(result).toContain("wait for their approval")
+      const after = store.get(SID)!
+      expect(after.phase).toBe("IMPL_PLAN")
+      expect(after.phaseState).toBe("USER_GATE")
+      expect(after.pendingRevisionSteps).toBeNull()
+      expect(after.revisionBaseline).toBeNull()
     })
   })
 
@@ -273,18 +289,8 @@ describe("cascadeAutoSkip", () => {
   // Fast-forward to USER_GATE
   // ---------------------------------------------------------------------------
 
-  describe("USER_GATE fast-forward", () => {
-    it("transitions to USER_GATE when last cascade step has no changes", async () => {
-      // We simulate the scenario by manually mutating the store inside the
-      // function's loop. This is tricky because hasArtifactChanged depends on
-      // real file/git state. Instead, test the transition logic directly.
-      //
-      // Create a state in TESTS/REVISE with empty pendingRevisionSteps and a
-      // git-sha baseline. Since shell is mocked, hasArtifactChanged will throw,
-      // and cascadeAutoSkip will return null (graceful degradation).
-      //
-      // The real integration of this function is tested via the full plugin
-      // integration tests. This unit test covers the structural guarantees.
+  describe("USER_GATE fast-forward fallback", () => {
+    it("returns null when shell-based git-sha verification degrades instead of fast-forwarding", async () => {
       const state = freshState({
         phase: "TESTS" as Phase,
         phaseState: "REVISE",
@@ -292,8 +298,7 @@ describe("cascadeAutoSkip", () => {
         pendingRevisionSteps: [],
       })
       const store = createMockStore(new Map([[SID, state]]))
-      const result = await cascadeAutoSkip(makeDeps(store), SID, CWD)
-      // Shell mock causes graceful degradation → null
+      const result = await cascadeAutoSkip(makeDeps(store), SID, cwd)
       expect(result).toBeNull()
     })
   })
@@ -307,7 +312,7 @@ describe("cascadeAutoSkip", () => {
     const store = createMockStore(new Map([[SID, state]]))
     const getSpy = mock(store.get.bind(store))
     store.get = getSpy as typeof store.get
-    await cascadeAutoSkip(makeDeps(store), SID, CWD)
+    await cascadeAutoSkip(makeDeps(store), SID, cwd)
     expect(getSpy).toHaveBeenCalledWith(SID)
   })
 
@@ -316,7 +321,7 @@ describe("cascadeAutoSkip", () => {
     const store = createMockStore(new Map([[SID, state]]))
     const updateSpy = mock(store.update.bind(store))
     store.update = updateSpy as typeof store.update
-    await cascadeAutoSkip(makeDeps(store), SID, CWD)
+    await cascadeAutoSkip(makeDeps(store), SID, cwd)
     expect(updateSpy).not.toHaveBeenCalled()
   })
 
@@ -327,7 +332,7 @@ describe("cascadeAutoSkip", () => {
   it("does not log info when no skip is performed", async () => {
     const state = freshState({ phaseState: "DRAFT" })
     const store = createMockStore(new Map([[SID, state]]))
-    await cascadeAutoSkip(makeDeps(store), SID, CWD)
+    await cascadeAutoSkip(makeDeps(store), SID, cwd)
     expect(log.info).not.toHaveBeenCalled()
   })
 
@@ -344,7 +349,7 @@ describe("cascadeAutoSkip", () => {
       revisionBaseline: null, // Null baseline → returns null immediately
     })
     const store = createMockStore(new Map([[SID, state]]))
-    const result = await cascadeAutoSkip(makeDeps(store), SID, CWD)
+    const result = await cascadeAutoSkip(makeDeps(store), SID, cwd)
     expect(result).toBeNull()
   })
 
@@ -352,8 +357,8 @@ describe("cascadeAutoSkip", () => {
   // Return message format
   // ---------------------------------------------------------------------------
 
-  describe("return message format", () => {
-    it("skip message includes phase names in bold when phases are skipped", async () => {
+  describe("return message format preconditions", () => {
+    it("documents the callable export shape when a real skip cannot be triggered in this unit seam", async () => {
       // Test the message format by checking the function contract.
       // When skippedPhases has items and there are remaining steps,
       // the message should include the skipped phase names in bold

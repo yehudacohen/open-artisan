@@ -3,7 +3,7 @@
  * Covers G11: ANALYZE sub-state now correctly mentions mark_analyze_complete.
  */
 import { describe, expect, it } from "bun:test"
-import { buildWorkflowSystemPrompt } from "#core/hooks/system-transform"
+import { buildSubagentContext, buildWorkflowSystemPrompt } from "#core/hooks/system-transform"
 import type { WorkflowState } from "#core/types"
 import { SCHEMA_VERSION } from "#core/types"
 
@@ -31,6 +31,7 @@ function makeState(overrides: Partial<WorkflowState> = {}): WorkflowState {
     pendingRevisionSteps: null,
     currentTaskId: null,
     feedbackHistory: [],
+    backtrackContext: null,
     userGateMessageReceived: false,
     artifactDiskPaths: {},
     featureName: null,
@@ -120,6 +121,14 @@ describe("buildWorkflowSystemPrompt — DRAFT sub-state", () => {
     const prompt = buildWorkflowSystemPrompt(makeState({ phaseState: "DRAFT" }))
     expect(prompt).toContain("request_review")
   })
+
+  it("instructs agents to resolve uncertainty with documented decisions", () => {
+    const prompt = buildWorkflowSystemPrompt(makeState({ phaseState: "DRAFT" }))
+    expect(prompt).toContain("Uncertainty Handling")
+    expect(prompt).toContain("make the best decision yourself")
+    expect(prompt).toContain("alternatives considered")
+    expect(prompt).toContain("tradeoffs/risks")
+  })
 })
 
 describe("buildWorkflowSystemPrompt — REVIEW sub-state", () => {
@@ -140,6 +149,13 @@ describe("buildWorkflowSystemPrompt — USER_GATE sub-state", () => {
     expect(prompt).toContain("submit_feedback")
   })
 
+  it("requires uncertainty decisions and tradeoffs to be surfaced at USER_GATE", () => {
+    const prompt = buildWorkflowSystemPrompt(makeState({ phaseState: "USER_GATE" }))
+    expect(prompt).toContain("summarize any decisions you made under uncertainty")
+    expect(prompt).toContain("alternatives considered")
+    expect(prompt).toContain("tradeoffs/risks")
+  })
+
   it("shows escape hatch warning when phaseState is ESCAPE_HATCH", () => {
     const state = makeState({ phaseState: "ESCAPE_HATCH", phase: "INTERFACES", escapePending: true })
     const prompt = buildWorkflowSystemPrompt(state)
@@ -156,6 +172,107 @@ describe("buildWorkflowSystemPrompt — REVISE sub-state", () => {
   it("mentions request_review for after revision", () => {
     const prompt = buildWorkflowSystemPrompt(makeState({ phaseState: "REVISE" }))
     expect(prompt).toContain("request_review")
+  })
+
+  it("forbids stopping when revision feedback leaves viable alternatives", () => {
+    const prompt = buildWorkflowSystemPrompt(makeState({ phaseState: "REVISE" }))
+    expect(prompt).toContain("multiple viable fixes")
+    expect(prompt).toContain("choose the best one")
+    expect(prompt).toContain("alternatives/tradeoffs")
+  })
+})
+
+describe("buildWorkflowSystemPrompt — structural workflow sub-states", () => {
+  it("surfaces backtrack provenance during PLANNING/REDRAFT", () => {
+    const prompt = buildWorkflowSystemPrompt(makeState({
+      phase: "PLANNING",
+      phaseState: "REDRAFT",
+      mode: "INCREMENTAL",
+      backtrackContext: {
+        sourcePhase: "INTERFACES",
+        targetPhase: "PLANNING",
+        reason: "Interface review found structural drift that requires a redraft.",
+      },
+    }))
+    expect(prompt).toContain("REDRAFT")
+    expect(prompt).toContain("INTERFACES")
+    expect(prompt).toContain("Interface review found structural drift")
+  })
+
+  it("treats INTERFACES/SKIP_CHECK as an active structural decision state rather than ordinary drafting", () => {
+    const prompt = buildWorkflowSystemPrompt(makeState({
+      phase: "INTERFACES",
+      phaseState: "SKIP_CHECK",
+      mode: "INCREMENTAL",
+    }))
+    expect(prompt).toContain("SKIP_CHECK")
+    expect(prompt).toContain("phase_skipped")
+    expect(prompt).toContain("scheduling_complete")
+  })
+
+  it("treats INTERFACES/CASCADE_CHECK as an explicit cascade decision state", () => {
+    const prompt = buildWorkflowSystemPrompt(makeState({
+      phase: "INTERFACES",
+      phaseState: "CASCADE_CHECK",
+      mode: "INCREMENTAL",
+    }))
+    expect(prompt).toContain("CASCADE_CHECK")
+    expect(prompt).toContain("cascade_step_skipped")
+    expect(prompt).toContain("scheduling_complete")
+  })
+
+  it("treats IMPLEMENTATION/SCHEDULING as dispatch work rather than authoring", () => {
+    const prompt = buildWorkflowSystemPrompt(makeState({
+      phase: "IMPLEMENTATION",
+      phaseState: "SCHEDULING",
+      mode: "INCREMENTAL",
+      implDag: [],
+    }))
+    expect(prompt).toContain("SCHEDULING")
+    expect(prompt).toContain("scheduling_complete")
+    expect(prompt).not.toContain("You are drafting the IMPLEMENTATION artifact")
+  })
+
+  it("treats IMPLEMENTATION/TASK_REVIEW as waiting for submit_task_review", () => {
+    const prompt = buildWorkflowSystemPrompt(makeState({
+      phase: "IMPLEMENTATION",
+      phaseState: "TASK_REVIEW",
+      mode: "INCREMENTAL",
+    }))
+    expect(prompt).toContain("TASK_REVIEW")
+    expect(prompt).toContain("submit_task_review")
+  })
+
+  it("treats IMPLEMENTATION/TASK_REVISE as targeted repair before returning to task review", () => {
+    const prompt = buildWorkflowSystemPrompt(makeState({
+      phase: "IMPLEMENTATION",
+      phaseState: "TASK_REVISE",
+      mode: "INCREMENTAL",
+    }))
+    expect(prompt).toContain("TASK_REVISE")
+    expect(prompt).toContain("revision_complete")
+    expect(prompt).not.toContain("submit_feedback")
+  })
+
+  it("treats IMPLEMENTATION/HUMAN_GATE as manual-action waiting rather than a user approval gate", () => {
+    const prompt = buildWorkflowSystemPrompt(makeState({
+      phase: "IMPLEMENTATION",
+      phaseState: "HUMAN_GATE",
+      mode: "INCREMENTAL",
+    }))
+    expect(prompt).toContain("HUMAN_GATE")
+    expect(prompt).toContain("manual action")
+    expect(prompt).not.toContain("submit_feedback")
+  })
+
+  it("treats IMPLEMENTATION/DELEGATED_WAIT as waiting on delegated sub-workflow completion", () => {
+    const prompt = buildWorkflowSystemPrompt(makeState({
+      phase: "IMPLEMENTATION",
+      phaseState: "DELEGATED_WAIT",
+      mode: "INCREMENTAL",
+    }))
+    expect(prompt).toContain("DELEGATED_WAIT")
+    expect(prompt).toContain("delegated_task_completed")
   })
 })
 
@@ -285,12 +402,14 @@ describe("buildWorkflowSystemPrompt — acceptance criteria at REVIEW", () => {
   it("injects Interfaces acceptance criteria at INTERFACES/REVIEW", () => {
     const prompt = buildWorkflowSystemPrompt(makeState({ phase: "INTERFACES", phaseState: "REVIEW" }))
     expect(prompt).toContain("Acceptance Criteria")
+    expect(prompt).toContain("real interface/type/schema files")
     expect(prompt).toContain("Every function/method has input types")
   })
 
   it("injects Tests acceptance criteria at TESTS/REVIEW", () => {
     const prompt = buildWorkflowSystemPrompt(makeState({ phase: "TESTS", phaseState: "REVIEW" }))
     expect(prompt).toContain("Acceptance Criteria")
+    expect(prompt).toContain("real runnable test/spec files")
     expect(prompt).toContain("At least one test per interface method")
   })
 
@@ -309,6 +428,19 @@ describe("buildWorkflowSystemPrompt — acceptance criteria at REVIEW", () => {
   it("includes deployment criterion in PLANNING/REVIEW", () => {
     const prompt = buildWorkflowSystemPrompt(makeState({ phase: "PLANNING", phaseState: "REVIEW" }))
     expect(prompt).toContain("Deployment & infrastructure addressed")
+  })
+
+  it("injects bespoke structural gates for plan, interfaces, and tests review", () => {
+    const planning = buildWorkflowSystemPrompt(makeState({ phase: "PLANNING", phaseState: "REVIEW" }))
+    const interfaces = buildWorkflowSystemPrompt(makeState({ phase: "INTERFACES", phaseState: "REVIEW" }))
+    const tests = buildWorkflowSystemPrompt(makeState({ phase: "TESTS", phaseState: "REVIEW" }))
+
+    expect(planning).toContain("Bespoke structural gate — Plan review")
+    expect(planning).toContain("protocol/API coverage")
+    expect(interfaces).toContain("Bespoke structural gate — Interfaces review")
+    expect(interfaces).toContain("structure is encoded in types/schemas/APIs")
+    expect(tests).toContain("Bespoke structural gate — Tests review")
+    expect(tests).toContain("helper-only implementations")
   })
 
   it("injects Implementation acceptance criteria at IMPLEMENTATION/REVIEW", () => {
@@ -369,11 +501,70 @@ describe("buildWorkflowSystemPrompt — acceptance criteria at REVIEW", () => {
   })
 })
 
+describe("buildSubagentContext — implementation scoring visibility", () => {
+  it("shows implementation subagents the final scoring rubric", () => {
+    const context = buildSubagentContext(makeState({ phase: "IMPLEMENTATION", phaseState: "DRAFT" }))
+
+    expect(context).toContain("Final Implementation Review Rubric")
+    expect(context).toContain("minimum 9/10")
+    expect(context).toContain("No helper-only or half-integrated implementations")
+    expect(context).toContain("Bespoke structural gate — Implementation review")
+  })
+})
+
 // ---------------------------------------------------------------------------
 // Acceptance criteria preview at DRAFT/CONVENTIONS/REVISE
 // ---------------------------------------------------------------------------
 
 describe("buildWorkflowSystemPrompt — acceptance criteria preview at authoring states", () => {
+  it("injects the required review rubric before every reviewable phase artifact is submitted", () => {
+    const cases: Array<{ name: string; overrides: Partial<WorkflowState>; expected: string }> = [
+      {
+        name: "DISCOVERY/CONVENTIONS refactor",
+        overrides: { phase: "DISCOVERY", phaseState: "CONVENTIONS", mode: "REFACTOR" },
+        expected: "Existing architecture accurately described",
+      },
+      {
+        name: "DISCOVERY/CONVENTIONS incremental",
+        overrides: { phase: "DISCOVERY", phaseState: "CONVENTIONS", mode: "INCREMENTAL" },
+        expected: "Naming conventions documented",
+      },
+      {
+        name: "PLANNING/DRAFT",
+        overrides: { phase: "PLANNING", phaseState: "DRAFT", mode: "GREENFIELD" },
+        expected: "All user requirements explicitly addressed",
+      },
+      {
+        name: "INTERFACES/DRAFT",
+        overrides: { phase: "INTERFACES", phaseState: "DRAFT" },
+        expected: "Every function/method has input types",
+      },
+      {
+        name: "TESTS/DRAFT",
+        overrides: { phase: "TESTS", phaseState: "DRAFT" },
+        expected: "At least one test per interface method",
+      },
+      {
+        name: "IMPL_PLAN/DRAFT",
+        overrides: { phase: "IMPL_PLAN", phaseState: "DRAFT" },
+        expected: "Every interface method is covered by at least one task",
+      },
+      {
+        name: "IMPLEMENTATION/DRAFT",
+        overrides: { phase: "IMPLEMENTATION", phaseState: "DRAFT" },
+        expected: "Implementation matches approved interface signatures exactly",
+      },
+    ]
+
+    for (const c of cases) {
+      const prompt = buildWorkflowSystemPrompt(makeState(c.overrides))
+      expect(prompt, c.name).toContain("Required Review Rubric")
+      expect(prompt, c.name).toContain("implementation contract for this phase")
+      expect(prompt, c.name).toContain(c.expected)
+      expect(prompt, c.name).toContain("Quality criteria")
+    }
+  })
+
   it("injects criteria preview at PLANNING/DRAFT", () => {
     const prompt = buildWorkflowSystemPrompt(makeState({ phase: "PLANNING", phaseState: "DRAFT" }))
     expect(prompt).toContain("Acceptance Criteria Preview")

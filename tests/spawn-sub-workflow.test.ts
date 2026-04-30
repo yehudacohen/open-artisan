@@ -57,6 +57,7 @@ function makeState(overrides: Partial<WorkflowState> = {}): WorkflowState {
     pendingRevisionSteps: null,
     currentTaskId: null,
     feedbackHistory: [],
+    backtrackContext: null,
     userGateMessageReceived: false,
     reviewArtifactHash: null,
     latestReviewResults: null,

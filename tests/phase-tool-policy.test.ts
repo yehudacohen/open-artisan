@@ -272,6 +272,38 @@ describe("Tool policy — INTERFACES allows .ts/.tsx/.d.ts writes only (G1)", ()
     const policy = getPhaseToolPolicy("INTERFACES", "DRAFT", "GREENFIELD", [])
     expect(policy.writePathPredicate?.("/project/README.md")).toBe(false)
   })
+
+  it("predicate blocks .openartisan markdown artifacts in INTERFACES", () => {
+    const policy = getPhaseToolPolicy("INTERFACES", "DRAFT", "GREENFIELD", [])
+    expect(policy.writePathPredicate?.(".openartisan/feature/interfaces.md")).toBe(false)
+    expect(policy.writePathPredicate?.("/project/.openartisan/feature/interfaces.md")).toBe(false)
+  })
+
+  // Decision note: treat REDRAFT as artifact authoring and SKIP_CHECK/CASCADE_CHECK
+  // as non-authoring decision states. Alternative considered: inherit ordinary
+  // DRAFT permissions for all new states. Rejected because that would over-grant
+  // writes during structural decision points and weaken the approved plan's guard story.
+  it("INTERFACES/REDRAFT should preserve interface-only write permissions", () => {
+    const policy = getPhaseToolPolicy("INTERFACES", "REDRAFT", "GREENFIELD", [])
+    expect(policy.writePathPredicate).toBeDefined()
+    expect(policy.writePathPredicate?.("/project/src/types.ts")).toBe(true)
+    expect(policy.writePathPredicate?.("/project/src/server.ts")).toBe(false)
+    expect(policy.blocked).toContain("bash")
+  })
+
+  it("INTERFACES/SKIP_CHECK should block writes while the workflow is deciding whether to skip", () => {
+    const policy = getPhaseToolPolicy("INTERFACES", "SKIP_CHECK", "GREENFIELD", [])
+    expect(policy.blocked).toContain("write")
+    expect(policy.blocked).toContain("edit")
+    expect(policy.blocked).toContain("bash")
+  })
+
+  it("INTERFACES/CASCADE_CHECK should block writes while cascade auto-skip is being evaluated", () => {
+    const policy = getPhaseToolPolicy("INTERFACES", "CASCADE_CHECK", "GREENFIELD", [])
+    expect(policy.blocked).toContain("write")
+    expect(policy.blocked).toContain("edit")
+    expect(policy.blocked).toContain("bash")
+  })
 })
 
 describe("Tool policy — TESTS allows .test.ts/.test.tsx writes only (G1)", () => {
@@ -323,6 +355,12 @@ describe("Tool policy — TESTS allows .test.ts/.test.tsx writes only (G1)", () 
     const policy = getPhaseToolPolicy("TESTS", "DRAFT", "GREENFIELD", [])
     expect(policy.writePathPredicate?.("/project/src/Component.tsx")).toBe(false)
   })
+
+  it("predicate blocks .openartisan markdown artifacts in TESTS", () => {
+    const policy = getPhaseToolPolicy("TESTS", "DRAFT", "GREENFIELD", [])
+    expect(policy.writePathPredicate?.(".openartisan/feature/tests.md")).toBe(false)
+    expect(policy.writePathPredicate?.("/project/.openartisan/feature/tests.md")).toBe(false)
+  })
 })
 
 describe("Tool policy — IMPLEMENTATION with INCREMENTAL allowlist", () => {
@@ -356,6 +394,32 @@ describe("Tool policy — IMPLEMENTATION with INCREMENTAL allowlist", () => {
     const policy = getPhaseToolPolicy("IMPLEMENTATION", "DRAFT", "REFACTOR", [])
     expect(policy.writePathPredicate?.("/project/src/service.ts")).toBe(true)
     expect(policy.writePathPredicate?.("/project/src/utils.js")).toBe(true)
+  })
+})
+
+describe("Tool policy — IMPLEMENTATION structural sub-states", () => {
+  const allowlist = ["/project/src/task.ts", "/project/tests/task.test.ts"]
+  const taskFiles = ["/project/src/task.ts", "/project/tests/task.test.ts"]
+
+  // Decision note: SCHEDULING, TASK_REVIEW, HUMAN_GATE, and DELEGATED_WAIT are
+  // structural wait/decision states, not authoring states. Alternative considered:
+  // inherit IMPLEMENTATION/DRAFT permissions for all of them. Rejected because it
+  // would allow source writes while the workflow is dispatching, reviewing, waiting
+  // on manual action, or blocked on delegated completion.
+  for (const phaseState of ["SCHEDULING", "TASK_REVIEW", "HUMAN_GATE", "DELEGATED_WAIT"] as const) {
+    it(`IMPLEMENTATION/${phaseState} blocks source writes while no authoring work is active`, () => {
+      const policy = getPhaseToolPolicy("IMPLEMENTATION", phaseState, "INCREMENTAL", allowlist, taskFiles)
+      expect(policy.blocked).toContain("write")
+      expect(policy.blocked).toContain("edit")
+    })
+  }
+
+  it("IMPLEMENTATION/TASK_REVISE preserves current-task file restrictions for targeted repair", () => {
+    const policy = getPhaseToolPolicy("IMPLEMENTATION", "TASK_REVISE", "INCREMENTAL", allowlist, taskFiles)
+    expect(policy.writePathPredicate).toBeDefined()
+    expect(policy.writePathPredicate?.("/project/src/task.ts")).toBe(true)
+    expect(policy.writePathPredicate?.("/project/tests/task.test.ts")).toBe(true)
+    expect(policy.writePathPredicate?.("/project/src/other.ts")).toBe(false)
   })
 })
 
@@ -482,6 +546,8 @@ describe("Tool policy — IMPLEMENTATION/INCREMENTAL bashCommandPredicate", () =
     // for security — it's better to over-block than under-block.
     // The predicate blocks << followed by a word character, which catches
     // most heredoc patterns.
+    expect(policy.bashCommandPredicate!("node -e 'console.log(1 << 3)'")).toBe(true)
+    expect(policy.bashCommandPredicate!("node -e 'console.log(value << amount)'")).toBe(false)
   })
 
   it("GREENFIELD mode does NOT have bashCommandPredicate", () => {

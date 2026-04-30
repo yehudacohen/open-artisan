@@ -8,7 +8,7 @@
  * the returned tools and hooks to verify end-to-end behavior.
  */
 import { describe, expect, it, beforeEach, mock } from "bun:test"
-import { mkdtempSync, rmSync } from "node:fs"
+import { mkdtempSync, rmSync, mkdirSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 
@@ -92,6 +92,98 @@ beforeEach(async () => {
   // work around by using a unique session ID per test. The plugin startup
   // calls store.load() which is safe even if the file doesn't exist.
   plugin = await OpenArtisanPlugin({ client } as any)
+})
+
+function planningPassCriteria() {
+  return [
+    { criterion: "All user requirements explicitly addressed", met: true, evidence: "Section 1 covers all", severity: "blocking" },
+    { criterion: "Scope boundaries explicit", met: true, evidence: "Section 2 lists scope", severity: "blocking" },
+    { criterion: "Architecture described", met: true, evidence: "Section 3 has arch diagram", severity: "blocking" },
+    { criterion: "Error and failure cases specified", met: true, evidence: "Section 4 covers errors", severity: "blocking" },
+    { criterion: "No TBD items", met: true, evidence: "All decisions resolved", severity: "blocking" },
+    { criterion: "Data model described", met: true, evidence: "Section 5 has ERD", severity: "blocking" },
+    { criterion: "Integration points identified", met: true, evidence: "Section 6 lists APIs", severity: "blocking" },
+    { criterion: "Deployment & infrastructure addressed", met: true, evidence: "Section 8 covers deployment pipeline and infra", severity: "blocking" },
+    { criterion: "User journey completeness", met: true, evidence: "Setup, onboarding, all modes covered", severity: "blocking" },
+    { criterion: "[Q] Design excellence", met: true, evidence: "Well-reasoned approach", severity: "blocking", score: "9" },
+    { criterion: "[Q] Architectural cohesion", met: true, evidence: "All components fit together", severity: "blocking", score: "9" },
+    { criterion: "[Q] Vision alignment", met: true, evidence: "Plan traces to user intent", severity: "blocking", score: "9" },
+    { criterion: "[Q] Completeness", met: true, evidence: "Every requirement addressed", severity: "blocking", score: "9" },
+    { criterion: "[Q] Readiness for execution", met: true, evidence: "Engineer can begin immediately", severity: "blocking", score: "10" },
+    { criterion: "[Q] Security standards", met: true, evidence: "Auth and validation covered", severity: "blocking", score: "9" },
+    { criterion: "[Q] Operational excellence", met: true, evidence: "Monitoring and logging covered", severity: "blocking", score: "9" },
+  ]
+}
+
+function planArtifactPath(featureName: string) {
+  return join(tempDir, ".openartisan", featureName, "plan.md")
+}
+
+function implPlanArtifactPath(featureName: string) {
+  return join(tempDir, ".openartisan", featureName, "impl-plan.md")
+}
+
+async function writePlanArtifact(featureName: string, content = "# Plan\n\nPlan text") {
+  const planPath = planArtifactPath(featureName)
+  mkdirSync(join(tempDir, ".openartisan", featureName), { recursive: true })
+  await Bun.write(planPath, content)
+  return planPath
+}
+
+async function writeImplPlanArtifact(featureName: string, content: string) {
+  const implPlanPath = implPlanArtifactPath(featureName)
+  mkdirSync(join(tempDir, ".openartisan", featureName), { recursive: true })
+  await Bun.write(implPlanPath, content)
+  return implPlanPath
+}
+
+async function requestPlanningReview(ctx: { directory: string; sessionId: string; agent?: string }, featureName: string, content = "# Plan\n\nPlan text") {
+  const planPath = await writePlanArtifact(featureName, content)
+  return plugin.tool.request_review.execute(
+    { summary: "Plan", artifact_description: "Plan", artifact_files: [planPath] },
+    ctx,
+  )
+}
+
+async function advanceGreenfieldToInterfaces(sid: string, featureName: string) {
+  const ctx = { directory: tempDir, sessionId: sid }
+  await plugin.event({ event: { type: "session.created", properties: { info: { id: sid } } } })
+  await plugin.tool.select_mode.execute({ mode: "GREENFIELD", feature_name: featureName }, ctx)
+  await requestPlanningReview(ctx, featureName)
+  await plugin.tool.mark_satisfied.execute({ criteria_met: planningPassCriteria() }, ctx)
+  await plugin["chat.message"](
+    { sessionID: sid },
+    { message: { sessionID: sid }, parts: [{ type: "text", text: "approved" }] },
+  )
+  await plugin.tool.submit_feedback.execute({ feedback_text: "approved", feedback_type: "approve" }, ctx)
+  return ctx
+}
+
+// Decision note: exercise the public OpenCode plugin seam directly for structural
+// phase-state changes instead of asserting only core helper behavior. Alternative
+// considered: rely on state-machine tests alone. Rejected because the approved plan
+// explicitly requires cross-adapter/runtime parity, so at least one plugin-level
+// test should fail until the OpenCode wiring lands.
+
+describe("OpenCode integration — structural workflow parity", () => {
+  it("approving PLANNING should land at INTERFACES/SKIP_CHECK in INCREMENTAL mode", async () => {
+    const sid = `int-test-${Date.now()}-planning-skip-check`
+    await plugin.event({ event: { type: "session.created", properties: { info: { id: sid } } } })
+    const ctx = { directory: tempDir, sessionId: sid }
+    await plugin.tool.select_mode.execute({ mode: "INCREMENTAL", feature_name: `skip-check-${Date.now()}` }, ctx)
+    // Simulate already-approved discovery so planning can be exercised directly.
+    await plugin._testStore.update(sid, (d: any) => {
+      d.phase = "PLANNING"
+      d.phaseState = "USER_GATE"
+      d.mode = "INCREMENTAL"
+      d.featureName = `skip-check-${Date.now()}`
+      d.userGateMessageReceived = true
+    })
+    await plugin.tool.submit_feedback.execute({ feedback_text: "approved", feedback_type: "approve", approved_files: [] }, ctx)
+    const state = plugin._testStore.get(sid)
+    expect(state?.phase).toBe("INTERFACES")
+    expect(state?.phaseState).toBe("SKIP_CHECK")
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -383,6 +475,36 @@ describe("tool.execute.before — phase-gated tool restrictions", () => {
       plugin["tool.execute.before"]({ sessionID: "truly-unknown-session-guard", tool: "file_write" }),
     ).resolves.toBeUndefined()
   })
+
+  it("blocks write-like patch tools with no extractable target path in INTERFACES", async () => {
+    const sid = `int-test-${Date.now()}-guard-unknown-patch`
+    await advanceGreenfieldToInterfaces(sid, `guard-unknown-patch-${Date.now()}`)
+
+    await expect(
+      plugin["tool.execute.before"]({
+        sessionID: sid,
+        tool: "apply_patch",
+        args: { patch: "*** Begin Patch\n*** End Patch" },
+      }),
+    ).rejects.toThrow("no target path")
+  })
+
+  it("rejects artifact_content for OpenCode INTERFACES request_review", async () => {
+    const sid = `int-test-${Date.now()}-interfaces-content`
+    const ctx = await advanceGreenfieldToInterfaces(sid, `interfaces-content-${Date.now()}`)
+
+    const result = await plugin.tool.request_review.execute(
+      {
+        summary: "Interfaces",
+        artifact_description: "Markdown interface design doc",
+        artifact_content: "# Interfaces\n",
+      },
+      ctx,
+    )
+
+    expect(result).toContain("Error")
+    expect(result).toContain("artifact_files")
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -474,7 +596,48 @@ describe("experimental.chat.system.transform — injects workflow prompt", () =>
     expect(output.system[output.system.length - 1]).toContain("MODE_SELECT")
   })
 
-  it("goes dormant when the user explicitly exits artisan mode", async () => {
+  it("activates for build sessions only when the user explicitly asks to use Open Artisan", async () => {
+    const sid = `int-test-${Date.now()}-build-opt-in`
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: sid, agent: "build" } } },
+    })
+
+    await plugin["chat.message"](
+      { sessionID: sid, agent: "build" },
+      {
+        message: { sessionID: sid, id: "msg-opt-in" },
+        parts: [{ type: "text", text: "Please use Open Artisan for this workflow." }],
+      },
+    )
+
+    const output = { system: ["original"] }
+    await plugin["experimental.chat.system.transform"]({ sessionID: sid, agent: "build" }, output)
+
+    expect(output.system.length).toBeGreaterThan(1)
+    expect(output.system[output.system.length - 1]).toContain("STRUCTURED WORKFLOW")
+    expect(plugin._testStore.get(sid).activeAgent).toBe("build-artisan")
+  })
+
+  it("treats workflow tool calls from build sessions as explicit Open Artisan opt-in", async () => {
+    const sid = `int-test-${Date.now()}-build-tool-opt-in`
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: sid, agent: "build" } } },
+    })
+
+    await plugin.tool.select_mode.execute(
+      { mode: "GREENFIELD", feature_name: "tool-opt-in" },
+      { directory: tempDir, sessionId: sid, agent: "build" },
+    )
+
+    const output = { system: ["original"] }
+    await plugin["experimental.chat.system.transform"]({ sessionID: sid, agent: "build" }, output)
+
+    expect(output.system.length).toBeGreaterThan(1)
+    expect(output.system[output.system.length - 1]).toContain("STRUCTURED WORKFLOW")
+    expect(plugin._testStore.get(sid).activeAgent).toBe("build-artisan")
+  })
+
+  it("ignores explicit disable-workflow text in true artisan sessions", async () => {
     const sid = `int-test-${Date.now()}-manual-dormant`
     await plugin.event({
       event: { type: "session.created", properties: { info: { id: sid, agent: "artisan" } } },
@@ -496,12 +659,122 @@ describe("experimental.chat.system.transform — injects workflow prompt", () =>
     const output = { system: ["original"] }
     await plugin["experimental.chat.system.transform"]({ sessionID: sid }, output)
 
-    expect(output.system).toEqual(["original"])
+    expect(output.system.length).toBeGreaterThan(1)
+    expect(output.system[output.system.length - 1]).toContain("STRUCTURED WORKFLOW")
     const state = plugin._testStore.get(sid)
-    expect(state.activeAgent).toBe("build")
+    expect(state.activeAgent).toBe("artisan")
   })
 
-  it("goes dormant when chat.message detects a non-artisan agent", async () => {
+  it("does not go dormant from incidental build-mode phrasing alone", async () => {
+    const sid = `int-test-${Date.now()}-build-mode-mention`
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: sid, agent: "artisan" } } },
+    })
+
+    await plugin.tool.select_mode.execute(
+      { mode: "REFACTOR", feature_name: "build-mode-mention" },
+      { directory: tempDir, sessionId: sid, agent: "artisan" },
+    )
+
+    await plugin["chat.message"](
+      { sessionID: sid },
+      {
+        message: { sessionID: sid, id: "msg-build-mode" },
+        parts: [{ type: "text", text: "We are in build mode, continue the workflow changes." }],
+      },
+    )
+
+    const output = { system: ["original"] }
+    await plugin["experimental.chat.system.transform"]({ sessionID: sid }, output)
+
+    expect(output.system.length).toBeGreaterThan(1)
+    expect(output.system[output.system.length - 1]).toContain("STRUCTURED WORKFLOW")
+    const state = plugin._testStore.get(sid)
+    expect(state.activeAgent).toBe("artisan")
+  })
+
+  it("can switch back out of the workflow in build mode after an explicit opt-in", async () => {
+    const sid = `int-test-${Date.now()}-build-opt-out`
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: sid, agent: "build" } } },
+    })
+
+    await plugin["chat.message"](
+      { sessionID: sid, agent: "build" },
+      {
+        message: { sessionID: sid, id: "msg-opt-in-2" },
+        parts: [{ type: "text", text: "Use Open Artisan for this task." }],
+      },
+    )
+
+    await plugin["chat.message"](
+      { sessionID: sid, agent: "build" },
+      {
+        message: { sessionID: sid, id: "msg-opt-out" },
+        parts: [{ type: "text", text: "disable workflow now" }],
+      },
+    )
+
+    const output = { system: ["original"] }
+    await plugin["experimental.chat.system.transform"]({ sessionID: sid, agent: "build" }, output)
+
+    expect(output.system).toEqual(["original"])
+    expect(plugin._testStore.get(sid).activeAgent).toBe("build")
+  })
+
+  it("ignores disable-workflow text for true artisan sessions", async () => {
+    const sid = `int-test-${Date.now()}-artisan-locked`
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: sid, agent: "artisan" } } },
+    })
+
+    await plugin.tool.select_mode.execute(
+      { mode: "GREENFIELD", feature_name: "artisan-locked" },
+      { directory: tempDir, sessionId: sid, agent: "artisan" },
+    )
+
+    await plugin["chat.message"](
+      { sessionID: sid, agent: "artisan" },
+      {
+        message: { sessionID: sid, id: "msg-locked" },
+        parts: [{ type: "text", text: "disable workflow now" }],
+      },
+    )
+
+    const output = { system: ["original"] }
+    await plugin["experimental.chat.system.transform"]({ sessionID: sid, agent: "artisan" }, output)
+
+    expect(output.system.length).toBeGreaterThan(1)
+    expect(plugin._testStore.get(sid).activeAgent).toBe("artisan")
+  })
+
+  it("ignores disable-workflow text for robot-artisan sessions", async () => {
+    const sid = `int-test-${Date.now()}-robot-locked`
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: sid, agent: "robot-artisan" } } },
+    })
+
+    await plugin.tool.select_mode.execute(
+      { mode: "GREENFIELD", feature_name: "robot-locked" },
+      { directory: tempDir, sessionId: sid, agent: "robot-artisan" },
+    )
+
+    await plugin["chat.message"](
+      { sessionID: sid, agent: "robot-artisan" },
+      {
+        message: { sessionID: sid, id: "msg-robot-locked" },
+        parts: [{ type: "text", text: "disable workflow now" }],
+      },
+    )
+
+    const output = { system: ["original"] }
+    await plugin["experimental.chat.system.transform"]({ sessionID: sid, agent: "robot-artisan" }, output)
+
+    expect(output.system.length).toBeGreaterThan(1)
+    expect(plugin._testStore.get(sid).activeAgent).toBe("robot-artisan")
+  })
+
+  it("does not auto-downgrade a true artisan session from non-artisan agent metadata", async () => {
     const sid = `int-test-${Date.now()}-auto-build-dormant`
     await plugin.event({
       event: { type: "session.created", properties: { info: { id: sid, agent: "artisan" } } },
@@ -523,9 +796,10 @@ describe("experimental.chat.system.transform — injects workflow prompt", () =>
     const output = { system: ["original"] }
     await plugin["experimental.chat.system.transform"]({ sessionID: sid, agent: "Build" }, output)
 
-    expect(output.system).toEqual(["original"])
+    expect(output.system.length).toBeGreaterThan(1)
+    expect(output.system[output.system.length - 1]).toContain("STRUCTURED WORKFLOW")
     const state = plugin._testStore.get(sid)
-    expect(state.activeAgent).toBe("build")
+    expect(state.activeAgent).toBe("artisan")
   })
 })
 
@@ -587,10 +861,9 @@ describe("robot-artisan autonomy", () => {
       { mode: "GREENFIELD", feature_name: "robot-auto-revise" },
       ctx,
     )
-    await plugin.tool.request_review.execute(
-      { summary: "Plan", artifact_description: "Plan doc", artifact_content: "# Plan" },
-      ctx,
-    )
+    await requestPlanningReview(ctx, "robot-auto-revise", "# Plan")
+    promptCallCount = 0
+    ;(client.session.prompt as ReturnType<typeof mock>).mockClear()
 
     const result = await plugin.tool.mark_satisfied.execute(
       {
@@ -676,10 +949,9 @@ describe("robot-artisan autonomy", () => {
       { mode: "GREENFIELD", feature_name: "robot-auto-failure" },
       ctx,
     )
-    await plugin.tool.request_review.execute(
-      { summary: "Plan", artifact_description: "Plan doc", artifact_content: "# Plan" },
-      ctx,
-    )
+    await requestPlanningReview(ctx, "robot-auto-failure", "# Plan")
+    promptCallCount = 0
+    ;(client.session.prompt as ReturnType<typeof mock>).mockClear()
 
     const result = await plugin.tool.mark_satisfied.execute(
       {
@@ -730,12 +1002,13 @@ describe("End-to-end: GREENFIELD happy path through PLANNING", () => {
     const ctx = { directory: tempDir, sessionId: sid }
 
     // 1. Select GREENFIELD mode
-    const modeResult = await plugin.tool.select_mode.execute({ mode: "GREENFIELD", feature_name: "test-feature" }, ctx)
+    const featureName = "test-feature"
+    const modeResult = await plugin.tool.select_mode.execute({ mode: "GREENFIELD", feature_name: featureName }, ctx)
     expect(modeResult).toContain("GREENFIELD")
 
     // 2. Now in PLANNING/DRAFT — call request_review
     const rrResult = await plugin.tool.request_review.execute(
-      { summary: "The plan", artifact_description: "Plan for feature X" },
+      { summary: "The plan", artifact_description: "Plan for feature X", artifact_files: [await writePlanArtifact(featureName)] },
       ctx,
     )
     expect(rrResult).not.toContain("Error")
@@ -783,7 +1056,6 @@ describe("End-to-end: GREENFIELD happy path through PLANNING", () => {
       {
         feedback_text: "Looks good",
         feedback_type: "approve",
-        artifact_content: "The full plan text here",
       },
       ctx,
     )
@@ -815,29 +1087,17 @@ describe("userGateMessageReceived — blocks self-approval", () => {
     const ctx = { directory: tempDir, sessionId: sid }
 
     // Get to USER_GATE: GREENFIELD → PLANNING/DRAFT → request_review → mark_satisfied
-    await plugin.tool.select_mode.execute({ mode: "GREENFIELD", feature_name: "test-feature" }, ctx)
-    await plugin.tool.request_review.execute(
-      { summary: "The plan", artifact_description: "Plan doc" },
-      ctx,
-    )
+    const featureName = "test-feature"
+    await plugin.tool.select_mode.execute({ mode: "GREENFIELD", feature_name: featureName }, ctx)
+    await requestPlanningReview(ctx, featureName)
     await plugin.tool.mark_satisfied.execute(
-      {
-        criteria_met: [
-          { criterion: "All user requirements explicitly addressed", met: true, evidence: "yes", severity: "blocking" },
-          { criterion: "Scope boundaries explicit", met: true, evidence: "yes", severity: "blocking" },
-          { criterion: "Architecture described", met: true, evidence: "yes", severity: "blocking" },
-          { criterion: "Error and failure cases specified", met: true, evidence: "yes", severity: "blocking" },
-          { criterion: "No TBD items", met: true, evidence: "yes", severity: "blocking" },
-          { criterion: "Data model described", met: true, evidence: "yes", severity: "blocking" },
-          { criterion: "Integration points identified", met: true, evidence: "yes", severity: "blocking" },
-        ],
-      },
+      { criteria_met: planningPassCriteria() },
       ctx,
     )
 
     // Attempt to approve WITHOUT sending a user message first
     const result = await plugin.tool.submit_feedback.execute(
-      { feedback_text: "approved", feedback_type: "approve", artifact_content: "plan text" },
+      { feedback_text: "approved", feedback_type: "approve" },
       ctx,
     )
     // Should be blocked — either because we're not at USER_GATE (self-review redirected)
@@ -858,23 +1118,11 @@ describe("userGateMessageReceived — blocks self-approval", () => {
     const ctx = { directory: tempDir, sessionId: sid }
 
     // Get to USER_GATE
-    await plugin.tool.select_mode.execute({ mode: "GREENFIELD", feature_name: "test-feature" }, ctx)
-    await plugin.tool.request_review.execute(
-      { summary: "The plan", artifact_description: "Plan doc" },
-      ctx,
-    )
+    const featureName = "test-feature"
+    await plugin.tool.select_mode.execute({ mode: "GREENFIELD", feature_name: featureName }, ctx)
+    await requestPlanningReview(ctx, featureName)
     await plugin.tool.mark_satisfied.execute(
-      {
-        criteria_met: [
-          { criterion: "All user requirements explicitly addressed", met: true, evidence: "yes", severity: "blocking" },
-          { criterion: "Scope boundaries explicit", met: true, evidence: "yes", severity: "blocking" },
-          { criterion: "Architecture described", met: true, evidence: "yes", severity: "blocking" },
-          { criterion: "Error and failure cases specified", met: true, evidence: "yes", severity: "blocking" },
-          { criterion: "No TBD items", met: true, evidence: "yes", severity: "blocking" },
-          { criterion: "Data model described", met: true, evidence: "yes", severity: "blocking" },
-          { criterion: "Integration points identified", met: true, evidence: "yes", severity: "blocking" },
-        ],
-      },
+      { criteria_met: planningPassCriteria() },
       ctx,
     )
 
@@ -886,7 +1134,7 @@ describe("userGateMessageReceived — blocks self-approval", () => {
 
     // Now try to approve — should succeed (or fail for a different reason like phase)
     const result = await plugin.tool.submit_feedback.execute(
-      { feedback_text: "approved", feedback_type: "approve", artifact_content: "plan text" },
+      { feedback_text: "approved", feedback_type: "approve" },
       ctx,
     )
     // Should NOT contain the "no user message" error
@@ -901,23 +1149,11 @@ describe("userGateMessageReceived — blocks self-approval", () => {
     const ctx = { directory: tempDir, sessionId: sid }
 
     // Get to USER_GATE
-    await plugin.tool.select_mode.execute({ mode: "GREENFIELD", feature_name: "test-feature" }, ctx)
-    await plugin.tool.request_review.execute(
-      { summary: "The plan", artifact_description: "Plan doc" },
-      ctx,
-    )
+    const featureName = "test-feature"
+    await plugin.tool.select_mode.execute({ mode: "GREENFIELD", feature_name: featureName }, ctx)
+    await requestPlanningReview(ctx, featureName)
     await plugin.tool.mark_satisfied.execute(
-      {
-        criteria_met: [
-          { criterion: "All user requirements explicitly addressed", met: true, evidence: "yes", severity: "blocking" },
-          { criterion: "Scope boundaries explicit", met: true, evidence: "yes", severity: "blocking" },
-          { criterion: "Architecture described", met: true, evidence: "yes", severity: "blocking" },
-          { criterion: "Error and failure cases specified", met: true, evidence: "yes", severity: "blocking" },
-          { criterion: "No TBD items", met: true, evidence: "yes", severity: "blocking" },
-          { criterion: "Data model described", met: true, evidence: "yes", severity: "blocking" },
-          { criterion: "Integration points identified", met: true, evidence: "yes", severity: "blocking" },
-        ],
-      },
+      { criteria_met: planningPassCriteria() },
       ctx,
     )
 
@@ -945,8 +1181,8 @@ describe("userGateMessageReceived — blocks self-approval", () => {
 // currentTaskId clearing on mark_task_complete
 // ---------------------------------------------------------------------------
 
-describe("mark_task_complete — clears currentTaskId in state", () => {
-  it("sets currentTaskId to null after marking a task complete", async () => {
+describe("mark_task_complete — phase gating and final-task cleanup", () => {
+  it("returns a phase error when mark_task_complete is called before IMPLEMENTATION", async () => {
     const sid = `int-test-${Date.now()}-cleartask`
     await plugin.event({
       event: { type: "session.created", properties: { info: { id: sid } } },
@@ -969,6 +1205,48 @@ describe("mark_task_complete — clears currentTaskId in state", () => {
     // Should get a phase error since we're in PLANNING, not IMPLEMENTATION
     expect(result).toContain("Error")
     expect(result).toContain("IMPLEMENTATION")
+  })
+
+  it("clears taskCompletionInProgress before clearing currentTaskId for the final task", async () => {
+    const sid = `int-test-${Date.now()}-final-task-complete`
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: sid } } },
+    })
+    const ctx = { directory: tempDir, sessionId: sid }
+
+    await plugin.tool.select_mode.execute({ mode: "GREENFIELD", feature_name: "final-task-test" }, ctx)
+
+    const store = plugin._testStore
+    await store.update(sid, (draft: any) => {
+      draft.phase = "IMPLEMENTATION"
+      draft.phaseState = "DRAFT"
+      draft.implDag = [
+        {
+          id: "T1",
+          description: "Final task",
+          dependencies: [],
+          expectedTests: [],
+          expectedFiles: [],
+          estimatedComplexity: "small",
+          status: "pending",
+        },
+      ]
+      draft.currentTaskId = "T1"
+      draft.taskReviewCount = 9
+      draft.taskCompletionInProgress = null
+    })
+
+    const result = await plugin.tool.mark_task_complete.execute(
+      { task_id: "T1", implementation_summary: "done", tests_passing: true },
+      ctx,
+    )
+
+    expect(result).toContain("All DAG tasks complete")
+    const updated = store.get(sid)
+    expect(updated?.implDag?.[0]?.status).toBe("complete")
+    expect(updated?.currentTaskId).toBeNull()
+    expect(updated?.taskCompletionInProgress).toBeNull()
+    expect(updated?.taskReviewCount).toBe(0)
   })
 })
 
@@ -1362,7 +1640,37 @@ describe("Error resilience — tool execute returns error string on unexpected f
 // ---------------------------------------------------------------------------
 
 describe("request_review — re-submit at REVIEW state", () => {
-  it("allows request_review at REVIEW state with artifact_content", async () => {
+  it("does not queue a same-session prompt while request_review is still executing", async () => {
+    const sid = `int-test-${Date.now()}-review-reprompt`
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: sid } } },
+    })
+    const ctx = { directory: tempDir, sessionId: sid }
+
+    await plugin.tool.select_mode.execute(
+      { mode: "GREENFIELD", feature_name: "review-reprompt" },
+      ctx,
+    )
+    ;(client.session.prompt as ReturnType<typeof mock>).mockClear()
+    const planPath = await writePlanArtifact("review-reprompt", "Plan v1")
+
+    const result = await plugin.tool.request_review.execute(
+      { summary: "Plan", artifact_description: "Plan doc", artifact_files: [planPath] },
+      ctx,
+    )
+
+    expect(result).not.toContain("Error")
+    expect(client.session.prompt).not.toHaveBeenCalled()
+
+    await plugin.event({ event: { type: "session.idle", properties: { sessionID: sid } } })
+
+    expect(client.session.prompt).toHaveBeenCalledTimes(1)
+    const promptArg = (client.session.prompt as ReturnType<typeof mock>).mock.calls[0]?.[0]
+    expect(promptArg?.path?.id).toBe(sid)
+    expect(promptArg?.body?.parts?.[0]?.text).toContain("Continue self-reviewing the PLANNING artifact")
+  })
+
+  it("allows request_review at REVIEW state with artifact_files", async () => {
     const sid = `int-test-${Date.now()}-resubmit`
     await plugin.event({
       event: { type: "session.created", properties: { info: { id: sid } } },
@@ -1374,15 +1682,17 @@ describe("request_review — re-submit at REVIEW state", () => {
       { mode: "GREENFIELD", feature_name: "resubmit-test" },
       ctx,
     )
+    const planPath = await writePlanArtifact("resubmit-test", "Old plan content")
     const rrResult = await plugin.tool.request_review.execute(
-      { summary: "Initial plan", artifact_description: "Plan v1", artifact_content: "Old plan content" },
+      { summary: "Initial plan", artifact_description: "Plan v1", artifact_files: [planPath] },
       ctx,
     )
     expect(rrResult).not.toContain("Error")
 
     // Now in REVIEW — re-submit with updated content
+    await Bun.write(planPath, "New comprehensive 200-line plan")
     const resubmitResult = await plugin.tool.request_review.execute(
-      { summary: "Updated plan", artifact_description: "Plan v2", artifact_content: "New comprehensive 200-line plan" },
+      { summary: "Updated plan", artifact_description: "Plan v2", artifact_files: [planPath] },
       ctx,
     )
     expect(resubmitResult).not.toContain("Error")
@@ -1396,6 +1706,72 @@ describe("request_review — re-submit at REVIEW state", () => {
     expect(state.iterationCount).toBe(0)
   })
 
+  it("allows PLANNING request_review with artifact_files only", async () => {
+    const sid = `int-test-${Date.now()}-review-artifact-files`
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: sid } } },
+    })
+    const ctx = { directory: tempDir, sessionId: sid }
+
+    await plugin.tool.select_mode.execute(
+      { mode: "GREENFIELD", feature_name: "review-artifact-files" },
+      ctx,
+    )
+
+    const planPath = join(tempDir, ".openartisan", "review-artifact-files", "plan.md")
+    mkdirSync(join(tempDir, ".openartisan", "review-artifact-files"), { recursive: true })
+    await Bun.write(planPath, "# Plan\n\nUse file references for review.")
+
+    const result = await plugin.tool.request_review.execute(
+      {
+        summary: "Plan ready",
+        artifact_description: "Plan doc",
+        artifact_files: [planPath],
+      },
+      ctx,
+    )
+
+    expect(result).not.toContain("Error")
+    const state = plugin._testStore.get(sid)
+    expect(state.phaseState).toBe("REVIEW")
+    expect(state.artifactDiskPaths.plan).toBe(planPath)
+    expect(state.reviewArtifactHash).not.toBeNull()
+  })
+
+  it("resolves relative artifact_files before persisting artifact disk paths", async () => {
+    const sid = `int-test-${Date.now()}-review-relative-artifact-files`
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: sid } } },
+    })
+    const ctx = { directory: tempDir, sessionId: sid }
+
+    await plugin.tool.select_mode.execute(
+      { mode: "GREENFIELD", feature_name: "review-relative-artifact-files" },
+      ctx,
+    )
+
+    const relativePlanPath = join(".openartisan", "review-relative-artifact-files", "plan.md")
+    const absolutePlanPath = join(tempDir, relativePlanPath)
+    mkdirSync(join(tempDir, ".openartisan", "review-relative-artifact-files"), { recursive: true })
+    await Bun.write(absolutePlanPath, "# Plan\n\nUse relative file references for review.")
+
+    const result = await plugin.tool.request_review.execute(
+      {
+        summary: "Plan ready",
+        artifact_description: "Plan doc",
+        artifact_files: [relativePlanPath],
+      },
+      ctx,
+    )
+
+    expect(result).not.toContain("Error")
+    const state = plugin._testStore.get(sid)
+    expect(state.phaseState).toBe("REVIEW")
+    expect(state.artifactDiskPaths.plan).toBe(absolutePlanPath)
+    expect(state.reviewArtifactFiles).toContain(absolutePlanPath)
+    expect(state.reviewArtifactHash).not.toBeNull()
+  })
+
   it("classifies unchanged REVIEW resubmission and preserves iteration count", async () => {
     const sid = `int-test-${Date.now()}-resubmit-unchanged`
     await plugin.event({
@@ -1407,8 +1783,9 @@ describe("request_review — re-submit at REVIEW state", () => {
       { mode: "GREENFIELD", feature_name: "resubmit-unchanged-test" },
       ctx,
     )
+    const planPath = await writePlanArtifact("resubmit-unchanged-test", "Stable plan content")
     await plugin.tool.request_review.execute(
-      { summary: "Initial plan", artifact_description: "Plan v1", artifact_content: "Stable plan content" },
+      { summary: "Initial plan", artifact_description: "Plan v1", artifact_files: [planPath] },
       ctx,
     )
 
@@ -1418,7 +1795,7 @@ describe("request_review — re-submit at REVIEW state", () => {
     })
 
     const resubmitResult = await plugin.tool.request_review.execute(
-      { summary: "Same plan", artifact_description: "Plan v1", artifact_content: "Stable plan content" },
+      { summary: "Same plan", artifact_description: "Plan v1", artifact_files: [planPath] },
       ctx,
     )
 
@@ -1428,6 +1805,41 @@ describe("request_review — re-submit at REVIEW state", () => {
     const state = store.get(sid)
     expect(state.phaseState).toBe("REVIEW")
     expect(state.iterationCount).toBe(2)
+  })
+
+  it("does not queue a same-session prompt during REVIEW resubmission", async () => {
+    const sid = `int-test-${Date.now()}-review-resubmit-reprompt`
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: sid } } },
+    })
+    const ctx = { directory: tempDir, sessionId: sid }
+
+    await plugin.tool.select_mode.execute(
+      { mode: "GREENFIELD", feature_name: "review-resubmit-reprompt" },
+      ctx,
+    )
+    const planPath = await writePlanArtifact("review-resubmit-reprompt", "Plan v1")
+    await plugin.tool.request_review.execute(
+      { summary: "Plan", artifact_description: "Plan doc", artifact_files: [planPath] },
+      ctx,
+    )
+    ;(client.session.prompt as ReturnType<typeof mock>).mockClear()
+
+    await Bun.write(planPath, "Plan v2")
+    const result = await plugin.tool.request_review.execute(
+      { summary: "Plan", artifact_description: "Plan doc", artifact_files: [planPath] },
+      ctx,
+    )
+
+    expect(result).toContain("re-submitted")
+    expect(client.session.prompt).not.toHaveBeenCalled()
+
+    await plugin.event({ event: { type: "session.idle", properties: { sessionID: sid } } })
+
+    expect(client.session.prompt).toHaveBeenCalledTimes(1)
+    const promptArg = (client.session.prompt as ReturnType<typeof mock>).mock.calls[0]?.[0]
+    expect(promptArg?.path?.id).toBe(sid)
+    expect(promptArg?.body?.parts?.[0]?.text).toContain("Continue self-reviewing the PLANNING artifact")
   })
 
   it("clears stale latestReviewResults on request_review resubmission", async () => {
@@ -1441,8 +1853,9 @@ describe("request_review — re-submit at REVIEW state", () => {
       { mode: "GREENFIELD", feature_name: "clear-review-results-test" },
       ctx,
     )
+    const planPath = await writePlanArtifact("clear-review-results-test", "Plan v1")
     await plugin.tool.request_review.execute(
-      { summary: "Initial plan", artifact_description: "Plan", artifact_content: "Plan v1" },
+      { summary: "Initial plan", artifact_description: "Plan", artifact_files: [planPath] },
       ctx,
     )
 
@@ -1451,8 +1864,9 @@ describe("request_review — re-submit at REVIEW state", () => {
       draft.latestReviewResults = [{ criterion: "Old", met: false, evidence: "stale" }]
     })
 
+    await Bun.write(planPath, "Plan v2")
     await plugin.tool.request_review.execute(
-      { summary: "Updated plan", artifact_description: "Plan", artifact_content: "Plan v2" },
+      { summary: "Updated plan", artifact_description: "Plan", artifact_files: [planPath] },
       ctx,
     )
 
@@ -1460,7 +1874,56 @@ describe("request_review — re-submit at REVIEW state", () => {
     expect(state.latestReviewResults).toBeNull()
   })
 
-  it("rejects request_review at REVIEW state without artifact_content", async () => {
+  it("checks current reviewArtifactFiles instead of stale phase artifact path", async () => {
+    const sid = `int-test-${Date.now()}-review-files-hash`
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: sid } } },
+    })
+    const ctx = { directory: tempDir, sessionId: sid }
+
+    await plugin.tool.select_mode.execute(
+      { mode: "GREENFIELD", feature_name: "review-files-hash" },
+      ctx,
+    )
+
+    const featureDir = join(tempDir, ".openartisan", "review-files-hash")
+    mkdirSync(featureDir, { recursive: true })
+    const staleMirrorPath = join(featureDir, "tests.md")
+    const typeTestPath = join(tempDir, "test", "unit", "aspects-types.test.ts")
+    const runtimeTestPath = join(tempDir, "test", "unit", "aspects.test.ts")
+    mkdirSync(join(tempDir, "test", "unit"), { recursive: true })
+    await Bun.write(staleMirrorPath, "stale legacy tests mirror")
+    await Bun.write(typeTestPath, "import { describe, it } from 'bun:test'; describe('types', () => { it('works', () => {}); });")
+    await Bun.write(runtimeTestPath, "import { describe, it } from 'bun:test'; describe('runtime', () => { it('works', () => {}); });")
+
+    const store = plugin._testStore
+    await store.update(sid, (draft: any) => {
+      draft.phase = "TESTS"
+      draft.phaseState = "REVIEW"
+      draft.artifactDiskPaths.tests = staleMirrorPath
+      draft.reviewArtifactHash = "stale-review-hash"
+      draft.reviewArtifactFiles = [staleMirrorPath]
+    })
+
+    const resubmitResult = await plugin.tool.request_review.execute(
+      {
+        summary: "Tests ready",
+        artifact_description: "Real test files",
+        artifact_files: [typeTestPath, runtimeTestPath],
+      },
+      ctx,
+    )
+    expect(resubmitResult).not.toContain("Error")
+
+    const result = await plugin.tool.mark_satisfied.execute(
+      { criteria_met: planningPassCriteria() },
+      ctx,
+    )
+
+    expect(result).not.toContain("Artifact has changed")
+  })
+
+  it("rejects request_review at REVIEW state without artifact_files", async () => {
     const sid = `int-test-${Date.now()}-resubmit-no-content`
     await plugin.event({
       event: { type: "session.created", properties: { info: { id: sid } } },
@@ -1471,18 +1934,19 @@ describe("request_review — re-submit at REVIEW state", () => {
       { mode: "GREENFIELD", feature_name: "resubmit-no-content" },
       ctx,
     )
+    const planPath = await writePlanArtifact("resubmit-no-content", "Content")
     await plugin.tool.request_review.execute(
-      { summary: "Plan", artifact_description: "Plan", artifact_content: "Content" },
+      { summary: "Plan", artifact_description: "Plan", artifact_files: [planPath] },
       ctx,
     )
 
-    // Re-submit without artifact_content — should error
+    // Re-submit without artifact_files — should error
     const result = await plugin.tool.request_review.execute(
       { summary: "Updated plan", artifact_description: "Plan v2" },
       ctx,
     )
     expect(result).toContain("Error")
-    expect(result).toContain("artifact_content")
+    expect(result).toContain("artifact_files")
   })
 
   it("still blocks request_review at USER_GATE", async () => {
@@ -1504,7 +1968,7 @@ describe("request_review — re-submit at REVIEW state", () => {
     })
 
     const result = await plugin.tool.request_review.execute(
-      { summary: "Plan", artifact_description: "Plan", artifact_content: "Content" },
+      { summary: "Plan", artifact_description: "Plan", artifact_files: [await writePlanArtifact("block-at-usergate")] },
       ctx,
     )
     expect(result).toContain("Error")
@@ -1663,12 +2127,15 @@ describe("fileAllowlist — relative paths are normalized to absolute", () => {
 **Expected tests:** tests/allowed.test.ts
 **Complexity:** medium
 `
+    const implPlanPath = await writeImplPlanArtifact("impl-allowlist-recovery-test", implPlan)
+    await store.update(sid, (draft: any) => {
+      draft.artifactDiskPaths.impl_plan = implPlanPath
+    })
 
     const result = await plugin.tool.submit_feedback.execute(
       {
         feedback_type: "approve",
         feedback_text: "approved",
-        artifact_content: implPlan,
       },
       ctx,
     )
@@ -1708,12 +2175,15 @@ describe("fileAllowlist — relative paths are normalized to absolute", () => {
 **Expected tests:** \0tests/allowed.test.ts\0
 **Complexity:** medium
 `.replaceAll("\u00060", "`")
+    const implPlanPath = await writeImplPlanArtifact("impl-backticks-test", implPlan)
+    await store.update(sid, (draft: any) => {
+      draft.artifactDiskPaths.impl_plan = implPlanPath
+    })
 
     const result = await plugin.tool.submit_feedback.execute(
       {
         feedback_type: "approve",
         feedback_text: "approved",
-        artifact_content: implPlan,
       },
       ctx,
     )
@@ -1879,7 +2349,7 @@ describe("fileAllowlist — relative paths are normalized to absolute", () => {
     expect(result).toContain("T2")
     const state = store.get(sid)
     expect(state.currentTaskId).toBe("T2")
-    expect(state.phaseState).toBe("DRAFT")
+    expect(state.phaseState).toBe("SCHEDULING")
   })
 
   it("normalizes preserved fileAllowlist from prior cycle at select_mode time", async () => {

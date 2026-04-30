@@ -11,6 +11,7 @@ import { tmpdir } from "node:os"
 import { handleInit, handleSessionCreated } from "#bridge/methods/lifecycle"
 import { handleGuardCheck, handleGuardPolicy } from "#bridge/methods/guard"
 import { handlePromptBuild, handlePromptCompaction } from "#bridge/methods/prompt"
+import { handleStateGet, handleStateHealth } from "#bridge/methods/state"
 import { handleMessageProcess } from "#bridge/methods/message"
 import { handleIdleCheck } from "#bridge/methods/idle"
 import type { BridgeContext } from "#bridge/server"
@@ -260,9 +261,62 @@ describe("prompt.compaction", () => {
     expect(typeof result).toBe("string")
   })
 
+  it("includes structural REDRAFT state in compaction context", async () => {
+    await ctx.engine!.store.update("s1", (d) => {
+      d.mode = "INCREMENTAL"
+      d.phase = "PLANNING"
+      d.phaseState = "REDRAFT"
+      d.featureName = "redraft-feat"
+      d.backtrackContext = {
+        sourcePhase: "INTERFACES",
+        targetPhase: "PLANNING",
+        reason: "Interfaces uncovered a missing planner invariant.",
+      }
+    })
+    const result = await handlePromptCompaction({ sessionId: "s1" }, ctx) as string
+    expect(result).toContain("REDRAFT")
+    expect(result).toContain("INTERFACES")
+  })
+
   it("returns null for unknown session", async () => {
     const result = await handlePromptCompaction({ sessionId: "nonexistent" }, ctx)
     expect(result).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// state.get / state.health
+// ---------------------------------------------------------------------------
+
+describe("state.get / state.health", () => {
+  it("state.get includes runtime health for structural HUMAN_GATE state", async () => {
+    await ctx.engine!.store.update("s1", (d) => {
+      d.mode = "INCREMENTAL"
+      d.phase = "IMPLEMENTATION"
+      d.phaseState = "HUMAN_GATE"
+      d.featureName = "human-gate-feat"
+    })
+    const result = await handleStateGet({ sessionId: "s1", includeRuntimeHealth: true }, ctx) as any
+    expect(result.state.phaseState).toBe("HUMAN_GATE")
+    expect(result.runtimeHealth.phase).toBe("IMPLEMENTATION")
+    expect(result.runtimeHealth.phaseState).toBe("HUMAN_GATE")
+    expect(result.runtimeHealth.awaitingUserGate).toBe(false)
+  })
+
+  it("state.health reports pending task review for TASK_REVIEW state", async () => {
+    await ctx.engine!.store.update("s1", (d) => {
+      d.mode = "INCREMENTAL"
+      d.phase = "IMPLEMENTATION"
+      d.phaseState = "TASK_REVIEW"
+      d.currentTaskId = "T9"
+      d.taskCompletionInProgress = "T9"
+      d.featureName = "task-review-feat"
+    })
+    const result = await handleStateHealth({ sessionId: "s1" }, ctx) as any
+    expect(result.phase).toBe("IMPLEMENTATION")
+    expect(result.phaseState).toBe("TASK_REVIEW")
+    expect(result.pendingTaskReview).toBe(true)
+    expect(result.noopReason).toContain("T9")
   })
 })
 
@@ -321,6 +375,31 @@ describe("idle.check", () => {
     expect(typeof result.message).toBe("string")
     expect(result.retryCount).toBe(1)
   })
+
+  // Decision note: treat REDRAFT, SKIP_CHECK, CASCADE_CHECK, SCHEDULING, and TASK_REVISE
+  // as active non-gate states that should keep the workflow moving autonomously.
+  // Alternative considered: ignore idle in these states. Rejected because it would leave
+  // the workflow stalled during structural decision/revision work without a truthful gate.
+  for (const [phase, phaseState] of [
+    ["PLANNING", "REDRAFT"],
+    ["INTERFACES", "SKIP_CHECK"],
+    ["INTERFACES", "CASCADE_CHECK"],
+    ["IMPLEMENTATION", "SCHEDULING"],
+    ["IMPLEMENTATION", "TASK_REVISE"],
+  ] as const) {
+    it(`returns reprompt for ${phase}/${phaseState}`, async () => {
+      await ctx.engine!.store.update("s1", (d) => {
+        d.mode = "INCREMENTAL"
+        d.phase = phase
+        d.phaseState = phaseState
+        d.retryCount = 0
+      })
+      const result = await handleIdleCheck({ sessionId: "s1" }, ctx) as IdleCheckResult
+      expect(result.action).toBe("reprompt")
+      expect(typeof result.message).toBe("string")
+      expect(result.retryCount).toBe(1)
+    })
+  }
 
   it("returns escalate after max retries", async () => {
     await ctx.engine!.store.update("s1", (d) => {

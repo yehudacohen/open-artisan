@@ -11,7 +11,17 @@ import {
 } from "#core/tools/transitions"
 import { createStateMachine } from "#core/state-machine"
 import { SCHEMA_VERSION } from "#core/types"
-import type { WorkflowState } from "#core/types"
+import type {
+  StructuralTransitionDescriptor,
+  StructuralTransitionDescriptorStore,
+  StructuralTransitionPlanner,
+  StructuralTransitionResult,
+  StructuralWorkflowDiagnosticsConfig,
+  StructuralWorkflowHealthCheck,
+  StructuralWorkflowLogEvent,
+  StructuralWorkflowMetricsSnapshot,
+  WorkflowState,
+} from "#core/types"
 
 const sm = createStateMachine()
 
@@ -39,6 +49,7 @@ function makeState(overrides: Partial<WorkflowState> = {}): WorkflowState {
     pendingRevisionSteps: null,
     currentTaskId: null,
     feedbackHistory: [],
+    backtrackContext: null,
     userGateMessageReceived: false,
     reviewArtifactHash: null,
     latestReviewResults: null,
@@ -321,3 +332,4 @@ describe("computeProposeBacktrackTransition", () => {
     expect(result.error).toContain("DRAFT or REVISE")
   })
 })
+

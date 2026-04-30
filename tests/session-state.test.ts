@@ -37,6 +37,7 @@ function makeState(sessionId: string, featureName: string | null, overrides?: Pa
     pendingRevisionSteps: null,
     currentTaskId: null,
     feedbackHistory: [],
+    backtrackContext: null,
     userGateMessageReceived: false,
     reviewArtifactHash: null,
     latestReviewResults: null,
@@ -773,6 +774,135 @@ describe("SessionStateStore — load", () => {
     expect(loaded?.implDag?.[0]?.status).toBe("complete")
   })
 
+  it("migrates v22 state missing backtrackContext to current schema", async () => {
+    const dir = join(tmpDir, "v22-feature")
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(
+      join(dir, "workflow-state.json"),
+      JSON.stringify({
+        schemaVersion: 22,
+        sessionId: "v22-session",
+        mode: "INCREMENTAL",
+        phase: "INTERFACES",
+        phaseState: "REVISE",
+        iterationCount: 1,
+        retryCount: 0,
+        approvedArtifacts: { plan: "abc123" },
+        conventions: null,
+        fileAllowlist: ["/tmp/project/packages/core/types.ts"],
+        lastCheckpointTag: null,
+        approvalCount: 2,
+        orchestratorSessionId: null,
+        intentBaseline: null,
+        modeDetectionNote: null,
+        discoveryReport: null,
+        implDag: null,
+        phaseApprovalCounts: { PLANNING: 1 },
+        escapePending: false,
+        pendingRevisionSteps: null,
+        currentTaskId: null,
+        feedbackHistory: [],
+        userGateMessageReceived: false,
+        reviewArtifactHash: null,
+        latestReviewResults: [],
+        artifactDiskPaths: {},
+        featureName: "v22-feature",
+        revisionBaseline: null,
+        activeAgent: null,
+        taskCompletionInProgress: null,
+        taskReviewCount: 0,
+        pendingFeedback: null,
+        userMessages: [],
+        cachedPriorState: null,
+        priorWorkflowChecked: false,
+        sessionModel: null,
+        parentWorkflow: null,
+        childWorkflows: [],
+        concurrency: { maxParallelTasks: 1 },
+        reviewArtifactFiles: ["/tmp/project/packages/core/types.ts"],
+        // Note: no backtrackContext — v23 field
+      }),
+    )
+
+    const store2 = createSessionStateStore(createFileSystemStateBackend(tmpDir))
+    const result = await store2.load()
+    expect(result.success).toBe(true)
+    const loaded = store2.get("v22-session")
+    expect(loaded).not.toBeNull()
+    expect(loaded?.schemaVersion).toBe(SCHEMA_VERSION)
+    expect(loaded?.backtrackContext).toBeNull()
+    expect(loaded?.phase).toBe("INTERFACES")
+    expect(loaded?.phaseState).toBe("REVISE")
+  })
+
+  it("rejects backtrackContext outside REDRAFT during update", async () => {
+    await store.create("backtrack-invalid")
+    await expect(store.update("backtrack-invalid", (draft) => {
+      draft.featureName = "backtrack-invalid"
+      draft.mode = "INCREMENTAL"
+      draft.phase = "PLANNING"
+      draft.phaseState = "DRAFT"
+      draft.backtrackContext = {
+        sourcePhase: "INTERFACES",
+        targetPhase: "PLANNING",
+        reason: "Planner regression requires a structural rewind.",
+      }
+    })).rejects.toThrow("backtrackContext may only be present")
+  })
+
+  it("accepts backtrackContext during REDRAFT update", async () => {
+    await store.create("backtrack-valid")
+    const updated = await store.update("backtrack-valid", (draft) => {
+      draft.featureName = "backtrack-valid"
+      draft.mode = "INCREMENTAL"
+      draft.phase = "PLANNING"
+      draft.phaseState = "REDRAFT"
+      draft.backtrackContext = {
+        sourcePhase: "INTERFACES",
+        targetPhase: "PLANNING",
+        reason: "Planner regression requires a structural rewind.",
+      }
+    })
+    expect(updated.backtrackContext?.targetPhase).toBe("PLANNING")
+    expect(updated.phaseState).toBe("REDRAFT")
+  })
+
+  it("accepts the approved structural phase states only in their intended phases", async () => {
+    const cases: Array<{ sessionId: string; phase: WorkflowState["phase"]; phaseState: WorkflowState["phaseState"] }> = [
+      { sessionId: "planning-redraft", phase: "PLANNING", phaseState: "REDRAFT" },
+      { sessionId: "interfaces-skip", phase: "INTERFACES", phaseState: "SKIP_CHECK" },
+      { sessionId: "tests-cascade", phase: "TESTS", phaseState: "CASCADE_CHECK" },
+      { sessionId: "impl-plan-skip", phase: "IMPL_PLAN", phaseState: "SKIP_CHECK" },
+      { sessionId: "impl-scheduling", phase: "IMPLEMENTATION", phaseState: "SCHEDULING" },
+      { sessionId: "impl-task-review", phase: "IMPLEMENTATION", phaseState: "TASK_REVIEW" },
+      { sessionId: "impl-task-revise", phase: "IMPLEMENTATION", phaseState: "TASK_REVISE" },
+      { sessionId: "impl-human-gate", phase: "IMPLEMENTATION", phaseState: "HUMAN_GATE" },
+      { sessionId: "impl-delegated-wait", phase: "IMPLEMENTATION", phaseState: "DELEGATED_WAIT" },
+    ]
+
+    for (const testCase of cases) {
+      await store.create(testCase.sessionId)
+      const updated = await store.update(testCase.sessionId, (draft) => {
+        draft.featureName = testCase.sessionId
+        draft.mode = "INCREMENTAL"
+        draft.phase = testCase.phase
+        draft.phaseState = testCase.phaseState
+      })
+      expect(updated.phase).toBe(testCase.phase)
+      expect(updated.phaseState).toBe(testCase.phaseState)
+    }
+  })
+
+  it("rejects structural phase states when they are attached to the wrong phase", async () => {
+    await store.create("wrong-structural-phase")
+    await expect(store.update("wrong-structural-phase", (draft) => {
+      draft.featureName = "wrong-structural-phase"
+      draft.mode = "INCREMENTAL"
+      draft.phase = "INTERFACES"
+      draft.phaseState = "TASK_REVIEW" as WorkflowState["phaseState"]
+    })).rejects.toThrow(/Invalid phaseState/)
+  })
+
   it("reports count of successfully loaded sessions", async () => {
     // Write two valid sessions as per-feature files
     writePerFeatureState(tmpDir, "feat-1", makeState("s1", "feat-1"))
@@ -932,7 +1062,7 @@ describe("SessionStateStore — load", () => {
     ])
   })
 
-  it("reopens implementation at USER_GATE when only unresolved human gates remain", async () => {
+  it("reopens implementation at HUMAN_GATE when only unresolved human gates remain", async () => {
     writePerFeatureState(tmpDir, "repair-awaiting-human", makeState("repair-awaiting-human-session", "repair-awaiting-human", {
       mode: "GREENFIELD",
       phase: "IMPLEMENTATION",
@@ -959,12 +1089,12 @@ describe("SessionStateStore — load", () => {
     expect(result.success).toBe(true)
     const loaded = store2.get("repair-awaiting-human-session")
     expect(loaded?.phase).toBe("IMPLEMENTATION")
-    expect(loaded?.phaseState).toBe("USER_GATE")
+    expect(loaded?.phaseState).toBe("HUMAN_GATE")
     expect(loaded?.currentTaskId).toBeNull()
     expect(loaded?.userGateMessageReceived).toBe(false)
 
     const persisted = JSON.parse(readFileSync(join(tmpDir, "repair-awaiting-human", "workflow-state.json"), "utf-8"))
-    expect(persisted.phaseState).toBe("USER_GATE")
+    expect(persisted.phaseState).toBe("HUMAN_GATE")
   })
 })
 

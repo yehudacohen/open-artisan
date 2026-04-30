@@ -588,6 +588,10 @@ export interface StructuralTransitionDescriptorStore {
   listDescriptors(): Promise<{ success: true; value: StructuralTransitionDescriptor[] } | { success: false; error: StructuralTransitionError }>
 }
 
+/**
+ * Planner contract for deriving shared structural transition descriptors from the
+ * current workflow snapshot.
+ */
 export interface StructuralTransitionPlanner {
   computeRedraftDescriptor(input: StructuralTransitionInput): Promise<StructuralTransitionResult>
   computePhaseSkipDescriptor(input: StructuralTransitionInput): Promise<StructuralTransitionResult>
@@ -2025,19 +2029,45 @@ export type SupportedExecutableSeamErrorPattern =
  *   public seam, so executable tests should target that module directly.
  * - `interface-only`: traditional contract shape where tests should stay on the
  *   abstract interface/type surface and avoid implementation imports.
+ *
+ * Decision note: for this feature's runtime seam registry, `owner-module-public-runtime-contract`
+ * is not a loophole or implementation leak. It is the approved public test boundary for
+ * adapter/runtime parity coverage.
  */
 export type SupportedExecutableSeamImportPolicy =
   | "owner-module-public-runtime-contract"
   | "interface-only"
 
 /**
+ * TESTS-phase suite style allowed for an approved executable seam.
+ *
+ * - `target-state-only`: only future-state/specification tests that would fail until the
+ *   implementation lands.
+ * - `characterization-regression`: tests may capture current runtime behavior to prevent
+ *   regressions while later phases structuralize the implementation.
+ * - `mixed-characterization-and-target-state`: both characterization/regression tests and
+ *   target-state assertions are required because the seam must simultaneously preserve
+ *   working runtime behavior and expose newly required structural behavior.
+ */
+export type SupportedExecutableSeamSuiteStyle =
+  | "target-state-only"
+  | "characterization-regression"
+  | "mixed-characterization-and-target-state"
+
+/**
  * Explicit testing-contract summary for executable seam-based features.
  * This lets earlier phases record when seam-oriented runtime imports are not an
  * accidental implementation leak but the approved public-test contract.
+ *
+ * For this feature, a seam may also explicitly bless mixed characterization +
+ * target-state suites. That means TESTS is allowed to carry forward regression
+ * coverage for already-working runtime behavior while also adding future-state
+ * assertions for newly structuralized workflow behavior.
  */
 export interface SupportedExecutableSeamTestingContract {
   seamKind: SupportedExecutableSeamKind
   importPolicy: SupportedExecutableSeamImportPolicy
+  suiteStyle: SupportedExecutableSeamSuiteStyle
   rationale: string
   alternativesConsidered: string[]
   tradeoffs: string[]
@@ -2049,10 +2079,145 @@ export interface SupportedExecutableSeamDescriptor {
   primaryInterface: string
   errorPattern: SupportedExecutableSeamErrorPattern
   runtimeCoverageExpectedAt: "TESTS" | "IMPLEMENTATION"
+  /** Approved TESTS-phase import boundary for this seam. */
+  importPolicy?: SupportedExecutableSeamImportPolicy
+  /** Approved TESTS-phase suite style for this seam. */
+  suiteStyle?: SupportedExecutableSeamSuiteStyle
   decision: string
   alternativesConsidered: string[]
   tradeoffs: string[]
 }
+
+/**
+ * Concrete approved executable seam registry for this feature.
+ *
+ * Each entry is the interface-level source of truth for which runtime owner module is
+ * the supported public seam, what error/result pattern tests should expect, and whether
+ * the suite is allowed to mix characterization/regression coverage with target-state
+ * structural assertions.
+ */
+export const SUPPORTED_EXECUTABLE_SEAM_DESCRIPTORS: readonly SupportedExecutableSeamDescriptor[] = [
+  {
+    kind: "state-machine",
+    ownerModule: "#core/state-machine",
+    primaryInterface: "StateMachine",
+    errorPattern: "TransitionOutcome",
+    runtimeCoverageExpectedAt: "TESTS",
+    importPolicy: "owner-module-public-runtime-contract",
+    suiteStyle: "mixed-characterization-and-target-state",
+    decision: "Exercise the real FSM owner module because structural-state legality is itself the public runtime contract.",
+    alternativesConsidered: ["interface-only helper assertions", "adapter-only integration coverage"],
+    tradeoffs: ["couples tests to the shared runtime owner module", "catches illegal transition drift earlier"],
+  },
+  {
+    kind: "phase-tool-policy",
+    ownerModule: "#core/hooks/tool-guard",
+    primaryInterface: "PhaseToolPolicy",
+    errorPattern: "StructuralTransitionResult",
+    runtimeCoverageExpectedAt: "TESTS",
+    importPolicy: "owner-module-public-runtime-contract",
+    suiteStyle: "mixed-characterization-and-target-state",
+    decision: "Tool legality is a runtime seam owned by the guard policy module, not a prose-only convention.",
+    alternativesConsidered: ["prompt-only assertions", "implementation-phase-only verification"],
+    tradeoffs: ["tests concrete policy outputs directly", "prevents silent phase-policy regressions"],
+  },
+  {
+    kind: "request-review-file-artifact",
+    ownerModule: "#core/tools/request-review",
+    primaryInterface: "RequestReviewArgs",
+    errorPattern: "StructuralTransitionResult",
+    runtimeCoverageExpectedAt: "TESTS",
+    importPolicy: "owner-module-public-runtime-contract",
+    suiteStyle: "characterization-regression",
+    decision: "File-based review submission is a public runtime contract and must remain executable through the request_review owner module.",
+    alternativesConsidered: ["types-only contract checks"],
+    tradeoffs: ["keeps review-source-of-truth behavior executable", "binds tests to the public owner module intentionally"],
+  },
+  {
+    kind: "session-state-validation",
+    ownerModule: "#core/session-state",
+    primaryInterface: "SessionStateStore",
+    errorPattern: "validation-string-null",
+    runtimeCoverageExpectedAt: "TESTS",
+    importPolicy: "owner-module-public-runtime-contract",
+    suiteStyle: "mixed-characterization-and-target-state",
+    decision: "Resume repair and validation are public structural seams because stale persisted state must recover truthfully.",
+    alternativesConsidered: ["state-machine-only tests"],
+    tradeoffs: ["covers persistence repair directly", "requires runtime fixture setup"],
+  },
+  {
+    kind: "scheduler-parallel-contract",
+    ownerModule: "#core/scheduler",
+    primaryInterface: "WorkflowConcurrency",
+    errorPattern: "StructuralTransitionResult",
+    runtimeCoverageExpectedAt: "TESTS",
+    importPolicy: "owner-module-public-runtime-contract",
+    suiteStyle: "characterization-regression",
+    decision: "Scheduler parallelism/isolation is an executable contract and must be locked by runtime tests.",
+    alternativesConsidered: ["single-threaded helper tests only"],
+    tradeoffs: ["requires concurrency-sensitive assertions", "catches slot/isolation regressions"],
+  },
+  {
+    kind: "bridge-runtime",
+    ownerModule: "#bridge/methods/tool-execute",
+    primaryInterface: "BridgeContext",
+    errorPattern: "StructuralTransitionResult",
+    runtimeCoverageExpectedAt: "TESTS",
+    importPolicy: "owner-module-public-runtime-contract",
+    suiteStyle: "mixed-characterization-and-target-state",
+    decision: "Bridge JSON-RPC/runtime wiring is an approved executable seam for parity testing.",
+    alternativesConsidered: ["core-only tests", "OpenCode-only tests"],
+    tradeoffs: ["tests bridge handler owners directly", "makes adapter parity drift visible"],
+  },
+  {
+    kind: "hermes-post-tool-continuation",
+    ownerModule: "packages/adapter-hermes/hermes_adapter/workflow_tools.py",
+    primaryInterface: "HermesContinuationSeam",
+    errorPattern: "throws",
+    runtimeCoverageExpectedAt: "TESTS",
+    importPolicy: "owner-module-public-runtime-contract",
+    suiteStyle: "mixed-characterization-and-target-state",
+    decision: "Hermes immediate continuation is an adapter-owned public seam and must be covered through the adapter runtime path.",
+    alternativesConsidered: ["bridge idle tests only"],
+    tradeoffs: ["Python adapter tests are required", "captures transport-specific continuation truth"],
+  },
+  {
+    kind: "claude-hook-phase-gating",
+    ownerModule: "#claude-code/src/hook-handlers",
+    primaryInterface: "ClaudeHookPhaseGatingSeam",
+    errorPattern: "throws",
+    runtimeCoverageExpectedAt: "TESTS",
+    importPolicy: "owner-module-public-runtime-contract",
+    suiteStyle: "characterization-regression",
+    decision: "Claude hook gating is a public adapter seam whose runtime behavior must stay aligned with shared workflow meaning.",
+    alternativesConsidered: ["bridge-only parity tests"],
+    tradeoffs: ["exercises hook owners directly", "keeps Claude parity visible despite different runtime model"],
+  },
+  {
+    kind: "task-boundary-revision-workflow",
+    ownerModule: "#plugin/index",
+    primaryInterface: "TaskBoundaryRevisionSeam",
+    errorPattern: "StructuralTransitionResult",
+    runtimeCoverageExpectedAt: "TESTS",
+    importPolicy: "owner-module-public-runtime-contract",
+    suiteStyle: "mixed-characterization-and-target-state",
+    decision: "Analyze/apply boundary revision is a public runtime seam spanning OpenCode and bridge entrypoints, not a private implementation detail.",
+    alternativesConsidered: ["types-only argument tests", "implementation-phase-only verification"],
+    tradeoffs: ["requires runtime fixture DAGs/allowlists", "prevents hidden ownership-regression gaps"],
+  },
+  {
+    kind: "workflow-guidance-legality",
+    ownerModule: "#core/hooks/system-transform",
+    primaryInterface: "WorkflowGuidanceLegalitySeam",
+    errorPattern: "throws",
+    runtimeCoverageExpectedAt: "TESTS",
+    importPolicy: "owner-module-public-runtime-contract",
+    suiteStyle: "mixed-characterization-and-target-state",
+    decision: "Prompt/tool-legality consistency is a public workflow contract and must be asserted through the prompt-building owner module.",
+    alternativesConsidered: ["manual prompt inspection", "tool-guard-only tests"],
+    tradeoffs: ["tests prompt content concretely", "catches impossible-guidance regressions early"],
+  },
+]
 
 export interface WorkflowPromptPart {
   type: "text"
@@ -2200,6 +2365,9 @@ export interface AnalyzeTaskBoundaryChangeArgs {
   reason: NonEmptyBoundaryChangeReason
 }
 
+/**
+ * Apply-time acknowledgement contract for a previously analyzed task-boundary revision.
+ */
 export interface ApplyTaskBoundaryChangeArgs extends AnalyzeTaskBoundaryChangeArgs {
   /** Explicit acknowledgement of which tasks are expected to be impacted by the change */
   expected_impacted_tasks?: string[]

@@ -34,6 +34,14 @@ export type PhaseState =
   | "USER_GATE"
   | "ESCAPE_HATCH"
   | "REVISE"
+  | "REDRAFT"
+  | "SKIP_CHECK"
+  | "CASCADE_CHECK"
+  | "SCHEDULING"
+  | "TASK_REVIEW"
+  | "TASK_REVISE"
+  | "HUMAN_GATE"
+  | "DELEGATED_WAIT"
 
 /**
  * Which PhaseStates are valid for each Phase.
@@ -42,11 +50,11 @@ export type PhaseState =
 export const VALID_PHASE_STATES: Record<Phase, PhaseState[]> = {
   MODE_SELECT: ["DRAFT"],
   DISCOVERY: ["SCAN", "ANALYZE", "CONVENTIONS", "REVIEW", "USER_GATE", "ESCAPE_HATCH", "REVISE"],
-  PLANNING: ["DRAFT", "REVIEW", "USER_GATE", "ESCAPE_HATCH", "REVISE"],
-  INTERFACES: ["DRAFT", "REVIEW", "USER_GATE", "ESCAPE_HATCH", "REVISE"],
-  TESTS: ["DRAFT", "REVIEW", "USER_GATE", "ESCAPE_HATCH", "REVISE"],
-  IMPL_PLAN: ["DRAFT", "REVIEW", "USER_GATE", "ESCAPE_HATCH", "REVISE"],
-  IMPLEMENTATION: ["DRAFT", "REVIEW", "USER_GATE", "ESCAPE_HATCH", "REVISE"],
+  PLANNING: ["DRAFT", "REDRAFT", "SKIP_CHECK", "CASCADE_CHECK", "REVIEW", "USER_GATE", "ESCAPE_HATCH", "REVISE"],
+  INTERFACES: ["DRAFT", "REDRAFT", "SKIP_CHECK", "CASCADE_CHECK", "REVIEW", "USER_GATE", "ESCAPE_HATCH", "REVISE"],
+  TESTS: ["DRAFT", "REDRAFT", "SKIP_CHECK", "CASCADE_CHECK", "REVIEW", "USER_GATE", "ESCAPE_HATCH", "REVISE"],
+  IMPL_PLAN: ["DRAFT", "REDRAFT", "SKIP_CHECK", "CASCADE_CHECK", "REVIEW", "USER_GATE", "ESCAPE_HATCH", "REVISE"],
+  IMPLEMENTATION: ["DRAFT", "REVIEW", "USER_GATE", "ESCAPE_HATCH", "REVISE", "SCHEDULING", "TASK_REVIEW", "TASK_REVISE", "HUMAN_GATE", "DELEGATED_WAIT"],
   DONE: ["DRAFT"],
 }
 
@@ -54,14 +62,21 @@ export type WorkflowEvent =
   | "mode_selected"           // MODE_SELECT → DISCOVERY or PLANNING
   | "scan_complete"           // DISCOVERY/SCAN → DISCOVERY/ANALYZE
   | "analyze_complete"        // DISCOVERY/ANALYZE → DISCOVERY/CONVENTIONS
-  | "draft_complete"          // */DRAFT → */REVIEW
+  | "draft_complete"          // */DRAFT or */REDRAFT → */REVIEW
   | "self_review_pass"        // */REVIEW → */USER_GATE
   | "self_review_fail"        // */REVIEW → */REVISE (address feedback, increments iterationCount)
   | "escalate_to_user"        // */REVIEW → */USER_GATE (iteration cap reached — M12)
-  | "user_approve"            // */USER_GATE → next Phase/DRAFT (+ git checkpoint)
+  | "user_approve"            // */USER_GATE → next structural state
   | "user_feedback"           // */USER_GATE or */ESCAPE_HATCH → orchestrator → */REVISE
   | "escape_hatch_triggered"  // */USER_GATE → */ESCAPE_HATCH (strategic pivot detected)
-  | "revision_complete"       // */REVISE → */REVIEW
+  | "revision_complete"       // */REVISE or */TASK_REVISE → corresponding review state
+  | "phase_skipped"
+  | "cascade_step_skipped"
+  | "task_review_pass"
+  | "task_review_fail"
+  | "human_gate_resolved"
+  | "delegated_task_completed"
+  | "scheduling_complete"
 
 export type ArtifactKey =
   | "design"
@@ -119,11 +134,33 @@ export type ArtifactKey =
  *        Added expectedFiles to implDag TaskNode (parsed from IMPL_PLAN "Files:" field).
  *        The reviewer now receives explicit file paths from the orchestrator instead
  *        of scanning directories with heuristics.
+ *   v23: expanded the structural workflow contract with new PhaseState / WorkflowEvent values
+ *        and persisted BacktrackContext provenance on WorkflowState.
  */
-export const SCHEMA_VERSION = 22
+export const SCHEMA_VERSION = 23
 
+/**
+ * Runtime concurrency policy for nested or delegated workflow execution.
+ * maxParallelTasks is configuration, not live scheduler state.
+ */
 export interface WorkflowConcurrency {
   maxParallelTasks: number
+}
+
+export type UserAuthoredText = string
+
+/**
+ * Persisted provenance for a structural backtrack/redraft flow.
+ *
+ * - sourcePhase: the phase where the backtrack was proposed
+ * - targetPhase: the earlier phase that now owns the redraft
+ * - reason: user-authored rationale carried into prompts/recovery.
+ *   Treat as sensitive operational context and avoid echoing it into low-signal logs.
+ */
+export interface BacktrackContext {
+  sourcePhase: Phase
+  targetPhase: Phase
+  reason: UserAuthoredText
 }
 
 export interface WorkflowState {
@@ -216,6 +253,15 @@ export interface WorkflowState {
    * Each entry records the phase, feedback text, and timestamp.
    */
   feedbackHistory: Array<{ phase: Phase; feedback: string; timestamp: number }>
+
+  /**
+   * Persisted provenance for a structural backtrack/redraft flow.
+   * Present while a REDRAFT lineage is still relevant for prompts and resume recovery.
+   * Cleared after the redraft is approved or superseded by a later explicit backtrack.
+   * Optional in in-memory fixtures and older transient callers; persisted state should
+   * normalize absent values to null during migration/load.
+   */
+  backtrackContext?: BacktrackContext | null
 
   /**
    * Serialized ImplDAG — the parsed task graph from the approved IMPL_PLAN artifact.
@@ -339,16 +385,19 @@ export interface WorkflowState {
    * User feedback text persisted before orchestrator LLM calls (assess/diverge).
    * If the process crashes during the orchestrator call, this field preserves
    * the feedback so it can be replayed on restart.
+   * Treat as user-provided sensitive text; do not surface outside workflow review
+   * and prompt-building paths without explicit need.
    * null = no orchestrator call in flight.
    */
-  pendingFeedback: string | null
+  pendingFeedback: UserAuthoredText | null
 
   /**
    * Full conversation history of user messages.
    * Captured from chat.message hook and passed to self-review subagent.
    * Provides complete context beyond just intentBaseline.
+   * Treat entries as user-provided sensitive text rather than operational metadata.
    */
-  userMessages: string[]
+  userMessages: UserAuthoredText[]
 
   /**
    * Cached result from check_prior_workflow to avoid redundant file reads in select_mode.
@@ -444,6 +493,147 @@ export interface TransitionFailure {
 }
 
 export type TransitionOutcome = TransitionSuccess | TransitionFailure
+
+/**
+ * Shared structural transition-descriptor seam chosen by the approved plan.
+ *
+ * Alternatives considered and rejected:
+ * - direct adapter-owned `draft.phase` / `draft.phaseState` rewrites
+ * - new durable persisted helper states for AUTO_APPROVE / CHECKPOINTING / RESUME_CHECK
+ *
+ * Tradeoff: descriptors add contract surface area, but they make adapter parity,
+ * resume repair, tests, and review dispatch explicit enough that later phases do not
+ * need to guess at structural workflow meaning.
+ */
+export interface StructuralTransitionDescriptor {
+  kind: "redraft" | "skip" | "cascade" | "scheduling" | "task-review" | "human-gate" | "delegated-wait"
+  source: { phase: Phase; phaseState: PhaseState }
+  target: { phase: Phase; phaseState: PhaseState }
+  triggeringEvent: WorkflowEvent
+  rationale: string
+  requiredArtifactFiles: string[]
+  blockedOn: "none" | "human-action" | "delegated-sub-workflow" | "reviewer" | "bridge-runtime"
+  tradeoffs: {
+    chosen: string
+    alternativesConsidered: string[]
+    risks: string[]
+  }
+  currentTaskId?: string | null
+  reviewArtifactFiles?: string[]
+  childWorkflowIds?: string[]
+  humanGate?: {
+    taskId: string
+    whatIsNeeded: string
+    verificationSteps?: string
+  }
+}
+
+export interface StructuralTransitionError {
+  message: string
+  code:
+    | "INVALID_SKIP_TARGET"
+    | "INVALID_CASCADE_TARGET"
+    | "INVALID_IMPLEMENTATION_LIFECYCLE"
+    | "MISSING_HUMAN_GATE_CONTEXT"
+    | "MISSING_DELEGATED_WORKFLOW"
+    | "UNRESUMABLE_STRUCTURAL_STATE"
+}
+
+export type StructuralTransitionResult =
+  | { success: true; value: StructuralTransitionDescriptor }
+  | { success: false; error: StructuralTransitionError }
+
+export interface StructuralTransitionInput {
+  currentPhase: Phase
+  currentPhaseState: PhaseState
+  mode: WorkflowMode
+  approvedArtifacts: Partial<Record<ArtifactKey, string>>
+  pendingRevisionSteps: RevisionStep[] | null
+  currentTaskId: string | null
+  reviewArtifactFiles: string[]
+  childWorkflowIds: string[]
+  backtrackContext: BacktrackContext | null
+}
+
+export interface StructuralTransitionDescriptorStore {
+  createDescriptor(sessionId: string, descriptor: StructuralTransitionDescriptor): Promise<StructuralTransitionResult>
+  readDescriptor(sessionId: string, descriptorKind: StructuralTransitionDescriptor["kind"]): Promise<StructuralTransitionResult>
+  updateDescriptor(sessionId: string, descriptor: StructuralTransitionDescriptor): Promise<StructuralTransitionResult>
+  deleteDescriptor(sessionId: string, descriptorKind: StructuralTransitionDescriptor["kind"]): Promise<{ success: true } | { success: false; error: StructuralTransitionError }>
+  listDescriptors(sessionId: string): Promise<{ success: true; value: StructuralTransitionDescriptor[] } | { success: false; error: StructuralTransitionError }>
+}
+
+export interface StructuralTransitionPlanner {
+  computeRedraftDescriptor(input: StructuralTransitionInput): StructuralTransitionResult
+  computePhaseSkipDescriptor(input: StructuralTransitionInput): StructuralTransitionResult
+  computeCascadeDescriptor(input: StructuralTransitionInput): StructuralTransitionResult
+  computeSchedulingDescriptor(input: StructuralTransitionInput): StructuralTransitionResult
+  computeTaskReviewDescriptor(input: StructuralTransitionInput): StructuralTransitionResult
+  computeHumanGateDescriptor(input: StructuralTransitionInput): StructuralTransitionResult
+  computeDelegatedWaitDescriptor(input: StructuralTransitionInput): StructuralTransitionResult
+}
+
+export type StructuralWorkflowHealthStatus = "healthy" | "reviewing" | "blocked" | "stalled" | "bridge-unavailable"
+
+export type StructuralWorkflowIssueKind =
+  | "continuation-stall"
+  | "review-failure"
+  | "bridge-state-issue"
+  | "human-gate-block"
+  | "delegated-wait"
+
+export interface StructuralWorkflowHealthCheck {
+  featureName: string
+  phase: Phase
+  phaseState: PhaseState
+  status: StructuralWorkflowHealthStatus
+  issueKind?: StructuralWorkflowIssueKind
+  currentTaskId: string | null
+  diagnosticsPaths: string[]
+  reviewArtifactFiles: string[]
+}
+
+export interface StructuralWorkflowMetricsSnapshot {
+  featureName: string
+  activePhase: Phase
+  activePhaseState: PhaseState
+  transitionCount: number
+  skippedPhaseCount: number
+  cascadeSkipCount: number
+  taskReviewFailureCount: number
+  humanGateCount: number
+  delegatedWaitCount: number
+  stallCount: number
+}
+
+export interface StructuralWorkflowLogEvent {
+  event:
+    | "state-transition"
+    | "phase-skipped"
+    | "cascade-skipped"
+    | "task-review-failed"
+    | "human-gate-entered"
+    | "delegated-wait-entered"
+    | "stall-detected"
+    | "bridge-state-issue"
+  featureName: string
+  phase: Phase
+  phaseState: PhaseState
+  descriptorKind?: StructuralTransitionDescriptor["kind"]
+  message: string
+}
+
+export interface StructuralWorkflowDiagnosticsConfig {
+  debugEnabled?: boolean
+  reviewTimeoutSeconds?: number
+  diagnosticsPaths: Array<
+    | ".openartisan/openartisan-errors.log"
+    | ".openartisan/.bridge-meta.json"
+    | ".openartisan/.bridge-clients.json"
+    | ".openartisan/.bridge-pid"
+    | ".openartisan/.bridge.sock"
+  >
+}
 
 export interface StateMachine {
   /**
@@ -968,7 +1158,7 @@ export interface SessionStateStore {
 
 /**
  * Validates that a WorkflowState object is internally consistent.
- * Returns null if valid, or an error message describing the first violation found.
+ * Returns null if valid, or a structured validation error describing the first violation found.
  *
  * Rules:
  * - schemaVersion must equal SCHEMA_VERSION
@@ -978,101 +1168,139 @@ export interface SessionStateStore {
  * - iterationCount, retryCount, approvalCount must all be >= 0
  * - fileAllowlist paths must start with "/" in INCREMENTAL mode
  */
-export function validateWorkflowState(state: WorkflowState): string | null {
+export interface WorkflowStateValidationError extends String {
+  code: "INVALID_WORKFLOW_STATE"
+  message: string
+}
+
+function workflowStateValidationError(message: string): WorkflowStateValidationError {
+  const error = new String(message) as unknown as WorkflowStateValidationError
+  error.code = "INVALID_WORKFLOW_STATE"
+  error.message = message
+  return error
+}
+
+export function validateWorkflowState(state: WorkflowState): WorkflowStateValidationError | null {
   if (state.schemaVersion !== SCHEMA_VERSION) {
-    return `Invalid schemaVersion: expected ${SCHEMA_VERSION}, got ${state.schemaVersion}`
+    return workflowStateValidationError(`Invalid schemaVersion: expected ${SCHEMA_VERSION}, got ${state.schemaVersion}`)
   }
   if (!state.sessionId || typeof state.sessionId !== "string") {
-    return "Invalid sessionId: must be a non-empty string"
+    return workflowStateValidationError("Invalid sessionId: must be a non-empty string")
   }
   const validPhases = Object.keys(VALID_PHASE_STATES) as Phase[]
   if (!validPhases.includes(state.phase)) {
-    return `Invalid phase: "${state.phase}"`
+    return workflowStateValidationError(`Invalid phase: "${state.phase}"`)
   }
   const validStates = VALID_PHASE_STATES[state.phase]
   if (!validStates.includes(state.phaseState)) {
-    return `Invalid phaseState "${state.phaseState}" for phase "${state.phase}". Valid: ${validStates.join(", ")}`
+    return workflowStateValidationError(`Invalid phaseState "${state.phaseState}" for phase "${state.phase}". Valid: ${validStates.join(", ")}`)
   }
   if (state.mode !== null && state.mode !== "GREENFIELD" && state.mode !== "REFACTOR" && state.mode !== "INCREMENTAL") {
-    return `Invalid mode: "${state.mode}". Must be null, "GREENFIELD", "REFACTOR", or "INCREMENTAL".`
+    return workflowStateValidationError(`Invalid mode: "${state.mode}". Must be null, "GREENFIELD", "REFACTOR", or "INCREMENTAL".`)
   }
-  if (state.iterationCount < 0) return "iterationCount must be >= 0"
-  if (state.retryCount < 0) return "retryCount must be >= 0"
-  if (state.approvalCount < 0) return "approvalCount must be >= 0"
+  if (state.iterationCount < 0) return workflowStateValidationError("iterationCount must be >= 0")
+  if (state.retryCount < 0) return workflowStateValidationError("retryCount must be >= 0")
+  if (state.approvalCount < 0) return workflowStateValidationError("approvalCount must be >= 0")
   if (state.mode === "INCREMENTAL") {
     for (const path of state.fileAllowlist) {
       if (!path.startsWith("/")) {
-        return `fileAllowlist path "${path}" must be an absolute path (start with "/")`
+        return workflowStateValidationError(`fileAllowlist path "${path}" must be an absolute path (start with "/")`)
       }
     }
   }
   if (state.conventions !== null && typeof state.conventions !== "string") {
-    return `conventions must be null or a string, got ${typeof state.conventions}`
+    return workflowStateValidationError(`conventions must be null or a string, got ${typeof state.conventions}`)
   }
   if (typeof state.priorWorkflowChecked !== "boolean") {
-    return `priorWorkflowChecked must be a boolean, got ${typeof state.priorWorkflowChecked}`
+    return workflowStateValidationError(`priorWorkflowChecked must be a boolean, got ${typeof state.priorWorkflowChecked}`)
   }
   if (state.sessionModel !== null) {
     if (typeof state.sessionModel === "string") {
       // valid
     } else if (typeof state.sessionModel === "object" && !Array.isArray(state.sessionModel)) {
       if (!("modelID" in state.sessionModel) || typeof state.sessionModel.modelID !== "string") {
-        return `sessionModel object must have a string modelID field`
+        return workflowStateValidationError(`sessionModel object must have a string modelID field`)
       }
     } else {
-      return `sessionModel must be null, a string, or an object with modelID, got ${typeof state.sessionModel}`
+      return workflowStateValidationError(`sessionModel must be null, a string, or an object with modelID, got ${typeof state.sessionModel}`)
     }
   }
   if (state.currentTaskId !== null && typeof state.currentTaskId !== "string") {
-    return `currentTaskId must be null or a string, got ${typeof state.currentTaskId}`
+    return workflowStateValidationError(`currentTaskId must be null or a string, got ${typeof state.currentTaskId}`)
   }
   if (state.phase !== "IMPLEMENTATION" && state.currentTaskId !== null) {
-    return `currentTaskId must be null outside IMPLEMENTATION, got "${state.currentTaskId}" in ${state.phase}`
+    return workflowStateValidationError(`currentTaskId must be null outside IMPLEMENTATION, got "${state.currentTaskId}" in ${state.phase}`)
   }
   if (!Array.isArray(state.feedbackHistory)) {
-    return `feedbackHistory must be an array, got ${typeof state.feedbackHistory}`
+    return workflowStateValidationError(`feedbackHistory must be an array, got ${typeof state.feedbackHistory}`)
   }
   for (let i = 0; i < state.feedbackHistory.length; i++) {
     const entry = state.feedbackHistory[i]
     if (!entry || typeof entry !== "object") {
-      return `feedbackHistory[${i}] must be an object`
+      return workflowStateValidationError(`feedbackHistory[${i}] must be an object`)
     }
     if (typeof entry.phase !== "string") {
-      return `feedbackHistory[${i}].phase must be a string`
+      return workflowStateValidationError(`feedbackHistory[${i}].phase must be a string`)
     }
     if (typeof entry.feedback !== "string") {
-      return `feedbackHistory[${i}].feedback must be a string`
+      return workflowStateValidationError(`feedbackHistory[${i}].feedback must be a string`)
     }
     if (typeof entry.timestamp !== "number" || entry.timestamp < 0) {
-      return `feedbackHistory[${i}].timestamp must be a non-negative number`
+      return workflowStateValidationError(`feedbackHistory[${i}].timestamp must be a non-negative number`)
+    }
+  }
+  if (state.backtrackContext != null) {
+    if (typeof state.backtrackContext !== "object" || Array.isArray(state.backtrackContext)) {
+      return workflowStateValidationError(`backtrackContext must be null or an object`)
+    }
+    if (state.phaseState !== "REDRAFT") {
+      return workflowStateValidationError(`backtrackContext may only be present while phaseState is "REDRAFT", got "${state.phaseState}"`)
+    }
+    if (typeof state.backtrackContext.sourcePhase !== "string") {
+      return workflowStateValidationError(`backtrackContext.sourcePhase must be a Phase string`)
+    }
+    if (typeof state.backtrackContext.targetPhase !== "string") {
+      return workflowStateValidationError(`backtrackContext.targetPhase must be a Phase string`)
+    }
+    if (!validPhases.includes(state.backtrackContext.sourcePhase as Phase)) {
+      return workflowStateValidationError(`backtrackContext.sourcePhase has invalid phase "${state.backtrackContext.sourcePhase}"`)
+    }
+    if (!validPhases.includes(state.backtrackContext.targetPhase as Phase)) {
+      return workflowStateValidationError(`backtrackContext.targetPhase has invalid phase "${state.backtrackContext.targetPhase}"`)
+    }
+    if (typeof state.backtrackContext.reason !== "string" || state.backtrackContext.reason.trim().length === 0) {
+      return workflowStateValidationError(`backtrackContext.reason must be a non-empty string`)
+    }
+    if (state.backtrackContext.targetPhase === "MODE_SELECT" || state.backtrackContext.targetPhase === "DONE") {
+      return workflowStateValidationError(`backtrackContext.targetPhase must be an artifact-authoring phase, got "${state.backtrackContext.targetPhase}"`)
     }
   }
   if (state.implDag !== null) {
     if (!Array.isArray(state.implDag)) {
-      return `implDag must be null or an array, got ${typeof state.implDag}`
+      return workflowStateValidationError(`implDag must be null or an array, got ${typeof state.implDag}`)
     }
     for (const node of state.implDag) {
       if (!node || typeof node !== "object") {
-        return `implDag contains a non-object entry`
+        return workflowStateValidationError(`implDag contains a non-object entry`)
       }
       if (typeof node.id !== "string" || !node.id) {
-        return `implDag task missing required "id" string field`
+        return workflowStateValidationError(`implDag task missing required "id" string field`)
       }
       if (!Array.isArray(node.dependencies)) {
-        return `implDag task "${node.id}" missing required "dependencies" array`
+        return workflowStateValidationError(`implDag task "${node.id}" missing required "dependencies" array`)
       }
       const validStatuses = ["pending", "in-flight", "complete", "aborted", "human-gated", "delegated"]
       if (typeof node.status !== "string" || !validStatuses.includes(node.status)) {
-        return `implDag task "${node.id}" has invalid status "${node.status}"`
+        return workflowStateValidationError(`implDag task "${node.id}" has invalid status "${node.status}"`)
       }
       // v22: validate expectedFiles array
       if (node.expectedFiles !== undefined && node.expectedFiles !== null) {
         if (!Array.isArray(node.expectedFiles)) {
-          return `implDag task "${node.id}" expectedFiles must be an array`
+          return workflowStateValidationError(`implDag task "${node.id}" expectedFiles must be an array`)
         }
         for (let j = 0; j < node.expectedFiles.length; j++) {
           if (typeof node.expectedFiles[j] !== "string") {
-            return `implDag task "${node.id}" expectedFiles[${j}] must be a string`
+            return workflowStateValidationError(`implDag task "${node.id}" expectedFiles[${j}] must be a string`)
           }
         }
       }
@@ -1080,86 +1308,86 @@ export function validateWorkflowState(state: WorkflowState): string | null {
       if (node.category !== undefined && node.category !== null) {
         const validCategories = ["scaffold", "human-gate", "integration", "standalone"]
         if (typeof node.category !== "string" || !validCategories.includes(node.category)) {
-          return `implDag task "${node.id}" has invalid category "${node.category}". Valid: ${validCategories.join(", ")}`
+          return workflowStateValidationError(`implDag task "${node.id}" has invalid category "${node.category}". Valid: ${validCategories.join(", ")}`)
         }
       }
       // v12: validate humanGate field if present
       if (node.humanGate !== undefined && node.humanGate !== null) {
         const hg = node.humanGate
         if (typeof hg !== "object" || Array.isArray(hg)) {
-          return `implDag task "${node.id}" humanGate must be an object`
+          return workflowStateValidationError(`implDag task "${node.id}" humanGate must be an object`)
         }
         if (typeof hg.whatIsNeeded !== "string") {
-          return `implDag task "${node.id}" humanGate.whatIsNeeded must be a string`
+          return workflowStateValidationError(`implDag task "${node.id}" humanGate.whatIsNeeded must be a string`)
         }
         if (typeof hg.why !== "string") {
-          return `implDag task "${node.id}" humanGate.why must be a string`
+          return workflowStateValidationError(`implDag task "${node.id}" humanGate.why must be a string`)
         }
         if (typeof hg.verificationSteps !== "string") {
-          return `implDag task "${node.id}" humanGate.verificationSteps must be a string`
+          return workflowStateValidationError(`implDag task "${node.id}" humanGate.verificationSteps must be a string`)
         }
         if (typeof hg.resolved !== "boolean") {
-          return `implDag task "${node.id}" humanGate.resolved must be a boolean`
+          return workflowStateValidationError(`implDag task "${node.id}" humanGate.resolved must be a boolean`)
         }
       }
       // v12: cross-field invariant — human-gated status requires humanGate metadata
       if (node.status === "human-gated" && (!node.humanGate || typeof node.humanGate !== "object")) {
-        return `implDag task "${node.id}" has status "human-gated" but no humanGate metadata`
+        return workflowStateValidationError(`implDag task "${node.id}" has status "human-gated" but no humanGate metadata`)
       }
     }
   }
   if (state.phaseApprovalCounts !== null && state.phaseApprovalCounts !== undefined) {
     if (typeof state.phaseApprovalCounts !== "object" || Array.isArray(state.phaseApprovalCounts)) {
-      return `phaseApprovalCounts must be an object, got ${typeof state.phaseApprovalCounts}`
+      return workflowStateValidationError(`phaseApprovalCounts must be an object, got ${typeof state.phaseApprovalCounts}`)
     }
     for (const [key, val] of Object.entries(state.phaseApprovalCounts)) {
       if (typeof val !== "number" || val < 0) {
-        return `phaseApprovalCounts["${key}"] must be a non-negative number`
+        return workflowStateValidationError(`phaseApprovalCounts["${key}"] must be a non-negative number`)
       }
     }
   }
   if (typeof state.escapePending !== "boolean") {
-    return `escapePending must be a boolean, got ${typeof state.escapePending}`
+    return workflowStateValidationError(`escapePending must be a boolean, got ${typeof state.escapePending}`)
   }
   if (state.pendingRevisionSteps !== null && !Array.isArray(state.pendingRevisionSteps)) {
-    return `pendingRevisionSteps must be null or an array, got ${typeof state.pendingRevisionSteps}`
+    return workflowStateValidationError(`pendingRevisionSteps must be null or an array, got ${typeof state.pendingRevisionSteps}`)
   }
   // M1: Cross-field invariant — escapePending requires pendingRevisionSteps
   if (state.escapePending && (state.pendingRevisionSteps === null || state.pendingRevisionSteps.length === 0)) {
-    return `escapePending is true but pendingRevisionSteps is ${state.pendingRevisionSteps === null ? "null" : "empty"} — escape hatch requires pending steps`
+    return workflowStateValidationError(`escapePending is true but pendingRevisionSteps is ${state.pendingRevisionSteps === null ? "null" : "empty"} — escape hatch requires pending steps`)
   }
   // M2: Cross-field invariant — escapePending requires ESCAPE_HATCH phaseState
   // (structural guarantee: the state machine enforces this via the escape_hatch_triggered event)
   if (state.escapePending && state.phaseState !== "ESCAPE_HATCH") {
-    return `escapePending is true but phaseState is "${state.phaseState}" — must be "ESCAPE_HATCH" (state machine should enforce this)`
+    return workflowStateValidationError(`escapePending is true but phaseState is "${state.phaseState}" — must be "ESCAPE_HATCH" (state machine should enforce this)`)
   }
   if (typeof state.userGateMessageReceived !== "boolean") {
-    return `userGateMessageReceived must be a boolean, got ${typeof state.userGateMessageReceived}`
+    return workflowStateValidationError(`userGateMessageReceived must be a boolean, got ${typeof state.userGateMessageReceived}`)
   }
   if (state.reviewArtifactHash !== null && typeof state.reviewArtifactHash !== "string") {
-    return `reviewArtifactHash must be a string or null, got ${typeof state.reviewArtifactHash}`
+    return workflowStateValidationError(`reviewArtifactHash must be a string or null, got ${typeof state.reviewArtifactHash}`)
   }
   if (state.latestReviewResults !== null && !Array.isArray(state.latestReviewResults)) {
-    return `latestReviewResults must be an array or null, got ${typeof state.latestReviewResults}`
+    return workflowStateValidationError(`latestReviewResults must be an array or null, got ${typeof state.latestReviewResults}`)
   }
   if (state.artifactDiskPaths !== null && state.artifactDiskPaths !== undefined) {
     if (typeof state.artifactDiskPaths !== "object" || Array.isArray(state.artifactDiskPaths)) {
-      return `artifactDiskPaths must be an object, got ${typeof state.artifactDiskPaths}`
+      return workflowStateValidationError(`artifactDiskPaths must be an object, got ${typeof state.artifactDiskPaths}`)
     }
     for (const [key, val] of Object.entries(state.artifactDiskPaths)) {
       if (typeof val !== "string") {
-        return `artifactDiskPaths["${key}"] must be a string, got ${typeof val}`
+        return workflowStateValidationError(`artifactDiskPaths["${key}"] must be a string, got ${typeof val}`)
       }
       if (!val.startsWith("/")) {
-        return `artifactDiskPaths["${key}"] must be an absolute path (start with "/"), got "${val}"`
+        return workflowStateValidationError(`artifactDiskPaths["${key}"] must be an absolute path (start with "/"), got "${val}"`)
       }
     }
   }
   if (state.featureName !== null && typeof state.featureName !== "string") {
-    return `featureName must be null or a string, got ${typeof state.featureName}`
+    return workflowStateValidationError(`featureName must be null or a string, got ${typeof state.featureName}`)
   }
   if (typeof state.featureName === "string" && state.featureName.length === 0) {
-    return `featureName must not be an empty string (use null for no feature)`
+    return workflowStateValidationError(`featureName must not be an empty string (use null for no feature)`)
   }
   // Security: featureName is used to construct artifact directory paths
   // (.openartisan/<featureName>/). Reject names containing path traversal
@@ -1168,149 +1396,149 @@ export function validateWorkflowState(state: WorkflowState): string | null {
   // Each segment is validated individually.
   if (typeof state.featureName === "string") {
     if (/\.\./.test(state.featureName)) {
-      return `featureName must not contain ".." (path traversal), got "${state.featureName}"`
+      return workflowStateValidationError(`featureName must not contain ".." (path traversal), got "${state.featureName}"`)
     }
     if (/\\/.test(state.featureName)) {
-      return `featureName must not contain backslashes, got "${state.featureName}"`
+      return workflowStateValidationError(`featureName must not contain backslashes, got "${state.featureName}"`)
     }
     if (state.featureName.startsWith("/") || state.featureName.endsWith("/")) {
-      return `featureName must not start or end with "/", got "${state.featureName}"`
+      return workflowStateValidationError(`featureName must not start or end with "/", got "${state.featureName}"`)
     }
     if (/\/\//.test(state.featureName)) {
-      return `featureName must not contain consecutive slashes, got "${state.featureName}"`
+      return workflowStateValidationError(`featureName must not contain consecutive slashes, got "${state.featureName}"`)
     }
     const segments = state.featureName.split("/")
     for (let i = 0; i < segments.length; i++) {
       if (segments[i] === "sub" && i === 0) {
         // "sub" is reserved for nesting but only rejected as the TOP-LEVEL name.
         // It's allowed as an interior segment (e.g., "parent/sub/child").
-        return `featureName "sub" is reserved (used for sub-workflow directory nesting). Choose a different name.`
+        return workflowStateValidationError(`featureName "sub" is reserved (used for sub-workflow directory nesting). Choose a different name.`)
       }
       if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(segments[i]!)) {
-        return `featureName segment "${segments[i]}" must start with alphanumeric and contain only alphanumeric, dots, hyphens, and underscores, got "${state.featureName}"`
+        return workflowStateValidationError(`featureName segment "${segments[i]}" must start with alphanumeric and contain only alphanumeric, dots, hyphens, and underscores, got "${state.featureName}"`)
       }
     }
   }
   // v13: activeAgent
   if (state.activeAgent !== null && state.activeAgent !== undefined) {
     if (typeof state.activeAgent !== "string") {
-      return `activeAgent must be null or a string, got ${typeof state.activeAgent}`
+      return workflowStateValidationError(`activeAgent must be null or a string, got ${typeof state.activeAgent}`)
     }
     if (state.activeAgent.length === 0) {
-      return `activeAgent must not be an empty string (use null for unknown/non-artisan agents)`
+      return workflowStateValidationError(`activeAgent must not be an empty string (use null for unknown/non-artisan agents)`)
     }
   }
   // v14: taskCompletionInProgress
   if (state.taskCompletionInProgress !== null && state.taskCompletionInProgress !== undefined) {
     if (typeof state.taskCompletionInProgress !== "string") {
-      return `taskCompletionInProgress must be null or a string, got ${typeof state.taskCompletionInProgress}`
+      return workflowStateValidationError(`taskCompletionInProgress must be null or a string, got ${typeof state.taskCompletionInProgress}`)
     }
     if (state.taskCompletionInProgress.length === 0) {
-      return `taskCompletionInProgress must not be an empty string (use null when no completion is in progress)`
+      return workflowStateValidationError(`taskCompletionInProgress must not be an empty string (use null when no completion is in progress)`)
     }
     if (state.phase !== "IMPLEMENTATION") {
-      return `taskCompletionInProgress must be null outside IMPLEMENTATION, got "${state.taskCompletionInProgress}" in ${state.phase}`
+      return workflowStateValidationError(`taskCompletionInProgress must be null outside IMPLEMENTATION, got "${state.taskCompletionInProgress}" in ${state.phase}`)
     }
     if (state.currentTaskId !== state.taskCompletionInProgress) {
-      return `taskCompletionInProgress "${state.taskCompletionInProgress}" must match currentTaskId while review is pending`
+      return workflowStateValidationError(`taskCompletionInProgress "${state.taskCompletionInProgress}" must match currentTaskId while review is pending`)
     }
   }
   // v15: taskReviewCount
   if (typeof state.taskReviewCount !== "number" || state.taskReviewCount < 0 || !Number.isInteger(state.taskReviewCount)) {
-    return `taskReviewCount must be a non-negative integer, got ${state.taskReviewCount}`
+    return workflowStateValidationError(`taskReviewCount must be a non-negative integer, got ${state.taskReviewCount}`)
   }
   if (state.phase !== "IMPLEMENTATION" && state.taskReviewCount !== 0) {
-    return `taskReviewCount must be 0 outside IMPLEMENTATION, got ${state.taskReviewCount} in ${state.phase}`
+    return workflowStateValidationError(`taskReviewCount must be 0 outside IMPLEMENTATION, got ${state.taskReviewCount} in ${state.phase}`)
   }
   // v15: pendingFeedback
   if (state.pendingFeedback !== null && state.pendingFeedback !== undefined) {
     if (typeof state.pendingFeedback !== "string") {
-      return `pendingFeedback must be null or a string, got ${typeof state.pendingFeedback}`
+      return workflowStateValidationError(`pendingFeedback must be null or a string, got ${typeof state.pendingFeedback}`)
     }
   }
   // v11: revisionBaseline
   if (state.revisionBaseline !== null && state.revisionBaseline !== undefined) {
     const rb = state.revisionBaseline as Record<string, unknown>
     if (typeof rb !== "object" || Array.isArray(rb)) {
-      return `revisionBaseline must be null or an object, got ${typeof rb}`
+      return workflowStateValidationError(`revisionBaseline must be null or an object, got ${typeof rb}`)
     }
     if (rb.type !== "content-hash" && rb.type !== "git-sha") {
-      return `revisionBaseline.type must be "content-hash" or "git-sha", got "${rb.type}"`
+      return workflowStateValidationError(`revisionBaseline.type must be "content-hash" or "git-sha", got "${rb.type}"`)
     }
     if (rb.type === "content-hash" && typeof rb.hash !== "string") {
-      return `revisionBaseline of type "content-hash" must have a string "hash" field`
+      return workflowStateValidationError(`revisionBaseline of type "content-hash" must have a string "hash" field`)
     }
     if (rb.type === "git-sha" && typeof rb.sha !== "string") {
-      return `revisionBaseline of type "git-sha" must have a string "sha" field`
+      return workflowStateValidationError(`revisionBaseline of type "git-sha" must have a string "sha" field`)
     }
   }
   // v16: userMessages
   if (!Array.isArray(state.userMessages)) {
-    return `userMessages must be an array, got ${typeof state.userMessages}`
+    return workflowStateValidationError(`userMessages must be an array, got ${typeof state.userMessages}`)
   }
   for (let i = 0; i < state.userMessages.length; i++) {
     if (typeof state.userMessages[i] !== "string") {
-      return `userMessages[${i}] must be a string`
+      return workflowStateValidationError(`userMessages[${i}] must be a string`)
     }
   }
   // Nullable string fields — validate type when non-null
   if (state.lastCheckpointTag !== null && typeof state.lastCheckpointTag !== "string") {
-    return `lastCheckpointTag must be null or a string, got ${typeof state.lastCheckpointTag}`
+    return workflowStateValidationError(`lastCheckpointTag must be null or a string, got ${typeof state.lastCheckpointTag}`)
   }
   if (state.orchestratorSessionId !== null && typeof state.orchestratorSessionId !== "string") {
-    return `orchestratorSessionId must be null or a string, got ${typeof state.orchestratorSessionId}`
+    return workflowStateValidationError(`orchestratorSessionId must be null or a string, got ${typeof state.orchestratorSessionId}`)
   }
   if (state.intentBaseline !== null && typeof state.intentBaseline !== "string") {
-    return `intentBaseline must be null or a string, got ${typeof state.intentBaseline}`
+    return workflowStateValidationError(`intentBaseline must be null or a string, got ${typeof state.intentBaseline}`)
   }
   if (state.modeDetectionNote !== null && typeof state.modeDetectionNote !== "string") {
-    return `modeDetectionNote must be null or a string, got ${typeof state.modeDetectionNote}`
+    return workflowStateValidationError(`modeDetectionNote must be null or a string, got ${typeof state.modeDetectionNote}`)
   }
   if (state.discoveryReport !== null && typeof state.discoveryReport !== "string") {
-    return `discoveryReport must be null or a string, got ${typeof state.discoveryReport}`
+    return workflowStateValidationError(`discoveryReport must be null or a string, got ${typeof state.discoveryReport}`)
   }
   // approvedArtifacts — validate as object with string values
   if (typeof state.approvedArtifacts !== "object" || Array.isArray(state.approvedArtifacts) || state.approvedArtifacts === null) {
-    return `approvedArtifacts must be an object, got ${typeof state.approvedArtifacts}`
+    return workflowStateValidationError(`approvedArtifacts must be an object, got ${typeof state.approvedArtifacts}`)
   }
   for (const [key, val] of Object.entries(state.approvedArtifacts)) {
     if (typeof val !== "string") {
-      return `approvedArtifacts["${key}"] must be a string, got ${typeof val}`
+      return workflowStateValidationError(`approvedArtifacts["${key}"] must be a string, got ${typeof val}`)
     }
   }
   // cachedPriorState — validate shape when non-null (transient, cleared on load)
   if (state.cachedPriorState !== null && state.cachedPriorState !== undefined) {
     const cps = state.cachedPriorState as Record<string, unknown>
     if (typeof cps !== "object" || Array.isArray(cps)) {
-      return `cachedPriorState must be null or an object, got ${typeof cps}`
+      return workflowStateValidationError(`cachedPriorState must be null or an object, got ${typeof cps}`)
     }
     if (typeof cps.phase !== "string") {
-      return `cachedPriorState.phase must be a string`
+      return workflowStateValidationError(`cachedPriorState.phase must be a string`)
     }
     if (typeof cps.artifactDiskPaths !== "object" || Array.isArray(cps.artifactDiskPaths) || cps.artifactDiskPaths === null) {
-      return `cachedPriorState.artifactDiskPaths must be an object`
+      return workflowStateValidationError(`cachedPriorState.artifactDiskPaths must be an object`)
     }
   }
   // v21: parentWorkflow
   if (state.parentWorkflow !== null && state.parentWorkflow !== undefined) {
     const pw = state.parentWorkflow as Record<string, unknown>
     if (typeof pw !== "object" || Array.isArray(pw)) {
-      return `parentWorkflow must be null or an object, got ${typeof pw}`
+      return workflowStateValidationError(`parentWorkflow must be null or an object, got ${typeof pw}`)
     }
     if (typeof pw.sessionId !== "string" || !pw.sessionId) {
-      return `parentWorkflow.sessionId must be a non-empty string`
+      return workflowStateValidationError(`parentWorkflow.sessionId must be a non-empty string`)
     }
     if (typeof pw.featureName !== "string" || !pw.featureName) {
-      return `parentWorkflow.featureName must be a non-empty string`
+      return workflowStateValidationError(`parentWorkflow.featureName must be a non-empty string`)
     }
     if (typeof pw.taskId !== "string" || !pw.taskId) {
-      return `parentWorkflow.taskId must be a non-empty string`
+      return workflowStateValidationError(`parentWorkflow.taskId must be a non-empty string`)
     }
   }
   if (state.implDag !== null) {
     const taskIds = new Set(state.implDag.map((task) => task.id))
     if (state.currentTaskId !== null && !taskIds.has(state.currentTaskId)) {
-      return `currentTaskId "${state.currentTaskId}" does not exist in implDag`
+      return workflowStateValidationError(`currentTaskId "${state.currentTaskId}" does not exist in implDag`)
     }
     const currentTask = state.currentTaskId !== null
       ? state.implDag.find((task) => task.id === state.currentTaskId) ?? null
@@ -1320,58 +1548,58 @@ export function validateWorkflowState(state: WorkflowState): string | null {
       (currentTask.status === "complete" || currentTask.status === "aborted") &&
       state.taskCompletionInProgress !== state.currentTaskId
     ) {
-      return `currentTaskId "${state.currentTaskId}" cannot point to a terminal task with status "${currentTask.status}"`
+      return workflowStateValidationError(`currentTaskId "${state.currentTaskId}" cannot point to a terminal task with status "${currentTask.status}"`)
     }
     if (state.taskCompletionInProgress !== null && !taskIds.has(state.taskCompletionInProgress)) {
-      return `taskCompletionInProgress "${state.taskCompletionInProgress}" does not exist in implDag`
+      return workflowStateValidationError(`taskCompletionInProgress "${state.taskCompletionInProgress}" does not exist in implDag`)
     }
     if (state.phase === "DONE") {
       const unfinished = state.implDag.filter((task) => task.status !== "complete" && task.status !== "aborted")
       if (unfinished.length > 0) {
-        return `DONE cannot contain unresolved implDag work: ${unfinished.map((task) => task.id).join(", ")}`
+        return workflowStateValidationError(`DONE cannot contain unresolved implDag work: ${unfinished.map((task) => task.id).join(", ")}`)
       }
     }
   }
   // v21: childWorkflows
   if (!Array.isArray(state.childWorkflows)) {
-    return `childWorkflows must be an array, got ${typeof state.childWorkflows}`
+    return workflowStateValidationError(`childWorkflows must be an array, got ${typeof state.childWorkflows}`)
   }
   const validChildStatuses = ["pending", "running", "complete", "failed"]
   for (let i = 0; i < state.childWorkflows.length; i++) {
     const cw = state.childWorkflows[i]
     if (!cw || typeof cw !== "object") {
-      return `childWorkflows[${i}] must be an object`
+      return workflowStateValidationError(`childWorkflows[${i}] must be an object`)
     }
     if (typeof cw.taskId !== "string" || !cw.taskId) {
-      return `childWorkflows[${i}].taskId must be a non-empty string`
+      return workflowStateValidationError(`childWorkflows[${i}].taskId must be a non-empty string`)
     }
     if (typeof cw.featureName !== "string" || !cw.featureName) {
-      return `childWorkflows[${i}].featureName must be a non-empty string`
+      return workflowStateValidationError(`childWorkflows[${i}].featureName must be a non-empty string`)
     }
     if (cw.sessionId !== null && (typeof cw.sessionId !== "string" || !cw.sessionId)) {
-      return `childWorkflows[${i}].sessionId must be null or a non-empty string`
+      return workflowStateValidationError(`childWorkflows[${i}].sessionId must be null or a non-empty string`)
     }
     if (typeof cw.status !== "string" || !validChildStatuses.includes(cw.status)) {
-      return `childWorkflows[${i}].status must be one of ${validChildStatuses.join(", ")}, got "${cw.status}"`
+      return workflowStateValidationError(`childWorkflows[${i}].status must be one of ${validChildStatuses.join(", ")}, got "${cw.status}"`)
     }
     if (typeof cw.delegatedAt !== "string" || !cw.delegatedAt) {
-      return `childWorkflows[${i}].delegatedAt must be a non-empty ISO timestamp string`
+      return workflowStateValidationError(`childWorkflows[${i}].delegatedAt must be a non-empty ISO timestamp string`)
     }
   }
   // v21: concurrency
   if (!state.concurrency || typeof state.concurrency !== "object" || Array.isArray(state.concurrency)) {
-    return `concurrency must be an object, got ${typeof state.concurrency}`
+    return workflowStateValidationError(`concurrency must be an object, got ${typeof state.concurrency}`)
   }
   if (typeof state.concurrency.maxParallelTasks !== "number" || !Number.isInteger(state.concurrency.maxParallelTasks) || state.concurrency.maxParallelTasks < 1) {
-    return `concurrency.maxParallelTasks must be a positive integer, got ${state.concurrency.maxParallelTasks}`
+    return workflowStateValidationError(`concurrency.maxParallelTasks must be a positive integer, got ${state.concurrency.maxParallelTasks}`)
   }
   // v22: reviewArtifactFiles
   if (!Array.isArray(state.reviewArtifactFiles)) {
-    return `reviewArtifactFiles must be an array, got ${typeof state.reviewArtifactFiles}`
+    return workflowStateValidationError(`reviewArtifactFiles must be an array, got ${typeof state.reviewArtifactFiles}`)
   }
   for (let i = 0; i < state.reviewArtifactFiles.length; i++) {
     if (typeof state.reviewArtifactFiles[i] !== "string") {
-      return `reviewArtifactFiles[${i}] must be a string`
+      return workflowStateValidationError(`reviewArtifactFiles[${i}] must be a string`)
     }
   }
   // v21 cross-field: running childWorkflows entries must reference a "delegated" DAG task
@@ -1381,7 +1609,7 @@ export function validateWorkflowState(state: WorkflowState): string | null {
       if (cw.status === "running" || cw.status === "pending") {
         const dagTask = state.implDag.find((t) => t.id === cw.taskId)
         if (dagTask && dagTask.status !== "delegated") {
-          return `childWorkflows[${i}] (taskId="${cw.taskId}") has status "${cw.status}" but the DAG task has status "${dagTask.status}" — expected "delegated"`
+          return workflowStateValidationError(`childWorkflows[${i}] (taskId="${cw.taskId}") has status "${cw.status}" but the DAG task has status "${dagTask.status}" — expected "delegated"`)
         }
       }
     }
@@ -1438,7 +1666,7 @@ export type OrchestratorDivergeResult = OrchestratorDivergeSuccess | Orchestrato
 export interface RevisionStep {
   artifact: ArtifactKey
   phase: Phase
-  phaseState: "REVISE" | "DRAFT"
+  phaseState: "REVISE" | "DRAFT" | "REDRAFT"
   instructions: string
 }
 
@@ -1449,7 +1677,7 @@ export interface OrchestratorPlanResult {
    * Whether the orchestrator classified this change as tactical, strategic, or backtrack.
    * tactical → agent proceeds autonomously to REVISE.
    * strategic → escape hatch is presented to the user before proceeding.
-   * backtrack → route to an earlier phase's DRAFT state (scope change detected).
+   * backtrack → route to an earlier phase's REDRAFT state (scope change detected).
    * Callers MUST use this field rather than re-deriving from revisionSteps.length.
    */
   classification: "tactical" | "strategic" | "backtrack"
@@ -1629,14 +1857,11 @@ export interface RequestReviewArgs {
   /** Description of the artifact(s) produced */
   artifact_description: string
   /**
-   * The full text of the artifact being submitted for review.
-   * Required for in-memory phases (PLANNING, DISCOVERY/CONVENTIONS, IMPL_PLAN) —
-   * this is written to .openartisan/ immediately so the user can read it before
-   * approving and the isolated reviewer can evaluate the real file rather than
-   * an inline copy. For file-based phases (INTERFACES, TESTS, IMPLEMENTATION),
-   * leave this empty — the agent reads/writes files directly.
+   * Files on disk that are the review source of truth.
+   * Public callers must write artifacts to disk first and submit them by path.
+   * Inline artifact content is intentionally not part of the public contract.
    */
-  artifact_content?: string
+  artifact_files?: string[]
 }
 
 export interface MarkScanCompleteArgs {
@@ -1655,18 +1880,13 @@ export interface SubmitFeedbackArgs {
   /** Whether the user approved or is requesting a revision */
   feedback_type: "approve" | "revise"
   /**
-   * Optional: full artifact content to store as conventions (for DISCOVERY/USER_GATE approval).
-   * When approving the DISCOVERY phase, pass the complete conventions document text here.
-   */
-  artifact_content?: string
-  /**
    * Optional: list of absolute file paths to allow writes to (for PLANNING/USER_GATE approval in INCREMENTAL mode).
    * When approving the PLANNING phase in INCREMENTAL mode, pass the approved file allowlist here.
    */
   approved_files?: string[]
   /**
    * Optional: list of human-gated task IDs that the user confirms are resolved.
-   * Only valid at IMPLEMENTATION/USER_GATE. Each listed task must have status "human-gated".
+   * Only valid at IMPLEMENTATION/HUMAN_GATE. Each listed task must have status "human-gated".
    * The user is confirming they have completed the required infrastructure/credential setup.
    */
   resolved_human_gates?: string[]

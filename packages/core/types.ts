@@ -478,20 +478,29 @@ export interface WorkflowState {
 // State machine
 // ---------------------------------------------------------------------------
 
+/**
+ * Successful pure FSM transition lookup.
+ */
 export interface TransitionSuccess {
-  success: true
+  ok: true
   nextPhase: Phase
   nextPhaseState: PhaseState
 }
 
+/**
+ * Structured transition failure contract for illegal FSM event/state combinations.
+ */
 export interface TransitionFailure {
-  success: false
+  ok: false
   /** Machine-readable error code */
   code: "INVALID_EVENT" | "INVARIANT_VIOLATED" | "INVALID_PHASE_STATE"
   /** Human-readable explanation */
   message: string
 }
 
+/**
+ * Result of a pure FSM transition lookup.
+ */
 export type TransitionOutcome = TransitionSuccess | TransitionFailure
 
 /**
@@ -533,8 +542,13 @@ export interface StructuralTransitionDescriptor {
   }
 }
 
+/**
+ * Structured error contract for descriptor-planning and structural transition failures.
+ */
 export interface StructuralTransitionError {
+  /** Human-readable explanation of what went wrong */
   message: string
+  /** Machine-readable failure category used by tests, adapters, and guard logic */
   code:
     | "not-found"
     | "INVALID_SKIP_TARGET"
@@ -549,6 +563,11 @@ export type StructuralTransitionResult =
   | { success: true; value: StructuralTransitionDescriptor }
   | { success: false; error: StructuralTransitionError }
 
+/**
+ * Input snapshot consumed by shared structural transition planners.
+ * Encodes the runtime relationships a descriptor may depend on without exposing
+ * adapter-owned mutable state directly.
+ */
 export interface StructuralTransitionInput {
   currentPhase: Phase
   currentPhaseState: PhaseState
@@ -601,6 +620,10 @@ export interface StructuralWorkflowHealthCheck {
   reviewArtifactFiles?: string[]
 }
 
+/**
+ * Snapshot of workflow-health counters and active-state metrics exposed by the
+ * structural workflow runtime for diagnostics, parity checks, and regression tests.
+ */
 export interface StructuralWorkflowMetricsSnapshot {
   featureName?: string
   activePhase?: Phase
@@ -1145,8 +1168,16 @@ export interface StoreLoadResult {
   count: number
 }
 
-export interface StoreLoadError {
+/**
+ * String-compatible structured error for session-state store load failures.
+ *
+ * The contract remains compatible with legacy string-oriented callers while exposing
+ * machine-readable fields for newer implementations and tests.
+ */
+export interface StoreLoadError extends String {
   success: false
+  code: "STORE_LOAD_FAILED"
+  message: string
   error: string
 }
 
@@ -1704,8 +1735,10 @@ export interface OrchestratorAssessSuccess {
   reasoning: string
 }
 
-export interface OrchestratorAssessError {
+export interface OrchestratorAssessError extends String {
   success: false
+  code: "ORCHESTRATOR_ASSESS_FAILED"
+  message: string
   error: string
   /** Fall back to treating it as affecting the current phase's artifact only */
   fallbackArtifact: ArtifactKey
@@ -1722,8 +1755,10 @@ export interface OrchestratorDivergeSuccess {
   reasoning: string
 }
 
-export interface OrchestratorDivergeError {
+export interface OrchestratorDivergeError extends String {
   success: false
+  code: "ORCHESTRATOR_DIVERGE_FAILED"
+  message: string
   error: string
   /** Fall back to "tactical" on classification failure */
   fallback: "tactical"
@@ -1829,8 +1864,10 @@ export interface SelfReviewSuccess {
   criteriaResults: CriterionResult[]
 }
 
-export interface SelfReviewError {
+export interface SelfReviewError extends String {
   success: false
+  code: "SELF_REVIEW_FAILED"
+  message: string
   error: string
 }
 
@@ -1881,8 +1918,10 @@ export interface RebuttalSuccess {
   allResolved: boolean
 }
 
-export interface RebuttalError {
+export interface RebuttalError extends String {
   success: false
+  code: "REBUTTAL_FAILED"
+  message: string
   error: string
 }
 
@@ -1969,6 +2008,8 @@ export type SupportedExecutableSeamKind =
   | "bridge-runtime"
   | "hermes-post-tool-continuation"
   | "claude-hook-phase-gating"
+  | "task-boundary-revision-workflow"
+  | "workflow-guidance-legality"
 
 export type SupportedExecutableSeamErrorPattern =
   | "TransitionOutcome"
@@ -2052,6 +2093,42 @@ export interface ClaudeHookPhaseGatingSeam {
   tradeoffs: string[]
 }
 
+/**
+ * Adapter-facing executable seam summary for implementation-time task-boundary revision.
+ *
+ * This seam records that the public runtime contract is the analyze/apply workflow-tool
+ * pair together with the task-boundary argument shapes in this module. It exists so
+ * earlier phases can bless runtime coverage of the boundary-revision path as a supported
+ * executable seam rather than an implementation leak.
+ */
+export interface TaskBoundaryRevisionSeam {
+  kind: "task-boundary-revision-workflow"
+  analyzeArgs: AnalyzeTaskBoundaryChangeArgs
+  analyzeResult: TaskBoundaryChangeAnalysisResult
+  applyArgs: ApplyTaskBoundaryChangeArgs
+  applyResult: TaskBoundaryChangeApplyResult
+  decision: string
+  tradeoffs: string[]
+}
+
+/**
+ * Adapter-facing executable seam summary for prompt/tool legality consistency.
+ *
+ * This seam captures the structural rule that phase guidance and prompt-building must
+ * never recommend a workflow tool that is illegal in the current phase/sub-state.
+ * It exists because this feature treats impossible guidance paths as workflow defects,
+ * not as operator-discoverable quirks.
+ */
+export interface WorkflowGuidanceLegalitySeam {
+  kind: "workflow-guidance-legality"
+  phase: Phase
+  phaseState: PhaseState
+  legalEscalationPath: string
+  forbiddenToolRecommendation?: string
+  decision: string
+  tradeoffs: string[]
+}
+
 export interface MarkScanCompleteArgs {
   /** Brief summary of what was scanned and key observations */
   scan_summary: string
@@ -2070,6 +2147,7 @@ export interface SubmitFeedbackArgs {
   /**
    * Optional: list of absolute file paths to allow writes to (for PLANNING/USER_GATE approval in INCREMENTAL mode).
    * When approving the PLANNING phase in INCREMENTAL mode, pass the approved file allowlist here.
+   * This is the full replacement allowlist approved at the planning gate, not an incremental patch.
    */
   approved_files?: string[]
   /**
@@ -2097,6 +2175,113 @@ export interface SpawnSubWorkflowArgs {
   /** Feature name for the child workflow (kebab-case, used as directory name) */
   feature_name: string
 }
+
+/**
+ * Input contract for implementation-time task-boundary analysis.
+ *
+ * Path fields use branded absolute-path types so later phases can distinguish
+ * ownership/test file references from arbitrary free-form strings.
+ */
+export interface AnalyzeTaskBoundaryChangeArgs {
+  /** The task whose ownership boundary is being revised */
+  task_id: string
+  /** Absolute file paths to add to the task's owned file set */
+  add_files?: AbsoluteFilePath[]
+  /** Absolute file paths to remove from the task's owned file set */
+  remove_files?: AbsoluteFilePath[]
+  /** Expected test file paths to add to the task */
+  add_expected_tests?: AbsoluteFilePath[]
+  /** Expected test file paths to remove from the task */
+  remove_expected_tests?: AbsoluteFilePath[]
+  /**
+   * Why the boundary change is needed.
+   * Must be a non-empty user/agent-authored explanation that can be surfaced in review.
+   */
+  reason: NonEmptyBoundaryChangeReason
+}
+
+export interface ApplyTaskBoundaryChangeArgs extends AnalyzeTaskBoundaryChangeArgs {
+  /** Explicit acknowledgement of which tasks are expected to be impacted by the change */
+  expected_impacted_tasks?: string[]
+  /** Explicit acknowledgement of which completed tasks are expected to be reset */
+  expected_reset_tasks?: string[]
+}
+
+/** Absolute project file path approved for ownership/test targeting in boundary-revision flows. */
+export type AbsoluteFilePath = string & { readonly __absoluteFilePathBrand: "AbsoluteFilePath" }
+
+/** Non-empty human/agent-authored rationale carried through boundary-revision review. */
+export type NonEmptyBoundaryChangeReason = string & { readonly __nonEmptyBoundaryChangeReasonBrand: "NonEmptyBoundaryChangeReason" }
+
+export type TaskBoundaryChangeConflictKind =
+  | "task-not-found"
+  | "file-overlap"
+  | "expected-test-overlap"
+  | "dependency-adjacency-change"
+  | "parallelism-break"
+  | "allowlist-violation"
+  | "completed-task-reset-required"
+  | "illegal-phase"
+  | "review-acknowledgement-mismatch"
+
+/**
+ * A concrete incompatibility or review-surface hazard discovered while analyzing
+ * a proposed task-boundary revision.
+ */
+export interface TaskBoundaryChangeConflict {
+  kind: TaskBoundaryChangeConflictKind
+  message: string
+  taskIds?: string[]
+  filePaths?: AbsoluteFilePath[]
+  expectedTests?: AbsoluteFilePath[]
+}
+
+/**
+ * Full impact analysis for a proposed task-boundary revision.
+ *
+ * This is the public analysis contract that later TESTS/IMPLEMENTATION work relies on
+ * when determining whether a boundary change is legal, what it invalidates, and which
+ * downstream tasks/reviews are affected.
+ */
+export interface TaskBoundaryChangeAnalysis {
+  taskId: string
+  impactedTaskIds: string[]
+  completedTaskIdsToReset: string[]
+  overlappingOwnedFiles: AbsoluteFilePath[]
+  overlappingExpectedTests: AbsoluteFilePath[]
+  addFiles: AbsoluteFilePath[]
+  removeFiles: AbsoluteFilePath[]
+  addExpectedTests: AbsoluteFilePath[]
+  removeExpectedTests: AbsoluteFilePath[]
+  preservesAllowlist: boolean
+  preservesDependencyOrdering: boolean
+  preservesParallelism: boolean
+  conflicts: TaskBoundaryChangeConflict[]
+  rationale: NonEmptyBoundaryChangeReason
+}
+
+export interface TaskBoundaryChangeError extends String {
+  code:
+    | "TASK_BOUNDARY_CHANGE_NOT_ALLOWED"
+    | "TASK_BOUNDARY_CHANGE_INVALID_ARGS"
+    | "TASK_BOUNDARY_CHANGE_CONFLICT"
+    | "TASK_BOUNDARY_CHANGE_ACKNOWLEDGEMENT_MISMATCH"
+  message: string
+  error: string
+}
+
+export type TaskBoundaryChangeAnalysisResult =
+  | { success: true; analysis: TaskBoundaryChangeAnalysis }
+  | { success: false; error: TaskBoundaryChangeError }
+
+export type TaskBoundaryChangeApplyResult =
+  | {
+      success: true
+      analysis: TaskBoundaryChangeAnalysis
+      updatedNodes: import("./dag").TaskNode[]
+      message: string
+    }
+  | { success: false; error: TaskBoundaryChangeError }
 
 // ---------------------------------------------------------------------------
 // Phase tool restrictions
@@ -2139,8 +2324,10 @@ export interface GitCheckpointSuccess {
   warnings?: string[]
 }
 
-export interface GitCheckpointError {
+export interface GitCheckpointError extends String {
   success: false
+  code: "GIT_CHECKPOINT_FAILED"
+  message: string
   error: string
 }
 

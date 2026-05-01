@@ -12,6 +12,7 @@
  * - Safety cap prevents infinite loops
  */
 import { describe, expect, it, mock, beforeEach, afterEach } from "bun:test"
+import { createHash } from "node:crypto"
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
@@ -192,28 +193,22 @@ describe("cascadeAutoSkip", () => {
   })
 
   it("returns null for standalone REVISE with no pendingRevisionSteps (not a cascade)", async () => {
-    // Standalone REVISE — pendingRevisionSteps is null.
-    // The function should return null so the caller can apply the hard block.
-    // We need hasArtifactChanged to return false for this test to reach the guard.
-    // Since we can't easily mock hasArtifactChanged (it's imported), we use a
-    // content-hash baseline and ensure the artifact file doesn't exist on disk.
-    // This means hasArtifactChanged will return true (file missing → allow through).
-    // To test the standalone guard, we need the function to think nothing changed.
-    // Let's use a git-sha baseline with a matching diff hash — but that requires
-    // a real git repo. Instead, we test the guard indirectly: with empty
-    // pendingRevisionSteps (not null but []), which is the edge case.
+    const testsPath = writeArtifact(".openartisan/feat/tests.md", "# Tests\n")
+    const baselineHash = createHash("sha256").update("# Tests\n").digest("hex").slice(0, 32)
     const state = freshState({
-      pendingRevisionSteps: [],  // Empty array = last cascade step scenario
+      artifactDiskPaths: {
+        tests: testsPath,
+      },
+      revisionBaseline: { type: "content-hash", hash: baselineHash },
+      pendingRevisionSteps: null,
     })
-    // hasArtifactChanged will likely return true (no file on disk), so
-    // the function will break at the `changed` check before reaching the guard.
-    // This is still a valid test — it confirms the function doesn't skip
-    // anything when there's no cascade context.
     const store = createMockStore(new Map([[SID, state]]))
     const result = await cascadeAutoSkip(makeDeps(store), SID, cwd)
-    // Either null (changed=true, broke out of loop) or a USER_GATE message
-    // Either way, the standalone REVISE guard is covered
-    expect(typeof result === "string" || result === null).toBe(true)
+    expect(result).toBeNull()
+    const afterState = store.get(SID)!
+    expect(afterState.phase).toBe("TESTS")
+    expect(afterState.phaseState).toBe("REVISE")
+    expect(afterState.pendingRevisionSteps).toBeNull()
   })
 
   // ---------------------------------------------------------------------------
@@ -341,16 +336,27 @@ describe("cascadeAutoSkip", () => {
   // ---------------------------------------------------------------------------
 
   it("has a safety cap of 10 iterations to prevent infinite loops", async () => {
-    // Verify the loop terminates even if the store keeps returning REVISE state.
-    // We can't easily trigger 10 iterations without real hasArtifactChanged returning
-    // false, but we can verify the function doesn't hang by setting a timeout.
+    const planPath = writeArtifact(".openartisan/feat/plan.md", "# Plan\n")
+    const baselineHash = createHash("sha256").update("# Plan\n").digest("hex").slice(0, 32)
     const state = freshState({
+      phase: "PLANNING" as Phase,
       phaseState: "REVISE",
-      revisionBaseline: null, // Null baseline → returns null immediately
+      artifactDiskPaths: { plan: planPath },
+      revisionBaseline: { type: "content-hash", hash: baselineHash },
+      pendingRevisionSteps: Array.from({ length: 11 }, (_, i) => ({
+        phase: "PLANNING" as Phase,
+        phaseState: "REVISE",
+        artifact: "plan",
+        instructions: `Cascade step ${i + 1}`,
+      })),
     })
     const store = createMockStore(new Map([[SID, state]]))
     const result = await cascadeAutoSkip(makeDeps(store), SID, cwd)
-    expect(result).toBeNull()
+    expect(result).toContain("No changes needed for **PLANNING**")
+    const afterState = store.get(SID)!
+    expect(afterState.phase).toBe("PLANNING")
+    expect(afterState.phaseState).toBe("REVISE")
+    expect(afterState.pendingRevisionSteps?.length).toBe(1)
   })
 
   // ---------------------------------------------------------------------------
@@ -397,15 +403,15 @@ describe("cascadeAutoSkip", () => {
 
       // revision_complete event from REVISE
       const revComplete = testSm.transition("TESTS", "REVISE", "revision_complete", "REFACTOR")
-      expect(revComplete.success).toBe(true)
-      if (revComplete.success) {
+      expect(revComplete.ok).toBe(true)
+      if (revComplete.ok) {
         expect(revComplete.nextPhaseState).toBe("REVIEW")
       }
 
       // self_review_pass event from REVIEW
       const reviewPass = testSm.transition("TESTS", "REVIEW", "self_review_pass", "REFACTOR")
-      expect(reviewPass.success).toBe(true)
-      if (reviewPass.success) {
+      expect(reviewPass.ok).toBe(true)
+      if (reviewPass.ok) {
         expect(reviewPass.nextPhaseState).toBe("USER_GATE")
       }
     })
@@ -417,12 +423,12 @@ describe("cascadeAutoSkip", () => {
 
       for (const phase of phases) {
         const step1 = testSm.transition(phase, "REVISE", "revision_complete", "REFACTOR")
-        expect(step1.success).toBe(true)
-        if (!step1.success) continue
+        expect(step1.ok).toBe(true)
+        if (!step1.ok) continue
 
         const step2 = testSm.transition(step1.nextPhase, step1.nextPhaseState, "self_review_pass", "REFACTOR")
-        expect(step2.success).toBe(true)
-        if (!step2.success) continue
+        expect(step2.ok).toBe(true)
+        if (!step2.ok) continue
 
         expect(step2.nextPhaseState).toBe("USER_GATE")
       }

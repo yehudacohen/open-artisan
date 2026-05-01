@@ -32,6 +32,16 @@ describe("processSubmitFeedback — approve path", () => {
       msg.includes("checkpoint") || msg.includes("next phase") || msg.includes("advance"),
     ).toBe(true)
   })
+
+  it("approve responseMessage requires immediate continuation after non-terminal advancement", () => {
+    const result = processSubmitFeedback({
+      feedback_text: "Approved",
+      feedback_type: "approve",
+    })
+    expect(result.responseMessage).toContain("Begin the next phase immediately")
+    expect(result.responseMessage).toContain("do not stop")
+    expect(result.responseMessage).toContain("wait for user input")
+  })
 })
 
 describe("processSubmitFeedback — revise path", () => {

@@ -261,6 +261,14 @@ describe("prompt.compaction", () => {
     expect(typeof result).toBe("string")
   })
 
+  it("returns compaction context for ephemeral child sessions from the parent workflow", async () => {
+    await handleSessionCreated({ sessionId: "child-compaction", parentId: "s1" }, ctx)
+    const result = await handlePromptCompaction({ sessionId: "child-compaction" }, ctx)
+    expect(typeof result).toBe("string")
+    expect((result as string).toLowerCase()).toContain("subagent")
+    expect(result).toContain("WORKFLOW")
+  })
+
   it("includes structural REDRAFT state in compaction context", async () => {
     await ctx.engine!.store.update("s1", (d) => {
       d.mode = "INCREMENTAL"

@@ -332,26 +332,20 @@ describe("currentTaskId guard (M9)", () => {
 // ---------------------------------------------------------------------------
 
 describe("processMarkTaskComplete — blocked DAG", () => {
-  it("responseMessage mentions blocked/conflict when DAG is in a blocked state", () => {
-    // Create a DAG where T2 depends on T3 but T3 depends on T2 (cycle not detectable at runtime
-    // after validation; instead simulate blocked by marking T1 complete but T2 still waiting on
-    // a non-existent dep — we test the "all pending tasks are blocked" scenario by
-    // having T1 complete and T2 blocked with no ready tasks remaining)
-    // Simpler approach: mark T1 complete (the only no-dep task), then complete T2 which has
-    // T1 as dep. If we next have a T3 depending on a T4 that is also pending with T3 as dep
-    // (a cycle), that is caught at parse time. Instead just verify the blocked path does not throw.
-    // We test the "blocked" scheduler action by having T2 depend on "T99" (invalid dep),
-    // but createImplDAG validates deps, so we cannot create that at the DAG level.
-    // The blocked scenario requires in-flight tasks with no new ready tasks — not reachable
-    // in sequential mode without manually mutating. Accept this coverage gap and verify
-    // the happy path does not regress.
+  it("responseMessage flags DAG inconsistency when remaining pending tasks wait on aborted dependencies", () => {
     const nodes = [
-      makeTask({ id: "T1", status: "complete" }),
-      makeTask({ id: "T2", dependencies: ["T1"] }),
+      makeTask({ id: "T1" }),
+      makeTask({ id: "T2", dependencies: ["T3"] }),
+      makeTask({ id: "T3", status: "aborted" }),
     ]
-    const result = processMarkTaskComplete({ ...VALID_ARGS, task_id: "T2" }, nodes)
-    // T2 is the last task — should be "complete" outcome
+    const result = processMarkTaskComplete({ ...VALID_ARGS, task_id: "T1" }, nodes, "T1")
     expect("error" in result).toBe(false)
+    if (!("error" in result)) {
+      expect(result.nextTaskId).toBeNull()
+      expect(result.awaitingHuman).toBe(false)
+      expect(result.responseMessage).toContain("**DAG BLOCKED:**")
+      expect(result.responseMessage).toContain("submit_feedback")
+    }
   })
 })
 

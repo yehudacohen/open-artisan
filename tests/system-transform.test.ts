@@ -256,6 +256,41 @@ describe("buildWorkflowSystemPrompt — structural workflow sub-states", () => {
     expect(prompt).not.toContain("You are drafting the IMPLEMENTATION artifact")
   })
 
+  it("routes blocked IMPLEMENTATION/DRAFT DAG conflicts through propose_backtrack, not submit_feedback", () => {
+    const prompt = buildWorkflowSystemPrompt(makeState({
+      phase: "IMPLEMENTATION",
+      phaseState: "DRAFT",
+      mode: "INCREMENTAL",
+      featureName: "structural-state-machine-rigor",
+      currentTaskId: "T2",
+      implDag: [
+        {
+          id: "T1",
+          description: "Earlier task aborted after truthful backtrack.",
+          dependencies: [],
+          expectedTests: [],
+          expectedFiles: ["/project/src/t1.ts"],
+          estimatedComplexity: "small",
+          status: "aborted",
+          category: "integration",
+        },
+        {
+          id: "T2",
+          description: "Blocked downstream task.",
+          dependencies: ["T1"],
+          expectedTests: [],
+          expectedFiles: ["/project/src/t2.ts"],
+          estimatedComplexity: "small",
+          status: "pending",
+          category: "integration",
+        },
+      ],
+    }))
+    expect(prompt).toContain("DAG BLOCKED")
+    expect(prompt).toContain("propose_backtrack")
+    expect(prompt).not.toContain("Call `submit_feedback` to alert the user of the scheduling conflict")
+  })
+
   it("treats IMPLEMENTATION/TASK_REVIEW as waiting for submit_task_review", () => {
     const prompt = buildWorkflowSystemPrompt(makeState({
       phase: "IMPLEMENTATION",

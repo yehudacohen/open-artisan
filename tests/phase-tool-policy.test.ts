@@ -495,6 +495,12 @@ describe("Tool policy — IMPLEMENTATION/INCREMENTAL with empty allowlist blocks
 })
 
 describe("Tool policy — IMPLEMENTATION/INCREMENTAL bashCommandPredicate", () => {
+  it("IMPLEMENTATION/INCREMENTAL with empty allowlist does not tell the agent to call select_mode", () => {
+    const policy = getPhaseToolPolicy("IMPLEMENTATION", "DRAFT", "INCREMENTAL", [])
+    expect(policy.allowedDescription.toLowerCase()).not.toContain("select_mode")
+    expect(policy.allowedDescription.toLowerCase()).toContain("allowlist")
+  })
+
   it("provides bashCommandPredicate when allowlist is non-empty", () => {
     const policy = getPhaseToolPolicy("IMPLEMENTATION", "DRAFT", "INCREMENTAL", ["/a.ts"])
     expect(policy.bashCommandPredicate).toBeDefined()

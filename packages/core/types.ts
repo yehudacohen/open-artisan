@@ -1173,16 +1173,17 @@ export interface StoreLoadResult {
 }
 
 /**
- * String-compatible structured error for session-state store load failures.
+ * Session-state store load failure.
  *
- * The contract remains compatible with legacy string-oriented callers while exposing
- * machine-readable fields for newer implementations and tests.
+ * Keep the public runtime contract string-first for compatibility with existing
+ * callers and implementations. Optional structured fields may be added by newer
+ * producers, but they are not required by the interface artifact.
  */
-export interface StoreLoadError extends String {
+export interface StoreLoadError {
   success: false
-  code: "STORE_LOAD_FAILED"
-  message: string
   error: string
+  code?: "STORE_LOAD_FAILED"
+  message?: string
 }
 
 export interface SessionStateStore {
@@ -1739,11 +1740,11 @@ export interface OrchestratorAssessSuccess {
   reasoning: string
 }
 
-export interface OrchestratorAssessError extends String {
+export interface OrchestratorAssessError {
   success: false
-  code: "ORCHESTRATOR_ASSESS_FAILED"
-  message: string
   error: string
+  code?: "ORCHESTRATOR_ASSESS_FAILED"
+  message?: string
   /** Fall back to treating it as affecting the current phase's artifact only */
   fallbackArtifact: ArtifactKey
 }
@@ -1759,11 +1760,11 @@ export interface OrchestratorDivergeSuccess {
   reasoning: string
 }
 
-export interface OrchestratorDivergeError extends String {
+export interface OrchestratorDivergeError {
   success: false
-  code: "ORCHESTRATOR_DIVERGE_FAILED"
-  message: string
   error: string
+  code?: "ORCHESTRATOR_DIVERGE_FAILED"
+  message?: string
   /** Fall back to "tactical" on classification failure */
   fallback: "tactical"
 }
@@ -1868,11 +1869,11 @@ export interface SelfReviewSuccess {
   criteriaResults: CriterionResult[]
 }
 
-export interface SelfReviewError extends String {
+export interface SelfReviewError {
   success: false
-  code: "SELF_REVIEW_FAILED"
-  message: string
   error: string
+  code?: "SELF_REVIEW_FAILED"
+  message?: string
 }
 
 export type SelfReviewResult = SelfReviewSuccess | SelfReviewError
@@ -1922,11 +1923,11 @@ export interface RebuttalSuccess {
   allResolved: boolean
 }
 
-export interface RebuttalError extends String {
+export interface RebuttalError {
   success: false
-  code: "REBUTTAL_FAILED"
-  message: string
   error: string
+  code?: "REBUTTAL_FAILED"
+  message?: string
 }
 
 export type RebuttalResult = RebuttalSuccess | RebuttalError
@@ -2527,11 +2528,11 @@ export interface GitCheckpointSuccess {
   warnings?: string[]
 }
 
-export interface GitCheckpointError extends String {
+export interface GitCheckpointError {
   success: false
-  code: "GIT_CHECKPOINT_FAILED"
-  message: string
   error: string
+  code?: "GIT_CHECKPOINT_FAILED"
+  message?: string
 }
 
 export type GitCheckpointResult = GitCheckpointSuccess | GitCheckpointError

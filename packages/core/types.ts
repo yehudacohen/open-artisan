@@ -757,29 +757,59 @@ export interface ArtifactGraph {
  * reviewers, orchestrator, discovery fleet) inherit the parent's tool policy.
  */
 export interface SessionRegistry {
-  /** Register a primary session (will get its own WorkflowState). */
+  /**
+   * Register a primary session (will get its own WorkflowState).
+   * @throws SessionRegistryError when the session graph is malformed or duplicated.
+   */
   registerPrimary(sessionId: string): void
 
-  /** Register a child session that inherits from a parent. */
+  /**
+   * Register a child session that inherits from a parent.
+   * @throws SessionRegistryError when parent/child invariants are violated.
+   */
   registerChild(sessionId: string, parentId: string): void
 
-  /** Unregister any session (primary or child). */
+  /**
+   * Unregister any session (primary or child).
+   * @throws SessionRegistryError when internal registry state is inconsistent.
+   */
   unregister(sessionId: string): void
 
-  /** Get the parent ID for a child session. null if primary or unknown. */
+  /**
+   * Get the parent ID for a child session. null if primary or unknown.
+   * Error contract: never throws for ordinary lookup misses.
+   */
   getParent(sessionId: string): string | null
 
-  /** True if the session is a registered child session. */
+  /**
+   * True if the session is a registered child session.
+   * Error contract: never throws for ordinary lookup misses.
+   */
   isChild(sessionId: string): boolean
 
-  /** Mark a session as the most recently active (updated on each tool call). */
+  /**
+   * Mark a session as the most recently active (updated on each tool call).
+   * @throws SessionRegistryError when the target session is unknown.
+   */
   setActive(sessionId: string): void
 
-  /** Get the most recently active primary session ID. */
+  /**
+   * Get the most recently active primary session ID.
+   * Error contract: never throws when there is no active primary session.
+   */
   getActiveId(): string | undefined
 
-  /** Count of all tracked sessions (primary + child). */
+  /** Count of all tracked sessions (primary + child). Error contract: never throws. */
   count(): number
+}
+
+/**
+ * Structured thrown error contract for SessionRegistry mutations.
+ */
+export interface SessionRegistryError {
+  code: "SESSION_ALREADY_REGISTERED" | "PARENT_SESSION_NOT_FOUND" | "SESSION_REGISTRY_INCONSISTENT" | "ACTIVE_SESSION_NOT_FOUND"
+  message: string
+  retryable: boolean
 }
 
 // ---------------------------------------------------------------------------
@@ -1733,6 +1763,7 @@ export interface Orchestrator {
   route(input: OrchestratorRouteInput): Promise<OrchestratorPlanResult>
 }
 
+/** Successful result from the orchestrator's assess stage. */
 export interface OrchestratorAssessSuccess {
   success: true
   affectedArtifacts: ArtifactKey[]
@@ -1740,6 +1771,7 @@ export interface OrchestratorAssessSuccess {
   reasoning: string
 }
 
+/** Structured failure result from the orchestrator's assess stage. */
 export interface OrchestratorAssessError {
   success: false
   error: string
@@ -1753,6 +1785,7 @@ export type OrchestratorAssessResult = OrchestratorAssessSuccess | OrchestratorA
 
 export type DivergenceClass = "tactical" | "strategic" | "backtrack"
 
+/** Successful result from the orchestrator's divergence/classification stage. */
 export interface OrchestratorDivergeSuccess {
   success: true
   classification: DivergenceClass
@@ -1760,6 +1793,7 @@ export interface OrchestratorDivergeSuccess {
   reasoning: string
 }
 
+/** Structured failure result from the orchestrator's divergence/classification stage. */
 export interface OrchestratorDivergeError {
   success: false
   error: string
@@ -2085,6 +2119,144 @@ export interface SupportedExecutableSeamTestingContract {
   tradeoffs: string[]
 }
 
+/**
+ * Feature-level TESTS contract for structural-state-machine-rigor.
+ *
+ * This makes the approved override explicit at the interface layer: for this feature,
+ * the public contract under test is the executable seam registry itself, not a generic
+ * interface-only import rule and not a pure expected-failure-only suite style.
+ */
+export type InterfaceErrorPattern =
+  | "ok-result-union"
+  | "success-result-union"
+  | "throws-typed-error"
+  | "string-null-legacy-validation"
+
+/**
+ * Explicitly records the compatibility patterns this repository already exposes.
+ *
+ * The structural-state-machine-rigor feature extends these existing contracts instead of
+ * forcing a repo-wide error-pattern rewrite during INTERFACES. Reviewer/tooling consumers
+ * can use this declaration to distinguish deliberate compatibility seams from accidental drift.
+ */
+export interface LegacyInterfaceCompatibilityPolicy {
+  policyName: "open-artisan-interface-compatibility"
+  featureName: "structural-state-machine-rigor"
+  canonicalPatternForNewStructuralContracts: "success-result-union"
+  approvedLegacyPatterns: InterfaceErrorPattern[]
+  compatibilitySeams: Array<{
+    seam: string
+    pattern: InterfaceErrorPattern
+    rationale: string
+  }>
+  decision: string
+  alternativesConsidered: string[]
+  tradeoffs: string[]
+}
+
+export interface StructuralWorkflowExecutableTestingPolicy {
+  featureName: "structural-state-machine-rigor"
+  appliesAtPhase: "TESTS"
+  publicContractKind: "supported-executable-seam-registry"
+  defaultImportPolicy: SupportedExecutableSeamImportPolicy
+  defaultSuiteStyle: SupportedExecutableSeamSuiteStyle
+  displacesGenericInterfaceOnlyRule: true
+  displacesExpectedFailureOnlyRule: true
+  /** Runtime owner modules that are explicitly approved as public seams for TESTS. */
+  approvedRuntimeOwnerModules: string[]
+  /** Named seam kinds that TESTS must treat as the public contract surface. */
+  approvedSeamKinds: SupportedExecutableSeamKind[]
+  decision: string
+  alternativesConsidered: string[]
+  tradeoffs: string[]
+}
+
+export const LEGACY_INTERFACE_COMPATIBILITY_POLICY: LegacyInterfaceCompatibilityPolicy = {
+  policyName: "open-artisan-interface-compatibility",
+  featureName: "structural-state-machine-rigor",
+  canonicalPatternForNewStructuralContracts: "success-result-union",
+  approvedLegacyPatterns: [
+    "ok-result-union",
+    "success-result-union",
+    "throws-typed-error",
+    "string-null-legacy-validation",
+  ],
+  compatibilitySeams: [
+    {
+      seam: "StateMachine and related transition helpers",
+      pattern: "ok-result-union",
+      rationale: "Existing transition legality/runtime helper seams already use ok-based discriminated unions and downstream runtime code depends on that shape.",
+    },
+    {
+      seam: "Roadmap validation helpers",
+      pattern: "string-null-legacy-validation",
+      rationale: "Roadmap validation is an existing local helper seam whose runtime contract was explicitly preserved to avoid breaking current behavior and tests during INTERFACES.",
+    },
+    {
+      seam: "StateBackend and SessionRegistry mutation-style methods",
+      pattern: "throws-typed-error",
+      rationale: "These low-level storage/session graph seams document typed thrown errors rather than result unions because their existing consumers already rely on mutation/throw semantics.",
+    },
+  ],
+  decision:
+    "Preserve existing repository compatibility seams while requiring new structural-state-machine-rigor contracts to use explicit typed policies and structured result/error declarations.",
+  alternativesConsidered: [
+    "force a repo-wide single error pattern in INTERFACES",
+    "hide legacy patterns and leave the mixed contracts undocumented",
+  ],
+  tradeoffs: [
+    "keeps compatibility with already-approved runtime contracts",
+    "documents mixed patterns explicitly so later work does not mistake them for accidental drift",
+    "defers a repo-wide error normalization refactor to a dedicated future change instead of smuggling it into this feature",
+  ],
+}
+
+export const STRUCTURAL_WORKFLOW_EXECUTABLE_TESTING_POLICY: StructuralWorkflowExecutableTestingPolicy = {
+  featureName: "structural-state-machine-rigor",
+  appliesAtPhase: "TESTS",
+  publicContractKind: "supported-executable-seam-registry",
+  defaultImportPolicy: "owner-module-public-runtime-contract",
+  defaultSuiteStyle: "mixed-characterization-and-target-state",
+  displacesGenericInterfaceOnlyRule: true,
+  displacesExpectedFailureOnlyRule: true,
+  approvedRuntimeOwnerModules: [
+    "#core/state-machine",
+    "#core/hooks/tool-guard",
+    "#core/tools/request-review",
+    "#core/session-state",
+    "#core/scheduler",
+    "#bridge/methods/tool-execute",
+    "packages/adapter-hermes/hermes_adapter/workflow_tools.py",
+    "#claude-code/src/hook-handlers",
+    "#plugin/index",
+    "#core/hooks/system-transform",
+  ],
+  approvedSeamKinds: [
+    "state-machine",
+    "phase-tool-policy",
+    "request-review-file-artifact",
+    "session-state-validation",
+    "scheduler-parallel-contract",
+    "bridge-runtime",
+    "hermes-post-tool-continuation",
+    "claude-hook-phase-gating",
+    "task-boundary-revision-workflow",
+    "workflow-guidance-legality",
+  ],
+  decision:
+    "Treat the supported executable seam registry as the public TESTS contract so runnable suites can verify real workflow wiring, adapter parity, persistence repair, and structural state behavior.",
+  alternativesConsidered: [
+    "generic interface-only imports for all tests",
+    "pure expected-failure-only specification suites",
+    "deferring runtime seam verification to IMPLEMENTATION only",
+  ],
+  tradeoffs: [
+    "binds TESTS to named runtime owner modules intentionally",
+    "permits characterization/regression coverage where preserving existing runtime behavior is part of the contract",
+    "removes ambiguity about whether generic TESTS rubric defaults still apply to this feature",
+  ],
+}
+
 export interface SupportedExecutableSeamDescriptor {
   kind: SupportedExecutableSeamKind
   ownerModule: string
@@ -2340,6 +2512,12 @@ export interface MarkAnalyzeCompleteArgs {
   analysis_summary: string
 }
 
+/**
+ * Public workflow-tool arguments for submit_feedback.
+ *
+ * This contract intentionally carries both ordinary approval/revision feedback and
+ * the planning-gate allowlist replacement used in INCREMENTAL mode.
+ */
 export interface SubmitFeedbackArgs {
   /** The user's raw feedback text */
   feedback_text: string

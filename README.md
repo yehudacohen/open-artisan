@@ -179,8 +179,10 @@ open-artisan/
 ### Running Tests
 
 ```bash
-bun test
+bun run test
 ```
+
+The full suite uses the repository test script because PGlite-heavy tests need a longer timeout and serial execution. Use `bun test <file>` for focused files.
 
 ### Watching Tests
 

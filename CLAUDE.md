@@ -12,8 +12,8 @@ Open Artisan is an OpenCode plugin that enforces a phased, quality-gated workflo
 # Install dependencies (both root and plugin)
 bun install && cd .opencode && bun install && cd ..
 
-# Run all tests (~1,430 tests across 58 files)
-bun test
+# Run all tests (uses the repo's split runner for PGlite-heavy files)
+bun run test
 
 # Run a single test file
 bun test tests/state-machine.test.ts

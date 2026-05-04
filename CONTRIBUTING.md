@@ -29,10 +29,10 @@ Thank you for your interest in contributing to Open Artisan! This guide will hel
 3. **Run the tests** to make sure everything works:
 
    ```bash
-   bun test
+   bun run test
    ```
 
-   You should see all 1,100+ tests pass across 38 test files.
+   The full suite uses the repository test script because PGlite-heavy tests need a longer timeout and serial execution.
 
 4. **Try it out** by symlinking the plugin into an OpenCode project:
 
@@ -60,7 +60,7 @@ open-artisan/
 |       +-- orchestrator/        # Feedback classification and routing
 |       +-- discovery/           # Parallel codebase scanner fleet
 |       +-- prompts/             # Phase-specific prompt templates
-+-- tests/                       # Test suite (bun test)
++-- tests/                       # Test suite (bun run test)
 +-- docs/                        # Design documents
 ```
 
@@ -99,7 +99,7 @@ Feature ideas are welcome! Please open an issue describing:
 3. **Run the full test suite:**
 
    ```bash
-   bun test
+   bun run test
    ```
 
    All tests must pass before submitting.

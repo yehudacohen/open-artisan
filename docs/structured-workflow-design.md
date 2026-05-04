@@ -209,7 +209,7 @@ DRAFT ──[draft_complete]──► REVIEW ──[self_review_fail]──► R
 
 The DISCOVERY phase has a prefix: SCAN → ANALYZE → CONVENTIONS → REVIEW → USER_GATE → REVISE.
 
-**Artifact re-submit at REVIEW:** If the agent realizes the artifact content is stale or wrong while already in REVIEW, it can call `request_review` again with updated `artifact_content`. This overwrites the on-disk artifact, resets the iteration count, and restarts the review cycle (stays in REVIEW). The `artifact_content` parameter is required for re-submission — omitting it returns an error. This prevents the agent from being stuck with stale content that the isolated reviewer would evaluate.
+**Artifact re-submit at REVIEW:** If the agent realizes the artifact file is stale or wrong while already in REVIEW, it edits the on-disk artifact and calls `request_review` again with `artifact_files`. This updates the review file set, resets the iteration count when content changed, and restarts the review cycle while staying in REVIEW. This prevents the agent from being stuck with stale files that the isolated reviewer would evaluate.
 
 ### 5.4 Phase Progression
 
@@ -257,7 +257,7 @@ After `select_mode` completes, if `approvedArtifacts` has entries (carried over 
 
 **Structural guarantee:** We never skip a phase whose artifact is missing, changed, or was never approved. We only skip phases with verified-intact artifacts.
 
-**Time-sentinel handling:** File-based phases (INTERFACES, TESTS, IMPLEMENTATION) sometimes store `"approved-at-<timestamp>"` instead of a content hash (when `artifact_content` wasn't provided at approval). For these, the fast-forward verifies the file exists on disk but does not verify content (there is no reference hash to compare against). This is a deliberate trade-off — the file existing at all is sufficient evidence for time-sentinel approvals.
+**Time-sentinel handling:** File-based phases (INTERFACES, TESTS, IMPLEMENTATION) sometimes store `"approved-at-<timestamp>"` instead of a content hash when approval is based on a multi-file worktree snapshot. For these, the fast-forward verifies the file exists on disk but does not verify content (there is no single artifact hash to compare against). This is a deliberate trade-off — the file existing at all is sufficient evidence for time-sentinel approvals.
 
 **Implementation:** `fast-forward.ts` exports `computeFastForward()` — an async function with no side effects used internally by `select_mode`. A synchronous variant, `computeFastForwardSync()`, is also exported for consumers that require a synchronous API (e.g., external integrations, test harnesses that cannot await).
 
@@ -567,7 +567,7 @@ In INCREMENTAL mode, the reviewer must validate that the file allowlist covers a
 | `select_mode` | MODE_SELECT | Choose workflow mode + feature name |
 | `mark_scan_complete` | DISCOVERY/SCAN | Signal scan phase complete |
 | `mark_analyze_complete` | DISCOVERY/ANALYZE | Signal analysis complete |
-| `request_review` | */DRAFT, */CONVENTIONS, */REVISE, */REVIEW | Submit artifact for review. `artifact_content` for in-memory phases, `artifact_files` for file-based phases (INTERFACES, TESTS). IMPLEMENTATION files are accumulated automatically from DAG. At REVIEW: re-submits updated content (requires `artifact_content`), resets iteration count. |
+| `request_review` | */DRAFT, */CONVENTIONS, */REVISE, */REVIEW | Submit artifacts for review. `artifact_files` is the review source of truth; markdown phases may use `artifact_markdown` with `artifact_files: []` to materialize `.openartisan/<feature>/{conventions.md,plan.md,impl-plan.md}`. Source phases use real project files. IMPLEMENTATION files are accumulated automatically from DAG and can be supplemented with `artifact_files`. At REVIEW: re-submits updated files and resets iteration count when content changed. |
 | `mark_satisfied` | */REVIEW | Submit criteria assessment (triggers isolated reviewer). Uses `state.reviewArtifactFiles` for reviewer paths (v22). |
 | `submit_feedback` | */USER_GATE, */ESCAPE_HATCH | Route user feedback (approve or revise). At ESCAPE_HATCH: accept drift, provide alternative direction, start new direction, or abort. |
 | `mark_task_complete` | IMPLEMENTATION/DRAFT, IMPLEMENTATION/REVISE | Complete a DAG task (triggers per-task review). Accumulates the task's `expectedFiles` into `state.reviewArtifactFiles` for the final implementation reviewer. |

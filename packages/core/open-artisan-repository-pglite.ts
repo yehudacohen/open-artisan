@@ -340,6 +340,10 @@ function unique<T>(items: T[]): T[] {
   return Array.from(new Set(items))
 }
 
+function transitionEventId(workflowId: string, createdAt: string, fromPhase: Phase, fromPhaseState: PhaseState, toPhase: Phase, toPhaseState: PhaseState): string {
+  return `${workflowId}:transition:${createdAt}:${fromPhase}/${fromPhaseState}:${toPhase}/${toPhaseState}`
+}
+
 function freshWorkflowState(sessionId: string): WorkflowState {
   return {
     schemaVersion: SCHEMA_VERSION,
@@ -1162,13 +1166,34 @@ export function createPGliteOpenArtisanRepository(
         const schemaDb = db.withSchema(schemaName)
         const row = await schemaDb.selectFrom("workflows").selectAll().where("id", "=", workflowId).executeTakeFirst()
         if (!row) return notFound(`Workflow ${workflowId} was not found`)
-        const workflow = { ...rowRecord<DbWorkflow>(row), phase, phaseState, updatedAt: nowIso() }
+        const previousWorkflow = rowRecord<DbWorkflow>(row)
+        const updatedAt = nowIso()
+        const workflow = { ...previousWorkflow, phase, phaseState, updatedAt }
         await schemaDb.updateTable("workflows").set({
           phase,
           phase_state: phaseState,
           record: clone(workflow),
           updated_at: workflow.updatedAt,
         }).where("id", "=", workflowId).execute()
+        if (previousWorkflow.phase !== phase || previousWorkflow.phaseState !== phaseState) {
+          const event: DbWorkflowEvent = {
+            id: transitionEventId(workflowId, updatedAt, previousWorkflow.phase, previousWorkflow.phaseState, phase, phaseState),
+            workflowId,
+            event: "phase_transition",
+            fromPhase: previousWorkflow.phase,
+            fromPhaseState: previousWorkflow.phaseState,
+            toPhase: phase,
+            toPhaseState: phaseState,
+            reason: "setWorkflowPhase",
+            createdAt: updatedAt,
+          }
+          await schemaDb.insertInto("workflow_events").values({
+            id: event.id,
+            workflow_id: event.workflowId,
+            created_at: event.createdAt,
+            record: clone(event),
+          }).execute()
+        }
         return openArtisanDbOk(workflow)
       })
     },
@@ -1663,6 +1688,7 @@ export function createPGliteOpenArtisanRepository(
         const workflowId = `workflow:${featureName}`
         const schemaDb = db.withSchema(schemaName)
         const existingWorkflowRow = await schemaDb.selectFrom("workflows").selectAll().where("id", "=", workflowId).executeTakeFirst()
+        const previousWorkflow = existingWorkflowRow ? rowRecord<DbWorkflow>(existingWorkflowRow) : null
         const timestamp = nowIso()
         const workflow: DbWorkflow = {
           id: workflowId,
@@ -1670,7 +1696,7 @@ export function createPGliteOpenArtisanRepository(
           mode: state.mode ?? "GREENFIELD",
           phase: state.phase,
           phaseState: state.phaseState,
-          createdAt: existingWorkflowRow ? rowRecord<DbWorkflow>(existingWorkflowRow).createdAt : timestamp,
+          createdAt: previousWorkflow ? previousWorkflow.createdAt : timestamp,
           updatedAt: timestamp,
         }
         const oldTasks = await schemaDb.selectFrom("tasks").select("id").where("workflow_id", "=", workflowId).execute()
@@ -1702,6 +1728,26 @@ export function createPGliteOpenArtisanRepository(
           state_snapshot: clone(state),
           updated_at: workflow.updatedAt,
         })).execute()
+        if (previousWorkflow && (previousWorkflow.phase !== workflow.phase || previousWorkflow.phaseState !== workflow.phaseState)) {
+          const event: DbWorkflowEvent = {
+            id: transitionEventId(workflowId, timestamp, previousWorkflow.phase, previousWorkflow.phaseState, workflow.phase, workflow.phaseState),
+            workflowId,
+            event: "phase_transition",
+            fromPhase: previousWorkflow.phase,
+            fromPhaseState: previousWorkflow.phaseState,
+            toPhase: workflow.phase,
+            toPhaseState: workflow.phaseState,
+            reason: "WorkflowState compatibility import",
+            createdAt: timestamp,
+            metadata: { source: "importWorkflowState" },
+          }
+          await schemaDb.insertInto("workflow_events").values({
+            id: event.id,
+            workflow_id: event.workflowId,
+            created_at: event.createdAt,
+            record: clone(event),
+          }).execute()
+        }
         const graph = buildImportedTaskGraph(state, workflowId)
         if (graph) {
           const graphResult = await replaceTaskGraphInDb(db, workflowId, graph)

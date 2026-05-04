@@ -468,6 +468,40 @@ describe("PGlite Open Artisan repository", () => {
     expect(exported.ok && exported.value.implDag?.[0]?.humanGate?.whatIsNeeded).toBe("Provision service")
   })
 
+  it("records workflow transition events from compatibility state imports", async () => {
+    const repo = tempRepo()
+    const workflowId = valueOf(await repo.importWorkflowState(legacyState())).workflowId
+    expect(valueOf(await repo.listWorkflowEvents(workflowId))).toEqual([])
+
+    const nextState = legacyState()
+    nextState.phase = "IMPLEMENTATION"
+    nextState.phaseState = "SCHEDULING"
+    expect((await repo.importWorkflowState(nextState)).ok).toBe(true)
+
+    const events = valueOf(await repo.listWorkflowEvents(workflowId))
+    expect(events).toHaveLength(1)
+    expect(events[0]?.event).toBe("phase_transition")
+    expect(events[0]?.fromPhase).toBe("IMPLEMENTATION")
+    expect(events[0]?.fromPhaseState).toBe("HUMAN_GATE")
+    expect(events[0]?.toPhase).toBe("IMPLEMENTATION")
+    expect(events[0]?.toPhaseState).toBe("SCHEDULING")
+    expect(events[0]?.reason).toBe("WorkflowState compatibility import")
+  })
+
+  it("records workflow transition events from direct phase updates", async () => {
+    const repo = tempRepo()
+    await repo.createWorkflow(workflow())
+
+    expect((await repo.setWorkflowPhase("workflow-1", "IMPLEMENTATION", "REVIEW")).ok).toBe(true)
+
+    const events = valueOf(await repo.listWorkflowEvents("workflow-1"))
+    expect(events).toHaveLength(1)
+    expect(events[0]?.event).toBe("phase_transition")
+    expect(events[0]?.fromPhaseState).toBe("SCHEDULING")
+    expect(events[0]?.toPhaseState).toBe("REVIEW")
+    expect(events[0]?.reason).toBe("setWorkflowPhase")
+  })
+
   it("preserves runtime review and observation facts across compatibility state imports", async () => {
     const repo = tempRepo()
     const workflowId = valueOf(await repo.importWorkflowState(legacyState())).workflowId
@@ -494,7 +528,9 @@ describe("PGlite Open Artisan repository", () => {
     expect(valueOf(await repo.listReviewObservations("runtime-review-1")).map((item) => item.id)).toEqual(["runtime-observation-1"])
     expect(valueOf(await repo.listWorktreeObservations(workflowId)).map((item) => item.id)).toEqual(["runtime-wt-1"])
     expect(valueOf(await repo.listFastForwards(workflowId)).map((item) => item.id)).toEqual(["runtime-ff-1"])
-    expect(valueOf(await repo.listWorkflowEvents(workflowId)).map((item) => item.id)).toEqual(["runtime-event-1"])
+    const workflowEvents = valueOf(await repo.listWorkflowEvents(workflowId))
+    expect(workflowEvents.map((item) => item.id)).toContain("runtime-event-1")
+    expect(workflowEvents.some((item) => item.event === "phase_transition" && item.toPhaseState === "SCHEDULING")).toBe(true)
     const projection = valueOf(await repo.getWorkflow(workflowId))
     expect(projection?.artifacts.map((item) => item.id)).toEqual(["runtime-artifact-1"])
     expect(projection?.artifacts[0]?.currentVersionId).toBe("runtime-artifact-version-1")

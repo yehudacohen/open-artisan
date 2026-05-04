@@ -121,7 +121,7 @@ export interface DbWorkflow {
 export interface DbWorkflowEvent {
   id: DbRecordId
   workflowId: DbRecordId
-  event: WorkflowEvent | "repository_import" | "fast_forward" | "patch_applied"
+  event: WorkflowEvent | "repository_import" | "phase_transition" | "fast_forward" | "patch_applied"
   fromPhase?: Phase
   fromPhaseState?: PhaseState
   toPhase?: Phase

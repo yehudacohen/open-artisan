@@ -112,6 +112,21 @@ class TestSharedBridgeDiscovery:
         assert result["kind"] == "stale_bridge_state"
         assert result["stalePaths"]
 
+    def test_discover_bridge_returns_stale_bridge_state_when_live_pid_has_no_socket(
+        self, tmp_path
+    ):
+        _write_bridge_state(tmp_path, pid=os.getpid())
+        (tmp_path / ".openartisan" / DEFAULT_SOCKET_FILENAME).unlink()
+        bridge = make_bridge_client()
+
+        result: BridgeDiscoveryResult = bridge.discover_bridge(
+            str(tmp_path), str(tmp_path / ".openartisan")
+        )
+
+        assert result["kind"] == "stale_bridge_state"
+        assert result["reason"] == "Bridge process is running but the shared bridge socket is missing."
+        assert result["previousPid"] == os.getpid()
+
     def test_discover_bridge_surfaces_invalid_metadata_as_attach_failed(self, tmp_path):
         _write_bridge_state(tmp_path, malformed_metadata=True)
         bridge = make_bridge_client()
@@ -121,6 +136,43 @@ class TestSharedBridgeDiscovery:
         )
 
         assert result["kind"] == "attach_failed"
+
+    def test_recover_stale_bridge_clears_dead_pid_runtime_files(self, tmp_path):
+        _write_bridge_state(tmp_path, pid=999999)
+        state_dir = tmp_path / ".openartisan"
+        bridge = make_bridge_client()
+
+        result = bridge.recover_stale_bridge(str(tmp_path))
+
+        assert result["kind"] == "stale_bridge_recovered"
+        assert result["pluginReloaded"] is False
+        assert result["clearedPaths"]
+        assert not (state_dir / BRIDGE_METADATA_FILENAME).exists()
+        assert not (state_dir / BRIDGE_LEASES_FILENAME).exists()
+        assert not (state_dir / DEFAULT_SOCKET_FILENAME).exists()
+        assert not (state_dir / ".bridge-pid").exists()
+
+    def test_recover_stale_bridge_clears_malformed_metadata(self, tmp_path):
+        _write_bridge_state(tmp_path, malformed_metadata=True)
+        state_dir = tmp_path / ".openartisan"
+        bridge = make_bridge_client()
+
+        result = bridge.recover_stale_bridge(str(tmp_path))
+
+        assert result["kind"] == "stale_bridge_recovered"
+        assert not (state_dir / BRIDGE_METADATA_FILENAME).exists()
+
+    def test_recover_stale_bridge_does_not_clear_live_bridge(self, tmp_path):
+        _write_bridge_state(tmp_path, pid=os.getpid())
+        state_dir = tmp_path / ".openartisan"
+        bridge = make_bridge_client()
+
+        result = bridge.recover_stale_bridge(str(tmp_path))
+
+        assert result["kind"] == "no_recovery_needed"
+        assert result["clearedPaths"] == []
+        assert (state_dir / BRIDGE_METADATA_FILENAME).exists()
+        assert (state_dir / DEFAULT_SOCKET_FILENAME).exists()
 
 
 class TestSharedBridgeAttachOrStart:

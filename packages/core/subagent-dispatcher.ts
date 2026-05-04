@@ -26,9 +26,18 @@ export interface SubagentCreateOptions {
   title: string
   /** Agent identifier (e.g. "workflow-reviewer", "workflow-orchestrator", "auto-approver") */
   agent: string
-  /** Parent session ID for TUI nesting. If set, session cleanup may be skipped (parent owns it). */
+  /**
+   * Parent session ID for TUI nesting.
+   * When present, the parent session owns cleanup/lifecycle visibility and adapters may
+   * intentionally skip explicit child-session deletion during destroy().
+   */
   parentId?: string
-  /** Model to use. Inherit from parent when possible. */
+  /**
+   * Model to use. Inherit from parent when possible.
+   *
+   * - string: shorthand model identifier to be normalized by the adapter
+   * - object: explicit provider/model routing contract passed through as-is
+   */
   model?: string | { modelID: string; providerID?: string }
 }
 

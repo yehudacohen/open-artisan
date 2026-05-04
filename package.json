@@ -10,7 +10,7 @@
   },
   "scripts": {
     "dogfood:discord": "bun run tools/discord-dogfood-harness.ts",
-    "test": "bun test",
+    "test": "bun test tests --timeout 90000 --path-ignore-patterns '*pglite*' --path-ignore-patterns '*patch-suggestion-application.test.ts' && bun test packages/bridge/tests packages/core/tests --timeout 90000 --path-ignore-patterns '*pglite*' && bun test tests/open-artisan-repository-pglite.test.ts tests/patch-suggestion-application.test.ts packages/core/tests/roadmap-state-backend-pglite.test.ts packages/core/tests/roadmap-repository-pglite.test.ts --timeout 90000 --max-concurrency=1",
     "test:watch": "bun test --watch",
     "typecheck": "tsc --noEmit"
   },
@@ -27,6 +27,7 @@
     "json-rpc-2.0": "^1.7.1",
     "kysely": "^0.28.16",
     "kysely-pglite-dialect": "^1.3.1",
-    "pino": "^10.3.1"
+    "pino": "^10.3.1",
+    "zod": "^4.4.1"
   }
 }

@@ -3,7 +3,7 @@
  */
 import { describe, expect, it } from "bun:test"
 
-import { getPhaseToolPolicy } from "#core/hooks/tool-guard"
+import { extractWriteToolPaths, getPhaseToolPolicy } from "#core/hooks/tool-guard"
 import type { PhaseToolPolicy } from "#core/types"
 
 describe("Tool policy — DISCOVERY/SCAN and DISCOVERY/ANALYZE are strictly read-only", () => {
@@ -53,6 +53,29 @@ describe("Tool policy — DISCOVERY/CONVENTIONS allows writes to .openartisan/ o
   it("DISCOVERY/CONVENTIONS blocks writes to .env files even in .openartisan/", () => {
     const policy = getPhaseToolPolicy("DISCOVERY", "CONVENTIONS", "REFACTOR", [])
     expect(policy.writePathPredicate?.("/project/.openartisan/.env")).toBe(false)
+  })
+})
+
+describe("Tool policy — apply_patch path extraction", () => {
+  it("extracts .openartisan targets from freeform apply_patch text", () => {
+    const paths = extractWriteToolPaths("*** Begin Patch\n*** Add File: .openartisan/fix-ci-dev-mode-aspect/conventions.md\n+body\n*** End Patch")
+    expect(paths).toEqual([".openartisan/fix-ci-dev-mode-aspect/conventions.md"])
+  })
+
+  it("extracts quoted targets from apply_patch text", () => {
+    const paths = extractWriteToolPaths({
+      patchText: "*** Begin Patch\n*** Add File: \".openartisan/fix-ci-dev-mode-aspect/conventions.md\"\n+body\n*** End Patch",
+    })
+    expect(paths).toEqual([".openartisan/fix-ci-dev-mode-aspect/conventions.md"])
+  })
+
+  it("extracts nested and diff-style patch targets", () => {
+    const paths = extractWriteToolPaths({
+      input: {
+        patch: "diff --git a/src/old.ts b/src/new.ts\n--- a/src/old.ts\n+++ b/src/new.ts",
+      },
+    })
+    expect(paths).toEqual(["src/new.ts"])
   })
 })
 

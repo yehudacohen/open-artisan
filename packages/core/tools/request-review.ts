@@ -16,9 +16,32 @@ Call this tool when you have completed the current draft and are ready for self-
 Provide:
 - summary: a brief description of what was built in this phase
 - artifact_description: a description of the artifact(s) produced (files written, key decisions)
+- artifact_files: required file paths on disk that are the review source of truth
 
 After calling this tool, you will enter REVIEW state and must evaluate the artifact
 against the acceptance criteria using mark_satisfied.
+
+Pass artifact file references that the reviewer can read from disk.
+Relative artifact_files paths are resolved from the project directory before being stored.
+Do not pass legacy artifact_content; normal workflow review is file-based only.
+For workflow-authored markdown phases only, you may pass artifact_markdown with
+artifact_files: [] and the tool will materialize the canonical .openartisan file
+before review.
+
+Markdown artifacts are valid only for markdown phases:
+- DISCOVERY conventions: .openartisan/<feature>/conventions.md
+- PLANNING plan: .openartisan/<feature>/plan.md
+- IMPL_PLAN: .openartisan/<feature>/impl-plan.md
+
+File-based source phases must point at real project files:
+- INTERFACES: interface/type/schema files, not markdown
+- TESTS: runnable test files, not markdown test plans
+- IMPLEMENTATION: changed implementation files
+
+If a phase is not applicable, do not invent placeholder source files. Write the
+phase's appropriate on-disk artifact with a specific pass-through/fast-forward
+justification, then submit that file for review so the reviewer/user can approve
+or reject the fast-forward.
 
 Do NOT call this tool until the draft is complete. Do NOT call it as a progress checkpoint —
 only call it when the artifact is ready for critical evaluation.

@@ -5,21 +5,17 @@
  * implements a simplified version of the adapter's orchestration:
  * state lookup → validation → transition → store update → response.
  *
- * IMPORTANT: The authoritative tool implementations are in the OpenCode adapter
- * (.opencode/plugins/open-artisan/index.ts). The bridge handlers are simplified
- * versions that omit platform-specific features (git checkpoints, SubagentDispatcher
- * calls, design doc detection, fast-forward). A future refactor should extract
- * shared orchestration into packages/core/engine.ts so both share the same logic.
- *
- * Tools that need SubagentDispatcher (self-review, orchestrator, discovery)
- * return descriptive errors in bridge mode. Basic operations (transitions,
- * state updates, artifact writes) work without SubagentDispatcher.
+ * Bridge handlers run in adapter-managed mode: adapters request review context,
+ * spawn external reviewers themselves, then submit structured reviewer output.
+ * Platform-local capabilities such as OpenCode TUI notifications remain in the
+ * OpenCode adapter, while bridge-visible state transitions use shared core logic.
  */
 import { JSONRPCErrorException } from "json-rpc-2.0"
 import type { MethodHandler, BridgeContext } from "../server"
 import type { ToolExecuteParams } from "../protocol"
 import { SESSION_NOT_FOUND, INVALID_PARAMS } from "../protocol"
 import type { ArtifactKey, WorkflowState } from "../../core/types"
+import type { OpenArtisanServices } from "../../core/open-artisan-services"
 
 import { createHash } from "node:crypto"
 import { resolve } from "node:path"
@@ -48,6 +44,8 @@ import { parseImplPlan, validateExecutableImplPlan } from "../../core/impl-plan-
 import { PHASE_TO_ARTIFACT } from "../../core/artifacts"
 import { createImplDAG } from "../../core/dag"
 import { nextSchedulerDecision, nextSchedulerDecisionForInput, readDecisionInput, resolveHumanGate } from "../../core/scheduler"
+import { validateFileBasedReviewArtifacts } from "../../core/tools/file-artifact-validation"
+import { buildInvalidPhaseReviewJsonReason, normalizePhaseReviewOutput } from "../../core/phase-review"
 import {
   buildAutoApproveRequest,
   buildRobotArtisanAutoApproveFailureFeedback,
@@ -56,14 +54,27 @@ import {
 } from "../../core/autonomous-user-gate"
 import { activateHumanGateTasks, resolveAwaitingHumanState } from "../../core/human-gate-policy"
 import { buildWorkflowSwitchMessage, parkCurrentWorkflowSession } from "../../core/session-switch"
-import { createPGliteRoadmapStateBackend } from "../../core/roadmap-state-backend-pglite"
-import { createPGliteRoadmapRepository } from "../../core/roadmap-repository-pglite"
-import { createRoadmapSliceService } from "../../core/roadmap-slice-service"
-import type { RoadmapQuery, RoadmapServiceFactoryOptions } from "../../core/types"
+import type { RoadmapQuery } from "../../core/types"
+import type { DbAgentLease } from "../../core/open-artisan-repository"
 import { getAcceptanceCriteria } from "../../core/hooks/system-transform"
 import { resolveArtifactPaths } from "../../core/tools/artifact-paths"
 import { extractJsonFromText } from "../../core/utils"
 import { countExpectedBlockingCriteria } from "../../core/tools/mark-satisfied"
+import { analyzeTaskBoundaryChange, applyTaskBoundaryChange } from "../../core/tools/transitions"
+import { isEscapeHatchClarificationFeedback, isUserGateMetaFeedback, stripWorkflowRoutingNotes } from "../../core/tools/submit-feedback"
+import { collectWorktreeObservations } from "../../core/worktree-observation"
+import { ApplyDriftRepairToolSchema, ApplyPatchSuggestionSchema, PlanDriftRepairToolSchema, ReportDriftToolSchema, ResolvePatchSuggestionSchema, formatZodError } from "../../core/schemas"
+import {
+  loadWorkflowFileClaims,
+  persistPhaseReviewResult,
+  persistTaskDispatchClaims,
+  persistTaskReviewResult,
+  persistWorktreeObservations,
+  workflowDbId,
+} from "../../core/runtime-persistence"
+import { routePatchSuggestions } from "../../core/patch-suggestion-routing"
+import { applyPatchSuggestionToWorktree } from "../../core/patch-suggestion-application"
+import { buildDriftRepairPlan, buildRepairToolCall, buildWorkflowDriftReport, type DriftRepairPlan, type DriftReport, type DriftToolCallPlan } from "../../core/drift"
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -75,24 +86,13 @@ interface ToolContext {
   agent?: string
 }
 
-function createRoadmapServices(stateDir: string) {
-  const roadmapOptions: RoadmapServiceFactoryOptions = {
-    stateDir,
-    persistence: {
-      kind: "pglite",
-      pglite: {
-        connection: {
-          dataDir: resolve(stateDir, "roadmap", "bridge-pglite-db"),
-          debugName: "bridge-roadmap",
-        },
-      },
-    },
+function createRoadmapServices(ctx: BridgeContext):
+  | { ok: true; roadmapBackend: NonNullable<BridgeContext["roadmapBackend"]>; roadmapService: NonNullable<BridgeContext["roadmapService"]> }
+  | { ok: false; message: string } {
+  if (ctx.roadmapBackend && ctx.roadmapService) {
+    return { ok: true, roadmapBackend: ctx.roadmapBackend, roadmapService: ctx.roadmapService }
   }
-  const pgliteOptions = roadmapOptions.persistence.pglite!
-  const roadmapRepository = createPGliteRoadmapRepository(pgliteOptions)
-  const roadmapBackend = createPGliteRoadmapStateBackend(stateDir, pgliteOptions, roadmapRepository)
-  const roadmapService = createRoadmapSliceService(roadmapBackend, roadmapRepository)
-  return { roadmapBackend, roadmapRepository, roadmapService }
+  return { ok: false, message: "Roadmap backend was not initialized at lifecycle.init" }
 }
 
 function roadmapStorageFailure(message: string, retryable: boolean) {
@@ -116,8 +116,8 @@ function requireState(ctx: BridgeContext, sessionId: string): WorkflowState {
 
 function subagentError(toolName: string, feature: string): string {
   return (
-    `Error: ${toolName} requires ${feature} which is not available in bridge mode. ` +
-    `Use an in-process adapter or configure an LLM client.`
+    `Error: ${toolName} requires ${feature}. ` +
+    `Use the bridge context/review submission flow or an adapter that declares this capability.`
   )
 }
 
@@ -125,13 +125,53 @@ function artifactHash(text: string): string {
   return createHash("sha256").update(text).digest("hex").slice(0, 16)
 }
 
+function stableId(...parts: string[]): string {
+  return createHash("sha256").update(parts.join("\0")).digest("hex").slice(0, 24)
+}
+
+const driftReports = new Map<string, DriftReport>()
+const driftRepairPlans = new Map<string, DriftRepairPlan>()
+const latestDriftReportBySession = new Map<string, string>()
+
+function driftStoreKey(sessionId: string, id: string): string {
+  return `${sessionId}:${id}`
+}
+
+function agentKindFromSession(agent: string | null | undefined): DbAgentLease["agentKind"] {
+  if (agent === "hermes" || agent === "claude" || agent === "opencode") return agent
+  if (agent === "artisan" || agent === "robot-artisan") return "opencode"
+  return "other"
+}
+
+async function persistCurrentTaskClaim(
+  services: OpenArtisanServices | null | undefined,
+  state: WorkflowState | null | undefined,
+  sessionId: string,
+): Promise<void> {
+  if (!state?.currentTaskId) return
+  await persistTaskDispatchClaims(services, state, state.currentTaskId, sessionId, agentKindFromSession(state.activeAgent))
+}
+
+function artifactFilesHash(files: string[], cwd: string): string | null {
+  if (files.length === 0) return null
+  try {
+    const payload = files
+      .map((file) => {
+        const resolvedPath = file.startsWith("/") ? file : resolve(cwd, file)
+        return `${resolvedPath}\n${readFileSync(resolvedPath, "utf-8")}`
+      })
+      .join("\n---\n")
+    return artifactHash(payload)
+  } catch {
+    return null
+  }
+}
+
 function buildApprovedArtifactMarker(
   state: WorkflowState,
   artifactKey: ArtifactKey,
-  artifactContent?: string,
   artifactDiskPath?: string | null,
 ): string {
-  if (artifactContent) return artifactHash(artifactContent)
   const diskPath = artifactDiskPath ?? state.artifactDiskPaths[artifactKey]
   if (diskPath) {
     try {
@@ -149,11 +189,7 @@ function buildRuntimeSchedulerDecision(state: {
 }) {
   const input = readDecisionInput({ implDag: state.implDag, concurrency: state.concurrency })
   const evaluation = nextSchedulerDecisionForInput(input)
-  const fallbackDecision =
-    evaluation.decision.action === "unsupported" && evaluation.decision.fallback === "sequential"
-      ? nextSchedulerDecision(input.dag)
-      : evaluation.decision
-  return { evaluation, fallbackDecision }
+  return { evaluation, fallbackDecision: evaluation.decision }
 }
 
 function formatSchedulerDecisionMessage(decision: ReturnType<typeof buildRuntimeSchedulerDecision>["fallbackDecision"]): string {
@@ -167,8 +203,6 @@ function formatSchedulerDecisionMessage(decision: ReturnType<typeof buildRuntime
     case "awaiting-human":
     case "error":
       return decision.message
-    case "unsupported":
-      return `Unsupported scheduler decision: ${decision.reason}; fallback=${decision.fallback}.`
   }
 }
 
@@ -185,7 +219,6 @@ function buildTaskReviewResolvedMessage(
 
   if (fallbackDecision.action === "dispatch") {
     return (
-      `${evaluation.decision.action === "unsupported" ? `Parallel runtime unsupported: ${evaluation.decision.reason}. Applying ${evaluation.decision.fallback} fallback.\n\n` : ""}` +
       `**Next task ready:**\n${fallbackDecision.prompt}`
     )
   }
@@ -198,6 +231,9 @@ function buildTaskReviewResolvedMessage(
 }
 
 async function readCurrentArtifactHash(state: WorkflowState): Promise<string | null> {
+  if (state.reviewArtifactFiles.length > 0) {
+    return artifactFilesHash(state.reviewArtifactFiles, process.cwd())
+  }
   const artifactKey = PHASE_TO_ARTIFACT[state.phase]
   if (!artifactKey) return null
   const artifactPath = state.artifactDiskPaths[artifactKey]
@@ -219,12 +255,13 @@ async function readCurrentArtifactHash(state: WorkflowState): Promise<string | n
  *
  * Returns null if the task is not found in the DAG.
  */
-function buildReviewContextForTask(
+async function buildReviewContextForTask(
   state: WorkflowState,
   taskId: string,
   directory: string,
+  services: OpenArtisanServices | null | undefined,
   implementationSummary?: string,
-): string | null {
+): Promise<string | null> {
   const task = state.implDag?.find((t) => t.id === taskId)
   if (!task) return null
 
@@ -254,6 +291,18 @@ function buildReviewContextForTask(
     }
   }
 
+  const workflowId = workflowDbId(state)
+  const currentAgentLeaseId = await persistTaskDispatchClaims(services, state, taskId, state.sessionId, agentKindFromSession(state.activeAgent))
+  const worktreeObservations = await collectWorktreeObservations({
+    cwd: directory,
+    workflowId,
+    taskOwnedFiles: task.expectedFiles,
+    artifactFiles: state.reviewArtifactFiles,
+    ...(currentAgentLeaseId ? { currentAgentLeaseId } : {}),
+    fileClaims: await loadWorkflowFileClaims(services, workflowId),
+  })
+  await persistWorktreeObservations(services, worktreeObservations)
+
   return buildTaskReviewPrompt({
     task,
     implementationSummary: implementationSummary ?? "(see task files)",
@@ -263,6 +312,7 @@ function buildReviewContextForTask(
     conventions: state.conventions,
     artifactDiskPaths: state.artifactDiskPaths as Record<string, string>,
     ...(adjacentTasks.length > 0 ? { adjacentTasks } : {}),
+    ...(worktreeObservations.length > 0 ? { worktreeObservations } : {}),
   })
 }
 
@@ -303,6 +353,7 @@ function buildPhaseReviewContext(
     ...(state.fileAllowlist.length > 0 ? { fileAllowlist: state.fileAllowlist } : {}),
     ...(Object.keys(state.approvedArtifacts).length > 0 ? { approvedArtifacts: state.approvedArtifacts } : {}),
     ...(Object.keys(state.artifactDiskPaths).length > 0 ? { artifactDiskPaths: state.artifactDiskPaths } : {}),
+    ...(Object.keys(state.approvedArtifactFiles ?? {}).length > 0 ? { approvedArtifactFiles: state.approvedArtifactFiles ?? {} } : {}),
   })
 }
 
@@ -391,7 +442,7 @@ const handleSelectMode: ToolHandler = async (args, toolCtx, ctx) => {
   }
 
   const outcome = sm.transition("MODE_SELECT", "DRAFT", "mode_selected", parsed.mode)
-  if (!outcome.success) return `Error: ${outcome.message}`
+  if (!outcome.ok) return `Error: ${outcome.message}`
 
   await store.update(toolCtx.sessionId, (draft) => {
     draft.mode = parsed.mode
@@ -428,7 +479,7 @@ const handleMarkScanComplete: ToolHandler = async (args, toolCtx, ctx) => {
   const result = processMarkScanComplete(args as any)
 
   const outcome = sm.transition("DISCOVERY", "SCAN", "scan_complete", state.mode)
-  if (!outcome.success) return `Error: ${outcome.message}`
+  if (!outcome.ok) return `Error: ${outcome.message}`
 
   await store.update(toolCtx.sessionId, (draft) => {
     draft.phase = outcome.nextPhase
@@ -505,37 +556,35 @@ const handleRequestReview: ToolHandler = async (args, toolCtx, ctx) => {
   }
 
   if (state.phaseState === "REVIEW") {
-    if (!(args.artifact_content as string | undefined) && !((args.artifact_files as string[] | undefined)?.length)) {
-      return (
-        "Error: request_review at REVIEW state requires either artifact_content " +
-        "or artifact_files so the review source of truth can be updated."
-      )
+    if ((args.artifact_content as string | undefined)?.trim()) {
+      return "Error: request_review no longer accepts artifact_content; write the artifact to disk and pass artifact_files instead."
     }
-
-    const artifactContent = args.artifact_content as string | undefined
+    let artifactFiles = ((args.artifact_files as string[] | undefined) ?? []).map((file) =>
+      file.startsWith("/") ? file : resolve(toolCtx.directory, file),
+    )
     const artifactKey = PHASE_TO_ARTIFACT[state.phase]
-    let artifactDiskPath: string | null = null
-    if (artifactContent && artifactKey && artifactKey !== "implementation") {
-      try {
-        artifactDiskPath = await writeArtifact(toolCtx.directory, artifactKey, artifactContent, state.featureName)
-      } catch {
-        // Non-fatal
+    const artifactMarkdown = args.artifact_markdown as string | undefined
+    if (artifactMarkdown?.trim()) {
+      if (!artifactKey || !["DISCOVERY", "PLANNING", "IMPL_PLAN"].includes(state.phase)) {
+        return "Error: artifact_markdown is only supported for DISCOVERY, PLANNING, and IMPL_PLAN markdown artifacts."
       }
+      artifactFiles = [await writeArtifact(toolCtx.directory, artifactKey, artifactMarkdown, state.featureName)]
+    }
+    if (artifactFiles.length === 0) {
+      return "Error: request_review at REVIEW state requires artifact_files so the review source of truth can be updated."
     }
 
-    let reviewHash: string | null = null
-    if (artifactDiskPath) {
-      try {
-        const diskContent = await readFile(artifactDiskPath, "utf-8")
-        reviewHash = artifactHash(diskContent)
-      } catch {
-        // Non-fatal
-      }
-    } else if (artifactContent) {
-      reviewHash = artifactHash(artifactContent)
-    }
+    const artifactValidationError = validateFileBasedReviewArtifacts({
+      phase: state.phase,
+      artifactFiles,
+      cwd: toolCtx.directory,
+      featureName: state.featureName,
+    })
+    if (artifactValidationError) return `Error: ${artifactValidationError}`
 
-    const artifactFiles = args.artifact_files as string[] | undefined
+    const artifactDiskPath = artifactKey && artifactKey !== "implementation" ? artifactFiles[0] ?? null : null
+    const reviewHash = artifactFilesHash(artifactFiles, toolCtx.directory)
+
     await store.update(toolCtx.sessionId, (draft) => {
       draft.retryCount = 0
       draft.latestReviewResults = null
@@ -543,48 +592,42 @@ const handleRequestReview: ToolHandler = async (args, toolCtx, ctx) => {
       if (artifactDiskPath && artifactKey) {
         draft.artifactDiskPaths[artifactKey] = artifactDiskPath
       }
-      if (artifactFiles && artifactFiles.length > 0) {
-        const existing = new Set(draft.reviewArtifactFiles)
-        for (const f of artifactFiles) {
-          if (!existing.has(f)) draft.reviewArtifactFiles.push(f)
-        }
-      }
+      draft.reviewArtifactFiles = artifactFiles
     })
 
     const diskMsg = artifactDiskPath ? ` Artifact updated at ${artifactDiskPath}.` : ""
-    const filesMsg = artifactFiles?.length ? ` Registered ${artifactFiles.length} review file(s).` : ""
+    const filesMsg = artifactFiles.length ? ` Registered ${artifactFiles.length} review file(s).` : ""
     return `Artifact re-submitted for ${state.phase} review.${diskMsg}${filesMsg}`
   }
 
   const event = state.phaseState === "REVISE" ? "revision_complete" : "draft_complete"
   const outcome = sm.transition(state.phase, state.phaseState, event, state.mode)
-  if (!outcome.success) return `Error: ${outcome.message}`
+  if (!outcome.ok) return `Error: ${outcome.message}`
 
-  // Write artifact to disk if content was provided
   const artifactContent = args.artifact_content as string | undefined
+  if (artifactContent?.trim()) {
+    return "Error: request_review no longer accepts artifact_content; write the artifact to disk and pass artifact_files instead."
+  }
   const artifactKey = PHASE_TO_ARTIFACT[state.phase]
-  let artifactDiskPath: string | null = null
-  if (artifactContent && artifactKey && artifactKey !== "implementation") {
-    try {
-      artifactDiskPath = await writeArtifact(toolCtx.directory, artifactKey, artifactContent, state.featureName)
-    } catch {
-      // Non-fatal — disk write failure does not block the transition
+  let artifactFiles = ((args.artifact_files as string[] | undefined) ?? []).map((file) =>
+    file.startsWith("/") ? file : resolve(toolCtx.directory, file),
+  )
+  const artifactMarkdown = args.artifact_markdown as string | undefined
+  if (artifactMarkdown?.trim()) {
+    if (!artifactKey || !["DISCOVERY", "PLANNING", "IMPL_PLAN"].includes(state.phase)) {
+      return "Error: artifact_markdown is only supported for DISCOVERY, PLANNING, and IMPL_PLAN markdown artifacts."
     }
+    artifactFiles = [await writeArtifact(toolCtx.directory, artifactKey, artifactMarkdown, state.featureName)]
   }
-  let reviewHash: string | null = null
-  if (artifactDiskPath) {
-    try {
-      const diskContent = await readFile(artifactDiskPath, "utf-8")
-      reviewHash = artifactHash(diskContent)
-    } catch {
-      // Non-fatal
-    }
-  } else if (artifactContent) {
-    reviewHash = artifactHash(artifactContent)
-  }
-
-  // Merge agent-provided artifact_files into reviewArtifactFiles
-  const artifactFiles = args.artifact_files as string[] | undefined
+  const artifactValidationError = validateFileBasedReviewArtifacts({
+    phase: state.phase,
+    artifactFiles,
+    cwd: toolCtx.directory,
+    featureName: state.featureName,
+  })
+  if (artifactValidationError) return `Error: ${artifactValidationError}`
+  const artifactDiskPath = artifactKey && artifactKey !== "implementation" ? artifactFiles[0] ?? null : null
+  const reviewHash = artifactFilesHash(artifactFiles, toolCtx.directory)
 
   await store.update(toolCtx.sessionId, (draft) => {
     draft.phase = outcome.nextPhase
@@ -595,17 +638,10 @@ const handleRequestReview: ToolHandler = async (args, toolCtx, ctx) => {
     if (artifactDiskPath && artifactKey) {
       draft.artifactDiskPaths[artifactKey] = artifactDiskPath
     }
-    if (artifactContent) {
+    if (reviewHash) {
       draft.reviewArtifactHash = reviewHash
     }
-    if (artifactFiles && artifactFiles.length > 0) {
-      const existing = new Set(draft.reviewArtifactFiles)
-      for (const f of artifactFiles) {
-        if (!existing.has(f)) {
-          draft.reviewArtifactFiles.push(f)
-        }
-      }
-    }
+    draft.reviewArtifactFiles = artifactFiles
   })
 
   // policyVersion bumped automatically by setPostUpdateHook on store.update
@@ -619,6 +655,10 @@ const handleSubmitFeedback: ToolHandler = async (args, toolCtx, ctx) => {
   const { store, sm } = ctx.engine!
   const state = requireState(ctx, toolCtx.sessionId)
   const cwd = toolCtx.directory || process.cwd()
+  if (Object.prototype.hasOwnProperty.call(args, "artifact_content")) {
+    return "Error: submit_feedback no longer accepts artifact_content; approve the artifact already submitted on disk via request_review artifact_files."
+  }
+  const feedbackTextArg = typeof args.feedback_text === "string" ? stripWorkflowRoutingNotes(args.feedback_text) : ""
 
   let derivedApprovedFiles: string[] | null = null
   const getEffectiveIncrementalAllowlist = (): string[] => {
@@ -650,8 +690,8 @@ const handleSubmitFeedback: ToolHandler = async (args, toolCtx, ctx) => {
       .filter((path) => !normalizedAllowlist.has(path))
   }
 
-  if (state.phaseState !== "USER_GATE" && state.phaseState !== "ESCAPE_HATCH") {
-    return `Error: submit_feedback can only be called at USER_GATE or ESCAPE_HATCH (current: ${state.phaseState}).`
+  if (state.phaseState !== "USER_GATE" && state.phaseState !== "ESCAPE_HATCH" && state.phaseState !== "HUMAN_GATE") {
+    return `Error: submit_feedback can only be called at USER_GATE, ESCAPE_HATCH, or HUMAN_GATE (current: ${state.phaseState}).`
   }
 
   // Structural enforcement: agent cannot self-approve. The user must have
@@ -665,7 +705,25 @@ const handleSubmitFeedback: ToolHandler = async (args, toolCtx, ctx) => {
   }
 
   const feedbackType = args.feedback_type as string
+  if (feedbackType === "revise" && state.phaseState === "USER_GATE" && isUserGateMetaFeedback(feedbackTextArg)) {
+    return (
+      "That message looks like a clarification/status question, not artifact revision feedback. " +
+      "Do not change workflow state; answer the user's question normally and continue waiting at USER_GATE for an explicit approval or revision request."
+    )
+  }
+  if (feedbackType === "revise" && state.phaseState === "ESCAPE_HATCH" && isEscapeHatchClarificationFeedback(feedbackTextArg)) {
+    return (
+      "That message looks like an escape-hatch clarification question, not an escape-hatch decision. " +
+      "Do not change workflow state; explain the options normally and continue waiting at ESCAPE_HATCH for an explicit decision."
+    )
+  }
   if (feedbackType === "approve") {
+    const resolvedHumanGates = Array.isArray(args.resolved_human_gates)
+      ? args.resolved_human_gates as string[]
+      : []
+    if (state.phaseState === "HUMAN_GATE" && resolvedHumanGates.length === 0) {
+      return "Cannot approve — HUMAN_GATE is a structural manual-action state, not a user approval surface. Resolve human-gated tasks via resolved_human_gates instead."
+    }
     if (state.phaseState === "ESCAPE_HATCH") {
       return "Error: Cannot approve while an escape hatch is pending."
     }
@@ -690,12 +748,12 @@ const handleSubmitFeedback: ToolHandler = async (args, toolCtx, ctx) => {
       }
     }
 
-    if (state.phase === "IMPLEMENTATION" && state.implDag && args.resolved_human_gates && (args.resolved_human_gates as string[]).length > 0) {
+    if (state.phase === "IMPLEMENTATION" && state.implDag && resolvedHumanGates.length > 0) {
       const dag = createImplDAG(Array.from(state.implDag))
       const resolvedIds: string[] = []
       const errors: string[] = []
 
-      for (const gateId of args.resolved_human_gates as string[]) {
+      for (const gateId of resolvedHumanGates) {
         const resolved = resolveHumanGate(dag, gateId)
         if (resolved) {
           resolvedIds.push(gateId)
@@ -738,15 +796,16 @@ const handleSubmitFeedback: ToolHandler = async (args, toolCtx, ctx) => {
         await store.update(toolCtx.sessionId, (draft) => {
           draft.implDag = updatedNodes
           draft.phase = "IMPLEMENTATION"
-          draft.phaseState = "DRAFT"
+          draft.phaseState = "SCHEDULING"
           draft.currentTaskId = nextDecision.task.id
           draft.iterationCount = 0
           draft.retryCount = 0
           draft.userGateMessageReceived = false
         })
+        await persistCurrentTaskClaim(ctx.openArtisanServices, store.get(toolCtx.sessionId), toolCtx.sessionId)
         return (
           `Resolved ${resolvedIds.length} human gate(s): ${resolvedIds.join(", ")}.\n\n` +
-          `${evaluation.decision.action === "unsupported" ? `Parallel runtime unsupported: ${evaluation.decision.reason}. Applying ${evaluation.decision.fallback} fallback.\n\n` : ""}Returning to IMPLEMENTATION/DRAFT — downstream tasks are now unblocked.`
+          "Returning to IMPLEMENTATION/SCHEDULING — downstream tasks are now unblocked."
         )
       }
 
@@ -760,13 +819,29 @@ const handleSubmitFeedback: ToolHandler = async (args, toolCtx, ctx) => {
         )
       }
 
+      if (state.phaseState === "HUMAN_GATE") {
+        await store.update(toolCtx.sessionId, (draft) => {
+          draft.implDag = updatedNodes
+          draft.phase = "IMPLEMENTATION"
+          draft.phaseState = "SCHEDULING"
+          draft.currentTaskId = null
+          draft.iterationCount = 0
+          draft.retryCount = 0
+          draft.userGateMessageReceived = false
+        })
+        return (
+          `Resolved ${resolvedIds.length} human gate(s): ${resolvedIds.join(", ")}.\n\n` +
+          "All DAG tasks are now complete. Returning to IMPLEMENTATION/SCHEDULING so the runtime can request final implementation review."
+        )
+      }
+
       await store.update(toolCtx.sessionId, (draft) => {
         draft.implDag = updatedNodes
       })
     }
 
     if (state.phase === "IMPL_PLAN") {
-      let planContent = args.artifact_content as string | undefined
+      let planContent: string | undefined
       if (!planContent) {
         const diskPath = state.artifactDiskPaths["impl_plan" as keyof typeof state.artifactDiskPaths] as string | undefined
         if (diskPath) {
@@ -779,7 +854,7 @@ const handleSubmitFeedback: ToolHandler = async (args, toolCtx, ctx) => {
       }
       if (!planContent) {
         return (
-          "Error: IMPL_PLAN approval requires `artifact_content` or a previously written implementation plan on disk " +
+          "Error: IMPL_PLAN approval requires a previously written implementation plan on disk " +
           "so the plan can be parsed into a DAG before entering IMPLEMENTATION."
         )
       }
@@ -787,7 +862,7 @@ const handleSubmitFeedback: ToolHandler = async (args, toolCtx, ctx) => {
       if (!parseCheck.success) {
         return (
           `Error: Failed to parse implementation plan into DAG: ${parseCheck.errors.join("; ")}. ` +
-          "Fix the plan format and re-submit approval with corrected `artifact_content`."
+          "Fix the plan format and re-submit request_review with corrected artifact_files."
         )
       }
       const effectiveAllowlist =
@@ -819,7 +894,7 @@ const handleSubmitFeedback: ToolHandler = async (args, toolCtx, ctx) => {
     }
 
     if (state.phase === "PLANNING" && state.mode === "INCREMENTAL" && !args.approved_files) {
-      let planContent = args.artifact_content as string | undefined
+      let planContent: string | undefined
       if (!planContent && state.artifactDiskPaths.plan) {
         try {
           planContent = readFileSync(state.artifactDiskPaths.plan, "utf-8")
@@ -845,22 +920,24 @@ const handleSubmitFeedback: ToolHandler = async (args, toolCtx, ctx) => {
     }
 
     const outcome = sm.transition(state.phase, state.phaseState, "user_approve", state.mode)
-    if (!outcome.success) return `Error: ${outcome.message}`
+    if (!outcome.ok) return `Error: ${outcome.message}`
 
-    // Write artifact to disk if content provided (for approval recording)
-    const artifactContent = args.artifact_content as string | undefined
     const approveArtifactKey = PHASE_TO_ARTIFACT[state.phase]
-    let approveArtifactPath: string | null = null
-    if (artifactContent && approveArtifactKey && approveArtifactKey !== "implementation") {
-      try {
-        approveArtifactPath = await writeArtifact(toolCtx.directory, approveArtifactKey, artifactContent, state.featureName)
-      } catch { /* non-fatal */ }
-    }
+    const approveArtifactPath = approveArtifactKey && approveArtifactKey !== "implementation"
+      ? state.artifactDiskPaths[approveArtifactKey] ?? null
+      : null
     const approvedArtifactMarker = approveArtifactKey
-      ? buildApprovedArtifactMarker(state, approveArtifactKey, artifactContent, approveArtifactPath)
+      ? buildApprovedArtifactMarker(state, approveArtifactKey, approveArtifactPath)
       : null
 
     const phaseCount = (state.phaseApprovalCounts[state.phase] ?? 0) + 1
+    const preserveFinalImplementationReview =
+      state.phase === "IMPLEMENTATION" &&
+      state.phaseState === "USER_GATE" &&
+      Array.isArray(args.resolved_human_gates) &&
+      (args.resolved_human_gates as string[]).length > 0 &&
+      outcome.nextPhase === "DONE"
+
     await store.update(toolCtx.sessionId, (draft) => {
       draft.phase = outcome.nextPhase
       draft.phaseState = outcome.nextPhaseState
@@ -870,29 +947,31 @@ const handleSubmitFeedback: ToolHandler = async (args, toolCtx, ctx) => {
       draft.retryCount = 0
       draft.userGateMessageReceived = false
       draft.reviewArtifactHash = null
-      draft.latestReviewResults = null
+      if (!preserveFinalImplementationReview) {
+        draft.latestReviewResults = null
+      }
       if (approveArtifactPath && approveArtifactKey) {
         draft.artifactDiskPaths[approveArtifactKey] = approveArtifactPath
       }
       if (approveArtifactKey && approvedArtifactMarker) {
         draft.approvedArtifacts[approveArtifactKey] = approvedArtifactMarker
       }
-      // Capture conventions at DISCOVERY approval
-      if (state.phase === "DISCOVERY" && artifactContent) {
-        draft.conventions = artifactContent
+      if (approveArtifactKey && state.reviewArtifactFiles.length > 0) {
+        draft.approvedArtifactFiles ??= {}
+        draft.approvedArtifactFiles[approveArtifactKey] = Array.from(new Set(state.reviewArtifactFiles.map((path) =>
+          path.startsWith("/") ? path : resolve(cwd, path),
+        )))
+      }
+      if (state.phase === "DISCOVERY") {
+        draft.conventions = null
       }
       if (state.phase === "IMPLEMENTATION") {
         draft.currentTaskId = null
         draft.taskCompletionInProgress = null
         draft.taskReviewCount = 0
       }
-      // Parse IMPL_PLAN into DAG at IMPL_PLAN approval.
-      // If artifact_content was not passed in the approve call, fall back to
-      // reading from the disk path written by request_review. This prevents
-      // the DAG from silently not being parsed when the user approves without
-      // re-passing the content.
       if (state.phase === "IMPL_PLAN") {
-        let planContent = artifactContent
+        let planContent: string | undefined
         if (!planContent) {
           const diskPath = state.artifactDiskPaths["impl_plan" as keyof typeof state.artifactDiskPaths] as string | undefined
           if (diskPath) {
@@ -932,8 +1011,11 @@ const handleSubmitFeedback: ToolHandler = async (args, toolCtx, ctx) => {
         }
       }
       // Reset artifact file tracking for the new phase
-      draft.reviewArtifactFiles = []
+      if (!preserveFinalImplementationReview) {
+        draft.reviewArtifactFiles = []
+      }
     })
+    await persistCurrentTaskClaim(ctx.openArtisanServices, store.get(toolCtx.sessionId), toolCtx.sessionId)
 
     // policyVersion bumped automatically by setPostUpdateHook
 
@@ -957,15 +1039,14 @@ const handleSubmitFeedback: ToolHandler = async (args, toolCtx, ctx) => {
       })
     }
 
-    return `Approved. Transitioning to ${outcome.nextPhase}/${outcome.nextPhaseState}.`
+    return `Approved. Transitioning to ${outcome.nextPhase}/${outcome.nextPhaseState}. Continue immediately in this same turn; do not stop.`
   }
 
   if (feedbackType === "revise") {
     if (ctx.capabilities.orchestrator !== false) {
       return subagentError("submit_feedback(revise)", "the orchestrator (SubagentDispatcher)")
     }
-    const feedbackText = (args.feedback_text ?? "") as string
-    const result = computeSubmitFeedbackReviseTransition(feedbackText, state, sm)
+    const result = computeSubmitFeedbackReviseTransition(feedbackTextArg, state, sm)
     if (!result.success) return `Error: ${result.error}`
     const t = result.transition
     await store.update(toolCtx.sessionId, (draft) => {
@@ -993,8 +1074,8 @@ const handleMarkTaskComplete: ToolHandler = async (args, toolCtx, ctx) => {
   if (state.phase !== "IMPLEMENTATION") {
     return `Error: mark_task_complete can only be called during IMPLEMENTATION (current: ${state.phase}).`
   }
-  if (state.phaseState !== "DRAFT" && state.phaseState !== "REVISE") {
-    return `Error: mark_task_complete can only be called in DRAFT or REVISE state (current: ${state.phase}/${state.phaseState}).`
+  if (state.phaseState !== "DRAFT" && state.phaseState !== "REVISE" && state.phaseState !== "SCHEDULING") {
+    return `Error: mark_task_complete can only be called in DRAFT, REVISE, or SCHEDULING state (current: ${state.phase}/${state.phaseState}).`
   }
 
   // Re-entry guard: prevent concurrent task completions
@@ -1011,6 +1092,7 @@ const handleMarkTaskComplete: ToolHandler = async (args, toolCtx, ctx) => {
     draft.currentTaskId = (args.task_id as string) ?? null
     draft.taskCompletionInProgress = (args.task_id as string) ?? null
     draft.taskReviewCount = (draft.taskReviewCount ?? 0) + 1
+    draft.phaseState = "TASK_REVIEW"
   })
 
   // Build the isolated review prompt for the adapter to dispatch.
@@ -1018,7 +1100,7 @@ const handleMarkTaskComplete: ToolHandler = async (args, toolCtx, ctx) => {
   const updatedState = requireState(ctx, toolCtx.sessionId)
   const taskId = args.task_id as string
   const implSummary = (args.implementation_summary as string) ?? ""
-  const reviewPrompt = buildReviewContextForTask(updatedState, taskId, toolCtx.directory, implSummary)
+  const reviewPrompt = await buildReviewContextForTask(updatedState, taskId, toolCtx.directory, ctx.openArtisanServices, implSummary)
   if (!reviewPrompt) {
     // Should not happen — task was just completed. Clear guard and return.
     await store.update(toolCtx.sessionId, (draft) => {
@@ -1060,6 +1142,7 @@ const handleSubmitTaskReview: ToolHandler = async (args, toolCtx, ctx) => {
   if (!review.success) {
     return `Error: Failed to parse review output: ${review.error}. Re-run the isolated reviewer and submit again.`
   }
+  await persistTaskReviewResult(ctx.openArtisanServices, state, taskId, review, reviewOutput)
 
   // Check iteration cap — force accept after MAX_TASK_REVIEW_ITERATIONS
   const hitCap = state.taskReviewCount >= MAX_TASK_REVIEW_ITERATIONS
@@ -1073,13 +1156,20 @@ const handleSubmitTaskReview: ToolHandler = async (args, toolCtx, ctx) => {
       }
       const refreshed = buildRuntimeSchedulerDecision({ implDag: draft.implDag, concurrency: draft.concurrency }).fallbackDecision
       draft.currentTaskId = refreshed.action === "dispatch" ? refreshed.task.id : null
-      draft.phaseState = refreshed.action === "awaiting-human" ? "USER_GATE" : "DRAFT"
+      draft.phaseState = refreshed.action === "awaiting-human"
+        ? "HUMAN_GATE"
+        : refreshed.action === "dispatch"
+          ? "SCHEDULING"
+          : refreshed.action === "blocked"
+            ? "DELEGATED_WAIT"
+            : draft.phaseState
       if (refreshed.action === "awaiting-human") {
         draft.userGateMessageReceived = false
       }
       draft.taskCompletionInProgress = null
       draft.taskReviewCount = 0
     })
+    await persistCurrentTaskClaim(ctx.openArtisanServices, store.get(toolCtx.sessionId), toolCtx.sessionId)
     return (
       `Task "${taskId}" force-accepted after ${MAX_TASK_REVIEW_ITERATIONS} review iterations. ` +
       `Issues will be caught in the full implementation review.\n\n${nextMessage}`
@@ -1096,13 +1186,20 @@ const handleSubmitTaskReview: ToolHandler = async (args, toolCtx, ctx) => {
       }
       const refreshed = buildRuntimeSchedulerDecision({ implDag: draft.implDag, concurrency: draft.concurrency }).fallbackDecision
       draft.currentTaskId = refreshed.action === "dispatch" ? refreshed.task.id : null
-      draft.phaseState = refreshed.action === "awaiting-human" ? "USER_GATE" : "DRAFT"
+      draft.phaseState = refreshed.action === "awaiting-human"
+        ? "HUMAN_GATE"
+        : refreshed.action === "dispatch"
+          ? "SCHEDULING"
+          : refreshed.action === "blocked"
+            ? "DELEGATED_WAIT"
+            : draft.phaseState
       if (refreshed.action === "awaiting-human") {
         draft.userGateMessageReceived = false
       }
       draft.taskCompletionInProgress = null
       draft.taskReviewCount = 0
     })
+    await persistCurrentTaskClaim(ctx.openArtisanServices, store.get(toolCtx.sessionId), toolCtx.sessionId)
     return `Task "${taskId}" review passed.\n\n${nextMessage}`
   }
 
@@ -1134,7 +1231,13 @@ const handleSubmitPhaseReview: ToolHandler = async (args, toolCtx, ctx) => {
     return `Error: submit_phase_review can only be called in REVIEW state (current: ${state.phase}/${state.phaseState}).`
   }
 
-  const reviewOutput = (args.review_output as string)?.trim()
+  const normalizedPhaseReviewInput = {
+    ...((args.review_stdout as string | undefined) !== undefined ? { stdout: args.review_stdout as string } : {}),
+    ...((args.review_stderr as string | undefined) !== undefined ? { stderr: args.review_stderr as string } : {}),
+    ...((args.review_exit_code as number | null | undefined) !== undefined ? { exitCode: args.review_exit_code as number | null } : {}),
+    ...((args.review_error as string | null | undefined) !== undefined ? { error: args.review_error as string | null } : {}),
+  }
+  const reviewOutput = ((args.review_output as string | undefined)?.trim()) || normalizePhaseReviewOutput(normalizedPhaseReviewInput).trim()
   if (!reviewOutput) {
     return "Error: review_output is required. Pass the raw output from the isolated phase reviewer."
   }
@@ -1159,11 +1262,18 @@ const handleSubmitPhaseReview: ToolHandler = async (args, toolCtx, ctx) => {
       }))
     }
   } catch (err) {
-    rawCriteria = buildReviewerFailureCriteria(state, err instanceof Error ? err.message : String(err))
+    rawCriteria = buildReviewerFailureCriteria(state, buildInvalidPhaseReviewJsonReason(reviewOutput, err))
   }
 
   const result = computeMarkSatisfiedTransition(rawCriteria, state, ctx.engine!.sm)
   if (!result.success) return `Error: ${result.error}`
+  await persistPhaseReviewResult(ctx.openArtisanServices, state, rawCriteria.map((criterion) => ({
+    criterion: criterion.criterion,
+    met: criterion.met,
+    evidence: criterion.evidence,
+    severity: criterion.severity === "suggestion" || criterion.severity === "design-invariant" ? criterion.severity : "blocking",
+    ...(typeof criterion.score === "number" ? { score: criterion.score } : {}),
+  })), reviewOutput)
   const t = result.transition
   await store.update(toolCtx.sessionId, (draft) => {
     draft.phase = t.nextPhase
@@ -1244,13 +1354,14 @@ const handleResolveHumanGate: ToolHandler = async (args, toolCtx, ctx) => {
       return
     }
     if (resolution.action === "user-gate") {
-      draft.phaseState = "USER_GATE"
+      draft.phaseState = "HUMAN_GATE"
       draft.iterationCount = 0
       draft.retryCount = 0
       draft.userGateMessageReceived = false
       draft.currentTaskId = null
     }
   })
+  await persistCurrentTaskClaim(ctx.openArtisanServices, store.get(toolCtx.sessionId), toolCtx.sessionId)
 
   if (resolution.action === "robot-abort") {
     return (
@@ -1269,7 +1380,7 @@ const handleResolveHumanGate: ToolHandler = async (args, toolCtx, ctx) => {
       .join("\n")
     return (
       `Human gate set for task "${taskId}".\n\n` +
-      `**All remaining work is blocked behind human gates.** Auto-advancing to USER_GATE for user resolution.\n\n` +
+      `**All remaining work is blocked behind human gates.** Auto-advancing to HUMAN_GATE for user resolution.\n\n` +
       `**Unresolved human gates:**\n${gateList}`
     )
   }
@@ -1278,10 +1389,11 @@ const handleResolveHumanGate: ToolHandler = async (args, toolCtx, ctx) => {
   await store.update(toolCtx.sessionId, (draft) => {
     draft.implDag = resolution.updatedNodes
     draft.currentTaskId = refreshedDecision.action === "dispatch" ? refreshedDecision.task.id : null
-    draft.phaseState = "DRAFT"
+    draft.phaseState = "SCHEDULING"
   })
+  await persistCurrentTaskClaim(ctx.openArtisanServices, store.get(toolCtx.sessionId), toolCtx.sessionId)
 
-  return `Human gate set for task "${taskId}". The user will resolve it at USER_GATE.`
+  return `Human gate set for task "${taskId}". Returning to IMPLEMENTATION/SCHEDULING for remaining work.`
 }
 
 // ---- propose_backtrack ----
@@ -1299,13 +1411,18 @@ const handleProposeBacktrack: ToolHandler = async (args, toolCtx, ctx) => {
   const t = result.transition
   await ctx.engine!.store.update(toolCtx.sessionId, (draft) => {
     draft.phase = t.targetPhase
-    draft.phaseState = "DRAFT"
+    draft.phaseState = "REDRAFT"
     draft.iterationCount = 0
     draft.retryCount = 0
     draft.userGateMessageReceived = false
     draft.reviewArtifactFiles = []
     draft.revisionBaseline = null
     draft.pendingRevisionSteps = null
+    draft.backtrackContext = {
+      sourcePhase: state.phase,
+      targetPhase: t.targetPhase,
+      reason: (args.reason ?? "") as string,
+    }
     for (const key of t.clearedArtifactKeys) {
       delete draft.approvedArtifacts[key]
     }
@@ -1322,8 +1439,163 @@ const handleProposeBacktrack: ToolHandler = async (args, toolCtx, ctx) => {
 
 // ---- spawn_sub_workflow ----
 
-const handleSpawnSubWorkflow: ToolHandler = async (_args, _toolCtx, _ctx) => {
-  return subagentError("spawn_sub_workflow", "SubagentDispatcher for child session creation")
+const handleSpawnSubWorkflow: ToolHandler = async () => {
+  return subagentError("spawn_sub_workflow", "adapter-managed child session creation")
+}
+
+const handleAnalyzeTaskBoundaryChange: ToolHandler = async (args, toolCtx, ctx) => {
+  const state = requireState(ctx, toolCtx.sessionId)
+  const result = analyzeTaskBoundaryChange(args as any, state)
+  if (!result.success) return `Error: ${result.error}`
+  return JSON.stringify(result.analysis, null, 2)
+}
+
+const handleApplyTaskBoundaryChange: ToolHandler = async (args, toolCtx, ctx) => {
+  const { store } = ctx.engine!
+  const state = requireState(ctx, toolCtx.sessionId)
+  const result = applyTaskBoundaryChange(args as any, state)
+  if (!result.success) return `Error: ${result.error}`
+  await store.update(toolCtx.sessionId, (draft) => {
+    draft.implDag = result.updatedNodes
+  })
+  return result.message
+}
+
+const handleRoutePatchSuggestions: ToolHandler = async (_args, toolCtx, ctx) => {
+  if (!ctx.openArtisanServices) return "Error: DB-backed patch suggestion services are not enabled."
+  const state = requireState(ctx, toolCtx.sessionId)
+  const workflowId = workflowDbId(state)
+  const suggestions = await ctx.openArtisanServices.patchSuggestions.listSuggestions(workflowId, "pending")
+  if (!suggestions.ok) return `Error: ${suggestions.error.message}`
+  return JSON.stringify({ ok: true, value: routePatchSuggestions(state, suggestions.value) }, null, 2)
+}
+
+const handleResolvePatchSuggestion: ToolHandler = async (args, toolCtx, ctx) => {
+  if (!ctx.openArtisanServices) return "Error: DB-backed patch suggestion services are not enabled."
+  const parsed = ResolvePatchSuggestionSchema.safeParse(args)
+  if (!parsed.success) return `Error: ${formatZodError(parsed.error)}`
+  const { patch_suggestion_id: suggestionId, resolution } = parsed.data
+  const message = parsed.data.message ?? ""
+  const now = new Date().toISOString()
+  if (resolution === "applied" || resolution === "failed") {
+    const applied = await ctx.openArtisanServices.patchSuggestions.applySuggestion({
+      id: stableId(suggestionId, resolution, now),
+      patchSuggestionId: suggestionId,
+      appliedBy: parsed.data.applied_by ?? "agent",
+      result: resolution,
+      ...(message ? { message } : {}),
+      createdAt: now,
+    })
+    if (!applied.ok) return `Error: ${applied.error.message}`
+    return JSON.stringify({ ok: true, value: applied.value }, null, 2)
+  }
+  const status = resolution === "escalated" ? "escalated" : resolution === "deferred" ? "deferred" : "rejected"
+  const updated = await ctx.openArtisanServices.patchSuggestions.updateStatus(suggestionId, status, now)
+  if (!updated.ok) return `Error: ${updated.error.message}`
+  return JSON.stringify({ ok: true, value: updated.value }, null, 2)
+}
+
+const handleApplyPatchSuggestion: ToolHandler = async (args, toolCtx, ctx) => {
+  if (!ctx.openArtisanServices) return "Error: DB-backed patch suggestion services are not enabled."
+  const parsed = ApplyPatchSuggestionSchema.safeParse(args)
+  if (!parsed.success) return `Error: ${formatZodError(parsed.error)}`
+  const state = requireState(ctx, toolCtx.sessionId)
+  const result = await applyPatchSuggestionToWorktree({
+    services: ctx.openArtisanServices,
+    state,
+    cwd: toolCtx.directory,
+    patchSuggestionId: parsed.data.patch_suggestion_id,
+    appliedBy: parsed.data.applied_by ?? "agent",
+    ...(parsed.data.force === undefined ? {} : { force: parsed.data.force }),
+  })
+  return JSON.stringify(result, null, 2)
+}
+
+const handleReportDrift: ToolHandler = async (args, toolCtx, ctx) => {
+  const parsed = ReportDriftToolSchema.safeParse(args)
+  if (!parsed.success) return `Error: ${formatZodError(parsed.error)}`
+  const state = requireState(ctx, toolCtx.sessionId)
+  const workflowId = workflowDbId(state)
+  const worktreeObservations = parsed.data.include_worktree === false
+    ? []
+    : await collectWorktreeObservations({
+      cwd: toolCtx.directory,
+      workflowId,
+      taskOwnedFiles: state.currentTaskId ? state.implDag?.find((task) => task.id === state.currentTaskId)?.expectedFiles ?? [] : [],
+      artifactFiles: Object.values(state.artifactDiskPaths).filter((item): item is string => typeof item === "string"),
+      fileClaims: [],
+    })
+  const pendingPatchSuggestions = ctx.openArtisanServices && parsed.data.include_db !== false
+    ? await ctx.openArtisanServices.patchSuggestions.listSuggestions(workflowId, "pending")
+    : null
+  if (pendingPatchSuggestions && !pendingPatchSuggestions.ok) return `Error: ${pendingPatchSuggestions.error.message}`
+  const report = buildWorkflowDriftReport({
+    workflowId,
+    state,
+    ...(parsed.data.scope === undefined ? {} : { scope: parsed.data.scope }),
+    ...(parsed.data.drifted_artifact_keys === undefined ? {} : { artifactKeys: parsed.data.drifted_artifact_keys }),
+    ...(parsed.data.task_ids === undefined ? {} : { taskIds: parsed.data.task_ids }),
+    ...(parsed.data.changed_files === undefined ? {} : { changedFiles: parsed.data.changed_files }),
+    worktreeObservations,
+    routedPatchSuggestions: pendingPatchSuggestions?.ok ? routePatchSuggestions(state, pendingPatchSuggestions.value) : [],
+  })
+  driftReports.set(driftStoreKey(toolCtx.sessionId, report.id), report)
+  latestDriftReportBySession.set(toolCtx.sessionId, report.id)
+  return JSON.stringify({ ok: true, value: report }, null, 2)
+}
+
+const handlePlanDriftRepair: ToolHandler = async (args, toolCtx) => {
+  const parsed = PlanDriftRepairToolSchema.safeParse(args)
+  if (!parsed.success) return `Error: ${formatZodError(parsed.error)}`
+  const reportId = parsed.data.drift_report_id ?? latestDriftReportBySession.get(toolCtx.sessionId)
+  if (!reportId) return "Error: No drift report available. Call report_drift first or pass drift_report_id."
+  const report = driftReports.get(driftStoreKey(toolCtx.sessionId, reportId))
+  if (!report) return `Error: Drift report "${reportId}" was not found for this session.`
+  const createdAt = new Date().toISOString()
+  const plan = buildDriftRepairPlan({
+    id: stableId("drift-repair-plan", report.id, parsed.data.strategy ?? "minimal", createdAt),
+    driftReport: report,
+    strategy: parsed.data.strategy ?? "minimal",
+    createdAt,
+  })
+  driftRepairPlans.set(driftStoreKey(toolCtx.sessionId, plan.id), plan)
+  return JSON.stringify({ ok: true, value: { ...plan, toolCalls: plan.actions.map((action) => ({ actionId: action.id, toolCall: buildRepairToolCall(action) })) } }, null, 2)
+}
+
+async function executeDriftToolCall(toolCall: DriftToolCallPlan, toolCtx: ToolContext, ctx: BridgeContext): Promise<string> {
+  switch (toolCall.toolName) {
+    case "reset_task": return handleResetTask(toolCall.args, toolCtx, ctx)
+    case "apply_patch_suggestion": return handleApplyPatchSuggestion(toolCall.args, toolCtx, ctx)
+    case "apply_task_boundary_change": return handleApplyTaskBoundaryChange(toolCall.args, toolCtx, ctx)
+    case "resolve_human_gate": return handleResolveHumanGate(toolCall.args, toolCtx, ctx)
+    case "propose_backtrack": return handleProposeBacktrack(toolCall.args, toolCtx, ctx)
+    case "request_review": return handleRequestReview(toolCall.args, toolCtx, ctx)
+    case "submit_feedback": return handleSubmitFeedback(toolCall.args, toolCtx, ctx)
+  }
+}
+
+const handleApplyDriftRepair: ToolHandler = async (args, toolCtx, ctx) => {
+  const parsed = ApplyDriftRepairToolSchema.safeParse(args)
+  if (!parsed.success) return `Error: ${formatZodError(parsed.error)}`
+  const plan = driftRepairPlans.get(driftStoreKey(toolCtx.sessionId, parsed.data.repair_plan_id))
+  if (!plan) return `Error: Drift repair plan "${parsed.data.repair_plan_id}" was not found for this session.`
+  const approved = new Set(parsed.data.approved_actions ?? [])
+  const results: Array<{ actionId: string; skipped?: string; toolName?: string; result?: string }> = []
+  for (const action of plan.actions) {
+    const shouldApply = (parsed.data.apply_safe_actions && action.safety === "safe-auto") || approved.has(action.id)
+    if (!shouldApply) {
+      results.push({ actionId: action.id, skipped: `Action safety is ${action.safety}.` })
+      continue
+    }
+    const toolCall = buildRepairToolCall(action)
+    if (!toolCall) {
+      results.push({ actionId: action.id, skipped: "No schema-valid executable tool call is available for this action." })
+      continue
+    }
+    const result = await executeDriftToolCall(toolCall, toolCtx, ctx)
+    results.push({ actionId: action.id, toolName: toolCall.toolName, result })
+  }
+  return JSON.stringify({ ok: true, value: { repairPlanId: plan.id, results } }, null, 2)
 }
 
 // ---- query_parent_workflow ----
@@ -1391,7 +1663,7 @@ const handleSubmitAutoApprove: ToolHandler = async (args, toolCtx, ctx) => {
   }
 
   const autoTransition = computeAutoApproveTransition(sm, state.phase, state.mode, result)
-  if (!autoTransition.success) return `Error: ${autoTransition.message}`
+  if (!autoTransition.ok) return `Error: ${autoTransition.message}`
 
   if (result.approve) {
     // Auto-approve: transition to next phase
@@ -1445,8 +1717,8 @@ const handleResetTask: ToolHandler = async (args, toolCtx, ctx) => {
   if (state.phase !== "IMPLEMENTATION") {
     return `Error: reset_task can only be called during IMPLEMENTATION (current: ${state.phase}).`
   }
-  if (state.phaseState !== "DRAFT" && state.phaseState !== "REVISE") {
-    return `Error: reset_task can only be called in DRAFT or REVISE state (current: ${state.phaseState}).`
+  if (state.phaseState !== "DRAFT" && state.phaseState !== "REVISE" && state.phaseState !== "SCHEDULING") {
+    return `Error: reset_task can only be called in DRAFT, REVISE, or SCHEDULING state (current: ${state.phaseState}).`
   }
   if (state.taskCompletionInProgress) {
     return `Error: Task "${state.taskCompletionInProgress}" is awaiting review. Call submit_task_review first.`
@@ -1502,6 +1774,7 @@ const handleResetTask: ToolHandler = async (args, toolCtx, ctx) => {
     draft.taskReviewCount = 0
     draft.taskCompletionInProgress = null
   })
+  await persistCurrentTaskClaim(ctx.openArtisanServices, store.get(toolCtx.sessionId), toolCtx.sessionId)
 
   const taskList = ids.join(", ")
   return `Reset ${ids.length} task(s) to pending: ${taskList}. Current task: ${ids[0]}.`
@@ -1513,7 +1786,9 @@ const handleRoadmapRead: ToolHandler = async (_args, _toolCtx, ctx) => {
   if (!ctx.stateDir) {
     return roadmapStorageFailure("Bridge stateDir is required for roadmap tools", false)
   }
-  const { roadmapBackend } = createRoadmapServices(ctx.stateDir)
+  const services = createRoadmapServices(ctx)
+  if (!services.ok) return roadmapStorageFailure(services.message, false)
+  const { roadmapBackend } = services
   return JSON.stringify(await roadmapBackend.readRoadmap())
 }
 
@@ -1523,7 +1798,9 @@ const handleRoadmapQuery: ToolHandler = async (args, _toolCtx, ctx) => {
   if (!ctx.stateDir) {
     return roadmapStorageFailure("Bridge stateDir is required for roadmap tools", false)
   }
-  const { roadmapService } = createRoadmapServices(ctx.stateDir)
+  const services = createRoadmapServices(ctx)
+  if (!services.ok) return roadmapStorageFailure(services.message, false)
+  const { roadmapService } = services
   const query = (args.query ?? {}) as RoadmapQuery
   return JSON.stringify(await roadmapService.queryRoadmap(query))
 }
@@ -1534,7 +1811,9 @@ const handleRoadmapDeriveExecutionSlice: ToolHandler = async (args, _toolCtx, ct
   if (!ctx.stateDir) {
     return roadmapStorageFailure("Bridge stateDir is required for roadmap tools", false)
   }
-  const { roadmapService } = createRoadmapServices(ctx.stateDir)
+  const services = createRoadmapServices(ctx)
+  if (!services.ok) return roadmapStorageFailure(services.message, false)
+  const { roadmapService } = services
   const roadmapItemIds = Array.isArray(args.roadmap_item_ids)
     ? (args.roadmap_item_ids as string[])
     : Array.isArray(args.roadmapItemIds)
@@ -1571,6 +1850,14 @@ const TOOL_HANDLERS: Record<string, ToolHandler> = {
   resolve_human_gate: handleResolveHumanGate,
   propose_backtrack: handleProposeBacktrack,
   spawn_sub_workflow: handleSpawnSubWorkflow,
+  analyze_task_boundary_change: handleAnalyzeTaskBoundaryChange,
+  apply_task_boundary_change: handleApplyTaskBoundaryChange,
+  route_patch_suggestions: handleRoutePatchSuggestions,
+  resolve_patch_suggestion: handleResolvePatchSuggestion,
+  apply_patch_suggestion: handleApplyPatchSuggestion,
+  report_drift: handleReportDrift,
+  plan_drift_repair: handlePlanDriftRepair,
+  apply_drift_repair: handleApplyDriftRepair,
   query_parent_workflow: handleQueryParentWorkflow,
   query_child_workflow: handleQueryChildWorkflow,
   roadmap_read: handleRoadmapRead,
@@ -1590,7 +1877,7 @@ export const handleTaskGetReviewContext: MethodHandler = async (params, ctx) => 
   const state = ctx.engine!.store.get(p.sessionId)
   if (!state || !state.taskCompletionInProgress) return null
 
-  return buildReviewContextForTask(state, state.taskCompletionInProgress, ctx.projectDir ?? process.cwd())
+  return buildReviewContextForTask(state, state.taskCompletionInProgress, ctx.projectDir ?? process.cwd(), ctx.openArtisanServices)
 }
 
 // ---------------------------------------------------------------------------
@@ -1620,7 +1907,7 @@ export const handleAutoApproveContext: MethodHandler = async (params, ctx) => {
   const state = ctx.engine!.store.get(p.sessionId)
   if (!state || state.phaseState !== "USER_GATE" || state.activeAgent !== "robot-artisan") return null
 
-  return buildAutoApprovePrompt(buildAutoApproveRequest(state, p.sessionId))
+  return `**Gate:** USER_GATE\n` + buildAutoApprovePrompt(buildAutoApproveRequest(state, p.sessionId))
 }
 
 // ---------------------------------------------------------------------------
@@ -1643,7 +1930,7 @@ export const handleToolExecute: MethodHandler = async (params, ctx) => {
 
   const toolCtx: ToolContext = {
     sessionId: p.context.sessionId,
-    directory: p.context.directory ?? process.cwd(),
+    directory: ctx.projectDir ?? p.context.directory ?? process.cwd(),
     ...(p.context.agent ? { agent: p.context.agent } : {}),
   }
 

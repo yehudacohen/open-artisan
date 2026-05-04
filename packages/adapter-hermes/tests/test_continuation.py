@@ -13,12 +13,15 @@ from unittest.mock import patch
 import pytest
 
 from hermes_adapter.continuation import (
+    _GATEWAY_CONTINUATION_WORKER,
     NativeSessionDirectContinuationRunner,
     GatewayBackgroundContinuationHandoff,
     build_continuation_request,
+    build_session_context,
     classify_continuation_surface,
     execute_continuation,
     resolve_continuation_strategy,
+    should_send_gateway_response_for_workflow_state,
 )
 
 from .conftest import MockBridgeClient
@@ -88,6 +91,48 @@ class TestContinuationSurfaceClassification:
 
 
 class TestContinuationRequestConstruction:
+    def test_builds_gateway_context_from_session_key_when_thread_contextvars_are_unavailable(self, monkeypatch) -> None:
+        monkeypatch.setenv(
+            "HERMES_SESSION_KEY",
+            "agent:main:discord:thread:1498867561683751044:1498867561683751044",
+        )
+
+        context = build_session_context({})
+
+        assert context == {
+            "platform": "discord",
+            "source": "gateway",
+            "chat_id": "1498867561683751044",
+            "thread_id": "1498867561683751044",
+            "session_origin": "agent:main:discord:thread:1498867561683751044:1498867561683751044",
+        }
+
+    def test_session_key_context_is_enough_for_gateway_handoff(self, monkeypatch) -> None:
+        monkeypatch.setenv(
+            "HERMES_SESSION_KEY",
+            "agent:main:discord:thread:1498867561683751044:1498867561683751044",
+        )
+
+        request = build_continuation_request(
+            session_id="ses-discord",
+            project_dir="/tmp/project",
+            agent="hermes",
+            idle_decision={
+                "action": "reprompt",
+                "message": "Continue revising the Open Artisan artifact.",
+            },
+            session_context=build_session_context({}),
+            workflow_state={"phase": "INTERFACES", "phaseState": "REVISE"},
+        )
+
+        assert request["gatewayRouting"] == {
+            "platform": "discord",
+            "chatId": "1498867561683751044",
+            "threadId": "1498867561683751044",
+            "sessionOrigin": "agent:main:discord:thread:1498867561683751044:1498867561683751044",
+        }
+        assert resolve_continuation_strategy(request) == "gateway_handoff"
+
     def test_builds_direct_cli_request_from_idle_check_and_session_context(self) -> None:
         request = build_continuation_request(
             session_id="ses-123",
@@ -195,6 +240,21 @@ class TestContinuationStrategyResolution:
 
 
 class TestContinuationExecution:
+    def test_gateway_response_allowed_only_at_truthful_stop_states(self) -> None:
+        assert should_send_gateway_response_for_workflow_state(
+            {"phase": "TESTS", "phaseState": "USER_GATE"}
+        ) is True
+        assert should_send_gateway_response_for_workflow_state(
+            {"phase": "DONE", "phaseState": "DRAFT"}
+        ) is True
+        assert should_send_gateway_response_for_workflow_state(
+            {"phase": "TESTS", "phaseState": "REVISE"}
+        ) is False
+        assert should_send_gateway_response_for_workflow_state(
+            {"phase": "IMPLEMENTATION", "phaseState": "DRAFT"}
+        ) is False
+        assert should_send_gateway_response_for_workflow_state(None) is True
+
     def test_native_direct_runner_launches_sync_session_worker(self, monkeypatch) -> None:
         runner = NativeSessionDirectContinuationRunner()
         request = {
@@ -243,6 +303,11 @@ class TestContinuationExecution:
                 "platform": "telegram",
                 "source": "gateway",
             },
+            "workflowState": {
+                "featureName": "structural-state-machine-rigor",
+                "phase": "TESTS",
+                "phaseState": "REVISE",
+            },
         }
 
         monkeypatch.setattr("hermes_adapter.continuation._resolve_python_command", lambda: "/usr/bin/python3")
@@ -262,11 +327,21 @@ class TestContinuationExecution:
         assert command[:2] == ["/usr/bin/python3", "-c"]
         assert "GatewayRunner" in command[2]
         assert "SessionSource" in command[2]
+        assert "_load_current_workflow_state" in command[2]
+        assert "_should_send_gateway_response" in command[2]
         assert env["OPENARTISAN_CONTINUE_CHAT_ID"] == "-100500"
         assert env["OPENARTISAN_CONTINUE_THREAD_ID"] == "77"
         assert env["OPENARTISAN_CONTINUE_USER_ID"] == "1234"
         assert env["OPENARTISAN_CONTINUE_MESSAGE_ID"] == "999"
         assert env["OPENARTISAN_CONTINUE_SESSION_ORIGIN"] == "telegram:-100500:77"
+        payload = __import__("json").loads(command[3])
+        assert payload["workflowState"] == request["workflowState"]
+
+    def test_gateway_worker_suppresses_non_gate_responses(self) -> None:
+        assert "_load_current_workflow_state" in _GATEWAY_CONTINUATION_WORKER
+        assert "if not _should_send_gateway_response(_load_current_workflow_state())" in _GATEWAY_CONTINUATION_WORKER
+        assert "USER_GATE" in _GATEWAY_CONTINUATION_WORKER
+        assert "ESCAPE_HATCH" in _GATEWAY_CONTINUATION_WORKER
 
     def test_execute_continuation_dispatches_direct_runner(self) -> None:
         request = {
@@ -366,11 +441,8 @@ class TestContinuationExecution:
             "detail": "missing gateway routing metadata",
             "missingFields": [
                 "chatId",
-                "messageId",
                 "platform",
                 "sessionOrigin",
-                "threadId",
-                "userId",
             ],
         }
         assert direct_runner.calls == []

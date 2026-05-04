@@ -129,7 +129,7 @@ export async function handleEscapeHatch(
 
     const ndFirst = ndPlan.revisionSteps[0]!
     const outcome = sm.transition(state.phase, state.phaseState, "user_feedback", state.mode)
-    if (!outcome.success) return { action: "error", message: `State transition failed: ${outcome.message}` }
+    if (!outcome.ok) return { action: "error", message: `State transition failed: ${outcome.message}` }
 
     return {
       action: "revise",
@@ -213,7 +213,7 @@ export async function handleEscapeHatch(
         return { action: "error", message: "Orchestrator returned backtrack classification with no revision steps." }
       }
       const altOutcome = sm.transition(state.phase, state.phaseState, "user_feedback", state.mode)
-      if (!altOutcome.success) return { action: "error", message: `State transition failed: ${altOutcome.message}` }
+      if (!altOutcome.ok) return { action: "error", message: `State transition failed: ${altOutcome.message}` }
 
       return {
         action: "revise",
@@ -235,7 +235,7 @@ export async function handleEscapeHatch(
       return { action: "error", message: "Orchestrator returned empty revision steps for tactical change." }
     }
     const altOutcome = sm.transition(state.phase, state.phaseState, "user_feedback", state.mode)
-    if (!altOutcome.success) return { action: "error", message: `State transition failed: ${altOutcome.message}` }
+    if (!altOutcome.ok) return { action: "error", message: `State transition failed: ${altOutcome.message}` }
 
     return {
       action: "revise",
@@ -263,7 +263,7 @@ export async function handleEscapeHatch(
   }
 
   const outcome = sm.transition(state.phase, state.phaseState, "user_feedback", state.mode)
-  if (!outcome.success) return { action: "error", message: `State transition failed: ${outcome.message}` }
+  if (!outcome.ok) return { action: "error", message: `State transition failed: ${outcome.message}` }
 
   const remainingMsg = steps.length > 1
     ? `\n\n**Revision cascade:** After completing this revision, ${steps.length - 1} more artifact(s) will need re-review: ${steps.slice(1).map((s) => s.artifact).join(" → ")}.`
@@ -303,7 +303,7 @@ export function handleCascade(
   }
 
   const outcome = sm.transition(state.phase, state.phaseState, "user_feedback", state.mode)
-  if (!outcome.success) return { action: "error", message: `State transition failed: ${outcome.message}` }
+  if (!outcome.ok) return { action: "error", message: `State transition failed: ${outcome.message}` }
 
   const remainingMsg = remaining.length > 0
     ? `\n\n**Cascade continues:** ${remaining.length} more artifact(s) after this: ${remaining.map((s) => s.artifact).join(" → ")}.`
@@ -346,7 +346,7 @@ export async function handleNormalRevise(
   } catch {
     // Orchestrator hard failure — fall back to simple REVISE in current phase
     const outcome = sm.transition(state.phase, state.phaseState, "user_feedback", state.mode)
-    if (!outcome.success) return { action: "error", message: `State transition failed: ${outcome.message}` }
+    if (!outcome.ok) return { action: "error", message: `State transition failed: ${outcome.message}` }
     return {
       action: "revise",
       targetPhase: outcome.nextPhase as Phase,
@@ -367,7 +367,7 @@ export async function handleNormalRevise(
     }
     // Use the backtrack event instead of user_feedback — this produces DRAFT, not REVISE
     const outcome = sm.transition(state.phase, state.phaseState, "user_feedback", state.mode)
-    if (!outcome.success) return { action: "error", message: `State transition failed: ${outcome.message}` }
+    if (!outcome.ok) return { action: "error", message: `State transition failed: ${outcome.message}` }
 
     return {
       action: "revise",
@@ -421,7 +421,7 @@ export async function handleNormalRevise(
     return { action: "error", message: "Orchestrator returned empty revision steps for tactical change." }
   }
   const outcome = sm.transition(state.phase, state.phaseState, "user_feedback", state.mode)
-  if (!outcome.success) return { action: "error", message: `State transition failed: ${outcome.message}` }
+  if (!outcome.ok) return { action: "error", message: `State transition failed: ${outcome.message}` }
 
   return {
     action: "revise",

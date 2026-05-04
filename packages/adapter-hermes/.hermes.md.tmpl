@@ -20,7 +20,7 @@ Each phase follows: **DRAFT → REVIEW → USER_GATE → (optional REVISE)**
 | `oa_mark_scan_complete` | Complete discovery scan (REFACTOR/INCREMENTAL) |
 | `oa_mark_analyze_complete` | Complete discovery analysis |
 | `oa_mark_satisfied` | Submit self-review criteria assessment |
-| `oa_request_review` | Submit artifact for review (`artifact_content` for text, `artifact_files` for files) |
+| `oa_request_review` | Submit review artifacts (`artifact_files`, or markdown via `artifact_markdown`) |
 | `oa_submit_feedback` | Approve or request revision at USER_GATE |
 | `oa_mark_task_complete` | Complete a DAG task during IMPLEMENTATION |
 | `oa_check_prior_workflow` | Check for existing workflow state |

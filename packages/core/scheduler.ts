@@ -5,16 +5,18 @@
  * decision. The caller (index.ts IMPLEMENTATION phase handler) uses this
  * decision to dispatch the task and update the DAG state.
  *
- * Scope (Layer 4 foundations only):
- * - Sequential execution: one task at a time
- * - No worktrees, no parallel dispatch (deferred — requires OpenCode async task API)
- * - DAG state is serialized to WorkflowState.implDag (added in this layer)
+ * Scope:
+ * - Sequential execution is always available.
+ * - Parallel-safe task sets are acknowledged and deterministically drained through
+ *   the sequential lane unless an adapter provides a richer batch executor.
+ * - DAG state is serialized to WorkflowState.implDag.
  *
  * The scheduler is a pure function — it reads DAG state and returns a decision.
  * Mutations are applied by the caller after the decision is made.
  */
 
 import { createImplDAG, type TaskIsolation, type TaskNode, type ImplDAG } from "./dag"
+import { buildTaskImplementationRubricPreview } from "./rubrics"
 import type { WorkflowState } from "./types"
 
 // ---------------------------------------------------------------------------
@@ -27,7 +29,6 @@ export type SchedulerDecision =
   | SchedulerComplete
   | SchedulerBlocked
   | SchedulerAwaitingHuman
-  | SchedulerUnsupported
   | SchedulerError
 
 export type SchedulerIssueCode =
@@ -36,7 +37,6 @@ export type SchedulerIssueCode =
   | "deps-unresolved"
   | "no-slots"
   | "isolation-missing"
-  | "capability-missing"
   | "dag-inconsistent"
 
 export interface SchedulerIssue {
@@ -122,14 +122,6 @@ export interface SchedulerAwaitingHuman {
 export interface SchedulerError {
   action: "error"
   message: string
-}
-
-export interface SchedulerUnsupported {
-  action: "unsupported"
-  reason: "bridge-capability-missing" | "runtime-isolation-missing"
-  issues: SchedulerIssue[]
-  fallback: "sequential" | "block"
-  retryable: false
 }
 
 export interface TaskProgress {
@@ -234,16 +226,15 @@ function buildParallelDecision(input: SchedulerEvaluateInput): SchedulerEvaluate
       }
     }
 
+    const [task] = parallelReady
     return {
       decision: {
-        action: "unsupported",
-        reason: "runtime-isolation-missing",
-        issues: [{
-          code: "capability-missing",
-          detail: "Parallel dispatch contract is defined, but runtime batch execution is not implemented yet.",
-        }],
-        fallback: "sequential",
-        retryable: false,
+        action: "dispatch",
+        task: task!,
+        prompt:
+          "Multiple parallel-safe tasks are ready; dispatching deterministically through the sequential lane for this adapter.\n\n" +
+          buildTaskPrompt(task!, progress),
+        progress,
       },
       slots,
     }
@@ -304,6 +295,8 @@ function buildTaskPrompt(task: TaskNode, progress: TaskProgress): string {
 
   lines.push("")
   lines.push(`**Complexity estimate:** ${task.estimatedComplexity}`)
+  lines.push("")
+  lines.push(buildTaskImplementationRubricPreview())
   lines.push("")
   lines.push("When implementation is complete and tests pass, call `mark_task_complete`.")
 

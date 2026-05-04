@@ -108,6 +108,24 @@ describe("buildTaskReviewPrompt", () => {
     expect(prompt).toContain("large")
   })
 
+  it("includes classified worktree observations as informational context", () => {
+    const prompt = buildTaskReviewPrompt(makeRequest({
+      worktreeObservations: [
+        {
+          id: "wt-1",
+          workflowId: "workflow-1",
+          path: "dist/out.js",
+          status: "untracked",
+          classification: "generated",
+          createdAt: "2026-05-01T00:00:00.000Z",
+        },
+      ],
+    }))
+    expect(prompt).toContain("Worktree Observations")
+    expect(prompt).toContain("[generated] untracked: `dist/out.js`")
+    expect(prompt).toContain("do not fail this task solely")
+  })
+
   it("includes review instructions", () => {
     const prompt = buildTaskReviewPrompt(makeRequest())
     expect(prompt).toContain("Run the tests")
@@ -238,6 +256,20 @@ describe("parseTaskReviewResult", () => {
     expect(result.reasoning).toContain("All tests pass")
   })
 
+  it("parses structured patch suggestions", () => {
+    const result = parseTaskReviewResult(JSON.stringify({
+      passed: true,
+      issues: [],
+      scores: { code_quality: 9, error_handling: 9 },
+      patch_suggestions: [{ target_path: "src/a.ts", summary: "Tighten check", suggested_patch: "diff --git a/src/a.ts b/src/a.ts" }],
+      reasoning: "Looks good",
+    }))
+
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    expect(result.patchSuggestions).toEqual([{ targetPath: "src/a.ts", summary: "Tighten check", suggestedPatch: "diff --git a/src/a.ts b/src/a.ts" }])
+  })
+
   it("parses a failing result with issues", () => {
     const raw = JSON.stringify({
       passed: false,
@@ -284,28 +316,28 @@ describe("parseTaskReviewResult", () => {
     expect(result.error).toContain("Failed to parse")
   })
 
-  it("treats truthy non-boolean passed as false", () => {
+  it("rejects truthy non-boolean passed values", () => {
     const raw = JSON.stringify({
       passed: "yes",
       issues: [],
       reasoning: "looks good",
     })
     const result = parseTaskReviewResult(raw)
-    expect(result.success).toBe(true)
-    if (!result.success) return
-    expect(result.passed).toBe(false) // "yes" !== true
+    expect(result.success).toBe(false)
+    if (result.success) return
+    expect(result.error).toContain("schema")
   })
 
-  it("filters non-string items from issues array", () => {
+  it("rejects non-string items in issues array", () => {
     const raw = JSON.stringify({
       passed: false,
       issues: ["real issue", 42, null, "another issue"],
       reasoning: "mixed types",
     })
     const result = parseTaskReviewResult(raw)
-    expect(result.success).toBe(true)
-    if (!result.success) return
-    expect(result.issues).toEqual(["real issue", "another issue"])
+    expect(result.success).toBe(false)
+    if (result.success) return
+    expect(result.error).toContain("issues")
   })
 
   it("handles missing issues array gracefully", () => {

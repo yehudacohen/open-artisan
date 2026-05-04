@@ -45,8 +45,24 @@ export const handlePromptCompaction: MethodHandler = async (params, ctx) => {
     throw new JSONRPCErrorException("sessionId is required", INVALID_PARAMS)
   }
 
-  const state = ctx.engine!.store.get(p.sessionId)
+  const { store, sessions } = ctx.engine!
+  const parentId = sessions.getParent(p.sessionId)
+  if (parentId) {
+    const childState = store.get(p.sessionId)
+    if (!childState) {
+      const parentState = store.get(parentId)
+      if (!parentState) return null
+      return buildSubagentContext(parentState)
+    }
+  }
+
+  const state = store.get(p.sessionId)
   if (!state) return null
 
-  return buildCompactionContext(state)
+  const base = buildCompactionContext(state)
+  if (state.phaseState === "REDRAFT" && state.backtrackContext) {
+    return `${base}\n\n### Backtrack Provenance\n- Source phase: ${state.backtrackContext.sourcePhase}\n- Target phase: ${state.backtrackContext.targetPhase}\n- Reason: ${state.backtrackContext.reason}`
+  }
+
+  return base
 }

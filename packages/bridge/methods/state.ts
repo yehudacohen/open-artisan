@@ -72,7 +72,7 @@ export const handleStateGet: MethodHandler = async (params, ctx) => {
 
   return {
     state: snapshot,
-    runtimeHealth: await resolveRuntimeHealth(p.sessionId, snapshot as Record<string, unknown> | null, ctx.stateDir),
+    runtimeHealth: await resolveRuntimeHealth(p.sessionId, snapshot as unknown as Record<string, unknown> | null, ctx.stateDir),
   }
 }
 
@@ -83,6 +83,6 @@ export const handleStateHealth: MethodHandler = async (params, ctx) => {
   }
 
   const state = ctx.engine!.store.get(p.sessionId)
-  const snapshot = state ? structuredClone(state) as Record<string, unknown> : null
+  const snapshot = state ? structuredClone(state) as unknown as Record<string, unknown> : null
   return resolveRuntimeHealth(p.sessionId, snapshot, ctx.stateDir)
 }

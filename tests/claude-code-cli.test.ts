@@ -6,7 +6,7 @@
  */
 import { describe, expect, it, beforeAll, afterAll } from "bun:test"
 import { join } from "node:path"
-import { mkdtemp, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { existsSync } from "node:fs"
 import { spawn, execSync, type ChildProcess } from "node:child_process"
@@ -22,6 +22,7 @@ let tmpDir: string
 let stateDir: string
 let socketPath: string
 let serverProcess: ChildProcess | null = null
+const CLI_FEATURE_NAME = "cli-feat"
 
 /** Run the artisan CLI with args and optional stdin. Returns stdout. */
 function runCli(args: string[], stdin?: string): string {
@@ -115,6 +116,7 @@ describe("artisan CLI", () => {
     expect(output).toContain("Usage: artisan")
     expect(output).toContain("select-mode")
     expect(output).toContain("mark-task-complete")
+    expect(output).toContain("apply-patch-suggestion")
   })
 
   it("ping returns pong", () => {
@@ -128,7 +130,7 @@ describe("artisan CLI", () => {
   })
 
   it("select-mode with CLI flags", () => {
-    const output = runCli(["select-mode", "--mode", "GREENFIELD", "--feature-name", `cli-feat-${Date.now()}`])
+    const output = runCli(["select-mode", "--mode", "GREENFIELD", "--feature-name", CLI_FEATURE_NAME])
     expect(output).toContain("GREENFIELD")
   })
 
@@ -138,11 +140,14 @@ describe("artisan CLI", () => {
     expect(output).toContain("GREENFIELD")
   })
 
-  it("request-review with stdin JSON", () => {
+  it("request-review with stdin JSON", async () => {
+    const artifactPath = join(tmpDir, ".openartisan", CLI_FEATURE_NAME, "plan.md")
+    await mkdir(join(tmpDir, ".openartisan", CLI_FEATURE_NAME), { recursive: true })
+    await writeFile(artifactPath, "# Plan\nBuild the thing step by step.\n", "utf-8")
     const input = JSON.stringify({
       summary: "Plan ready",
       artifact_description: "The plan document",
-      artifact_content: "# Plan\nBuild the thing step by step.",
+      artifact_files: [artifactPath],
     })
     const output = runCli(["request-review"], input)
     expect(output).toContain("REVIEW")

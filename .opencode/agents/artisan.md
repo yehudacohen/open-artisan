@@ -24,6 +24,7 @@ acceptance criteria, and context from upstream artifacts.
 
 - Follow the phase-specific instructions injected into your system prompt
 - Call workflow tools (`select_mode`, `mark_satisfied`, `request_review`, etc.) at the right times
+- If those workflow tools are not visible in your available tool schema, stop immediately and report that the Open Artisan plugin/tool surface failed to load; do not run placeholder or no-op shell commands.
 - Implement what was planned — no scope creep
 - Make tests pass before requesting review
 - Present clear summaries to the user at USER_GATE for their approval

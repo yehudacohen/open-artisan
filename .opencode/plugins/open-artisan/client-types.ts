@@ -37,6 +37,12 @@ export interface SessionPromptOptions {
   body: {
     /** When true, the session does not expect a reply (fire-and-forget) */
     noReply?: boolean
+    /** Agent identifier to use for this prompt. OpenCode applies agents at prompt time. */
+    agent?: string
+    /** Model identifier for this prompt. */
+    model?: { modelID: string; providerID?: string }
+    /** Per-prompt tool availability overrides. */
+    tools?: Record<string, boolean>
     parts: Array<{ type: string; text: string; id?: string }>
   }
 }

@@ -4,7 +4,7 @@ import { assessParallelTaskIsolation, getPhaseToolPolicy, normalizeParallelWrita
 import type { TaskNode } from "#core/dag"
 
 function makeTask(id: string, isolation?: TaskNode["isolation"]): Pick<TaskNode, "id" | "isolation"> {
-  return { id, isolation }
+  return isolation ? { id, isolation } : { id }
 }
 
 describe("parallel tool-guard isolation", () => {

@@ -31,11 +31,12 @@ import {
   handleSessionDeleted,
 } from "#bridge/methods/lifecycle"
 import { handleStateGet, handleStateHealth } from "#bridge/methods/state"
+import type { LifecycleInitParams } from "#bridge/protocol"
 import { handleGuardCheck, handleGuardPolicy } from "#bridge/methods/guard"
 import { handlePromptBuild, handlePromptCompaction } from "#bridge/methods/prompt"
 import { handleMessageProcess } from "#bridge/methods/message"
 import { handleIdleCheck } from "#bridge/methods/idle"
-import { handleToolExecute, handleTaskGetReviewContext, handleAutoApproveContext } from "#bridge/methods/tool-execute"
+import { handleToolExecute, handleTaskGetReviewContext, handlePhaseGetReviewContext, handleAutoApproveContext } from "#bridge/methods/tool-execute"
 
 import { createSocketTransport } from "#claude-code/src/socket-transport"
 import { DEFAULT_STATE_DIR_NAME, getSocketPath, PID_FILENAME } from "#claude-code/src/constants"
@@ -44,11 +45,17 @@ import { DEFAULT_STATE_DIR_NAME, getSocketPath, PID_FILENAME } from "#claude-cod
 // Parse CLI args (using node:util parseArgs — handles --flag=value and --flag value)
 // ---------------------------------------------------------------------------
 
-function parseCLIArgs(): { projectDir: string; daemon: boolean; stateDir?: string } {
+type ParsedPersistence = NonNullable<LifecycleInitParams["persistence"]>
+
+function parseCLIArgs(): { projectDir: string; daemon: boolean; stateDir?: string; persistence?: ParsedPersistence } {
   const { values } = parseArgs({
     options: {
       "project-dir": { type: "string" },
       "state-dir": { type: "string" },
+      persistence: { type: "string" },
+      "db-dir": { type: "string" },
+      "db-file": { type: "string" },
+      "db-schema": { type: "string" },
       daemon: { type: "boolean", default: false },
     },
     strict: false, // ignore unknown args
@@ -61,12 +68,30 @@ function parseCLIArgs(): { projectDir: string; daemon: boolean; stateDir?: strin
   }
 
   const stateDirValue = values["state-dir"]
+  const persistenceKind = typeof values.persistence === "string" ? values.persistence : process.env["OPENARTISAN_STATE_BACKEND"]
+  const dbDir = typeof values["db-dir"] === "string" ? resolve(values["db-dir"]) : process.env["OPENARTISAN_DB_DIR"]
+  const dbFile = typeof values["db-file"] === "string" ? values["db-file"] : process.env["OPENARTISAN_DB_FILE"]
+  const dbSchema = typeof values["db-schema"] === "string" ? values["db-schema"] : process.env["OPENARTISAN_DB_SCHEMA"]
   const daemon = values.daemon === true
+  const persistence: ParsedPersistence | undefined =
+    persistenceKind === "filesystem"
+      ? { kind: "filesystem" }
+      : persistenceKind === "db" || persistenceKind === "pglite"
+        ? {
+          kind: persistenceKind,
+          pglite: {
+            ...(dbDir ? { dataDir: dbDir } : {}),
+            ...(dbFile ? { databaseFileName: dbFile } : {}),
+            ...(dbSchema ? { schemaName: dbSchema } : {}),
+          },
+        }
+        : undefined
 
   return {
     projectDir: resolve(projectDirValue),
     daemon,
     ...(typeof stateDirValue === "string" ? { stateDir: resolve(stateDirValue) } : {}),
+    ...(persistence ? { persistence } : {}),
   }
 }
 
@@ -74,7 +99,7 @@ function parseCLIArgs(): { projectDir: string; daemon: boolean; stateDir?: strin
 // Daemonize — fork self and exit parent
 // ---------------------------------------------------------------------------
 
-async function daemonize(projectDir: string, stateDir?: string): Promise<never> {
+async function daemonize(projectDir: string, stateDir?: string, persistence?: ParsedPersistence): Promise<never> {
   const { fork } = await import("node:child_process")
   const scriptPath = process.argv[1]
   if (!scriptPath) {
@@ -83,6 +108,10 @@ async function daemonize(projectDir: string, stateDir?: string): Promise<never> 
   }
   const childArgs = ["--project-dir", projectDir]
   if (stateDir) childArgs.push("--state-dir", stateDir)
+  if (persistence?.kind) childArgs.push("--persistence", persistence.kind)
+  if (persistence?.pglite?.dataDir) childArgs.push("--db-dir", persistence.pglite.dataDir)
+  if (persistence?.pglite?.databaseFileName) childArgs.push("--db-file", persistence.pglite.databaseFileName)
+  if (persistence?.pglite?.schemaName) childArgs.push("--db-schema", persistence.pglite.schemaName)
   // Fork without --daemon flag so the child runs in foreground mode
   const child = fork(scriptPath, childArgs, {
     detached: true,
@@ -109,7 +138,7 @@ async function daemonize(projectDir: string, stateDir?: string): Promise<never> 
 // ---------------------------------------------------------------------------
 
 async function main() {
-  const { projectDir, daemon, stateDir: customStateDir } = parseCLIArgs()
+  const { projectDir, daemon, stateDir: customStateDir, persistence } = parseCLIArgs()
   const stateDir = customStateDir ?? join(projectDir, DEFAULT_STATE_DIR_NAME)
   const socketPath = getSocketPath(stateDir)
 
@@ -121,7 +150,7 @@ async function main() {
 
   // Daemonize if requested
   if (daemon) {
-    await daemonize(projectDir, customStateDir)
+    await daemonize(projectDir, customStateDir, persistence)
   }
 
   // Create the bridge engine (transport-agnostic — no stdio wiring)
@@ -141,6 +170,7 @@ async function main() {
     "idle.check": handleIdleCheck,
     "tool.execute": handleToolExecute,
     "task.getReviewContext": handleTaskGetReviewContext,
+    "task.getPhaseReviewContext": handlePhaseGetReviewContext,
     "task.getAutoApproveContext": handleAutoApproveContext,
   })
 
@@ -148,6 +178,10 @@ async function main() {
   await handleInit({
     projectDir,
     stateDir,
+    transport: "unix-socket",
+    socketPath,
+    registerRuntime: true,
+    ...(persistence ? { persistence } : {}),
     capabilities: {
       selfReview: "agent-only",
       orchestrator: false,

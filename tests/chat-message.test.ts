@@ -101,6 +101,9 @@ describe("processUserMessage — at USER_GATE, approval signals", () => {
     "yes and proceed",
     "approved, thanks",
     "yes please",
+    "do you think this design is the right design? If you do, I approve",
+    "if so, approved",
+    "I approve this change",
   ]
 
   for (const msg of approvalMessages) {
@@ -116,7 +119,6 @@ describe("processUserMessage — at USER_GATE, approval signals", () => {
 describe("processUserMessage — ambiguous approval phrases are treated as feedback", () => {
   // These contain the word 'approve' but in a context that could be negative
   const ambiguousMessages = [
-    "I approve this change",      // full sentence — treated as feedback for safety
     "I don't approve of this",
     "approved but I have concerns",
     "approved, but I have one concern",
@@ -150,6 +152,58 @@ describe("processUserMessage — at USER_GATE, feedback signals", () => {
       expect(result.feedbackType).toBe("feedback")
     })
   }
+})
+
+describe("processUserMessage — at USER_GATE, review clarification", () => {
+  const clarificationMessages = [
+    "okay, so what am i reviewing?",
+    "What should I review here?",
+    "Which files am I reviewing?",
+    "Where are the review assets?",
+    "Can you summarize what I am reviewing?",
+    "have we implemented all the implementation tasks? How has your experience with open-artisan been?",
+    "Did all tests pass?",
+    "How was your experience with Open Artisan?",
+    "Do you think this design is right?",
+    "Can you update me on progress?",
+    "What changed since the last review?",
+  ]
+
+  for (const msg of clarificationMessages) {
+    it(`does not route clarification as feedback: "${msg}"`, () => {
+      const state = makeState({ phaseState: "USER_GATE", phase: "IMPLEMENTATION" })
+      const parts = [{ type: "text", text: msg }]
+      const result = processUserMessage(state, parts)
+      expect(result.intercepted).toBe(false)
+      expect(result.feedbackType).toBeNull()
+      expect(result.parts).toBe(parts)
+    })
+  }
+
+  it("still routes change-request questions as feedback", () => {
+    const state = makeState({ phaseState: "USER_GATE" })
+    const result = processUserMessage(state, [{ type: "text", text: "Can you add section on authentication?" }])
+    expect(result.intercepted).toBe(true)
+    expect(result.feedbackType).toBe("feedback")
+  })
+})
+
+describe("processUserMessage — ESCAPE_HATCH clarification", () => {
+  it("does not route escape-hatch clarification as a decision", () => {
+    const state = makeState({ phaseState: "ESCAPE_HATCH", phase: "PLANNING" })
+    const parts = [{ type: "text", text: "What is the escape hatch and what are my options?" }]
+    const result = processUserMessage(state, parts)
+    expect(result.intercepted).toBe(false)
+    expect(result.feedbackType).toBeNull()
+    expect(result.parts).toBe(parts)
+  })
+
+  it("still routes actual escape-hatch decisions", () => {
+    const state = makeState({ phaseState: "ESCAPE_HATCH", phase: "PLANNING" })
+    const result = processUserMessage(state, [{ type: "text", text: "accept the strategic change" }])
+    expect(result.intercepted).toBe(true)
+    expect(result.feedbackType).toBe("feedback")
+  })
 })
 
 describe("processUserMessage — injected parts structure", () => {
@@ -239,10 +293,16 @@ describe("buildUserGateHint", () => {
     expect(hint).toContain("revise")
   })
 
-  it("instructs agent not to proceed without calling submit_feedback", () => {
+  it("instructs agent to route artifact decisions through submit_feedback", () => {
     const hint = buildUserGateHint("PLANNING", "USER_GATE")
     expect(hint).toContain("submit_feedback")
-    // The hint should strongly enforce immediate routing — either via "wait" or "first and only"
-    expect(hint.toLowerCase()).toMatch(/first and only|do not|mandatory|immediate/)
+    expect(hint).toContain("artifact decision")
+  })
+
+  it("does not instruct the agent to submit clarification questions as feedback", () => {
+    const hint = buildUserGateHint("IMPLEMENTATION", "USER_GATE")
+    expect(hint).toContain("what am I reviewing")
+    expect(hint).toContain("Do not call `submit_feedback` for clarification")
+    expect(hint).not.toContain("If the user requests changes or asks questions")
   })
 })

@@ -41,6 +41,8 @@ const STANDARD_PHASES: Phase[] = [
   "IMPLEMENTATION",
 ]
 
+const ARTIFACT_PHASES: Phase[] = ["PLANNING", "INTERFACES", "TESTS", "IMPL_PLAN"]
+
 function buildTable(): TableEntry[] {
   const table: TableEntry[] = []
 
@@ -78,7 +80,6 @@ function buildTable(): TableEntry[] {
     table.push({ from: [phase, "REVIEW"], event: "self_review_pass", modePredicate: null, to: [phase, "USER_GATE"] })
     table.push({ from: [phase, "REVIEW"], event: "self_review_fail", modePredicate: null, to: [phase, "REVISE"] })
     table.push({ from: [phase, "REVIEW"], event: "escalate_to_user", modePredicate: null, to: [phase, "USER_GATE"] })
-    table.push({ from: [phase, "USER_GATE"], event: "user_approve", modePredicate: null, to: [next, "DRAFT"] })
     table.push({ from: [phase, "USER_GATE"], event: "user_feedback", modePredicate: null, to: [phase, "REVISE"] })
     // ESCAPE_HATCH: strategic pivot detected at USER_GATE → structural guard
     // user_approve is NOT valid in ESCAPE_HATCH — the SM will reject it.
@@ -86,7 +87,43 @@ function buildTable(): TableEntry[] {
     table.push({ from: [phase, "USER_GATE"], event: "escape_hatch_triggered", modePredicate: null, to: [phase, "ESCAPE_HATCH"] })
     table.push({ from: [phase, "ESCAPE_HATCH"], event: "user_feedback", modePredicate: null, to: [phase, "REVISE"] })
     table.push({ from: [phase, "REVISE"], event: "revision_complete", modePredicate: null, to: [phase, "REVIEW"] })
+
+    if (phase === "IMPLEMENTATION") {
+      table.push({ from: [phase, "USER_GATE"], event: "user_approve", modePredicate: null, to: [next, "DRAFT"] })
+      continue
+    }
+
+    table.push({ from: [phase, "REDRAFT"], event: "draft_complete", modePredicate: null, to: [phase, "REVIEW"] })
+
+    if (phase === "IMPL_PLAN") {
+      table.push({ from: [phase, "USER_GATE"], event: "user_approve", modePredicate: (m) => m === "INCREMENTAL", to: ["IMPLEMENTATION", "SCHEDULING"] })
+    } else {
+      table.push({ from: [phase, "USER_GATE"], event: "user_approve", modePredicate: (m) => m === "INCREMENTAL", to: [next, "SKIP_CHECK"] })
+    }
+    table.push({ from: [phase, "USER_GATE"], event: "user_approve", modePredicate: (m) => m !== "INCREMENTAL", to: [next, "DRAFT"] })
+
+    table.push({ from: [phase, "SKIP_CHECK"], event: "scheduling_complete", modePredicate: null, to: [phase, "DRAFT"] })
+    table.push({ from: [phase, "CASCADE_CHECK"], event: "scheduling_complete", modePredicate: null, to: [phase, "REVISE"] })
   }
+
+  for (const phase of ARTIFACT_PHASES) {
+    const next = nextPhase(phase)
+    if (phase === "IMPL_PLAN") {
+      table.push({ from: [phase, "SKIP_CHECK"], event: "phase_skipped", modePredicate: null, to: ["IMPLEMENTATION", "SCHEDULING"] })
+      table.push({ from: [phase, "CASCADE_CHECK"], event: "cascade_step_skipped", modePredicate: null, to: ["IMPLEMENTATION", "SCHEDULING"] })
+      continue
+    }
+
+    table.push({ from: [phase, "SKIP_CHECK"], event: "phase_skipped", modePredicate: null, to: [next, "SKIP_CHECK"] })
+    table.push({ from: [phase, "CASCADE_CHECK"], event: "cascade_step_skipped", modePredicate: null, to: [next, "CASCADE_CHECK"] })
+  }
+
+  table.push({ from: ["IMPLEMENTATION", "SCHEDULING"], event: "scheduling_complete", modePredicate: null, to: ["IMPLEMENTATION", "DRAFT"] })
+  table.push({ from: ["IMPLEMENTATION", "TASK_REVIEW"], event: "task_review_pass", modePredicate: null, to: ["IMPLEMENTATION", "SCHEDULING"] })
+  table.push({ from: ["IMPLEMENTATION", "TASK_REVIEW"], event: "task_review_fail", modePredicate: null, to: ["IMPLEMENTATION", "TASK_REVISE"] })
+  table.push({ from: ["IMPLEMENTATION", "TASK_REVISE"], event: "revision_complete", modePredicate: null, to: ["IMPLEMENTATION", "TASK_REVIEW"] })
+  table.push({ from: ["IMPLEMENTATION", "HUMAN_GATE"], event: "human_gate_resolved", modePredicate: null, to: ["IMPLEMENTATION", "SCHEDULING"] })
+  table.push({ from: ["IMPLEMENTATION", "DELEGATED_WAIT"], event: "delegated_task_completed", modePredicate: null, to: ["IMPLEMENTATION", "SCHEDULING"] })
 
   return table
 }
@@ -145,7 +182,7 @@ export function createStateMachine(): StateMachine {
       const validStates = VALID_PHASE_STATES[currentPhase]
       if (!validStates.includes(currentPhaseState)) {
         return {
-          success: false,
+          ok: false,
           code: "INVALID_PHASE_STATE",
           message: `PhaseState "${currentPhaseState}" is not valid in phase "${currentPhase}". Valid: ${validStates.join(", ")}`,
         }
@@ -154,7 +191,7 @@ export function createStateMachine(): StateMachine {
       const result = findTransition(currentPhase, currentPhaseState, event, mode)
       if (!result) {
         return {
-          success: false,
+          ok: false,
           code: "INVALID_EVENT",
           message: `Event "${event}" is not valid in ${currentPhase}/${currentPhaseState}`,
         }
@@ -163,10 +200,10 @@ export function createStateMachine(): StateMachine {
       const [nextPhase, nextPhaseState] = result
       const invariantError = checkInvariants(event, nextPhaseState)
       if (invariantError) {
-        return { success: false, code: "INVARIANT_VIOLATED", message: invariantError }
+        return { ok: false, code: "INVARIANT_VIOLATED", message: invariantError }
       }
 
-      return { success: true, nextPhase, nextPhaseState }
+      return { ok: true, nextPhase, nextPhaseState }
     },
 
     validEvents(phase: Phase, phaseState: PhaseState, mode?: WorkflowMode | null): WorkflowEvent[] {

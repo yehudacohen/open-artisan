@@ -14,6 +14,22 @@ import type { PluginClient } from "./client-types"
 import type { SubagentDispatcher, SubagentSession, SubagentCreateOptions } from "../../../packages/core/subagent-dispatcher"
 import { extractEphemeralSessionId, extractTextFromPromptResult } from "../../../packages/core/utils"
 
+const WORKFLOW_TOOL_DENYLIST: Record<string, false> = {
+  check_prior_workflow: false,
+  select_mode: false,
+  mark_scan_complete: false,
+  mark_analyze_complete: false,
+  mark_satisfied: false,
+  mark_task_complete: false,
+  resolve_human_gate: false,
+  request_review: false,
+  submit_feedback: false,
+  propose_backtrack: false,
+  spawn_sub_workflow: false,
+  query_parent_workflow: false,
+  query_child_workflow: false,
+}
+
 export function createOpenCodeSubagentDispatcher(client: PluginClient): SubagentDispatcher {
   return {
     async createSession(opts: SubagentCreateOptions): Promise<SubagentSession> {
@@ -29,7 +45,6 @@ export function createOpenCodeSubagentDispatcher(client: PluginClient): Subagent
       const created = await client.session.create({
         body: {
           title: opts.title,
-          agent: opts.agent,
           ...(opts.parentId ? { parentID: opts.parentId } : {}),
           ...(modelConfig ? { model: modelConfig } : {}),
         },
@@ -47,6 +62,9 @@ export function createOpenCodeSubagentDispatcher(client: PluginClient): Subagent
           const result = await client.session!.prompt({
             path: { id: sessionId },
             body: {
+              ...(opts.agent ? { agent: opts.agent } : {}),
+              ...(modelConfig ? { model: modelConfig } : {}),
+              tools: WORKFLOW_TOOL_DENYLIST,
               parts: [{ type: "text", text, id: partId }],
             },
           })

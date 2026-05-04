@@ -44,17 +44,17 @@ describe("parallel scheduler contract", () => {
     expect(result.slots.dispatchableNow).toBe(1)
   })
 
-  it("reports unsupported with sequential fallback when multiple parallel-safe tasks are ready", () => {
+  it("deterministically dispatches one task when multiple parallel-safe tasks are ready", () => {
     const dag = createImplDAG([
       makeTask("T1", { isolation: { mode: "isolated-worktree", ownershipKey: "T1", writablePaths: ["src/t1.ts"], safeForParallelDispatch: true } }),
       makeTask("T2", { isolation: { mode: "isolated-worktree", ownershipKey: "T2", writablePaths: ["src/t2.ts"], safeForParallelDispatch: true } }),
     ])
     const result = nextSchedulerDecisionForInput({ dag, maxParallelTasks: 2 })
 
-    expect(result.decision.action).toBe("unsupported")
-    if (result.decision.action !== "unsupported") return
-    expect(result.decision.reason).toBe("runtime-isolation-missing")
-    expect(result.decision.fallback).toBe("sequential")
+    expect(result.decision.action).toBe("dispatch")
+    if (result.decision.action !== "dispatch") return
+    expect(result.decision.task.id).toBe("T1")
+    expect(result.decision.prompt).toContain("sequential lane")
     expect(result.slots.readyTasks).toBe(2)
     expect(result.slots.dispatchableNow).toBe(2)
   })

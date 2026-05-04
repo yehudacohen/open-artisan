@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -35,6 +36,26 @@ def resolve_bridge_command() -> list[str]:
         "Cannot find bridge CLI. Set OPENARTISAN_BRIDGE_CLI=/path/to/packages/bridge/cli.ts "
         "or install open-artisan in the monorepo."
     )
+
+
+def resolve_reviewer_command(prompt: str) -> list[str]:
+    """Resolve the isolated reviewer subprocess command.
+
+    OPENARTISAN_REVIEWER_COMMAND may override the default command. Include the
+    literal token {prompt} where the phase/task review prompt should be passed.
+    If omitted, the prompt is appended as the final argument.
+    """
+    template = os.environ.get(
+        "OPENARTISAN_REVIEWER_COMMAND",
+        "claude --print --max-turns 1 -p {prompt}",
+    )
+    parts = shlex.split(template)
+    if not parts:
+        raise RuntimeError("OPENARTISAN_REVIEWER_COMMAND is empty")
+    replaced = [prompt if part == "{prompt}" else part for part in parts]
+    if "{prompt}" not in parts:
+        replaced.append(prompt)
+    return replaced
 
 
 # ---------------------------------------------------------------------------
@@ -123,7 +144,7 @@ WORKFLOW_TOOLS: list[tuple[str, str, str, dict]] = [
     (
         "oa_mark_satisfied",
         "mark_satisfied",
-        "Submit self-review criteria assessment for the current artifact.",
+        "Submit self-review criteria assessment for the current artifact. In Hermes REVIEW state this is rejected because an isolated phase reviewer submits the verdict automatically.",
         {
             "type": "object",
             "properties": {
@@ -195,6 +216,10 @@ WORKFLOW_TOOLS: list[tuple[str, str, str, dict]] = [
                     "items": {"type": "string"},
                     "description": 'Task IDs to reset (for example: ["T3"]).',
                 },
+                "reason": {
+                    "type": "string",
+                    "description": "Why these task(s) are being reset, for drift repair provenance.",
+                },
             },
             "required": ["task_ids"],
         },
@@ -214,23 +239,23 @@ WORKFLOW_TOOLS: list[tuple[str, str, str, dict]] = [
                     "type": "string",
                     "description": "Description of what was produced.",
                 },
-                "artifact_content": {
-                    "type": "string",
-                    "description": "Text content of the artifact (for text-based phases like PLANNING).",
-                },
                 "artifact_files": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "List of file paths that comprise the artifact (for INTERFACES, TESTS).",
+                    "description": "Required list of file paths on disk that comprise the artifact.",
+                },
+                "artifact_markdown": {
+                    "type": "string",
+                    "description": "Optional markdown content for DISCOVERY/PLANNING/IMPL_PLAN; bridge materializes it to the canonical .openartisan artifact file before review.",
                 },
             },
-            "required": ["summary", "artifact_description"],
+            "required": ["summary", "artifact_description", "artifact_files"],
         },
     ),
     (
         "oa_submit_feedback",
         "submit_feedback",
-        "Approve or request revision of the current artifact at USER_GATE.",
+        "Approve or request revision at USER_GATE, or resolve explicit human gates at HUMAN_GATE.",
         {
             "type": "object",
             "properties": {
@@ -243,14 +268,15 @@ WORKFLOW_TOOLS: list[tuple[str, str, str, dict]] = [
                     "type": "string",
                     "description": "Feedback details (required for 'revise').",
                 },
-                "artifact_content": {
-                    "type": "string",
-                    "description": "Optional: artifact content to persist on approve.",
-                },
                 "approved_files": {
                     "type": "array",
                     "items": {"type": "string"},
                     "description": "Optional: file allowlist for INCREMENTAL mode PLANNING approval.",
+                },
+                "resolved_human_gates": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional: IMPLEMENTATION human-gated task IDs the user confirms are resolved.",
                 },
             },
             "required": ["feedback_type"],
@@ -316,6 +342,123 @@ WORKFLOW_TOOLS: list[tuple[str, str, str, dict]] = [
                 "feature_name": {"type": "string"},
             },
             "required": ["task_id", "feature_name"],
+        },
+    ),
+    (
+        "oa_analyze_task_boundary_change",
+        "analyze_task_boundary_change",
+        "Preview a localized implementation DAG task-boundary change.",
+        {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string"},
+                "add_files": {"type": "array", "items": {"type": "string"}},
+                "remove_files": {"type": "array", "items": {"type": "string"}},
+                "add_expected_tests": {"type": "array", "items": {"type": "string"}},
+                "remove_expected_tests": {"type": "array", "items": {"type": "string"}},
+                "reason": {"type": "string"},
+            },
+            "required": ["task_id", "reason"],
+        },
+    ),
+    (
+        "oa_apply_task_boundary_change",
+        "apply_task_boundary_change",
+        "Apply an approved localized implementation DAG task-boundary change.",
+        {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string"},
+                "add_files": {"type": "array", "items": {"type": "string"}},
+                "remove_files": {"type": "array", "items": {"type": "string"}},
+                "add_expected_tests": {"type": "array", "items": {"type": "string"}},
+                "remove_expected_tests": {"type": "array", "items": {"type": "string"}},
+                "expected_impacted_tasks": {"type": "array", "items": {"type": "string"}},
+                "expected_reset_tasks": {"type": "array", "items": {"type": "string"}},
+                "reason": {"type": "string"},
+            },
+            "required": ["task_id", "reason"],
+        },
+    ),
+    (
+        "oa_route_patch_suggestions",
+        "route_patch_suggestions",
+        "Classify pending reviewer patch suggestions for apply/defer/backtrack/user routing.",
+        {"type": "object", "properties": {}},
+    ),
+    (
+        "oa_resolve_patch_suggestion",
+        "resolve_patch_suggestion",
+        "Record a persisted reviewer patch suggestion disposition.",
+        {
+            "type": "object",
+            "properties": {
+                "patch_suggestion_id": {"type": "string"},
+                "resolution": {
+                    "type": "string",
+                    "enum": ["applied", "failed", "deferred", "rejected", "escalated"],
+                },
+                "message": {"type": "string"},
+                "applied_by": {"type": "string", "enum": ["agent", "orchestrator", "user"]},
+            },
+            "required": ["patch_suggestion_id", "resolution"],
+        },
+    ),
+    (
+        "oa_apply_patch_suggestion",
+        "apply_patch_suggestion",
+        "Apply a pending reviewer patch suggestion to the worktree and record the result.",
+        {
+            "type": "object",
+            "properties": {
+                "patch_suggestion_id": {"type": "string"},
+                "force": {"type": "boolean"},
+                "applied_by": {"type": "string", "enum": ["agent", "orchestrator", "user"]},
+            },
+            "required": ["patch_suggestion_id"],
+        },
+    ),
+    (
+        "oa_report_drift",
+        "report_drift",
+        "Report workflow drift using artifact, task, worktree, DB, and changed-file signals.",
+        {
+            "type": "object",
+            "properties": {
+                "scope": {"type": "string", "enum": ["current-task", "current-phase", "workflow", "roadmap"]},
+                "include_worktree": {"type": "boolean"},
+                "include_artifacts": {"type": "boolean"},
+                "include_db": {"type": "boolean"},
+                "changed_files": {"type": "array", "items": {"type": "string"}},
+                "drifted_artifact_keys": {"type": "array", "items": {"type": "string", "enum": ["design", "conventions", "plan", "interfaces", "tests", "impl_plan", "implementation"]}},
+                "task_ids": {"type": "array", "items": {"type": "string"}},
+            },
+        },
+    ),
+    (
+        "oa_plan_drift_repair",
+        "plan_drift_repair",
+        "Build a graph-native repair plan for a reported drift report.",
+        {
+            "type": "object",
+            "properties": {
+                "drift_report_id": {"type": "string"},
+                "strategy": {"type": "string", "enum": ["minimal", "safe-auto", "ask-first"]},
+            },
+        },
+    ),
+    (
+        "oa_apply_drift_repair",
+        "apply_drift_repair",
+        "Apply approved drift repair actions through existing workflow tools.",
+        {
+            "type": "object",
+            "properties": {
+                "repair_plan_id": {"type": "string"},
+                "approved_actions": {"type": "array", "items": {"type": "string"}},
+                "apply_safe_actions": {"type": "boolean"},
+            },
+            "required": ["repair_plan_id"],
         },
     ),
     (

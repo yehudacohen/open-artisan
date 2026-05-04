@@ -9,6 +9,7 @@ import type { MethodHandler } from "../server"
 import type { IdleCheckParams, IdleCheckResult } from "../protocol"
 import { SESSION_NOT_FOUND, INVALID_PARAMS } from "../protocol"
 import { handleIdle } from "../../core/hooks/idle-handler"
+import { MAX_IDLE_RETRIES } from "../../core/constants"
 
 export const handleIdleCheck: MethodHandler = async (params, ctx) => {
   const p = params as Partial<IdleCheckParams>
@@ -39,9 +40,11 @@ export const handleIdleCheck: MethodHandler = async (params, ctx) => {
     } satisfies IdleCheckResult
   }
 
-  // Escalation — reset retryCount so the agent gets fresh attempts after user input
+  // Escalation is terminal until the next real workflow transition resets retryCount.
+  // Resetting to 0 here causes repeated stall prompts if the agent already asked
+  // the user for guidance and then idles while waiting.
   await ctx.engine!.store.update(p.sessionId, (draft) => {
-    draft.retryCount = 0
+    draft.retryCount = MAX_IDLE_RETRIES + 1
   })
   return { action: "escalate", message: decision.message } satisfies IdleCheckResult
 }

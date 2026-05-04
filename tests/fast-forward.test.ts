@@ -286,8 +286,8 @@ describe("computeFastForward — content hash mismatch", () => {
 
 describe("computeFastForward — time-sentinel approved hash", () => {
   it("skips phase with time-sentinel hash without verifying content", async () => {
-    // Time sentinels are used for file-based phases where artifact_content
-    // wasn't provided at approval. We trust the sentinel as "was approved."
+    // Time sentinels are used for approvals that do not have a single
+    // content hash. We trust the sentinel as "was approved."
     const planContent = "# Plan"
     const planPath = writeArtifact("plan", planContent)
 

@@ -65,7 +65,6 @@ export async function cascadeAutoSkip(
       changed = await hasArtifactChanged(
         current.revisionBaseline,
         current.phase,
-        undefined, // No artifact_content at entry — check disk/git only
         current,
         cwd,
       )
@@ -121,9 +120,9 @@ export async function cascadeAutoSkip(
 
     // Last cascade step (or pendingRevisionSteps is empty) — fast-forward to USER_GATE
     const skipOutcome = sm.transition(current.phase, "REVISE", "revision_complete", current.mode)
-    if (skipOutcome.success) {
+    if (skipOutcome.ok) {
       const userGateOutcome = sm.transition(skipOutcome.nextPhase, skipOutcome.nextPhaseState, "self_review_pass", current.mode)
-      if (userGateOutcome.success && userGateOutcome.nextPhaseState === "USER_GATE") {
+      if (userGateOutcome.ok && userGateOutcome.nextPhaseState === "USER_GATE") {
         await store.update(sessionId, (draft) => {
           draft.phase = userGateOutcome.nextPhase
           draft.phaseState = userGateOutcome.nextPhaseState

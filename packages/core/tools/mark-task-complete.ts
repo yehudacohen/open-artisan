@@ -87,7 +87,7 @@ export function processMarkTaskComplete(
     return {
       error:
         "No implementation DAG found in state. " +
-        "The IMPL_PLAN phase must be approved with artifact_content before calling mark_task_complete.",
+        "The IMPL_PLAN phase must be approved with an on-disk implementation plan before calling mark_task_complete.",
     }
   }
 

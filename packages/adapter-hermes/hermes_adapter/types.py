@@ -96,6 +96,14 @@ class BridgeShutdownEligibility(TypedDict, total=False):
     reason: str
 
 
+class BridgeRecoveryResult(TypedDict, total=False):
+    kind: str
+    reason: str
+    clearedPaths: list[str]
+    discovery: BridgeDiscoveryResult
+    pluginReloaded: bool
+
+
 class AttachBridgeParams(TypedDict, total=False):
     projectDir: str
     stateDir: str
@@ -143,6 +151,10 @@ class BridgeClient(Protocol):
         self, project_dir: str, state_dir: str
     ) -> BridgeDiscoveryResult:
         """Inspect existing local bridge metadata and liveness for a project."""
+        ...
+
+    def recover_stale_bridge(self, project_dir: str) -> BridgeRecoveryResult:
+        """Clear stale or malformed shared-bridge runtime files for a project."""
         ...
 
     def ensure_started(self, project_dir: str) -> None:

@@ -12,6 +12,7 @@
 import type { SessionStateStore, StateMachine, Orchestrator, ArtifactGraph, SessionRegistry } from "./types"
 import type { SubagentDispatcher } from "./subagent-dispatcher"
 import type { Logger, NotificationSink } from "./logger"
+import type { OpenArtisanServices } from "./open-artisan-services"
 
 /**
  * All shared dependencies needed by tool and hook handlers.
@@ -25,6 +26,8 @@ export interface EngineContext {
   log: Logger
   notify: NotificationSink
   graph: ArtifactGraph
+  /** Optional DB-backed services when the runtime is configured with the unified DB backend. */
+  openArtisanServices?: OpenArtisanServices
 
   /** Design document path (null if not detected) */
   designDocPath: string | null

@@ -20,7 +20,14 @@ import { handleGuardCheck, handleGuardPolicy } from "./methods/guard"
 import { handlePromptBuild, handlePromptCompaction } from "./methods/prompt"
 import { handleMessageProcess } from "./methods/message"
 import { handleIdleCheck } from "./methods/idle"
-import { handleToolExecute, handleTaskGetReviewContext, handleAutoApproveContext } from "./methods/tool-execute"
+import { handleToolExecute, handleTaskGetReviewContext, handlePhaseGetReviewContext, handleAutoApproveContext } from "./methods/tool-execute"
+import { recoverStaleBridgeRuntime } from "./recovery"
+
+if (process.argv[2] === "recover") {
+  const projectDir = process.argv[3] || process.cwd()
+  process.stdout.write(`${JSON.stringify(recoverStaleBridgeRuntime(projectDir), null, 2)}\n`)
+  process.exit(0)
+}
 
 const server = createBridgeServer({
   "lifecycle.init": handleInit,
@@ -30,7 +37,6 @@ const server = createBridgeServer({
   "lifecycle.sessionDeleted": handleSessionDeleted,
   "state.get": handleStateGet,
   "state.health": handleStateHealth,
-  "state.health": handleStateHealth,
   "guard.check": handleGuardCheck,
   "guard.policy": handleGuardPolicy,
   "prompt.build": handlePromptBuild,
@@ -39,6 +45,7 @@ const server = createBridgeServer({
   "idle.check": handleIdleCheck,
   "tool.execute": handleToolExecute,
   "task.getReviewContext": handleTaskGetReviewContext,
+  "task.getPhaseReviewContext": handlePhaseGetReviewContext,
   "task.getAutoApproveContext": handleAutoApproveContext,
 })
 

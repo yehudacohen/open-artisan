@@ -53,6 +53,8 @@ class TestSubprocessLifecycle:
             call_args = mock_rpc.call_args
             assert call_args[0][0] == "lifecycle.init"
             assert call_args[0][1]["projectDir"] == str(tmp_path)
+            assert call_args[0][1]["transport"] == "stdio"
+            assert call_args[0][1]["registerRuntime"] is False
 
     def test_start_falls_back_to_local_bridge_when_shared_socket_probe_fails(
         self, tmp_path
@@ -142,6 +144,27 @@ class TestSubprocessLifecycle:
 
         assert client._ensured_sessions == set()
 
+    def test_start_shuts_down_existing_bridge_when_project_changes(self, tmp_path):
+        client = StdioBridgeClient()
+        old_project = tmp_path / "old"
+        new_project = tmp_path / "new"
+        old_project.mkdir()
+        new_project.mkdir()
+        client._project_dir = str(old_project)
+
+        with (
+            patch.object(client, "shutdown") as mock_shutdown,
+            patch.object(client, "_clear_shared_bridge_attachment") as mock_clear,
+            patch.object(client, "discover_bridge", return_value={"kind": "no_bridge"}),
+            patch.object(client, "_spawn_process"),
+            patch.object(client, "_send_rpc", return_value="ready"),
+        ):
+            client.start(str(new_project))
+
+        mock_shutdown.assert_called_once()
+        mock_clear.assert_called_once()
+        assert client._project_dir == str(new_project)
+
     def test_start_can_take_over_existing_bridge_when_enabled(self, tmp_path):
         client = StdioBridgeClient()
         state_dir = tmp_path / ".openartisan"
@@ -151,6 +174,84 @@ class TestSubprocessLifecycle:
 
         with (
             patch.dict(os.environ, {"OPENARTISAN_BRIDGE_TAKEOVER": "1"}, clear=False),
+            patch.object(client, "_spawn_process") as mock_spawn,
+            patch.object(client, "shutdown") as mock_shutdown,
+            patch.object(
+                client,
+                "_send_rpc",
+                side_effect=[
+                    BridgeError(
+                        "Bridge RPC error: Another bridge process is already running (PID 12345). Kill it or remove .bridge-pid manually."
+                    ),
+                    "ready",
+                ],
+            ) as mock_rpc,
+            patch("os.kill") as mock_kill,
+        ):
+            client.start(str(tmp_path))
+
+        assert mock_kill.call_args_list[-1].args == (12345, 15)
+        mock_shutdown.assert_called_once()
+        assert mock_spawn.call_count == 2
+        assert mock_rpc.call_count == 2
+
+    def test_start_takes_over_live_bridge_when_shared_socket_is_missing(self, tmp_path):
+        client = StdioBridgeClient()
+        state_dir = tmp_path / ".openartisan"
+        state_dir.mkdir()
+
+        with (
+            patch.object(
+                client,
+                "discover_bridge",
+                return_value={
+                    "kind": "live_compatible_bridge",
+                    "metadata": {"socketPath": str(state_dir / ".bridge.sock")},
+                },
+            ),
+            patch.object(
+                client,
+                "_probe_shared_bridge",
+                side_effect=BridgeError("socket missing"),
+            ),
+            patch.object(client, "_spawn_process") as mock_spawn,
+            patch.object(client, "shutdown") as mock_shutdown,
+            patch.object(
+                client,
+                "_send_rpc",
+                side_effect=[
+                    BridgeError(
+                        "Bridge RPC error: Another bridge process is already running (PID 12345). Kill it or remove .bridge-pid manually."
+                    ),
+                    "ready",
+                ],
+            ) as mock_rpc,
+            patch("os.kill") as mock_kill,
+        ):
+            client.start(str(tmp_path))
+
+        assert mock_kill.call_args_list[-1].args == (12345, 15)
+        mock_shutdown.assert_called_once()
+        assert mock_spawn.call_count == 2
+        assert mock_rpc.call_count == 2
+
+    def test_start_takes_over_stale_bridge_state(self, tmp_path):
+        client = StdioBridgeClient()
+        state_dir = tmp_path / ".openartisan"
+        state_dir.mkdir()
+        (state_dir / ".bridge-pid").write_text("12345")
+
+        with (
+            patch.object(
+                client,
+                "discover_bridge",
+                return_value={
+                    "kind": "stale_bridge_state",
+                    "previousPid": 12345,
+                    "stalePaths": [str(state_dir / ".bridge-pid")],
+                    "reason": "Bridge metadata exists but the recorded bridge process is not running.",
+                },
+            ),
             patch.object(client, "_spawn_process") as mock_spawn,
             patch.object(client, "shutdown") as mock_shutdown,
             patch.object(

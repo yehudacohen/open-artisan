@@ -12,7 +12,7 @@
  * - Severity defaults: unknown severity treated as "blocking"
  */
 import { describe, expect, it, mock } from "bun:test"
-import { dispatchSelfReview, dispatchRebuttal, buildRebuttalPrompt } from "#core/self-review"
+import { dispatchSelfReview, dispatchRebuttal, buildRebuttalPrompt, buildReviewPrompt } from "#core/self-review"
 import type { SelfReviewRequest } from "#core/self-review"
 import type { SubagentDispatcher, SubagentSession } from "#core/subagent-dispatcher"
 import type { RebuttalRequest, CriterionResult } from "#core/types"
@@ -116,6 +116,65 @@ describe("dispatchSelfReview — all criteria met", () => {
 
     expect(dispatcher._createMock.mock.calls).toHaveLength(1)
     expect(dispatcher._destroyMock.mock.calls).toHaveLength(1)
+  })
+})
+
+describe("buildReviewPrompt — intent baseline context", () => {
+  it("uses intentBaseline instead of raw approval chatter", () => {
+    const prompt = buildReviewPrompt({
+      ...BASE_REQ,
+      artifactPaths: ["/workspace/.openartisan/feature/plan.md"],
+      intentBaseline: "Build a Discord supervisor harness for Hermes/Open Artisan dogfooding.",
+    })
+
+    expect(prompt).toContain("## User's Original Request")
+    expect(prompt).toContain("Build a Discord supervisor harness")
+    expect(prompt).not.toContain("ok approve")
+  })
+
+  it("includes the bespoke self-review structural gate", () => {
+    const prompt = buildReviewPrompt({
+      ...BASE_REQ,
+      phase: "INTERFACES",
+      criteriaText: "1. Reviewed artifacts are real interface/type/schema files",
+    })
+
+    expect(prompt).toContain("Bespoke Structural Review Gate")
+    expect(prompt).toContain("Interfaces review")
+    expect(prompt).toContain("source contracts")
+  })
+
+  it("includes recent feedback as authoritative conflict-resolution context", () => {
+    const prompt = buildReviewPrompt({
+      ...BASE_REQ,
+      phase: "INTERFACES",
+      feedbackHistory: [
+        {
+          phase: "INTERFACES",
+          feedback: "Remove the bespoke CommonWorkloadOverrideSchema; use factory-advertised { spec: ... } schemas instead.",
+          timestamp: 123,
+        },
+      ],
+    })
+
+    expect(prompt).toContain("## Recent User Feedback / Approved Direction")
+    expect(prompt).toContain("latest approved intent")
+    expect(prompt).toContain("Do not resurrect requirements")
+    expect(prompt).toContain("factory-advertised { spec: ... } schemas")
+    expect(prompt).toContain("newer feedback as authoritative")
+  })
+
+  it("limits review scope to explicitly listed artifact files", () => {
+    const prompt = buildReviewPrompt({
+      ...BASE_REQ,
+      phase: "INTERFACES",
+      artifactPaths: ["/workspace/src/core/aspects/types.ts"],
+    })
+
+    expect(prompt).toContain("Evaluate ONLY these listed files as the reviewed artifact set")
+    expect(prompt).toContain("unlisted dependency has pre-existing issues")
+    expect(prompt).toContain("For TypeScript module augmentation")
+    expect(prompt).toContain("do not treat the original augmented module as a reviewed artifact")
   })
 })
 
@@ -313,6 +372,14 @@ describe("dispatchSelfReview — prompt construction", () => {
     const dispatcher = makeDispatcher(makeReviewResponse())
     await dispatchSelfReview(dispatcher, { ...BASE_REQ, artifactPaths: ["/workspace/interfaces.ts"] })
     expect(getPromptText(dispatcher)).toContain("/workspace/interfaces.ts")
+  })
+
+  it("instructs reviewers to reject markdown artifacts for file-based phases", async () => {
+    const dispatcher = makeDispatcher(makeReviewResponse())
+    await dispatchSelfReview(dispatcher, { ...BASE_REQ, phase: "TESTS", artifactPaths: ["/workspace/tests.md"] })
+    expect(getPromptText(dispatcher)).toContain("Structural gate")
+    expect(getPromptText(dispatcher)).toContain("Markdown test plans")
+    expect(getPromptText(dispatcher)).toContain(".openartisan")
   })
 
   it("includes criteria text in the prompt", async () => {

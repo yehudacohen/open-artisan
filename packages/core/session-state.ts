@@ -23,7 +23,7 @@ import {
   type StoreLoadResult,
   type StoreLoadError,
 } from "./types"
-import { readDecisionInput, nextSchedulerDecisionForInput, nextSchedulerDecision } from "./scheduler"
+import { readDecisionInput, nextSchedulerDecisionForInput } from "./scheduler"
 import { extractApprovedFileAllowlist } from "./tools/plan-allowlist"
 
 // ---------------------------------------------------------------------------
@@ -40,6 +40,7 @@ function freshState(sessionId: string): WorkflowState {
     iterationCount: 0,
     retryCount: 0,
     approvedArtifacts: {},
+    approvedArtifactFiles: {},
     conventions: null,
     fileAllowlist: [],
     lastCheckpointTag: null,
@@ -50,6 +51,7 @@ function freshState(sessionId: string): WorkflowState {
     discoveryReport: null,
     currentTaskId: null,
     feedbackHistory: [],
+    backtrackContext: null,
     implDag: null,
     phaseApprovalCounts: {},
     escapePending: false,
@@ -170,6 +172,10 @@ function migrateState(migrated: Record<string, unknown>): void {
       }
     }
   }
+  // v22 → v23: add persisted backtrack/redraft provenance.
+  migrated["backtrackContext"] ??= null
+  // v23 → v24: add approved source artifact file provenance.
+  migrated["approvedArtifactFiles"] ??= {}
   // retryCount is transient — reset on load so the idle handler starts fresh.
   // If the agent was stuck before a restart, it deserves a clean retry budget.
   migrated["retryCount"] = 0
@@ -214,14 +220,10 @@ function repairStateInconsistencies(state: WorkflowState): void {
     const unfinished = state.implDag.filter((task) => task.status !== "complete" && task.status !== "aborted")
     if (unfinished.length > 0) {
       const input = readDecisionInput({ implDag: state.implDag, concurrency: state.concurrency })
-      const evaluation = nextSchedulerDecisionForInput(input)
-      const decision =
-        evaluation.decision.action === "unsupported" && evaluation.decision.fallback === "sequential"
-          ? nextSchedulerDecision(input.dag)
-          : evaluation.decision
+      const decision = nextSchedulerDecisionForInput(input).decision
 
       state.phase = "IMPLEMENTATION"
-      state.phaseState = decision.action === "awaiting-human" ? "USER_GATE" : "DRAFT"
+      state.phaseState = decision.action === "awaiting-human" ? "HUMAN_GATE" : "DRAFT"
       state.currentTaskId = decision.action === "dispatch" ? decision.task.id : null
       state.taskCompletionInProgress = null
       state.taskReviewCount = 0
@@ -239,11 +241,7 @@ function repairStateInconsistencies(state: WorkflowState): void {
   const taskIds = new Set(state.implDag.map((task) => task.id))
   if (state.currentTaskId !== null && !taskIds.has(state.currentTaskId)) {
     const input = readDecisionInput({ implDag: state.implDag, concurrency: state.concurrency })
-    const evaluation = nextSchedulerDecisionForInput(input)
-    const decision =
-      evaluation.decision.action === "unsupported" && evaluation.decision.fallback === "sequential"
-        ? nextSchedulerDecision(input.dag)
-        : evaluation.decision
+    const decision = nextSchedulerDecisionForInput(input).decision
     state.currentTaskId = decision.action === "dispatch" ? decision.task.id : null
   }
 
@@ -265,11 +263,7 @@ function repairStateInconsistencies(state: WorkflowState): void {
       state.currentTaskId = currentTask.id
     } else {
       const input = readDecisionInput({ implDag: state.implDag, concurrency: state.concurrency })
-      const evaluation = nextSchedulerDecisionForInput(input)
-      const decision =
-        evaluation.decision.action === "unsupported" && evaluation.decision.fallback === "sequential"
-          ? nextSchedulerDecision(input.dag)
-          : evaluation.decision
+      const decision = nextSchedulerDecisionForInput(input).decision
       state.currentTaskId = decision.action === "dispatch" ? decision.task.id : null
     }
     state.taskReviewCount = 0
@@ -282,17 +276,13 @@ function repairStateInconsistencies(state: WorkflowState): void {
     state.currentTaskId === null
   ) {
     const input = readDecisionInput({ implDag: state.implDag, concurrency: state.concurrency })
-    const evaluation = nextSchedulerDecisionForInput(input)
-    const decision =
-      evaluation.decision.action === "unsupported" && evaluation.decision.fallback === "sequential"
-        ? nextSchedulerDecision(input.dag)
-        : evaluation.decision
+    const decision = nextSchedulerDecisionForInput(input).decision
 
     if (decision.action === "dispatch") {
       state.currentTaskId = decision.task.id
       state.phaseState = "DRAFT"
     } else if (decision.action === "awaiting-human") {
-      state.phaseState = "USER_GATE"
+      state.phaseState = "HUMAN_GATE"
       state.userGateMessageReceived = false
     }
   }
@@ -465,7 +455,7 @@ export function createSessionStateStore(backend: StateBackend): SessionStateStor
         // G4: Validate invariants before persisting
         const validationError = validateWorkflowState(draft)
         if (validationError) {
-          throw new Error(`State mutation produced invalid state for session "${sessionId}": ${validationError}`)
+          throw new Error(`State mutation produced invalid state for session "${sessionId}": ${String(validationError)}`)
         }
 
         // Replace in memory, then persist via backend if featureName is set.

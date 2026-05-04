@@ -1,8 +1,10 @@
 /**
  * chat-message.ts — Intercepts incoming user messages at USER_GATE states.
  *
- * When the workflow is in a USER_GATE sub-state, the next user message is
- * treated as feedback for the current phase. This hook:
+ * When the workflow is in a USER_GATE sub-state, artifact decisions are routed
+ * through submit_feedback. Clarification/meta questions are deliberately left
+ * as normal conversation so asking "what am I reviewing?" does not corrupt the
+ * workflow into REVISE.
  * 1. Detects if the session is in USER_GATE
  * 2. If so, classifies the message as approve or feedback
  * 3. Modifies the message parts to include routing instructions
@@ -44,12 +46,14 @@ export interface ChatMessageOutput {
  */
 function looksLikeApproval(text: string): boolean {
   const trimmed = text.trim().toLowerCase()
+  if (/\b(?:do\s+not|don't|dont|not|cannot|can't|wont|won't)\s+approve\b/.test(trimmed)) return false
   // Exact match against known approval tokens
   if (APPROVAL_WORDS.has(trimmed)) return true
   // Prefix match: starts with an approval signal and nothing substantive follows
   if (APPROVAL_PREFIX_RE.test(trimmed)) return true
 
   const normalized = trimmed.replace(/[.!?]/g, "").trim()
+  if (/^i\s+approve\b/.test(normalized) && !/\b(?:but|except|unless|however|please|fix|add|remove|revise)\b/.test(normalized)) return true
 
   // Accept short approval + non-substantive tail patterns like
   // "approved, thanks" or "yes please", but reject substantive follow-ups.
@@ -68,6 +72,58 @@ function looksLikeApproval(text: string): boolean {
     .filter(Boolean)
 
   return segments.length > 1 && segments.every((segment) => APPROVAL_PREFIX_RE.test(segment))
+}
+
+export function looksLikeUserGateMetaQuestion(text: string): boolean {
+  const normalized = text.trim().toLowerCase().replace(/\s+/g, " ")
+  if (!normalized) return false
+
+  if (
+    /\b(?:update me|status update|progress update|what changed|what has changed|what did you change|where are we|what's next|what is next)\b/.test(normalized) ||
+    /\b(?:status|progress)\b.*\?/.test(normalized)
+  ) {
+    return true
+  }
+
+  const asksForArtifactChange = /\b(?:add|remove|fix|revise|change|update|rewrite|include|exclude|replace)\b/.test(normalized)
+  if (asksForArtifactChange) return false
+
+  return (
+    /\bwhat\s+(am\s+i|are\s+we|should\s+i|do\s+i)\s+reviewing\b/.test(normalized) ||
+    /\bwhat\s+(should|do)\s+i\s+review\b/.test(normalized) ||
+    /\bwhat\s+(is|are)\s+(the\s+)?(artifact|artifacts|review\s+artifact|review\s+assets)\b/.test(normalized) ||
+    /\b(which|what)\s+files?\s+(am\s+i|should\s+i|do\s+i|are\s+we)\s+review/.test(normalized) ||
+    /\bwhere\s+(is|are)\s+(the\s+)?(artifact|artifacts|files?|review\s+assets)\b/.test(normalized) ||
+    /\b(can|could)\s+you\s+(summarize|explain|show|list)\s+(what|which|the\s+files|the\s+artifact|the\s+review)/.test(normalized) ||
+    /\b(have|has|did|are|is|was|were)\b.*\b(tasks?|implementation|tests?|verification|review)\b.*\b(implemented|complete|done|finished|pass(?:ed)?|green)\b/.test(normalized) ||
+    /\b(have|has|did|are|is|was|were)\b.*\b(implemented|complete|done|finished|pass(?:ed)?|green)\b.*\b(tasks?|implementation|tests?|verification|review)\b/.test(normalized) ||
+    /\b(all|which|what)\s+(implementation\s+)?tasks?\b.*\b(done|complete|implemented|finished)\b/.test(normalized) ||
+    /\bhow\s+(has|was|is)\s+(your\s+)?experience\b/.test(normalized) ||
+    /\bwhat\s+was\s+(your\s+)?experience\b/.test(normalized) ||
+    /\b(open[- ]artisan|workflow|dogfood(?:ing)?)\b.*\b(experience|rough|friction|worked|working)\b/.test(normalized) ||
+    /\bdo\s+you\s+think\b.*\b(right|good|ready|correct|sound)\b/.test(normalized)
+  )
+}
+
+function looksLikeEscapeHatchClarification(text: string): boolean {
+  const normalized = text.trim().toLowerCase().replace(/\s+/g, " ")
+  if (!normalized) return false
+  return (
+    /\bwhat\s+(is|does)\s+(the\s+)?escape\s+hatch\b/.test(normalized) ||
+    /\bwhat\s+are\s+(my|the)\s+options\b/.test(normalized) ||
+    /\b(can|could)\s+you\s+(explain|summarize)\s+(the\s+)?escape\s+hatch\b/.test(normalized) ||
+    /\bwhat\s+happens\s+if\b/.test(normalized)
+  )
+}
+
+function looksLikeConditionalApproval(text: string): boolean {
+  const normalized = text.trim().toLowerCase().replace(/[.!?]+$/g, "").replace(/\s+/g, " ")
+  if (!normalized) return false
+  if (/\b(?:but|except|unless|however|revise|change|fix|add|remove)\b/.test(normalized)) return false
+  return (
+    /\bif\s+(?:you|we|that|this|so)\b.*\b(?:i\s+)?approve\b/.test(normalized) ||
+    /\bif\s+(?:you|we|that|this|so)\b.*\b(?:approved|lgtm|looks good|ship it|proceed)\b/.test(normalized)
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -92,9 +148,19 @@ export function processUserMessage(
     .map((p) => p.text!)
     .join(" ")
 
-  // In ESCAPE_HATCH, the user message is ALWAYS feedback (approval is structurally
-  // blocked by the state machine — there is no user_approve transition from ESCAPE_HATCH).
-  const isApproval = state.phaseState === "ESCAPE_HATCH" ? false : looksLikeApproval(textContent)
+  const isConditionalApproval = state.phaseState === "ESCAPE_HATCH" ? false : looksLikeConditionalApproval(textContent)
+
+  if (state.phaseState === "ESCAPE_HATCH" && looksLikeEscapeHatchClarification(textContent)) {
+    return { parts, intercepted: false, feedbackType: null }
+  }
+
+  // In ESCAPE_HATCH, non-clarification user messages are decisions/feedback
+  // (approval is structurally blocked by the state machine).
+  if (state.phaseState !== "ESCAPE_HATCH" && !isConditionalApproval && looksLikeUserGateMetaQuestion(textContent)) {
+    return { parts, intercepted: false, feedbackType: null }
+  }
+
+  const isApproval = state.phaseState === "ESCAPE_HATCH" ? false : looksLikeApproval(textContent) || isConditionalApproval
   const feedbackType = isApproval ? "approve" : "feedback"
 
   // Inject routing instructions as a new leading text part
@@ -155,19 +221,15 @@ function buildEscapeHatchNote(phase: Phase): string {
  */
 export function buildUserGateHint(phase: Phase, _phaseState: PhaseState): string {
   return (
-    `\n---\n## ⚠ WORKFLOW USER GATE — ${phase} — ACTION REQUIRED\n\n` +
-    `A user message has arrived. You MUST call \`submit_feedback\` as your **first and only tool call**.\n\n` +
-    `**Do NOT:**\n` +
-    `- Do research, web searches, or file reads before calling \`submit_feedback\`\n` +
-    `- Re-review or improve the artifact before routing the feedback\n` +
-    `- Call any other tool before \`submit_feedback\`\n` +
-    `- Simulate or assume approval without calling \`submit_feedback\`\n\n` +
-    `**Do:**\n` +
+    `\n---\n## WORKFLOW USER GATE — ${phase}\n\n` +
+    `The artifact is awaiting the user's decision. Route artifact decisions through \`submit_feedback\`; answer clarification, status, dogfood, or experience questions normally.\n\n` +
+    `**Do when the user gives an artifact decision:**\n` +
     `- If the user approves (yes / lgtm / approved / looks good / ship it / proceed / etc.):\n` +
     `  → Call \`submit_feedback(feedback_type="approve", feedback_text=<their message>)\`\n` +
-    `- If the user requests changes or asks questions:\n` +
+    `- If the user requests artifact changes or gives review feedback:\n` +
     `  → Call \`submit_feedback(feedback_type="revise", feedback_text=<their exact message>)\`\n\n` +
-    `Calling \`submit_feedback\` is the ONLY correct response to a user message at USER_GATE.\n` +
+    `**Do not call \`submit_feedback\` for clarification/meta questions.** For example, if the user asks "what am I reviewing?", "have we implemented all tasks?", or "how was Open Artisan?", answer normally and continue waiting at USER_GATE.\n\n` +
+    `Do not do research, file reads, or artifact changes before routing a real approval/revision decision through \`submit_feedback\`.\n` +
     `---`
   )
 }

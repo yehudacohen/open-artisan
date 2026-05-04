@@ -17,9 +17,20 @@ tools:
   - oa_resolve_human_gate
   - oa_propose_backtrack
   - oa_spawn_sub_workflow
+  - oa_analyze_task_boundary_change
+  - oa_apply_task_boundary_change
+  - oa_route_patch_suggestions
+  - oa_resolve_patch_suggestion
+  - oa_apply_patch_suggestion
+  - oa_report_drift
+  - oa_plan_drift_repair
+  - oa_apply_drift_repair
   - oa_query_parent_workflow
   - oa_query_child_workflow
   - oa_state
+  - oa_list_projects
+  - oa_select_project
+  - oa_recover_bridge
 
 hooks:
   - on_session_start

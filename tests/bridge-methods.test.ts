@@ -14,6 +14,7 @@ import { handlePromptBuild, handlePromptCompaction } from "#bridge/methods/promp
 import { handleStateGet, handleStateHealth } from "#bridge/methods/state"
 import { handleMessageProcess } from "#bridge/methods/message"
 import { handleIdleCheck } from "#bridge/methods/idle"
+import { MAX_IDLE_RETRIES } from "#core/constants"
 import type { BridgeContext } from "#bridge/server"
 import type { GuardCheckResult, GuardPolicyResult, IdleCheckResult, MessageProcessResult } from "#bridge/protocol"
 import type { EngineContext } from "#core/engine-context"
@@ -32,6 +33,10 @@ function makeBridgeContext(): BridgeContext {
     stateDir: null,
     projectDir: null,
     capabilities: { selfReview: "isolated" as const, orchestrator: true, discoveryFleet: true },
+    runtimeBackendKind: "filesystem",
+    roadmapBackend: null,
+    roadmapService: null,
+    openArtisanServices: null,
     pinoLogger: null,
     shuttingDown: false,
   }
@@ -40,7 +45,7 @@ function makeBridgeContext(): BridgeContext {
 beforeEach(async () => {
   tmpDir = await mkdtemp(join(tmpdir(), "bridge-methods-"))
   ctx = makeBridgeContext()
-  await handleInit({ projectDir: tmpDir }, ctx)
+  await handleInit({ projectDir: tmpDir, persistence: { kind: "filesystem" } }, ctx)
   await handleSessionCreated({ sessionId: "s1" }, ctx)
 })
 
@@ -187,6 +192,37 @@ describe("guard.check", () => {
     expect(result.allowed).toBe(false)
     expect(result.reason).toContain("INCREMENTAL")
   })
+
+  it("allows apply_patch when extracted patch targets satisfy INTERFACES policy", async () => {
+    await ctx.engine!.store.update("s1", (d) => {
+      d.mode = "GREENFIELD"
+      d.phase = "INTERFACES"
+      d.phaseState = "REVISE"
+      d.featureName = "interfaces-feat"
+    })
+    const result = await handleGuardCheck({
+      toolName: "apply_patch",
+      args: { patchText: "*** Begin Patch\n*** Update File: src/core/aspects/types.ts\n@@\n-old\n+new\n*** End Patch" },
+      sessionId: "s1",
+    }, ctx) as GuardCheckResult
+    expect(result.allowed).toBe(true)
+  })
+
+  it("blocks apply_patch when an extracted target violates INTERFACES policy", async () => {
+    await ctx.engine!.store.update("s1", (d) => {
+      d.mode = "GREENFIELD"
+      d.phase = "INTERFACES"
+      d.phaseState = "REVISE"
+      d.featureName = "interfaces-feat"
+    })
+    const result = await handleGuardCheck({
+      toolName: "apply_patch",
+      args: { patchText: "*** Begin Patch\n*** Update File: src/runtime/app.ts\n@@\n-old\n+new\n*** End Patch" },
+      sessionId: "s1",
+    }, ctx) as GuardCheckResult
+    expect(result.allowed).toBe(false)
+    expect(result.reason).toContain("src/runtime/app.ts")
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -223,7 +259,7 @@ describe("guard.policy", () => {
 describe("lifecycle.init capabilities", () => {
   it("defaults bridge mode to agent-only capabilities", async () => {
     const freshCtx = makeBridgeContext()
-    await handleInit({ projectDir: tmpDir }, freshCtx)
+    await handleInit({ projectDir: tmpDir, persistence: { kind: "filesystem" } }, freshCtx)
     expect(freshCtx.capabilities).toEqual({
       selfReview: "agent-only",
       orchestrator: false,
@@ -357,6 +393,21 @@ describe("message.process", () => {
     expect(result.intercepted).toBe(true)
   })
 
+  it("resets retry count after user guidance following stalled escalation", async () => {
+    await ctx.engine!.store.update("s1", (d) => {
+      d.mode = "GREENFIELD"
+      d.phase = "PLANNING"
+      d.phaseState = "DRAFT"
+      d.retryCount = MAX_IDLE_RETRIES + 1
+    })
+    const result = await handleMessageProcess({
+      sessionId: "s1",
+      parts: [{ type: "text", text: "continue with the plan" }],
+    }, ctx) as MessageProcessResult
+    expect(result.intercepted).toBe(false)
+    expect(ctx.engine!.store.get("s1")?.retryCount).toBe(0)
+  })
+
   it("rejects unknown session", async () => {
     await expect(handleMessageProcess({
       sessionId: "nonexistent",
@@ -417,10 +468,21 @@ describe("idle.check", () => {
       d.mode = "GREENFIELD"
       d.phase = "PLANNING"
       d.phaseState = "DRAFT"
-      d.retryCount = 10 // Well above MAX_IDLE_RETRIES
+      d.retryCount = MAX_IDLE_RETRIES
     })
     const result = await handleIdleCheck({ sessionId: "s1" }, ctx) as IdleCheckResult
     expect(result.action).toBe("escalate")
+  })
+
+  it("returns ignore after escalation has already been delivered", async () => {
+    await ctx.engine!.store.update("s1", (d) => {
+      d.mode = "GREENFIELD"
+      d.phase = "PLANNING"
+      d.phaseState = "DRAFT"
+      d.retryCount = MAX_IDLE_RETRIES + 1
+    })
+    const result = await handleIdleCheck({ sessionId: "s1" }, ctx) as IdleCheckResult
+    expect(result.action).toBe("ignore")
   })
 
   it("returns ignore at USER_GATE (waiting for user)", async () => {

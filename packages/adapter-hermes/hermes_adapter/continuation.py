@@ -45,6 +45,22 @@ ContinuationOutcomeKind = Literal[
 
 logger = logging.getLogger(__name__)
 
+_GATEWAY_RESPONSE_PHASE_STATES = {"USER_GATE", "ESCAPE_HATCH"}
+
+
+def should_send_gateway_response_for_workflow_state(state: Any) -> bool:
+    """Return true only when a gateway continuation may surface a response.
+
+    If state cannot be inspected, preserve existing Hermes behavior and allow the
+    response. When Open Artisan state is available, non-gate phase states must not
+    look like valid conversational stopping points.
+    """
+    if not isinstance(state, dict):
+        return True
+    if state.get("phase") == "DONE":
+        return True
+    return state.get("phaseState") in _GATEWAY_RESPONSE_PHASE_STATES
+
 
 class ContinuationSurface(TypedDict, total=False):
     """Normalized description of where the current Hermes session originated."""
@@ -215,6 +231,7 @@ class GatewayBackgroundContinuationHandoff:
             "userId": _string_value(gateway_routing.get("userId")) or "",
             "messageId": _string_value(gateway_routing.get("messageId")) or "",
             "sessionOrigin": _string_value(gateway_routing.get("sessionOrigin")) or "",
+            "workflowState": dict(request.get("workflowState") or {}),
         }
 
         child_env = {
@@ -367,6 +384,53 @@ _GATEWAY_CONTINUATION_WORKER = textwrap.dedent(
     from hermes_cli.tools_config import _get_platform_tools
     from run_agent import AIAgent
 
+    TERMINAL_PHASE_STATES = {"USER_GATE", "ESCAPE_HATCH"}
+
+    def _should_send_gateway_response(state):
+        if not isinstance(state, dict):
+            return True
+        if state.get("phase") == "DONE":
+            return True
+        return state.get("phaseState") in TERMINAL_PHASE_STATES
+
+    def _candidate_state_paths():
+        state_dir = os.path.join(os.getcwd(), ".openartisan")
+        paths = []
+        workflow_state = payload.get("workflowState")
+        feature_name = workflow_state.get("featureName") if isinstance(workflow_state, dict) else None
+        if isinstance(feature_name, str) and feature_name:
+            paths.append(os.path.join(state_dir, feature_name, "workflow-state.json"))
+        try:
+            children = os.listdir(state_dir)
+        except Exception:
+            children = []
+        for child in children:
+            path = os.path.join(state_dir, child, "workflow-state.json")
+            if path not in paths:
+                paths.append(path)
+        return paths
+
+    def _load_current_workflow_state():
+        candidates = []
+        for path in _candidate_state_paths():
+            try:
+                candidates.append((os.path.getmtime(path), path))
+            except Exception:
+                continue
+        for _, path in sorted(candidates, reverse=True):
+            try:
+                with open(path, "r", encoding="utf-8") as handle:
+                    state = json.load(handle)
+            except Exception:
+                continue
+            if isinstance(state, dict) and state.get("phase") and state.get("phaseState"):
+                return state
+
+        workflow_state = payload.get("workflowState")
+        if isinstance(workflow_state, dict) and workflow_state.get("phase") and workflow_state.get("phaseState"):
+            return workflow_state
+        return None
+
     async def main() -> None:
         db = SessionDB()
         session_id = payload["sessionId"]
@@ -435,6 +499,13 @@ _GATEWAY_CONTINUATION_WORKER = textwrap.dedent(
         media_files, response = adapter.extract_media(response)
         images, text_content = adapter.extract_images(response)
 
+        if not _should_send_gateway_response(_load_current_workflow_state()):
+            try:
+                await adapter.disconnect()
+            except Exception:
+                pass
+            return
+
         if text_content:
             await adapter.send(
                 chat_id=payload["chatId"],
@@ -480,11 +551,8 @@ _GATEWAY_CONTINUATION_WORKER = textwrap.dedent(
 _GATEWAY_PLATFORMS = {"telegram", "discord", "slack", "sms", "whatsapp"}
 _GATEWAY_REQUIRED_FIELDS = [
     "chatId",
-    "messageId",
     "platform",
     "sessionOrigin",
-    "threadId",
-    "userId",
 ]
 
 
@@ -492,6 +560,92 @@ def _string_value(value: Any) -> str | None:
     if isinstance(value, str) and value.strip():
         return value.strip()
     return None
+
+
+def _gateway_session_env(name: str) -> str:
+    try:
+        from gateway.session_context import get_session_env
+    except Exception:
+        return os.environ.get(name, "")
+    return get_session_env(name, "")
+
+
+def _set_if_present(context: dict[str, Any], key: str, value: Any) -> None:
+    normalized = _string_value(value)
+    if normalized:
+        context[key] = normalized
+
+
+def _parse_gateway_session_key(session_key: str | None) -> dict[str, str]:
+    value = _string_value(session_key)
+    if not value:
+        return {}
+    parts = value.split(":")
+    if len(parts) < 4 or parts[0] != "agent" or parts[1] != "main":
+        return {"session_origin": value}
+
+    parsed = {
+        "platform": parts[2],
+        "source": "gateway",
+        "session_origin": value,
+    }
+    chat_type = parts[3]
+    remaining = parts[4:]
+
+    if chat_type == "dm":
+        if remaining:
+            parsed["chat_id"] = remaining[0]
+        if len(remaining) > 1:
+            parsed["thread_id"] = remaining[1]
+    else:
+        if remaining:
+            parsed["chat_id"] = remaining[0]
+        if len(remaining) > 1:
+            parsed["thread_id"] = remaining[1]
+
+    return parsed
+
+
+def build_session_context(kwargs: dict[str, Any]) -> dict[str, Any]:
+    context: dict[str, Any] = {}
+    field_sources = {
+        "platform": ("platform", "OPENARTISAN_CONTINUE_PLATFORM", "HERMES_SESSION_PLATFORM"),
+        "source": ("source", "OPENARTISAN_CONTINUE_SOURCE", ""),
+        "chat_id": ("chat_id", "OPENARTISAN_CONTINUE_CHAT_ID", "HERMES_SESSION_CHAT_ID"),
+        "thread_id": ("thread_id", "OPENARTISAN_CONTINUE_THREAD_ID", "HERMES_SESSION_THREAD_ID"),
+        "user_id": ("user_id", "OPENARTISAN_CONTINUE_USER_ID", "HERMES_SESSION_USER_ID"),
+        "message_id": ("message_id", "OPENARTISAN_CONTINUE_MESSAGE_ID", ""),
+        "session_origin": ("session_origin", "OPENARTISAN_CONTINUE_SESSION_ORIGIN", "HERMES_SESSION_KEY"),
+    }
+
+    camel_aliases = {
+        "chat_id": "chatId",
+        "thread_id": "threadId",
+        "user_id": "userId",
+        "message_id": "messageId",
+        "session_origin": "sessionOrigin",
+    }
+
+    for key, sources in field_sources.items():
+        kwarg_key, openartisan_env, hermes_env = sources
+        value = kwargs.get(kwarg_key)
+        if value is None and key in camel_aliases:
+            value = kwargs.get(camel_aliases[key])
+        if value is None and openartisan_env:
+            value = os.environ.get(openartisan_env)
+        if value is None and hermes_env:
+            value = _gateway_session_env(hermes_env)
+        _set_if_present(context, key, value)
+
+    parsed_session = _parse_gateway_session_key(_gateway_session_env("HERMES_SESSION_KEY"))
+    for key, value in parsed_session.items():
+        if key not in context:
+            context[key] = value
+
+    if context.get("platform") and context["platform"] != "cli" and "source" not in context:
+        context["source"] = "gateway"
+
+    return context
 
 
 def classify_continuation_surface(

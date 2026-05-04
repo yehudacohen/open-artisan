@@ -11,9 +11,9 @@ import { buildCompactionContext } from "#core/hooks/compaction"
 import { buildUserGateHint, processUserMessage } from "#core/hooks/chat-message"
 import { handleIdle } from "#core/hooks/idle-handler"
 import { buildSubagentContext, buildWorkflowSystemPrompt } from "#core/hooks/system-transform"
-import { getPhaseToolPolicy, getTaskWriteFiles } from "#core/hooks/tool-guard"
+import { extractWriteToolPaths, getPhaseToolPolicy, getTaskWriteFiles } from "#core/hooks/tool-guard"
 import { detectMode } from "#core/mode-detect"
-import { extractAgentName, isWorkflowSessionActive, persistActiveAgent } from "#core/agent-policy"
+import { extractAgentName, isArtisanAgent, isWorkflowSessionActive, normalizeAgentName, persistActiveAgent } from "#core/agent-policy"
 import type { ModeDetectionResult } from "#core/types"
 
 type SessionEvent = { type: string; properties?: Record<string, unknown> }
@@ -32,25 +32,86 @@ interface HookDeps {
   ) => void
 }
 
+function enforceWritePathPredicate(input: {
+  tool: string
+  phase: string
+  phaseState: string
+  allowedDescription: string
+  args: Record<string, unknown> | undefined
+  predicate: (filePath: string) => boolean
+}): void {
+  const filePaths = extractWriteToolPaths(input.args)
+  if (filePaths.length === 0) {
+    throw new Error(
+      `[Workflow] Tool "${input.tool}" is write-like but no target path could be extracted in ${input.phase}/${input.phaseState}. ` +
+      `Use a write/edit tool with an explicit file path. ${input.allowedDescription}`,
+    )
+  }
+  for (const filePath of filePaths) {
+    if (!input.predicate(filePath)) {
+      throw new Error(
+        `[Workflow] Writing to "${filePath}" is blocked in ${input.phase}/${input.phaseState}. ` +
+        `${input.allowedDescription}`,
+      )
+    }
+  }
+}
+
 function shouldForceWorkflowDormant(text: string): boolean {
   const normalized = text.toLowerCase()
   return [
     "out of artisan mode",
     "out of open artisan mode",
-    "we're in plan mode",
-    "we are in plan mode",
-    "planning mode",
-    "we're in build mode",
-    "we are in build mode",
-    "build mode",
     "disable workflow",
     "disable the workflow",
+    "disable open artisan",
+    "disable open-artisan",
+    "turn off open artisan",
+    "turn off open-artisan",
+    "turn off openartisan",
     "workflow off",
     "turn off workflow",
+    "open artisan off",
+    "open-artisan off",
+    "openartisan off",
+    "don't need openartisan",
+    "do not need openartisan",
+    "don't need open artisan",
+    "do not need open artisan",
+    "don't use openartisan",
+    "do not use openartisan",
+    "don't use open artisan",
+    "do not use open artisan",
+    "don't use open-artisan",
+    "do not use open-artisan",
     "restarted the opencode session",
     "just restarted",
     "restarted",
   ].some((phrase) => normalized.includes(phrase))
+}
+
+function explicitlyNamesOpenArtisan(text: string): boolean {
+  const normalized = text.toLowerCase()
+  return normalized.includes("open artisan") || normalized.includes("open-artisan") || normalized.includes("openartisan")
+}
+
+function shouldActivateWorkflow(text: string): boolean {
+  const normalized = text.toLowerCase()
+  return [
+    "use open artisan",
+    "use openartisan",
+    "use artisan",
+    "turn on workflow",
+    "enable workflow",
+    "enable the workflow",
+    "switch to open artisan",
+    "switch to artisan",
+  ].some((phrase) => normalized.includes(phrase))
+}
+
+function isArtisanLockedSession(state: { activeAgent?: string | null }, detectedAgent: string | null): boolean {
+  const persistedAgent = normalizeAgentName(state.activeAgent)
+  return isArtisanAgent(detectedAgent) || persistedAgent === "artisan" || persistedAgent === "robot-artisan"
 }
 
 export function createPluginHooks({
@@ -169,7 +230,7 @@ export function createPluginHooks({
               // ignore
             }
             try {
-              await store.update(sessionId, (draft) => { draft.retryCount = 0 })
+              await store.update(sessionId, (draft) => { draft.retryCount = MAX_IDLE_RETRIES + 1 })
             } catch (e) {
               log.warn("Failed to reset retryCount on escalation", { detail: e instanceof Error ? e.message : String(e), sessionId })
             }
@@ -218,10 +279,6 @@ export function createPluginHooks({
         sessions.setActive(sessionId)
 
         const detectedAgent = extractAgentName(input) ?? extractAgentName(output.message)
-        if (detectedAgent) {
-          await persistActiveAgent(store, sessionId, detectedAgent)
-        }
-
         const state = store.get(sessionId)
         if (!state) return
 
@@ -231,7 +288,32 @@ export function createPluginHooks({
           .join(" ")
           .trim()
 
-        if (textContent && shouldForceWorkflowDormant(textContent)) {
+        if (textContent && shouldActivateWorkflow(textContent) && !isArtisanLockedSession(state, detectedAgent)) {
+          await store.update(sessionId, (draft) => {
+            draft.activeAgent = "build-artisan"
+            draft.retryCount = 0
+            draft.userGateMessageReceived = false
+          })
+        }
+
+        if (detectedAgent) {
+          await persistActiveAgent(store, sessionId, detectedAgent)
+        }
+
+        const refreshedState = store.get(sessionId)
+        if (!refreshedState) return
+
+        if (textContent && refreshedState.retryCount > MAX_IDLE_RETRIES) {
+          await store.update(sessionId, (draft) => {
+            draft.retryCount = 0
+          })
+        }
+
+        if (
+          textContent &&
+          shouldForceWorkflowDormant(textContent) &&
+          (!isArtisanLockedSession(refreshedState, detectedAgent) || explicitlyNamesOpenArtisan(textContent))
+        ) {
           await store.update(sessionId, (draft) => {
             draft.activeAgent = "build"
             draft.retryCount = 0
@@ -239,9 +321,6 @@ export function createPluginHooks({
           })
           return
         }
-
-        const refreshedState = store.get(sessionId)
-        if (!refreshedState) return
         if (!isWorkflowSessionActive(refreshedState, detectedAgent)) return
 
         if (refreshedState.phase === "DONE") {
@@ -420,16 +499,14 @@ export function createPluginHooks({
             }
             const writeTokens = ["write", "edit", "patch", "create", "overwrite"]
             if (policy.writePathPredicate && writeTokens.some((token) => toolName.includes(token))) {
-              const filePath = (
-                input.args?.["filePath"] ?? input.args?.["path"] ?? input.args?.["file"] ??
-                input.args?.["filename"] ?? input.args?.["target"] ?? input.args?.["destination"]
-              ) as string | undefined
-              if (filePath && !policy.writePathPredicate(filePath)) {
-                throw new Error(
-                  `[Workflow] Writing to "${filePath}" is blocked in ${parentState.phase}/${parentState.phaseState}. ` +
-                  `${policy.allowedDescription}`,
-                )
-              }
+              enforceWritePathPredicate({
+                tool: input.tool,
+                phase: parentState.phase,
+                phaseState: parentState.phaseState,
+                allowedDescription: policy.allowedDescription,
+                args: input.args,
+                predicate: policy.writePathPredicate,
+              })
             }
             return
           }
@@ -481,20 +558,14 @@ export function createPluginHooks({
         }
         const writeTokens = ["write", "edit", "patch", "create", "overwrite"]
         if (policy.writePathPredicate && writeTokens.some((token) => toolName.includes(token))) {
-          const filePath = (
-            input.args?.["filePath"] ??
-            input.args?.["path"] ??
-            input.args?.["file"] ??
-            input.args?.["filename"] ??
-            input.args?.["target"] ??
-            input.args?.["destination"]
-          ) as string | undefined
-          if (filePath && !policy.writePathPredicate(filePath)) {
-            throw new Error(
-              `[Workflow] Writing to "${filePath}" is blocked in ${refreshedState.phase}/${refreshedState.phaseState}. ` +
-              `${policy.allowedDescription}`,
-            )
-          }
+          enforceWritePathPredicate({
+            tool: input.tool,
+            phase: refreshedState.phase,
+            phaseState: refreshedState.phaseState,
+            allowedDescription: policy.allowedDescription,
+            args: input.args,
+            predicate: policy.writePathPredicate,
+          })
         }
       } catch (e) {
         if (e instanceof Error && e.message.startsWith("[Workflow]")) throw e

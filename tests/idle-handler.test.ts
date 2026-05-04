@@ -209,6 +209,11 @@ describe("handleIdle — escalate after MAX_IDLE_RETRIES", () => {
     expect(decision.message).toContain("INTERFACES")
     expect(decision.message).toContain("REVIEW")
   })
+
+  it("ignores idle after escalation has already been delivered", () => {
+    const state = makeState({ phaseState: "CONVENTIONS", retryCount: MAX_IDLE_RETRIES + 1 })
+    expect(handleIdle(state)).toEqual({ action: "ignore" })
+  })
 })
 
 // ---------------------------------------------------------------------------

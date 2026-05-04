@@ -8,6 +8,7 @@ import type { MethodHandler } from "../server"
 import type { MessageProcessParams, MessageProcessResult } from "../protocol"
 import { SESSION_NOT_FOUND, INVALID_PARAMS } from "../protocol"
 import { processUserMessage } from "../../core/hooks/chat-message"
+import { MAX_IDLE_RETRIES } from "../../core/constants"
 
 export const handleMessageProcess: MethodHandler = async (params, ctx) => {
   const p = params as Partial<MessageProcessParams>
@@ -25,6 +26,12 @@ export const handleMessageProcess: MethodHandler = async (params, ctx) => {
   }
 
   const result = processUserMessage(state, p.parts)
+
+  if (state.retryCount > MAX_IDLE_RETRIES) {
+    await store.update(p.sessionId, (draft) => {
+      draft.retryCount = 0
+    })
+  }
 
   // If the message was intercepted (user at USER_GATE), mark that a real
   // user message was received (prevents agent from self-approving).

@@ -7,7 +7,7 @@
  * Strategy: mock the OpenCode client, instantiate the real plugin, then call
  * the returned tools and hooks to verify end-to-end behavior.
  */
-import { describe, expect, it, beforeEach, mock } from "bun:test"
+import { describe, expect, it, beforeEach, afterEach, mock } from "bun:test"
 import { mkdtempSync, rmSync, mkdirSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
@@ -82,16 +82,28 @@ let tempDir: string
 let client: ReturnType<typeof makeMockClient>
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let plugin: any
+let previousStateBackend: string | undefined
 
 beforeEach(async () => {
   tempDir = mkdtempSync(join(tmpdir(), "sw-integration-"))
   client = makeMockClient()
+  previousStateBackend = process.env["OPENARTISAN_STATE_BACKEND"]
+  process.env["OPENARTISAN_STATE_BACKEND"] = "filesystem"
 
   // OpenArtisanPlugin reads import.meta.dirname to find the state dir.
   // In tests, the state file lands in the real plugin dir — we accept that and
   // work around by using a unique session ID per test. The plugin startup
   // calls store.load() which is safe even if the file doesn't exist.
   plugin = await OpenArtisanPlugin({ client } as any)
+})
+
+afterEach(() => {
+  if (previousStateBackend === undefined) {
+    delete process.env["OPENARTISAN_STATE_BACKEND"]
+  } else {
+    process.env["OPENARTISAN_STATE_BACKEND"] = previousStateBackend
+  }
+  rmSync(tempDir, { recursive: true, force: true })
 })
 
 function planningPassCriteria() {
@@ -183,6 +195,85 @@ describe("OpenCode integration — structural workflow parity", () => {
     const state = plugin._testStore.get(sid)
     expect(state?.phase).toBe("INTERFACES")
     expect(state?.phaseState).toBe("SKIP_CHECK")
+  })
+
+  it("resolves IMPLEMENTATION/HUMAN_GATE tasks without direct approval", async () => {
+    const sid = `int-test-${Date.now()}-human-gate-resolve`
+    await plugin.event({ event: { type: "session.created", properties: { info: { id: sid } } } })
+    const ctx = { directory: tempDir, sessionId: sid }
+    await plugin._testStore.update(sid, (d: any) => {
+      d.phase = "IMPLEMENTATION"
+      d.phaseState = "HUMAN_GATE"
+      d.mode = "INCREMENTAL"
+      d.featureName = `human-gate-${Date.now()}`
+      d.userGateMessageReceived = true
+      d.implDag = [
+        {
+          id: "T1",
+          description: "Provision infra",
+          dependencies: [],
+          expectedTests: [],
+          expectedFiles: [],
+          estimatedComplexity: "small",
+          status: "human-gated",
+          category: "human-gate",
+          humanGate: {
+            whatIsNeeded: "Provision infra",
+            why: "Needed",
+            verificationSteps: "Verify",
+            resolved: false,
+          },
+        },
+        {
+          id: "T2",
+          description: "Resume work",
+          dependencies: ["T1"],
+          expectedTests: [],
+          expectedFiles: [],
+          estimatedComplexity: "small",
+          status: "pending",
+        },
+      ]
+    })
+
+    const result = await plugin.tool.submit_feedback.execute(
+      { feedback_text: "resolved", feedback_type: "approve", resolved_human_gates: ["T1"] },
+      ctx,
+    )
+
+    expect(result).toContain("Resolved 1 human gate(s): T1")
+    const state = plugin._testStore.get(sid)
+    expect(state?.phase).toBe("IMPLEMENTATION")
+    expect(state?.phaseState).toBe("SCHEDULING")
+    expect(state?.currentTaskId).toBe("T2")
+  })
+
+  it("rolls back delegated state when child sub-workflow prompt fails", async () => {
+    const sid = `int-test-${Date.now()}-spawn-prompt-fail`
+    client.session.prompt = mock(async () => {
+      throw new Error("prompt failed")
+    }) as any
+    await plugin.event({ event: { type: "session.created", properties: { info: { id: sid } } } })
+    const ctx = { directory: tempDir, sessionId: sid }
+    await plugin._testStore.update(sid, (d: any) => {
+      d.phase = "IMPLEMENTATION"
+      d.phaseState = "SCHEDULING"
+      d.mode = "INCREMENTAL"
+      d.featureName = `spawn-parent-${Date.now()}`
+      d.implDag = [
+        { id: "T1", description: "Delegate me", dependencies: [], expectedFiles: [], expectedTests: [], estimatedComplexity: "small", status: "pending" },
+      ]
+      d.currentTaskId = null
+      d.childWorkflows = []
+    })
+
+    const result = await plugin.tool.spawn_sub_workflow.execute({ task_id: "T1", feature_name: "child-work" }, ctx)
+
+    expect(result).toContain("Error: Child workflow state was created but initial prompt failed")
+    const state = plugin._testStore.get(sid)
+    expect(state?.implDag?.[0]?.status).toBe("pending")
+    expect(state?.childWorkflows).toEqual([])
+    expect(plugin._testStore.get("eph-1")).toBeNull()
   })
 })
 
@@ -282,6 +373,35 @@ describe("OpenCode integration — task boundary revision workflow", () => {
   })
 })
 
+describe("OpenCode integration — drift repair parity", () => {
+  it("applies safe drift repair through the shared tool-execute dispatcher", async () => {
+    const sid = `int-test-${Date.now()}-drift-repair-dispatch`
+    await plugin.event({ event: { type: "session.created", properties: { info: { id: sid } } } })
+    const ctx = { directory: tempDir, sessionId: sid }
+    await plugin._testStore.update(sid, (d: any) => {
+      d.phase = "IMPLEMENTATION"
+      d.phaseState = "SCHEDULING"
+      d.mode = "INCREMENTAL"
+      d.featureName = `drift-repair-${Date.now()}`
+      d.implDag = [
+        { id: "T1", description: "Completed task", dependencies: [], expectedFiles: ["src/a.ts"], expectedTests: [], estimatedComplexity: "small", status: "complete" },
+      ]
+      d.currentTaskId = null
+    })
+
+    const reportRaw = await plugin.tool.report_drift.execute({ task_ids: ["T1"], include_worktree: false, include_db: false }, ctx)
+    const report = JSON.parse(reportRaw)
+    const planRaw = await plugin.tool.plan_drift_repair.execute({ drift_report_id: report.value.id, strategy: "safe-auto" }, ctx)
+    const plan = JSON.parse(planRaw)
+    expect(plan.value.toolCalls[0].toolCall.toolName).toBe("reset_task")
+
+    const appliedRaw = await plugin.tool.apply_drift_repair.execute({ repair_plan_id: plan.value.id, apply_safe_actions: true }, ctx)
+    const applied = JSON.parse(appliedRaw)
+    expect(applied.value.results[0].result).toContain("Reset 1 task")
+    expect(plugin._testStore.get(sid)?.implDag?.[0]?.status).toBe("pending")
+  })
+})
+
 // ---------------------------------------------------------------------------
 // Plugin shape
 // ---------------------------------------------------------------------------
@@ -318,20 +438,33 @@ describe("Plugin shape — returned object has all required keys", () => {
     expect(tools.submit_feedback).toBeDefined()
   })
 
-  it("WORKFLOW_TOOL_NAMES contains all 16 tool names", () => {
-    expect(WORKFLOW_TOOL_NAMES.size).toBe(16)
-    expect(WORKFLOW_TOOL_NAMES.has("submit_task_review")).toBe(true)
-    expect(WORKFLOW_TOOL_NAMES.has("submit_auto_approve")).toBe(true)
-    expect(WORKFLOW_TOOL_NAMES.has("reset_task")).toBe(true)
-    expect(WORKFLOW_TOOL_NAMES.has("check_prior_workflow")).toBe(true)
-    expect(WORKFLOW_TOOL_NAMES.has("select_mode")).toBe(true)
-    expect(WORKFLOW_TOOL_NAMES.has("mark_task_complete")).toBe(true)
-    expect(WORKFLOW_TOOL_NAMES.has("submit_feedback")).toBe(true)
-    expect(WORKFLOW_TOOL_NAMES.has("resolve_human_gate")).toBe(true)
-    expect(WORKFLOW_TOOL_NAMES.has("propose_backtrack")).toBe(true)
-    expect(WORKFLOW_TOOL_NAMES.has("spawn_sub_workflow")).toBe(true)
-    expect(WORKFLOW_TOOL_NAMES.has("query_parent_workflow")).toBe(true)
-    expect(WORKFLOW_TOOL_NAMES.has("query_child_workflow")).toBe(true)
+  it("WORKFLOW_TOOL_NAMES contains every callable workflow tool", () => {
+    expect([...WORKFLOW_TOOL_NAMES].sort()).toEqual([
+      "analyze_task_boundary_change",
+      "apply_drift_repair",
+      "apply_patch_suggestion",
+      "apply_task_boundary_change",
+      "check_prior_workflow",
+      "mark_analyze_complete",
+      "mark_satisfied",
+      "mark_scan_complete",
+      "mark_task_complete",
+      "plan_drift_repair",
+      "propose_backtrack",
+      "query_child_workflow",
+      "query_parent_workflow",
+      "report_drift",
+      "request_review",
+      "reset_task",
+      "resolve_human_gate",
+      "resolve_patch_suggestion",
+      "route_patch_suggestions",
+      "select_mode",
+      "spawn_sub_workflow",
+      "submit_auto_approve",
+      "submit_feedback",
+      "submit_task_review",
+    ])
   })
 })
 
@@ -585,6 +718,36 @@ describe("tool.execute.before — phase-gated tool restrictions", () => {
     ).rejects.toThrow("no target path")
   })
 
+  it("allows apply_patch when all patch targets satisfy the phase file predicate", async () => {
+    const sid = `int-test-${Date.now()}-guard-valid-patch`
+    await advanceGreenfieldToInterfaces(sid, `guard-valid-patch-${Date.now()}`)
+
+    await expect(
+      plugin["tool.execute.before"]({
+        sessionID: sid,
+        tool: "apply_patch",
+        args: {
+          patchText: "*** Begin Patch\n*** Update File: src/core/aspects/types.ts\n@@\n-old\n+new\n*** End Patch",
+        },
+      }),
+    ).resolves.toBeUndefined()
+  })
+
+  it("blocks apply_patch when any patch target violates the phase file predicate", async () => {
+    const sid = `int-test-${Date.now()}-guard-invalid-patch`
+    await advanceGreenfieldToInterfaces(sid, `guard-invalid-patch-${Date.now()}`)
+
+    await expect(
+      plugin["tool.execute.before"]({
+        sessionID: sid,
+        tool: "apply_patch",
+        args: {
+          patchText: "*** Begin Patch\n*** Update File: src/core/aspects/types.ts\n@@\n-old\n+new\n*** Update File: src/runtime/app.ts\n@@\n-old\n+new\n*** End Patch",
+        },
+      }),
+    ).rejects.toThrow("src/runtime/app.ts")
+  })
+
   it("rejects artifact_content for OpenCode INTERFACES request_review", async () => {
     const sid = `int-test-${Date.now()}-interfaces-content`
     const ctx = await advanceGreenfieldToInterfaces(sid, `interfaces-content-${Date.now()}`)
@@ -714,6 +877,27 @@ describe("experimental.chat.system.transform — injects workflow prompt", () =>
     expect(plugin._testStore.get(sid).activeAgent).toBe("build-artisan")
   })
 
+  it("does not opt in when the user explicitly says not to use Open Artisan", async () => {
+    const sid = `int-test-${Date.now()}-build-negated-opt-in`
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: sid, agent: "build" } } },
+    })
+
+    await plugin["chat.message"](
+      { sessionID: sid, agent: "build" },
+      {
+        message: { sessionID: sid, id: "msg-negated-opt-in" },
+        parts: [{ type: "text", text: "Don't use Open Artisan for this task." }],
+      },
+    )
+
+    const output = { system: ["original"] }
+    await plugin["experimental.chat.system.transform"]({ sessionID: sid, agent: "build" }, output)
+
+    expect(output.system).toEqual(["original"])
+    expect(plugin._testStore.get(sid).activeAgent).toBe("build")
+  })
+
   it("treats workflow tool calls from build sessions as explicit Open Artisan opt-in", async () => {
     const sid = `int-test-${Date.now()}-build-tool-opt-in`
     await plugin.event({
@@ -789,6 +973,30 @@ describe("experimental.chat.system.transform — injects workflow prompt", () =>
     expect(state.activeAgent).toBe("artisan")
   })
 
+  it("resets stalled retry state when the user responds", async () => {
+    const sid = `int-test-${Date.now()}-retry-reset-on-user`
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: sid, agent: "artisan" } } },
+    })
+    await plugin.tool.select_mode.execute(
+      { mode: "GREENFIELD", feature_name: "retry-reset-on-user" },
+      { directory: tempDir, sessionId: sid, agent: "artisan" },
+    )
+    await plugin._testStore.update(sid, (draft: any) => {
+      draft.retryCount = 4
+    })
+
+    await plugin["chat.message"](
+      { sessionID: sid, agent: "artisan" },
+      {
+        message: { sessionID: sid, id: "msg-retry-reset" },
+        parts: [{ type: "text", text: "continue now" }],
+      },
+    )
+
+    expect(plugin._testStore.get(sid).retryCount).toBe(0)
+  })
+
   it("can switch back out of the workflow in build mode after an explicit opt-in", async () => {
     const sid = `int-test-${Date.now()}-build-opt-out`
     await plugin.event({
@@ -808,6 +1016,36 @@ describe("experimental.chat.system.transform — injects workflow prompt", () =>
       {
         message: { sessionID: sid, id: "msg-opt-out" },
         parts: [{ type: "text", text: "disable workflow now" }],
+      },
+    )
+
+    const output = { system: ["original"] }
+    await plugin["experimental.chat.system.transform"]({ sessionID: sid, agent: "build" }, output)
+
+    expect(output.system).toEqual(["original"])
+    expect(plugin._testStore.get(sid).activeAgent).toBe("build")
+  })
+
+  it("can explicitly turn off Open Artisan from a build-driven workflow", async () => {
+    const sid = `int-test-${Date.now()}-build-openartisan-off`
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: sid, agent: "build" } } },
+    })
+
+    await plugin["chat.message"](
+      { sessionID: sid, agent: "build" },
+      {
+        message: { sessionID: sid, id: "msg-opt-in-openartisan" },
+        parts: [{ type: "text", text: "Use Open Artisan for this task." }],
+      },
+    )
+    expect(plugin._testStore.get(sid).activeAgent).toBe("build-artisan")
+
+    await plugin["chat.message"](
+      { sessionID: sid, agent: "build" },
+      {
+        message: { sessionID: sid, id: "msg-openartisan-off" },
+        parts: [{ type: "text", text: "please turn off open-artisan. we're in build mode. we don't need openartisan for this" }],
       },
     )
 

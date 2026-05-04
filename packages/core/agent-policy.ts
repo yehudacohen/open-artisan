@@ -1,7 +1,7 @@
 import type { SessionStateStore, WorkflowState } from "./types"
 
-/** Known artisan agent names. Only these agents activate the full workflow. */
-export const ARTISAN_AGENT_NAMES = new Set(["artisan", "robot-artisan"])
+/** Known workflow-active agent names. */
+export const ARTISAN_AGENT_NAMES = new Set(["artisan", "robot-artisan", "build-artisan"])
 
 export function normalizeAgentName(agent: unknown): string | null {
   if (typeof agent !== "string") return null
@@ -41,6 +41,9 @@ export async function persistActiveAgent(
 
   const state = store.get(sessionId)
   if (!state) return normalized
+  if (isArtisanAgent(state.activeAgent) && !isArtisanAgent(normalized)) {
+    return normalizeAgentName(state.activeAgent) ?? normalized
+  }
   if (state.activeAgent === normalized) return normalized
 
   await store.update(sessionId, (draft) => {
@@ -51,8 +54,12 @@ export async function persistActiveAgent(
 }
 
 export function isWorkflowSessionActive(state: WorkflowState, agentOverride?: unknown): boolean {
-  const effectiveAgent = normalizeAgentName(agentOverride) ?? normalizeAgentName(state.activeAgent)
-  if (effectiveAgent) return isArtisanAgent(effectiveAgent)
+  const persistedAgent = normalizeAgentName(state.activeAgent)
+  if (persistedAgent && isArtisanAgent(persistedAgent)) return true
+  if (persistedAgent && !isArtisanAgent(persistedAgent)) return false
+
+  const overrideAgent = normalizeAgentName(agentOverride)
+  if (overrideAgent) return isArtisanAgent(overrideAgent)
 
   return (
     state.mode !== null ||

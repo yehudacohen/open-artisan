@@ -15,7 +15,8 @@ import type { LifecycleInitParams, LifecycleSessionParams, LifecycleShutdownPara
 import { INVALID_PARAMS, NOT_INITIALIZED } from "../protocol"
 
 import { createSessionStateStore, setPostUpdateHook } from "../../core/session-state"
-import { createFileSystemStateBackend, migrateLegacyStateFile } from "../../core/state-backend-fs"
+import { migrateLegacyStateFile } from "../../core/state-backend-fs"
+import { createOpenArtisanRuntimeBackend } from "../../core/open-artisan-runtime-backends"
 import { createStateMachine } from "../../core/state-machine"
 import { createArtifactGraph } from "../../core/artifacts"
 import { createSessionRegistry } from "../../core/session-registry"
@@ -23,24 +24,27 @@ import { normalizeAgentName } from "../../core/agent-policy"
 import { detectMode } from "../../core/mode-detect"
 import { setDefaultStateDir } from "../../core/logger"
 import { writeStatusFile } from "../../core/status-writer"
+import { LifecycleInitParamsSchema, formatZodError } from "../../core/schemas"
 import { checkPidFile, writePidFile, removePidFile } from "../pid-file"
 import { createBridgeLogger, adaptPinoToLogger } from "../structured-log"
 import { loadBridgeLeaseSnapshot, loadBridgeMetadata, upsertBridgeMetadata } from "../bridge-meta"
 import { detachBridgeClient, evaluateBridgeShutdownEligibility } from "../bridge-clients"
 import { upsertBridgeClientLease } from "../bridge-leases"
 import { DEFAULT_BRIDGE_SOCKET_FILENAME, SHARED_BRIDGE_PROTOCOL_VERSION } from "../bridge-discovery"
+import { createRoadmapSliceService } from "../../core/roadmap-slice-service"
+import { matchesRoadmapQuery, roadmapError, roadmapOk } from "../../core/types"
 import type { EngineContext } from "../../core/engine-context"
 import type { SubagentDispatcher } from "../../core/subagent-dispatcher"
 import type { NotificationSink } from "../../core/logger"
+import type { ArtifactKey, OrchestratorRouteInput, Phase } from "../../core/types"
 import type { BridgeClientLease, BridgeMetadata } from "../shared-bridge-types"
 
-// Stub SubagentDispatcher — returns descriptive errors for Phase 4.
-const stubSubagentDispatcher: SubagentDispatcher = {
+// Bridge adapters run review/discovery externally and submit results back via bridge tools.
+const externalReviewDispatcher: SubagentDispatcher = {
   async createSession() {
     throw new Error(
-      "SubagentDispatcher not available in bridge mode. " +
-      "Self-review, orchestrator, and discovery fleet require an LLM client. " +
-      "Use an in-process adapter or configure an LLM client in lifecycle.init.",
+      "This bridge uses adapter-managed external review sessions. " +
+      "Request review context through the bridge and submit reviewer output with the matching submit tool.",
     )
   },
 }
@@ -50,15 +54,24 @@ const noopNotify: NotificationSink = {
   toast() { /* no-op */ },
 }
 
-function buildBridgeMetadata(projectDir: string, stateDir: string, existing?: BridgeMetadata | null): BridgeMetadata {
+function buildBridgeMetadata(
+  projectDir: string,
+  stateDir: string,
+  transport: BridgeMetadata["transport"],
+  socketPath: string | undefined,
+  existing?: BridgeMetadata | null,
+): BridgeMetadata {
   const now = new Date().toISOString()
+  const resolvedSocketPath = transport === "unix-socket"
+    ? socketPath ?? existing?.socketPath ?? join(stateDir, DEFAULT_BRIDGE_SOCKET_FILENAME)
+    : undefined
   return {
     version: 1,
     bridgeInstanceId: existing?.bridgeInstanceId ?? randomUUID(),
     projectDir,
     stateDir,
-    transport: existing?.transport ?? "unix-socket",
-    socketPath: existing?.socketPath ?? join(stateDir, DEFAULT_BRIDGE_SOCKET_FILENAME),
+    transport,
+    ...(resolvedSocketPath ? { socketPath: resolvedSocketPath } : {}),
     pid: process.pid,
     startedAt: existing?.startedAt ?? now,
     protocolVersion: SHARED_BRIDGE_PROTOCOL_VERSION,
@@ -79,34 +92,52 @@ function buildSessionLease(sessionId: string, agent?: string): BridgeClientLease
 }
 
 export const handleInit: MethodHandler = async (params, ctx) => {
-  const p = params as Partial<LifecycleInitParams>
-  if (!p.projectDir || typeof p.projectDir !== "string") {
-    throw new JSONRPCErrorException("projectDir is required", INVALID_PARAMS)
+  const parsedParams = LifecycleInitParamsSchema.safeParse(params)
+  if (!parsedParams.success) {
+    throw new JSONRPCErrorException(`Invalid lifecycle.init params: ${formatZodError(parsedParams.error)}`, INVALID_PARAMS)
   }
+  const p = parsedParams.data
 
   const projectDir = p.projectDir.replace(/\/+$/, "")
   const stateDir = p.stateDir ?? join(projectDir, ".openartisan")
   const legacyStateFile = join(projectDir, ".opencode", "workflow-state.json")
+  const transport = p.transport ?? "unix-socket"
+  const registerRuntime = p.registerRuntime ?? true
 
-  // Check for existing bridge process (stale PID detection).
-  // Allow re-init from the same process (our own PID is fine).
-  const pidCheck = await checkPidFile(stateDir)
-  if (pidCheck.running && pidCheck.pid !== process.pid) {
-    throw new JSONRPCErrorException(
-      `Another bridge process is already running (PID ${pidCheck.pid}). ` +
-      `Kill it or remove .bridge-pid manually.`,
-      NOT_INITIALIZED,
-    )
+  if (registerRuntime) {
+    // Check for existing bridge process (stale PID detection).
+    // Allow re-init from the same process (our own PID is fine).
+    const pidCheck = await checkPidFile(stateDir)
+    if (pidCheck.running && pidCheck.pid !== process.pid) {
+      throw new JSONRPCErrorException(
+        `Another bridge process is already running (PID ${pidCheck.pid}). ` +
+        `Kill it or remove .bridge-pid manually.`,
+        NOT_INITIALIZED,
+      )
+    }
+
+    // Write PID file and shared bridge metadata only for reusable runtimes.
+    await writePidFile(stateDir)
+
+    const existingMetadata = await loadBridgeMetadata(stateDir)
+    await upsertBridgeMetadata(stateDir, buildBridgeMetadata(projectDir, stateDir, transport, p.socketPath, existingMetadata))
   }
 
-  // Write PID file
-  await writePidFile(stateDir)
-
-  const existingMetadata = await loadBridgeMetadata(stateDir)
-  await upsertBridgeMetadata(stateDir, buildBridgeMetadata(projectDir, stateDir, existingMetadata))
-
-  // Create backend and store
-  const backend = createFileSystemStateBackend(stateDir)
+  // Create backend and store. Filesystem remains the default; DB/PGlite is explicit opt-in.
+  const runtimeOptions: Parameters<typeof createOpenArtisanRuntimeBackend>[1] = {}
+  if (p.persistence?.kind) runtimeOptions.kind = p.persistence.kind
+  if (p.persistence?.pglite) {
+    runtimeOptions.pglite = {
+      connection: {
+        ...(p.persistence.pglite.dataDir ? { dataDir: p.persistence.pglite.dataDir } : {}),
+        ...(p.persistence.pglite.databaseFileName ? { databaseFileName: p.persistence.pglite.databaseFileName } : {}),
+        debugName: "open-artisan-bridge-workflow",
+      },
+      ...(p.persistence.pglite.schemaName ? { schemaName: p.persistence.pglite.schemaName } : {}),
+    }
+  }
+  const runtimeBackend = createOpenArtisanRuntimeBackend(stateDir, runtimeOptions)
+  const backend = runtimeBackend.stateBackend
   const store = createSessionStateStore(backend)
 
   // Legacy migration
@@ -132,10 +163,29 @@ export const handleInit: MethodHandler = async (params, ctx) => {
     throw new JSONRPCErrorException(`Failed to load state: ${loadResult.error}`, NOT_INITIALIZED)
   }
 
-  // Create stub orchestrator (needs SubagentDispatcher for real implementation)
+  // Capability-aware orchestrator fallback for bridge clients without LLM classification.
   const orchestrator = {
-    async route() {
-      throw new Error("Orchestrator not available in bridge mode (requires SubagentDispatcher).")
+    async route(input: OrchestratorRouteInput) {
+      const artifact: ArtifactKey = input.currentPhase === "DISCOVERY"
+        ? "conventions"
+        : input.currentPhase === "PLANNING"
+          ? "plan"
+          : input.currentPhase === "INTERFACES"
+            ? "interfaces"
+            : input.currentPhase === "TESTS"
+              ? "tests"
+              : input.currentPhase === "IMPL_PLAN"
+                ? "impl_plan"
+                : "implementation"
+      return {
+        classification: "tactical" as const,
+        revisionSteps: [{
+          artifact,
+          phase: input.currentPhase as Exclude<Phase, "MODE_SELECT" | "DONE">,
+          phaseState: "REVISE" as const,
+          instructions: input.feedback,
+        }],
+      }
     },
   }
 
@@ -144,10 +194,11 @@ export const handleInit: MethodHandler = async (params, ctx) => {
     store,
     sm,
     orchestrator,
-    subagentDispatcher: stubSubagentDispatcher,
+    subagentDispatcher: externalReviewDispatcher,
     log,
     notify: noopNotify,
     graph,
+    ...(runtimeBackend.services ? { openArtisanServices: runtimeBackend.services } : {}),
     designDocPath: null,
     sessions,
     lastRepromptTimestamps: new Map(),
@@ -165,9 +216,23 @@ export const handleInit: MethodHandler = async (params, ctx) => {
     discoveryFleet: p.capabilities?.discoveryFleet ?? false,
   }
   ctx.pinoLogger = pinoLogger
+  ctx.runtimeBackendKind = runtimeBackend.kind
+  ctx.roadmapBackend = runtimeBackend.roadmapBackend ?? null
+  ctx.openArtisanServices = runtimeBackend.services ?? null
+  ctx.runtimeBackendDispose = runtimeBackend.dispose
+  ctx.roadmapService = runtimeBackend.roadmapBackend
+    ? createRoadmapSliceService(runtimeBackend.roadmapBackend, {
+      async queryRoadmapItems(query) {
+        const result = await runtimeBackend.roadmapBackend!.readRoadmap()
+        if (!result.ok) return result
+        if (result.value === null) return roadmapError("not-found", "No roadmap document exists", false)
+        return roadmapOk(result.value.items.filter((item) => matchesRoadmapQuery(item, query)))
+      },
+    })
+    : null
 
   log.info("Bridge initialized", {
-    detail: `projectDir=${projectDir} stateDir=${stateDir} loaded=${loadResult.count} migrated=${migration.migrated.length}`,
+    detail: `projectDir=${projectDir} stateDir=${stateDir} backend=${runtimeBackend.kind} loaded=${loadResult.count} migrated=${migration.migrated.length}`,
   })
 
   return "ready"
@@ -194,6 +259,14 @@ export const handleShutdown: MethodHandler = async (params, ctx) => {
 
   ctx.shuttingDown = true
   ctx.engine?.log.info("Bridge shutting down")
+
+  try {
+    await ctx.runtimeBackendDispose?.()
+  } catch (error) {
+    ctx.engine?.log.warn("Runtime backend dispose failed", {
+      detail: error instanceof Error ? error.message : String(error),
+    })
+  }
 
   // Remove PID file before exit
   if (ctx.stateDir) {

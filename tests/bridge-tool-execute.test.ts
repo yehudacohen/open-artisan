@@ -10,6 +10,7 @@ import { handleInit, handleSessionCreated } from "#bridge/methods/lifecycle"
 import { handleToolExecute, handleTaskGetReviewContext, handlePhaseGetReviewContext, handleAutoApproveContext } from "#bridge/methods/tool-execute"
 import type { BridgeContext } from "#bridge/server"
 import type { EngineContext } from "#core/engine-context"
+import { workflowDbId } from "#core/runtime-persistence"
 
 let tmpDir: string
 let ctx: BridgeContext
@@ -25,6 +26,10 @@ function makeBridgeContext(): BridgeContext {
     stateDir: null,
     projectDir: null,
     capabilities: { selfReview: "isolated" as const, orchestrator: true, discoveryFleet: true },
+    runtimeBackendKind: "filesystem",
+    roadmapBackend: null,
+    roadmapService: null,
+    openArtisanServices: null,
     pinoLogger: null,
     shuttingDown: false,
   }
@@ -33,7 +38,7 @@ function makeBridgeContext(): BridgeContext {
 beforeEach(async () => {
   tmpDir = await mkdtemp(join(tmpdir(), "bridge-tools-"))
   ctx = makeBridgeContext()
-  await handleInit({ projectDir: tmpDir }, ctx)
+  await handleInit({ projectDir: tmpDir, persistence: { kind: "filesystem" } }, ctx)
   await handleSessionCreated({ sessionId: "s1" }, ctx)
 })
 
@@ -191,22 +196,22 @@ describe("tool.execute — mark_scan_complete", () => {
 // ---------------------------------------------------------------------------
 
 describe("tool.execute — SubagentDispatcher-dependent tools", () => {
-  it("mark_analyze_complete returns bridge mode error when discovery fleet is enabled", async () => {
+  it("mark_analyze_complete returns SubagentDispatcher requirement when discovery fleet is enabled", async () => {
     const isolatedCtx = makeBridgeContext()
-    await handleInit({ projectDir: tmpDir, capabilities: { selfReview: "isolated", orchestrator: true, discoveryFleet: true } }, isolatedCtx)
+    await handleInit({ projectDir: tmpDir, persistence: { kind: "filesystem" }, capabilities: { selfReview: "isolated", orchestrator: true, discoveryFleet: true } }, isolatedCtx)
     await handleSessionCreated({ sessionId: "iso" }, isolatedCtx)
     const result = await handleToolExecute({
       name: "mark_analyze_complete",
       args: {},
       context: { sessionId: "iso", directory: tmpDir },
     }, isolatedCtx) as string
-    expect(result).toContain("bridge mode")
+    expect(result).toContain("requires")
     expect(result).toContain("SubagentDispatcher")
   })
 
-  it("mark_satisfied returns bridge mode error when isolated self-review is enabled", async () => {
+  it("mark_satisfied returns SubagentDispatcher requirement when isolated self-review is enabled", async () => {
     const isolatedCtx = makeBridgeContext()
-    await handleInit({ projectDir: tmpDir, capabilities: { selfReview: "isolated", orchestrator: true, discoveryFleet: true } }, isolatedCtx)
+    await handleInit({ projectDir: tmpDir, persistence: { kind: "filesystem" }, capabilities: { selfReview: "isolated", orchestrator: true, discoveryFleet: true } }, isolatedCtx)
     await handleSessionCreated({ sessionId: "iso", agent: "artisan" }, isolatedCtx)
     await isolatedCtx.engine!.store.update("iso", (d) => {
       d.mode = "GREENFIELD"
@@ -218,12 +223,12 @@ describe("tool.execute — SubagentDispatcher-dependent tools", () => {
       args: { criteria_met: Array.from({ length: 16 }, (_, i) => ({ criterion: `C${i}`, met: true, evidence: "ok", severity: "blocking" })) },
       context: { sessionId: "iso", directory: tmpDir },
     }, isolatedCtx) as string
-    expect(result).toContain("bridge mode")
+    expect(result).toContain("requires")
   })
 
-  it("propose_backtrack returns bridge mode error when orchestrator is enabled", async () => {
+  it("propose_backtrack returns SubagentDispatcher requirement when orchestrator is enabled", async () => {
     const isolatedCtx = makeBridgeContext()
-    await handleInit({ projectDir: tmpDir, capabilities: { selfReview: "isolated", orchestrator: true, discoveryFleet: true } }, isolatedCtx)
+    await handleInit({ projectDir: tmpDir, persistence: { kind: "filesystem" }, capabilities: { selfReview: "isolated", orchestrator: true, discoveryFleet: true } }, isolatedCtx)
     await handleSessionCreated({ sessionId: "iso", agent: "artisan" }, isolatedCtx)
     await isolatedCtx.engine!.store.update("iso", (d) => {
       d.mode = "GREENFIELD"
@@ -235,15 +240,15 @@ describe("tool.execute — SubagentDispatcher-dependent tools", () => {
       args: { target_phase: "PLANNING", reason: "Need replanning" },
       context: { sessionId: "iso", directory: tmpDir },
     }, isolatedCtx) as string
-    expect(result).toContain("bridge mode")
+    expect(result).toContain("requires")
   })
 
-  it("spawn_sub_workflow returns bridge mode error", async () => {
+  it("spawn_sub_workflow returns SubagentDispatcher requirement", async () => {
     const result = await exec("spawn_sub_workflow")
-    expect(result).toContain("bridge mode")
+    expect(result).toContain("requires")
   })
 
-  it("spawn_sub_workflow should move IMPLEMENTATION into DELEGATED_WAIT when a task is delegated", async () => {
+  it("spawn_sub_workflow does not mutate parent state without adapter-managed child session creation", async () => {
     await exec("select_mode", { mode: "GREENFIELD", feature_name: "delegated-wait-feat" })
     await ctx.engine!.store.update("s1", (d) => {
       d.phase = "IMPLEMENTATION"
@@ -257,11 +262,35 @@ describe("tool.execute — SubagentDispatcher-dependent tools", () => {
     })
 
     const result = await exec("spawn_sub_workflow", { task_id: "T2", feature_name: "child-delegate" })
-    expect(result).toContain("DELEGATED_WAIT")
+    expect(result).toContain("requires adapter-managed child session creation")
     const state = ctx.engine!.store.get("s1")
     expect(state?.phase).toBe("IMPLEMENTATION")
-    expect(state?.phaseState).toBe("DELEGATED_WAIT")
-    expect(state?.childWorkflows.length).toBeGreaterThan(0)
+    expect(state?.phaseState).toBe("DRAFT")
+    expect(state?.childWorkflows.length).toBe(0)
+    expect(state?.implDag?.find((task) => task.id === "T2")?.status).toBe("pending")
+  })
+
+  it("persists approved source artifact files separately from stale markdown mirrors", async () => {
+    const staleMirror = join(tmpDir, ".openartisan", "typed-resource-aspects", "interfaces.md")
+    const sourceArtifact = join(tmpDir, "src", "core", "aspects", "types.ts")
+    await mkdir(join(tmpDir, ".openartisan", "typed-resource-aspects"), { recursive: true })
+    await mkdir(join(tmpDir, "src", "core", "aspects"), { recursive: true })
+    await Bun.write(staleMirror, "# stale interfaces mirror\n")
+    await Bun.write(sourceArtifact, "export interface RevisedAspectContract {}\n")
+    await ctx.engine!.store.update("s1", (d) => {
+      d.mode = "GREENFIELD"
+      d.phase = "INTERFACES"
+      d.phaseState = "USER_GATE"
+      d.featureName = "typed-resource-aspects"
+      d.userGateMessageReceived = true
+      d.artifactDiskPaths.interfaces = staleMirror
+      d.reviewArtifactFiles = [sourceArtifact]
+    })
+
+    const result = await exec("submit_feedback", { feedback_type: "approve", feedback_text: "approved" })
+    expect(result).toContain("Approved")
+    const state = ctx.engine!.store.get("s1")
+    expect(state?.approvedArtifactFiles?.interfaces).toEqual([sourceArtifact])
   })
 })
 
@@ -376,6 +405,64 @@ describe("tool.execute — submit_feedback", () => {
     const state = ctx.engine!.store.get("s1")
     expect(state?.phaseState).not.toBe("USER_GATE")
     expect(state?.approvedArtifacts.plan).toBeTruthy()
+  })
+
+  it("rejects submit_feedback artifact_content", async () => {
+    await exec("select_mode", { mode: "GREENFIELD", feature_name: "fb-artifact-content" })
+    await ctx.engine!.store.update("s1", (d) => {
+      d.phaseState = "USER_GATE"
+      d.userGateMessageReceived = true
+    })
+
+    const result = await exec("submit_feedback", {
+      feedback_type: "approve",
+      feedback_text: "Looks good",
+      artifact_content: "# Plan\n",
+    })
+
+    expect(result).toContain("submit_feedback no longer accepts artifact_content")
+    expect(ctx.engine!.store.get("s1")?.phaseState).toBe("USER_GATE")
+  })
+
+  it("does not mutate USER_GATE into REVISE for status or experience questions", async () => {
+    await exec("select_mode", { mode: "GREENFIELD", feature_name: "fb-meta-question" })
+    await ctx.engine!.store.update("s1", (d) => {
+      d.phase = "IMPLEMENTATION"
+      d.phaseState = "USER_GATE"
+      d.userGateMessageReceived = true
+    })
+
+    const result = await exec("submit_feedback", {
+      feedback_type: "revise",
+      feedback_text: "have we implemented all the implementation tasks? How has your experience with open-artisan been?",
+    })
+
+    expect(result).toContain("clarification/status question")
+    const state = ctx.engine!.store.get("s1")
+    expect(state?.phase).toBe("IMPLEMENTATION")
+    expect(state?.phaseState).toBe("USER_GATE")
+    expect(state?.feedbackHistory).toHaveLength(0)
+  })
+
+  it("does not mutate ESCAPE_HATCH for clarification questions", async () => {
+    await exec("select_mode", { mode: "GREENFIELD", feature_name: "fb-escape-meta" })
+    await ctx.engine!.store.update("s1", (d) => {
+      d.phase = "PLANNING"
+      d.phaseState = "ESCAPE_HATCH"
+      d.escapePending = true
+      d.pendingRevisionSteps = [{ artifact: "plan", phase: "PLANNING", phaseState: "REVISE", instructions: "revise" }]
+      d.userGateMessageReceived = true
+    })
+
+    const result = await exec("submit_feedback", {
+      feedback_type: "revise",
+      feedback_text: "What is the escape hatch and what are my options?",
+    })
+
+    expect(result).toContain("escape-hatch clarification")
+    const state = ctx.engine!.store.get("s1")
+    expect(state?.phaseState).toBe("ESCAPE_HATCH")
+    expect(state?.escapePending).toBe(true)
   })
 
   it("parses IMPL_PLAN into DAG on approval", async () => {
@@ -753,7 +840,7 @@ describe("tool.execute — check_prior_workflow", () => {
     })
 
     const freshCtx = makeBridgeContext()
-    await handleInit({ projectDir: tmpDir }, freshCtx)
+    await handleInit({ projectDir: tmpDir, persistence: { kind: "filesystem" } }, freshCtx)
     await handleSessionCreated({ sessionId: "reader" }, freshCtx)
 
     const result = await handleToolExecute({
@@ -966,7 +1053,7 @@ describe("tool.execute — agent-only mode", () => {
   beforeEach(async () => {
     agentCtx = makeBridgeContext()
     agentCtx.capabilities = { selfReview: "agent-only", orchestrator: false, discoveryFleet: false }
-    await handleInit({ projectDir: tmpDir, capabilities: { selfReview: "agent-only", orchestrator: false, discoveryFleet: false } }, agentCtx)
+    await handleInit({ projectDir: tmpDir, persistence: { kind: "filesystem" }, capabilities: { selfReview: "agent-only", orchestrator: false, discoveryFleet: false } }, agentCtx)
     await handleSessionCreated({ sessionId: "ao-session" }, agentCtx)
     agentExec = (name, args = {}) =>
       handleToolExecute(
@@ -1091,7 +1178,7 @@ describe("tool.execute — agent-only mode", () => {
 
   it("mark_satisfied returns subagent error in isolated mode", async () => {
     const isolatedCtx = makeBridgeContext()
-    await handleInit({ projectDir: tmpDir, capabilities: { selfReview: "isolated", orchestrator: true, discoveryFleet: true } }, isolatedCtx)
+    await handleInit({ projectDir: tmpDir, persistence: { kind: "filesystem" }, capabilities: { selfReview: "isolated", orchestrator: true, discoveryFleet: true } }, isolatedCtx)
     await handleSessionCreated({ sessionId: "iso-session", agent: "artisan" }, isolatedCtx)
     await handleToolExecute({
       name: "select_mode",
@@ -1204,6 +1291,29 @@ describe("tool.execute — agent-only mode", () => {
 
     expect(result).toContain("Transitioning to DISCOVERY/REVIEW")
     expect(ctx.engine!.store.get("s1")?.phaseState).toBe("REVIEW")
+  })
+
+  it("materializes markdown artifact content for DISCOVERY/CONVENTIONS", async () => {
+    await exec("select_mode", { mode: "GREENFIELD", feature_name: `conv-materialize-${Date.now()}` })
+    await ctx.engine!.store.update("s1", (d) => {
+      d.phase = "DISCOVERY"
+      d.phaseState = "CONVENTIONS"
+    })
+    const feature = ctx.engine!.store.get("s1")?.featureName ?? "conv-materialize"
+    const conventionsPath = join(tmpDir, ".openartisan", feature, "conventions.md")
+
+    const result = await exec("request_review", {
+      summary: "Conventions",
+      artifact_description: "Conventions doc",
+      artifact_files: [],
+      artifact_markdown: "# Conventions\n\n- Use Bun.\n",
+    })
+
+    expect(result).toContain("Transitioning to DISCOVERY/REVIEW")
+    const state = ctx.engine!.store.get("s1")
+    expect(state?.phaseState).toBe("REVIEW")
+    expect(state?.reviewArtifactFiles).toEqual([conventionsPath])
+    expect(await Bun.file(conventionsPath).text()).toContain("Use Bun")
   })
 
   it("rejects request_review artifact_content for PLANNING", async () => {
@@ -1439,7 +1549,7 @@ describe("tool.execute — agent-only mode", () => {
 describe("tool.execute — submit_auto_approve", () => {
   it("routes non-JSON auto-approve output to REVISE as a rejection", async () => {
     const agentCtx = makeBridgeContext()
-    await handleInit({ projectDir: tmpDir }, agentCtx)
+    await handleInit({ projectDir: tmpDir, persistence: { kind: "filesystem" } }, agentCtx)
     await handleSessionCreated({ sessionId: "robot-session", agent: "robot-artisan" }, agentCtx)
     await agentCtx.engine!.store.update("robot-session", (d) => {
       d.mode = "GREENFIELD"
@@ -1570,7 +1680,7 @@ describe("tool.execute — submit_feedback human gate handling", () => {
     expect(state?.phaseState).toBe("HUMAN_GATE")
   })
 
-  it("does not use submit_feedback approval to resolve human gates back into drafting", async () => {
+  it("resolves HUMAN_GATE tasks and resumes scheduling when downstream work is unblocked", async () => {
     await ctx.engine!.store.update("s1", (d) => {
       d.phase = "IMPLEMENTATION"
       d.phaseState = "HUMAN_GATE"
@@ -1609,11 +1719,55 @@ describe("tool.execute — submit_feedback human gate handling", () => {
       resolved_human_gates: ["T1"],
     })
 
-    expect(result).toContain("Cannot approve")
+    expect(result).toContain("Resolved 1 human gate(s): T1")
+    expect(result).toContain("Returning to IMPLEMENTATION/SCHEDULING")
     const state = ctx.engine!.store.get("s1")
     expect(state?.phase).toBe("IMPLEMENTATION")
-    expect(state?.phaseState).toBe("HUMAN_GATE")
+    expect(state?.phaseState).toBe("SCHEDULING")
+    expect(state?.currentTaskId).toBe("T2")
+    expect(state?.implDag?.find((t) => t.id === "T1")?.status).toBe("complete")
+    expect(state?.implDag?.find((t) => t.id === "T1")?.humanGate?.resolved).toBe(true)
+  })
+
+  it("resolves final HUMAN_GATE tasks without approving implementation directly", async () => {
+    await ctx.engine!.store.update("s1", (d) => {
+      d.phase = "IMPLEMENTATION"
+      d.phaseState = "HUMAN_GATE"
+      d.userGateMessageReceived = true
+      d.implDag = [
+        {
+          id: "T1",
+          description: "Provision infra",
+          dependencies: [],
+          expectedTests: [],
+          expectedFiles: [],
+          estimatedComplexity: "small",
+          status: "human-gated",
+          category: "human-gate",
+          humanGate: {
+            whatIsNeeded: "Provision infra",
+            why: "Needed",
+            verificationSteps: "Verify",
+            resolved: false,
+          },
+        },
+      ]
+    })
+
+    const result = await exec("submit_feedback", {
+      feedback_type: "approve",
+      feedback_text: "approved",
+      resolved_human_gates: ["T1"],
+    })
+
+    expect(result).toContain("Resolved 1 human gate(s): T1")
+    expect(result).toContain("request final implementation review")
+    const state = ctx.engine!.store.get("s1")
+    expect(state?.phase).toBe("IMPLEMENTATION")
+    expect(state?.phaseState).toBe("SCHEDULING")
     expect(state?.currentTaskId).toBeNull()
+    expect(state?.implDag?.[0]?.status).toBe("complete")
+    expect(state?.implDag?.[0]?.humanGate?.resolved).toBe(true)
   })
 
   it("completes IMPLEMENTATION cleanly when the final human gate is resolved", async () => {
@@ -1709,7 +1863,7 @@ describe("tool.execute — select_mode resume", () => {
     })
 
     const freshCtx = makeBridgeContext()
-    await handleInit({ projectDir: tmpDir }, freshCtx)
+    await handleInit({ projectDir: tmpDir, persistence: { kind: "filesystem" } }, freshCtx)
     await handleSessionCreated({ sessionId: "reader" }, freshCtx)
 
     const result = await handleToolExecute({
@@ -1875,7 +2029,7 @@ describe("task.getReviewContext", () => {
   beforeEach(async () => {
     agentCtx = makeBridgeContext()
     agentCtx.capabilities = { selfReview: "agent-only", orchestrator: false, discoveryFleet: false }
-    await handleInit({ projectDir: tmpDir, capabilities: { selfReview: "agent-only", orchestrator: false, discoveryFleet: false } }, agentCtx)
+    await handleInit({ projectDir: tmpDir, persistence: { kind: "filesystem" }, capabilities: { selfReview: "agent-only", orchestrator: false, discoveryFleet: false } }, agentCtx)
     await handleSessionCreated({ sessionId: "rc-session" }, agentCtx)
   })
 
@@ -2035,5 +2189,148 @@ describe("tool.execute — task review edge cases", () => {
     // The review prompt should include the actual summary, not "(see task files)"
     expect(result).toContain("Built the auth module with JWT tokens")
     expect(result).not.toContain("(see task files)")
+  })
+
+  it("allows reset_task during implementation scheduling", async () => {
+    await exec("select_mode", { mode: "GREENFIELD", feature_name: "scheduling-reset" })
+    await ctx.engine!.store.update("s1", (d) => {
+      d.phase = "IMPLEMENTATION"
+      d.phaseState = "SCHEDULING"
+      d.implDag = [
+        { id: "T1", description: "Resettable", dependencies: [], expectedTests: [], expectedFiles: [], estimatedComplexity: "small", status: "complete" },
+        { id: "T2", description: "Later", dependencies: ["T1"], expectedTests: [], expectedFiles: [], estimatedComplexity: "small", status: "pending" },
+      ]
+      d.currentTaskId = null
+      d.taskCompletionInProgress = null
+    })
+
+    const result = await exec("reset_task", { task_ids: ["T1"], reason: "Drift repair reset from scheduling." })
+
+    expect(result).toContain("Reset 1 task")
+    const state = ctx.engine!.store.get("s1")
+    expect(state?.phaseState).toBe("SCHEDULING")
+    expect(state?.currentTaskId).toBe("T1")
+    expect(state?.implDag?.find((task) => task.id === "T1")?.status).toBe("pending")
+  })
+
+  it("rejects reset_task when completed downstream dependencies are not reset together", async () => {
+    await exec("select_mode", { mode: "GREENFIELD", feature_name: "reset-downstream-guard" })
+    await ctx.engine!.store.update("s1", (d) => {
+      d.phase = "IMPLEMENTATION"
+      d.phaseState = "SCHEDULING"
+      d.implDag = [
+        { id: "T1", description: "Upstream", dependencies: [], expectedTests: [], expectedFiles: [], estimatedComplexity: "small", status: "complete" },
+        { id: "T2", description: "Downstream", dependencies: ["T1"], expectedTests: [], expectedFiles: [], estimatedComplexity: "small", status: "complete" },
+      ]
+      d.currentTaskId = null
+      d.taskCompletionInProgress = null
+    })
+
+    const result = await exec("reset_task", { task_ids: ["T1"], reason: "Attempt unsafe partial reset." })
+
+    expect(result).toContain("depends on \"T1\"")
+    const state = ctx.engine!.store.get("s1")
+    expect(state?.implDag?.map((task) => task.status)).toEqual(["complete", "complete"])
+    expect(state?.currentTaskId).toBeNull()
+  })
+
+  it("allows reset_task when completed downstream dependencies are reset together", async () => {
+    await exec("select_mode", { mode: "GREENFIELD", feature_name: "reset-downstream-closure" })
+    await ctx.engine!.store.update("s1", (d) => {
+      d.phase = "IMPLEMENTATION"
+      d.phaseState = "SCHEDULING"
+      d.implDag = [
+        { id: "T1", description: "Upstream", dependencies: [], expectedTests: [], expectedFiles: [], estimatedComplexity: "small", status: "complete" },
+        { id: "T2", description: "Downstream", dependencies: ["T1"], expectedTests: [], expectedFiles: [], estimatedComplexity: "small", status: "complete" },
+        { id: "T3", description: "Later pending", dependencies: ["T2"], expectedTests: [], expectedFiles: [], estimatedComplexity: "small", status: "pending" },
+      ]
+      d.currentTaskId = null
+      d.taskCompletionInProgress = null
+    })
+
+    const result = await exec("reset_task", { task_ids: ["T2", "T1"], reason: "Reset full completed closure." })
+
+    expect(result).toContain("Reset 2 task")
+    const state = ctx.engine!.store.get("s1")
+    expect(state?.currentTaskId).toBe("T1")
+    expect(state?.implDag?.map((task) => task.status)).toEqual(["pending", "pending", "pending"])
+  })
+
+  it("records service file claims when reset_task selects the current task", async () => {
+    const dbCtx = makeBridgeContext()
+    const recordedLeases: any[] = []
+    const recordedClaims: any[] = []
+    dbCtx.openArtisanServices = {
+      agentLeases: {
+        recordLease: async (lease: any) => { recordedLeases.push(lease); return { ok: true, value: lease } },
+        listLeases: async () => ({ ok: true, value: recordedLeases }),
+        recordFileClaim: async (claim: any) => { recordedClaims.push(claim); return { ok: true, value: claim } },
+        listFileClaims: async (agentLeaseId: string) => ({ ok: true, value: recordedClaims.filter((claim) => claim.agentLeaseId === agentLeaseId) }),
+      },
+    } as any
+    await handleInit({ projectDir: tmpDir, persistence: { kind: "filesystem" } }, dbCtx)
+    dbCtx.openArtisanServices = {
+      agentLeases: {
+        recordLease: async (lease: any) => { recordedLeases.push(lease); return { ok: true, value: lease } },
+        listLeases: async () => ({ ok: true, value: recordedLeases }),
+        recordFileClaim: async (claim: any) => { recordedClaims.push(claim); return { ok: true, value: claim } },
+        listFileClaims: async (agentLeaseId: string) => ({ ok: true, value: recordedClaims.filter((claim) => claim.agentLeaseId === agentLeaseId) }),
+      },
+    } as any
+    await handleSessionCreated({ sessionId: "db-reset" }, dbCtx)
+    await dbCtx.engine!.store.update("db-reset", (d) => {
+      d.mode = "GREENFIELD"
+      d.featureName = "db-reset-claims"
+      d.phase = "IMPLEMENTATION"
+      d.phaseState = "DRAFT"
+      d.implDag = [
+        { id: "T1", description: "Resettable", dependencies: [], expectedTests: [], expectedFiles: ["src/reset.ts"], estimatedComplexity: "small", status: "complete" },
+      ]
+      d.currentTaskId = null
+    })
+
+    const result = await handleToolExecute({
+      name: "reset_task",
+      args: { task_id: "T1" },
+      context: { sessionId: "db-reset", directory: tmpDir },
+    }, dbCtx) as string
+
+    expect(result).toContain("Reset 1 task")
+    const workflowId = workflowDbId(dbCtx.engine!.store.get("db-reset")!)
+    const leases = await dbCtx.openArtisanServices!.agentLeases.listLeases(workflowId)
+    expect(leases.ok && leases.value.length).toBe(1)
+    const persistedClaims = await dbCtx.openArtisanServices!.agentLeases.listFileClaims(leases.ok ? leases.value[0]!.id : "")
+    expect(persistedClaims.ok && persistedClaims.value.map((claim: any) => claim.path)).toEqual(["src/reset.ts"])
+  })
+
+  it("reports, plans, and applies safe task drift repair through reset_task", async () => {
+    await exec("select_mode", { mode: "GREENFIELD", feature_name: "drift-reset" })
+    await ctx.engine!.store.update("s1", (d) => {
+      d.phase = "IMPLEMENTATION"
+      d.phaseState = "SCHEDULING"
+      d.implDag = [
+        { id: "T1", description: "Resettable", dependencies: [], expectedTests: [], expectedFiles: ["src/a.ts"], estimatedComplexity: "small", status: "complete" },
+        { id: "T2", description: "Pending downstream", dependencies: ["T1"], expectedTests: [], expectedFiles: ["src/b.ts"], estimatedComplexity: "small", status: "pending" },
+      ]
+      d.currentTaskId = null
+    })
+
+    const reportRaw = await exec("report_drift", { task_ids: ["T1"], include_worktree: false, include_db: false })
+    const report = JSON.parse(reportRaw)
+    expect(report.ok).toBe(true)
+    expect(report.value.findings[0].proposedActions[0].kind).toBe("reset_tasks")
+
+    const planRaw = await exec("plan_drift_repair", { drift_report_id: report.value.id, strategy: "safe-auto" })
+    const plan = JSON.parse(planRaw)
+    expect(plan.ok).toBe(true)
+    expect(plan.value.toolCalls[0].toolCall.toolName).toBe("reset_task")
+
+    const appliedRaw = await exec("apply_drift_repair", { repair_plan_id: plan.value.id, apply_safe_actions: true })
+    const applied = JSON.parse(appliedRaw)
+    expect(applied.ok).toBe(true)
+    expect(applied.value.results[0].toolName).toBe("reset_task")
+    const state = ctx.engine!.store.get("s1")
+    expect(state?.currentTaskId).toBe("T1")
+    expect(state?.implDag?.[0]?.status).toBe("pending")
   })
 })

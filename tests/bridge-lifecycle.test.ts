@@ -20,6 +20,7 @@ import { loadBridgeLeaseSnapshot, loadBridgeMetadata } from "#bridge/bridge-meta
 import { handleStateGet, handleStateHealth } from "#bridge/methods/state"
 import type { BridgeContext } from "#bridge/server"
 import type { EngineContext } from "#core/engine-context"
+import { resolveRuntimeBackendKind } from "#core/open-artisan-runtime-backends"
 
 let tmpDir: string
 let ctx: BridgeContext
@@ -36,9 +37,17 @@ function makeBridgeContext(): BridgeContext {
     stateDir: null,
     projectDir: null,
     capabilities: { selfReview: "isolated" as const, orchestrator: true, discoveryFleet: true },
+    runtimeBackendKind: "filesystem",
+    roadmapBackend: null,
+    roadmapService: null,
+    openArtisanServices: null,
     pinoLogger: null,
     shuttingDown: false,
   }
+}
+
+function initFilesystem(context: BridgeContext = ctx) {
+  return handleInit({ projectDir: tmpDir, persistence: { kind: "filesystem" } }, context)
 }
 
 beforeEach(async () => {
@@ -52,7 +61,7 @@ afterEach(async () => {
 
 describe("lifecycle.init", () => {
   it("initializes the engine and returns 'ready'", async () => {
-    const result = await handleInit({ projectDir: tmpDir }, ctx)
+    const result = await initFilesystem()
     expect(result).toBe("ready")
     expect(ctx.engine).not.toBeNull()
   })
@@ -63,7 +72,7 @@ describe("lifecycle.init", () => {
 
   it("loads persisted state on init", async () => {
     // First init — create a session
-    await handleInit({ projectDir: tmpDir }, ctx)
+    await initFilesystem()
     await handleSessionCreated({ sessionId: "s1" }, ctx)
     await ctx.engine!.store.update("s1", (d) => {
       d.featureName = "test-feat"
@@ -74,19 +83,44 @@ describe("lifecycle.init", () => {
 
     // Re-init on fresh context — should load from disk
     const ctx2 = makeBridgeContext()
-    await handleInit({ projectDir: tmpDir }, ctx2)
+    await initFilesystem(ctx2)
     const state = ctx2.engine!.store.get("s1")
     expect(state).not.toBeNull()
     expect(state?.featureName).toBe("test-feat")
     expect(state?.phase).toBe("PLANNING")
   })
 
+  it("resolves unified DB persistence by default", () => {
+    expect(resolveRuntimeBackendKind()).toBe("db")
+  })
+
+  it("uses filesystem persistence when explicitly requested", async () => {
+    await handleInit({ projectDir: tmpDir, persistence: { kind: "filesystem" } }, ctx)
+    expect(ctx.runtimeBackendKind).toBe("filesystem")
+    expect(ctx.roadmapBackend).toBeNull()
+    expect(ctx.roadmapService).toBeNull()
+  })
+
+  it("uses unified DB persistence when explicitly requested", async () => {
+    expect(resolveRuntimeBackendKind("db")).toBe("db")
+    expect(resolveRuntimeBackendKind("pglite")).toBe("db")
+  })
+
   it("writes PID file on init", async () => {
     const { existsSync } = await import("node:fs")
     const { join } = await import("node:path")
-    await handleInit({ projectDir: tmpDir }, ctx)
+    await initFilesystem()
     const stateDir = join(tmpDir, ".openartisan")
     expect(existsSync(join(stateDir, ".bridge-pid"))).toBe(true)
+  })
+
+  it("does not advertise process-local stdio bridges as shared runtimes", async () => {
+    const { existsSync } = await import("node:fs")
+    const { join } = await import("node:path")
+    await handleInit({ projectDir: tmpDir, transport: "stdio", registerRuntime: false }, ctx)
+    const stateDir = join(tmpDir, ".openartisan")
+    expect(existsSync(join(stateDir, ".bridge-pid"))).toBe(false)
+    expect(await loadBridgeMetadata(stateDir)).toBeNull()
   })
 
   it("cleans up stale PID and succeeds", async () => {
@@ -95,7 +129,7 @@ describe("lifecycle.init", () => {
     const stateDir = join(tmpDir, ".openartisan")
     mkdirSync(stateDir, { recursive: true })
     writeFileSync(join(stateDir, ".bridge-pid"), "999999") // dead process
-    const result = await handleInit({ projectDir: tmpDir }, ctx)
+    const result = await initFilesystem()
     expect(result).toBe("ready")
   })
 })
@@ -114,7 +148,7 @@ describe("lifecycle.ping", () => {
 
 describe("lifecycle.sessionCreated", () => {
   it("creates a primary session", async () => {
-    await handleInit({ projectDir: tmpDir }, ctx)
+    await initFilesystem()
     await handleSessionCreated({ sessionId: "s1" }, ctx)
     const state = ctx.engine!.store.get("s1")
     expect(state).not.toBeNull()
@@ -122,7 +156,7 @@ describe("lifecycle.sessionCreated", () => {
   })
 
   it("registers child session without creating state", async () => {
-    await handleInit({ projectDir: tmpDir }, ctx)
+    await initFilesystem()
     await handleSessionCreated({ sessionId: "parent" }, ctx)
     await handleSessionCreated({ sessionId: "child", parentId: "parent" }, ctx)
     // Child doesn't get its own state
@@ -133,14 +167,14 @@ describe("lifecycle.sessionCreated", () => {
   })
 
   it("rejects missing sessionId", async () => {
-    await handleInit({ projectDir: tmpDir }, ctx)
+    await initFilesystem()
     await expect(handleSessionCreated({}, ctx)).rejects.toThrow("sessionId")
   })
 })
 
 describe("lifecycle.sessionDeleted", () => {
   it("preserves session state and only unregisters the client", async () => {
-    await handleInit({ projectDir: tmpDir }, ctx)
+    await initFilesystem()
     await handleSessionCreated({ sessionId: "s1" }, ctx)
     await ctx.engine!.store.update("s1", (d) => {
       d.featureName = "persisted-feature"
@@ -152,7 +186,7 @@ describe("lifecycle.sessionDeleted", () => {
   })
 
   it("removes the detached client lease", async () => {
-    await handleInit({ projectDir: tmpDir }, ctx)
+    await initFilesystem()
     await handleSessionCreated({ sessionId: "s1", agent: "artisan" }, ctx)
     await handleSessionDeleted({ sessionId: "s1" }, ctx)
 
@@ -163,7 +197,7 @@ describe("lifecycle.sessionDeleted", () => {
 
 describe("state.get", () => {
   it("returns session state", async () => {
-    await handleInit({ projectDir: tmpDir }, ctx)
+    await initFilesystem()
     await handleSessionCreated({ sessionId: "s1" }, ctx)
     const result = await handleStateGet({ sessionId: "s1" }, ctx) as any
     expect(result).not.toBeNull()
@@ -172,13 +206,13 @@ describe("state.get", () => {
   })
 
   it("returns null for unknown session", async () => {
-    await handleInit({ projectDir: tmpDir }, ctx)
+    await initFilesystem()
     const result = await handleStateGet({ sessionId: "nonexistent" }, ctx)
     expect(result).toBeNull()
   })
 
   it("can include runtime health summary alongside session state", async () => {
-    await handleInit({ projectDir: tmpDir }, ctx)
+    await initFilesystem()
     await handleSessionCreated({ sessionId: "s1", agent: "hermes" }, ctx)
     const result = await handleStateGet({ sessionId: "s1", includeRuntimeHealth: true }, ctx) as any
     expect(result.state).not.toBeNull()
@@ -194,12 +228,12 @@ describe("state.get", () => {
   })
 
   it("rejects missing sessionId", async () => {
-    await handleInit({ projectDir: tmpDir }, ctx)
+    await initFilesystem()
     await expect(handleStateGet({}, ctx)).rejects.toThrow("sessionId")
   })
 
   it("state.health returns runtime health directly", async () => {
-    await handleInit({ projectDir: tmpDir }, ctx)
+    await initFilesystem()
     await handleSessionCreated({ sessionId: "s1", agent: "hermes" }, ctx)
     const result = await handleStateHealth({ sessionId: "s1" }, ctx) as any
     expect(result.phase).toBe("MODE_SELECT")
@@ -233,7 +267,7 @@ describe("initialization guard", () => {
 
 describe("lifecycle.sessionDeleted — edge cases", () => {
   it("no-op for unknown session", async () => {
-    await handleInit({ projectDir: tmpDir }, ctx)
+    await initFilesystem()
     // Should not throw
     await handleSessionDeleted({ sessionId: "nonexistent" }, ctx)
   })
@@ -249,7 +283,7 @@ describe("lifecycle.shutdown", () => {
   })
 
   it("returns blocked result when active clients remain", async () => {
-    await handleInit({ projectDir: tmpDir }, ctx)
+    await initFilesystem()
     await handleSessionCreated({ sessionId: "s1" }, ctx)
 
     const result = await handleShutdown({}, ctx) as { ok: boolean; activeClientCount: number }
@@ -258,17 +292,43 @@ describe("lifecycle.shutdown", () => {
   })
 
   it("allows forced shutdown even when clients remain", async () => {
-    await handleInit({ projectDir: tmpDir }, ctx)
+    await initFilesystem()
     await handleSessionCreated({ sessionId: "s1" }, ctx)
 
-    const result = await handleShutdown({ force: true }, ctx)
-    expect(result).toBe("ok")
+    const originalExit = process.exit
+    process.exit = ((() => undefined) as unknown) as typeof process.exit
+    try {
+      const result = await handleShutdown({ force: true }, ctx)
+      expect(result).toBe("ok")
+      await new Promise((resolve) => setTimeout(resolve, 75))
+    } finally {
+      process.exit = originalExit
+    }
+  })
+
+  it("disposes the runtime backend during forced shutdown", async () => {
+    await initFilesystem()
+    let disposed = false
+    ctx.runtimeBackendDispose = async () => {
+      disposed = true
+    }
+
+    const originalExit = process.exit
+    process.exit = ((() => undefined) as unknown) as typeof process.exit
+    try {
+      const result = await handleShutdown({ force: true }, ctx)
+      expect(result).toBe("ok")
+      expect(disposed).toBe(true)
+      await new Promise((resolve) => setTimeout(resolve, 75))
+    } finally {
+      process.exit = originalExit
+    }
   })
 })
 
 describe("lifecycle.init — double init", () => {
   it("re-initializes with new engine on second call", async () => {
-    await handleInit({ projectDir: tmpDir }, ctx)
+    await initFilesystem()
     await handleSessionCreated({ sessionId: "s1" }, ctx)
     // Give the session a featureName so it persists to disk
     await ctx.engine!.store.update("s1", (d) => {
@@ -277,7 +337,7 @@ describe("lifecycle.init — double init", () => {
     })
 
     // Second init — should reload state from disk
-    await handleInit({ projectDir: tmpDir }, ctx)
+    await initFilesystem()
     const state = ctx.engine!.store.get("s1")
     expect(state).not.toBeNull()
     expect(state?.sessionId).toBe("s1")
@@ -285,7 +345,7 @@ describe("lifecycle.init — double init", () => {
   })
 
   it("writes bridge metadata on init", async () => {
-    await handleInit({ projectDir: tmpDir }, ctx)
+    await initFilesystem()
     const metadata = await loadBridgeMetadata(join(tmpDir, ".openartisan"))
     expect(metadata?.projectDir).toBe(tmpDir)
     expect(metadata?.pid).toBe(process.pid)
@@ -298,7 +358,7 @@ describe("policyVersion", () => {
   })
 
   it("bumps on store.update", async () => {
-    await handleInit({ projectDir: tmpDir }, ctx)
+    await initFilesystem()
     await handleSessionCreated({ sessionId: "s1" }, ctx)
     const before = ctx.policyVersion
     await ctx.engine!.store.update("s1", (d) => { d.iterationCount = 1 })

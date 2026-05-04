@@ -32,8 +32,8 @@ All workflow commands go through the `artisan` CLI via Bash. Simple commands use
 # Select mode and feature name
 ./artisan select-mode --mode GREENFIELD --feature-name my-feature
 
-# Submit artifact for review (text artifacts via stdin)
-echo '{"summary":"Plan ready","artifact_description":"The plan","artifact_content":"# Plan\n..."}' | ./artisan request-review
+# Submit artifact for review (artifact must already exist on disk)
+echo '{"summary":"Plan ready","artifact_description":"The plan","artifact_files":[".openartisan/my-feature/plan.md"]}' | ./artisan request-review
 
 # Submit artifact for review (file artifacts — list the files you created)
 echo '{"summary":"Interfaces done","artifact_description":"Type definitions","artifact_files":["src/types.ts","src/api.ts"]}' | ./artisan request-review

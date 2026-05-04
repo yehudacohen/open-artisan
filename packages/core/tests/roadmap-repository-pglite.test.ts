@@ -3,9 +3,14 @@ import { mkdtemp, readFile, rm, stat } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
+import { PGlite } from "@electric-sql/pglite"
+import { Kysely } from "kysely"
+import { PGliteDialect } from "kysely-pglite-dialect"
+
 import { createSessionStateStore } from "#core/session-state"
 import { createFileSystemStateBackend } from "#core/state-backend-fs"
 import { createPGliteRoadmapRepository } from "#core/roadmap-repository-pglite"
+import type { DatabaseOperationQueue } from "#core/open-artisan-db"
 import type { RoadmapDocument, RoadmapPGliteRepositoryOptions, RoadmapRepository } from "#core/types"
 
 const NOW = "2026-04-16T00:00:00.000Z"
@@ -76,6 +81,52 @@ function makeRepository(stateDir: string): RoadmapRepository {
 }
 
 describe("createPGliteRoadmapRepository", () => {
+  it("records ordered schema migrations", async () => {
+    const stateDir = await makeTempStateDir()
+    const repository = makeRepository(stateDir)
+    expect(await repository.initialize()).toEqual({ ok: true, value: null })
+
+    const dbPath = join(makeRepositoryOptions(stateDir).connection.dataDir, "roadmap.pg")
+    const db = new Kysely<any>({ dialect: new PGliteDialect(new PGlite(dbPath)) })
+    const rows = await db.withSchema("roadmap").selectFrom("schema_migrations").select("version").orderBy("version").execute()
+    await db.destroy()
+
+    expect(rows.map((row: { version: number }) => row.version)).toEqual([1])
+  })
+
+  it("uses injectable operation queues and exposes explicit disposal", async () => {
+    const stateDir = await makeTempStateDir()
+    const scopes: string[] = []
+    const queue: DatabaseOperationQueue = {
+      run: async (scope, run) => {
+        scopes.push(scope)
+        return run()
+      },
+    }
+    const repository = createPGliteRoadmapRepository({ ...makeRepositoryOptions(stateDir), operationQueue: queue })
+
+    expect(await repository.initialize()).toEqual({ ok: true, value: null })
+    await repository.dispose()
+
+    expect(scopes).toContain(join(makeRepositoryOptions(stateDir).connection.dataDir, "roadmap.pg"))
+  })
+
+  it("serializes concurrent repository instances that share one PGlite database", async () => {
+    const stateDir = await makeTempStateDir()
+    const results = await Promise.all(Array.from({ length: 8 }, (_, index) => {
+      const repository = makeRepository(stateDir)
+      return repository.updateRoadmap(makeRoadmapDocument({
+        items: [{ ...makeRoadmapDocument().items[0]!, id: `item-${index}`, title: `Item ${index}` }],
+        edges: [],
+      }))
+    }))
+
+    expect(results.every((result) => result.ok)).toBe(true)
+    const read = await makeRepository(stateDir).readRoadmap()
+    expect(read.ok).toBe(true)
+    if (read.ok) expect(read.value?.items).toHaveLength(1)
+  })
+
   it("initializes durable roadmap storage and keeps workflow-state persistence separate", async () => {
     const stateDir = await makeTempStateDir()
     const workflowStore = createSessionStateStore(createFileSystemStateBackend(stateDir))

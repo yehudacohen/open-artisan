@@ -120,14 +120,16 @@ const IMPL_PLAN_ARTIFACT = `## Tasks
 ### T1: Set up core module
 **Dependencies:** none
 **Complexity:** small
-**Tests:** tests/core.test.ts
+**Expected tests:** tests/core.test.ts
+**Files:** src/core.ts
 
 Create the core module with basic exports.
 
 ### T2: Add feature layer
 **Dependencies:** T1
 **Complexity:** medium
-**Tests:** tests/feature.test.ts
+**Expected tests:** tests/feature.test.ts
+**Files:** src/feature.ts
 
 Build the feature layer on top of core module.
 `
@@ -149,28 +151,55 @@ beforeEach(async () => {
   plugin = await OpenArtisanPlugin({ client, directory: tempDir } as any)
 })
 
+async function writeFileInProject(relativePath: string, content: string) {
+  const absolutePath = join(tempDir, relativePath)
+  mkdirSync(join(absolutePath, ".."), { recursive: true })
+  await Bun.write(absolutePath, content)
+  return absolutePath
+}
+
+async function writeMarkdownArtifact(featureName: string, fileName: string, content: string) {
+  const artifactDir = join(tempDir, ".openartisan", featureName)
+  mkdirSync(artifactDir, { recursive: true })
+  const artifactPath = join(artifactDir, fileName)
+  await Bun.write(artifactPath, content)
+  return artifactPath
+}
+
+async function defaultArtifactFilesForPhase(sid: string, artifactText: string | undefined) {
+  const state = plugin._testStore.get(sid)
+  const featureName = state.featureName ?? "test-feature"
+  if (state.phase === "PLANNING") {
+    return [await writeMarkdownArtifact(featureName, "plan.md", artifactText ?? "# Plan\n")]
+  }
+  if (state.phase === "IMPL_PLAN") {
+    return [await writeMarkdownArtifact(featureName, "impl-plan.md", artifactText ?? IMPL_PLAN_ARTIFACT)]
+  }
+  return []
+}
+
 /**
  * Drive a phase through the review-approval cycle:
- *   1. request_review (with optional artifact_content)
+ *   1. request_review (with on-disk artifact_files)
  *   2. mark_satisfied (with generic criteria)
  *   3. simulate user message
- *   4. submit_feedback(approve) (with optional artifact_content for artifact-dependent phases)
+ *   4. submit_feedback(approve)
  *
  * Assumes the session is already in the phase's DRAFT state.
  */
 async function approvePhase(
   sid: string,
-  opts: { artifactContent?: string; artifactFiles?: string[] } = {},
+  opts: { artifactText?: string; artifactFiles?: string[] } = {},
 ): Promise<string> {
   const ctx = { directory: tempDir, sessionId: sid }
+  const artifactFiles = opts.artifactFiles ?? await defaultArtifactFilesForPhase(sid, opts.artifactText)
 
   // 1. request_review
   const rrResult = await plugin.tool.request_review.execute(
     {
       summary: "Phase artifact complete",
       artifact_description: "Artifact for this phase",
-      artifact_content: opts.artifactContent,
-      artifact_files: opts.artifactFiles,
+      artifact_files: artifactFiles,
     },
     ctx,
   )
@@ -199,7 +228,6 @@ async function approvePhase(
     {
       feedback_text: "Looks good",
       feedback_type: "approve",
-      artifact_content: opts.artifactContent,
     },
     ctx,
   )
@@ -232,17 +260,37 @@ async function driveToImplementation(sid: string): Promise<void> {
     ctx,
   )
 
-  // 2. Approve PLANNING (requires artifact_content)
-  await approvePhase(sid, { artifactContent: "# Plan\nBuild the thing." })
+  // 2. Approve PLANNING
+  await approvePhase(sid, { artifactText: "# Plan\nBuild the thing." })
 
-  // 3. Approve INTERFACES (requires artifact_content + artifact_files for v22)
-  await approvePhase(sid, { artifactContent: "# Interfaces\nexport function doThing(): void", artifactFiles: ["src/types.ts"] })
+  // 3. Approve INTERFACES
+  await writeFileInProject("src/types.ts", "export interface Thing { id: string }\n")
+  await approvePhase(sid, { artifactFiles: ["src/types.ts"] })
 
-  // 4. Approve TESTS (requires artifact_content + artifact_files for v22)
-  await approvePhase(sid, { artifactContent: "# Tests\ndescribe('doThing', () => { it('works') })", artifactFiles: ["tests/thing.test.ts"] })
+  // 4. Approve TESTS
+  await writeFileInProject("tests/thing.test.ts", "import { describe, it, expect } from 'bun:test'\ndescribe('thing', () => { it('works', () => expect(true).toBe(true)) })\n")
+  await approvePhase(sid, { artifactFiles: ["tests/thing.test.ts"] })
 
-  // 5. Approve IMPL_PLAN — the artifact_content is parsed into a DAG
-  await approvePhase(sid, { artifactContent: IMPL_PLAN_ARTIFACT })
+  // 5. Approve IMPL_PLAN — the on-disk artifact is parsed into a DAG
+  await approvePhase(sid, { artifactText: IMPL_PLAN_ARTIFACT })
+
+  await writeFileInProject("src/core.ts", "export function core() { return true }\n")
+  await writeFileInProject("src/feature.ts", "import { core } from './core'\nexport function feature() { return core() }\n")
+}
+
+async function markDagTasksCompleteDirectly(sid: string, taskIds: string[]) {
+  await plugin._testStore.update(sid, (draft: any) => {
+    for (const task of draft.implDag ?? []) {
+      if (taskIds.includes(task.id)) {
+        task.status = "complete"
+        for (const file of task.expectedFiles ?? []) {
+          if (!draft.reviewArtifactFiles.includes(file)) draft.reviewArtifactFiles.push(file)
+        }
+      }
+    }
+    const nextTask = (draft.implDag ?? []).find((task: any) => task.status === "pending")
+    draft.currentTaskId = nextTask?.id ?? null
+  })
 }
 
 // ---------------------------------------------------------------------------
@@ -274,49 +322,7 @@ describe("request_review — IMPLEMENTATION DAG hard gate", () => {
     await driveToImplementation(sid)
     const ctx = { directory: tempDir, sessionId: sid }
 
-    // Complete T1 — the per-task review will be dispatched via mock client.
-    // Push a passing task review response for T1
-    client._pushPromptResponse({
-      data: {
-        parts: [{
-          type: "text",
-          text: JSON.stringify({
-            passed: true,
-            issues: [],
-            reasoning: "All tests pass, implementation looks good.",
-          }),
-        }],
-      },
-    })
-    const t1Result = await plugin.tool.mark_task_complete.execute(
-      { task_id: "T1", implementation_summary: "Core module done", tests_passing: true },
-      ctx,
-    )
-    // Should succeed (not an error about task review)
-    if (t1Result.includes("did NOT pass")) {
-      throw new Error(`T1 completion unexpectedly failed: ${t1Result}`)
-    }
-
-    // Complete T2 — push another passing response
-    client._pushPromptResponse({
-      data: {
-        parts: [{
-          type: "text",
-          text: JSON.stringify({
-            passed: true,
-            issues: [],
-            reasoning: "Feature layer tests pass.",
-          }),
-        }],
-      },
-    })
-    const t2Result = await plugin.tool.mark_task_complete.execute(
-      { task_id: "T2", implementation_summary: "Feature layer done", tests_passing: true },
-      ctx,
-    )
-    if (t2Result.includes("did NOT pass")) {
-      throw new Error(`T2 completion unexpectedly failed: ${t2Result}`)
-    }
+    await markDagTasksCompleteDirectly(sid, ["T1", "T2"])
 
     // Now all tasks complete — request_review should succeed
     const rrResult = await plugin.tool.request_review.execute(
@@ -332,23 +338,8 @@ describe("request_review — IMPLEMENTATION DAG hard gate", () => {
     await driveToImplementation(sid)
     const ctx = { directory: tempDir, sessionId: sid }
 
-    // Complete only T1
-    client._pushPromptResponse({
-      data: {
-        parts: [{
-          type: "text",
-          text: JSON.stringify({
-            passed: true,
-            issues: [],
-            reasoning: "All tests pass.",
-          }),
-        }],
-      },
-    })
-    await plugin.tool.mark_task_complete.execute(
-      { task_id: "T1", implementation_summary: "Core module done", tests_passing: true },
-      ctx,
-    )
+    // Complete only T1.
+    await markDagTasksCompleteDirectly(sid, ["T1"])
 
     // Try to request_review with T2 still pending
     const result = await plugin.tool.request_review.execute(
@@ -371,24 +362,11 @@ describe("mark_satisfied — v22 artifact files gate", () => {
     await driveToImplementation(sid)
     const ctx = { directory: tempDir, sessionId: sid }
 
-    // Complete T1 and T2 to reach request_review eligibility
-    for (const taskId of ["T1", "T2"]) {
-      client._pushPromptResponse({
-        data: { parts: [{ type: "text", text: JSON.stringify({ passed: true, issues: [], reasoning: "OK" }) }] },
-      })
-      await plugin.tool.mark_task_complete.execute(
-        { task_id: taskId, implementation_summary: `${taskId} done`, tests_passing: true },
-        ctx,
-      )
-    }
-
-    // Call request_review WITHOUT artifact_files — reviewArtifactFiles stays empty
-    // (DAG tasks in the test fixture don't have expectedFiles)
-    const rrResult = await plugin.tool.request_review.execute(
-      { summary: "Done", artifact_description: "All code" },
-      ctx,
-    )
-    expect(rrResult).not.toContain("Error: Cannot request review")
+    await markDagTasksCompleteDirectly(sid, ["T1", "T2"])
+    await plugin._testStore.update(sid, (draft: any) => {
+      draft.phaseState = "REVIEW"
+      draft.reviewArtifactFiles = []
+    })
 
     // Now call mark_satisfied — should be BLOCKED by the structural gate
     const msResult = await plugin.tool.mark_satisfied.execute(
@@ -405,16 +383,7 @@ describe("mark_satisfied — v22 artifact files gate", () => {
     await driveToImplementation(sid)
     const ctx = { directory: tempDir, sessionId: sid }
 
-    // Complete T1 and T2
-    for (const taskId of ["T1", "T2"]) {
-      client._pushPromptResponse({
-        data: { parts: [{ type: "text", text: JSON.stringify({ passed: true, issues: [], reasoning: "OK" }) }] },
-      })
-      await plugin.tool.mark_task_complete.execute(
-        { task_id: taskId, implementation_summary: `${taskId} done`, tests_passing: true },
-        ctx,
-      )
-    }
+    await markDagTasksCompleteDirectly(sid, ["T1", "T2"])
 
     // Call request_review WITH artifact_files
     await plugin.tool.request_review.execute(
@@ -429,26 +398,27 @@ describe("mark_satisfied — v22 artifact files gate", () => {
 
     // mark_satisfied should NOT be blocked
     const msResult = await plugin.tool.mark_satisfied.execute(
-      { criteria_met: [{ criterion: "Test", met: true, evidence: "pass", severity: "blocking" }] },
+      { criteria_met: GENERIC_CRITERIA },
       ctx,
     )
     expect(msResult).not.toContain("No artifact files registered")
   }, 30000)
 
-  it("allows mark_satisfied for PLANNING (in-memory phase) without artifact_files", async () => {
+  it("allows mark_satisfied for PLANNING with canonical on-disk artifact_files", async () => {
     const sid = `gate-v22-${Date.now()}-plan`
     const ctx = { directory: tempDir, sessionId: sid }
 
     // Set up session in PLANNING/DRAFT
     await plugin.event({ event: { type: "session.created", properties: { info: { id: sid } } } })
+    const featureName = `plan-gate-test-${Date.now()}`
     await plugin.tool.select_mode.execute(
-      { mode: "GREENFIELD", feature_name: `plan-gate-test-${Date.now()}` },
+      { mode: "GREENFIELD", feature_name: featureName },
       ctx,
     )
 
-    // request_review with artifact_content (no artifact_files — in-memory phase)
+    const planPath = await writeMarkdownArtifact(featureName, "plan.md", "# Plan\nDo the thing.")
     await plugin.tool.request_review.execute(
-      { summary: "Plan ready", artifact_description: "The plan", artifact_content: "# Plan\nDo the thing." },
+      { summary: "Plan ready", artifact_description: "The plan", artifact_files: [planPath] },
       ctx,
     )
 
@@ -457,9 +427,9 @@ describe("mark_satisfied — v22 artifact files gate", () => {
       data: { parts: [{ type: "text", text: JSON.stringify({ satisfied: true, criteria_results: [{ criterion: "Test", met: true, evidence: "pass", severity: "blocking" }] }) }] },
     })
 
-    // mark_satisfied should NOT be blocked (PLANNING is in-memory, not file-based)
+    // mark_satisfied should NOT be blocked when the markdown artifact was reviewed from disk.
     const msResult = await plugin.tool.mark_satisfied.execute(
-      { criteria_met: [{ criterion: "Test", met: true, evidence: "pass", severity: "blocking" }] },
+      { criteria_met: GENERIC_CRITERIA },
       ctx,
     )
     expect(msResult).not.toContain("No artifact files registered")
@@ -615,15 +585,17 @@ describe("request_review — REVISE artifact diff gate", () => {
     await plugin.event({
       event: { type: "session.created", properties: { info: { id: sid } } },
     })
+    const featureName = "test-diffgate"
     await plugin.tool.select_mode.execute(
-      { mode: "GREENFIELD", feature_name: "test-diffgate" },
+      { mode: "GREENFIELD", feature_name: featureName },
       ctx,
     )
 
     // Draft → request_review → REVIEW
     const planContent = "# Plan\nBuild the amazing feature."
+    const planPath = await writeMarkdownArtifact(featureName, "plan.md", planContent)
     await plugin.tool.request_review.execute(
-      { summary: "Plan done", artifact_description: "Plan", artifact_content: planContent },
+      { summary: "Plan done", artifact_description: "Plan", artifact_files: [planPath] },
       ctx,
     )
 
@@ -647,7 +619,7 @@ describe("request_review — REVISE artifact diff gate", () => {
     //   - Auto-skipped (cascade or last cascade step) → "No changes needed"
     //   - Hard blocked (standalone REVISE) → "Error: no changes detected"
     const rrResult = await plugin.tool.request_review.execute(
-      { summary: "Revised plan", artifact_description: "Plan", artifact_content: planContent },
+      { summary: "Revised plan", artifact_description: "Plan", artifact_files: [planPath] },
       ctx,
     )
     // Either auto-skip or hard block — both prevent unchanged passthrough
@@ -656,7 +628,7 @@ describe("request_review — REVISE artifact diff gate", () => {
     expect(isAutoSkipped || isHardBlocked).toBe(true)
   }, 30000)
 
-  it("allows request_review when artifact_content is changed in REVISE", async () => {
+  it("allows request_review when the on-disk artifact changes in REVISE", async () => {
     const sid = `diffgate-test-${Date.now()}-allow`
     const ctx = { directory: tempDir, sessionId: sid }
 
@@ -664,15 +636,17 @@ describe("request_review — REVISE artifact diff gate", () => {
     await plugin.event({
       event: { type: "session.created", properties: { info: { id: sid } } },
     })
+    const featureName = "test-diffgate2"
     await plugin.tool.select_mode.execute(
-      { mode: "GREENFIELD", feature_name: "test-diffgate2" },
+      { mode: "GREENFIELD", feature_name: featureName },
       ctx,
     )
 
     // Draft → REVIEW → USER_GATE
     const originalContent = "# Plan\nBuild the feature."
+    const planPath = await writeMarkdownArtifact(featureName, "plan.md", originalContent)
     await plugin.tool.request_review.execute(
-      { summary: "Plan done", artifact_description: "Plan", artifact_content: originalContent },
+      { summary: "Plan done", artifact_description: "Plan", artifact_files: [planPath] },
       ctx,
     )
     await plugin.tool.mark_satisfied.execute(
@@ -692,8 +666,9 @@ describe("request_review — REVISE artifact diff gate", () => {
 
     // Call request_review with DIFFERENT content — should be allowed
     const revisedContent = "# Plan\nBuild the feature.\n\n## Auth\nUse JWT tokens."
+    await Bun.write(planPath, revisedContent)
     const rrResult = await plugin.tool.request_review.execute(
-      { summary: "Revised plan with auth", artifact_description: "Plan", artifact_content: revisedContent },
+      { summary: "Revised plan with auth", artifact_description: "Plan", artifact_files: [planPath] },
       ctx,
     )
     // Should NOT be blocked by the diff gate

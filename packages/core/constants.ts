@@ -217,6 +217,23 @@ export const LOCK_TIMEOUT_MS = 10_000
  */
 export const LOCK_POLL_MS = 50
 
+/**
+ * Timeout for acquiring a DB operation lease (ms).
+ * Keeps multi-worker runtimes from waiting indefinitely behind a wedged writer.
+ */
+export const DB_OPERATION_LOCK_TIMEOUT_MS = 30_000
+
+/**
+ * Polling interval while waiting for a DB operation lease (ms).
+ */
+export const DB_OPERATION_LOCK_POLL_MS = 50
+
+/**
+ * Lease duration for DB operation locks (ms).
+ * Long enough for normal repository operations; stale leases can be taken over.
+ */
+export const DB_OPERATION_LOCK_LEASE_MS = 300_000
+
 // ---------------------------------------------------------------------------
 // Sub-workflows
 // ---------------------------------------------------------------------------
@@ -285,4 +302,14 @@ export const WORKFLOW_TOOL_NAMES = new Set([
   "submit_task_review",
   "submit_auto_approve",
   "reset_task",
+  "route_patch_suggestions",
+  "resolve_patch_suggestion",
+  "apply_patch_suggestion",
+  "analyze_task_boundary_change",
+  "apply_task_boundary_change",
+  "report_drift",
+  "plan_drift_repair",
+  "apply_drift_repair",
 ])
+
+export const DB_TASK_LEASE_TTL_MS = 60 * 60 * 1000

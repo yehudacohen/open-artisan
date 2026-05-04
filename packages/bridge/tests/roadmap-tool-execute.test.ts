@@ -7,7 +7,6 @@ import { handleInit, handleSessionCreated } from "#bridge/methods/lifecycle"
 import { handleToolExecute } from "#bridge/methods/tool-execute"
 import type { BridgeContext } from "#bridge/server"
 import type { EngineContext } from "#core/engine-context"
-import { createPGliteRoadmapStateBackend } from "#core/roadmap-state-backend-pglite"
 import type { RoadmapDocument } from "#core/types"
 
 const NOW = "2026-04-16T00:00:00.000Z"
@@ -26,6 +25,10 @@ function makeBridgeContext(): BridgeContext {
     stateDir: null,
     projectDir: null,
     capabilities: { selfReview: "agent-only", orchestrator: false, discoveryFleet: false },
+    runtimeBackendKind: "filesystem",
+    roadmapBackend: null,
+    roadmapService: null,
+    openArtisanServices: null,
     pinoLogger: null,
     shuttingDown: false,
   }
@@ -60,30 +63,24 @@ function makeRoadmapDocument(overrides: Partial<RoadmapDocument> = {}): RoadmapD
   }
 }
 
-function createBridgeRoadmapBackend(stateDir: string) {
-  return createPGliteRoadmapStateBackend(stateDir, {
-    connection: {
-      dataDir: join(stateDir, "roadmap", "bridge-pglite-db"),
-      debugName: "bridge-roadmap-test",
-    },
-  })
-}
-
 beforeEach(async () => {
   tmpDir = await mkdtemp(join(tmpdir(), "bridge-roadmap-"))
   ctx = makeBridgeContext()
-  await handleInit({ projectDir: tmpDir }, ctx)
+  await handleInit({
+    projectDir: tmpDir,
+    persistence: { kind: "db", pglite: { dataDir: join(tmpDir, ".openartisan", "runtime-db") } },
+  }, ctx)
   await handleSessionCreated({ sessionId: "s1", agent: "hermes" }, ctx)
 })
 
 afterEach(async () => {
+  await ctx.runtimeBackendDispose?.()
   await rm(tmpDir, { recursive: true, force: true })
 })
 
 describe("bridge roadmap tool execution", () => {
   it("reads roadmap state through tool.execute using roadmap-specific result shapes", async () => {
-    const roadmapBackend = createBridgeRoadmapBackend(ctx.stateDir!)
-    await roadmapBackend.createRoadmap(makeRoadmapDocument())
+    await ctx.roadmapBackend!.createRoadmap(makeRoadmapDocument())
 
     const response = await handleToolExecute({
       name: "roadmap_read",
@@ -97,9 +94,38 @@ describe("bridge roadmap tool execution", () => {
     })
   })
 
+  it("uses the unified DB roadmap backend when DB runtime persistence is selected", async () => {
+    const dbCtx = makeBridgeContext()
+    const dbStateDir = join(tmpDir, "db-openartisan")
+    try {
+      await handleInit({
+        projectDir: tmpDir,
+        stateDir: dbStateDir,
+        persistence: { kind: "db", pglite: { dataDir: join(dbStateDir, "runtime-db") } },
+      }, dbCtx)
+      await handleSessionCreated({ sessionId: "s-db", agent: "hermes" }, dbCtx)
+
+      expect(dbCtx.runtimeBackendKind).toBe("db")
+      expect(dbCtx.roadmapBackend).not.toBeNull()
+      await dbCtx.roadmapBackend!.createRoadmap(makeRoadmapDocument())
+
+      const response = await handleToolExecute({
+        name: "roadmap_query",
+        args: { query: { featureName: "persistent-roadmap-dag", minPriority: 9 } },
+        context: { sessionId: "s-db", directory: tmpDir },
+      }, dbCtx)
+
+      expect(JSON.parse(response as string)).toEqual({
+        ok: true,
+        value: [makeRoadmapDocument().items[0]],
+      })
+    } finally {
+      await dbCtx.runtimeBackendDispose?.()
+    }
+  })
+
   it("reads roadmap state from the bridge state directory instead of the request working directory", async () => {
-    const roadmapBackend = createBridgeRoadmapBackend(ctx.stateDir!)
-    await roadmapBackend.createRoadmap(makeRoadmapDocument())
+    await ctx.roadmapBackend!.createRoadmap(makeRoadmapDocument())
 
     const unrelatedDir = join(tmpDir, "nested", "workspace")
     await mkdir(unrelatedDir, { recursive: true })
@@ -117,8 +143,7 @@ describe("bridge roadmap tool execution", () => {
   })
 
   it("queries roadmap state through tool.execute and returns roadmap-specific collections", async () => {
-    const roadmapBackend = createBridgeRoadmapBackend(ctx.stateDir!)
-    await roadmapBackend.createRoadmap(makeRoadmapDocument())
+    await ctx.roadmapBackend!.createRoadmap(makeRoadmapDocument())
 
     const response = await handleToolExecute({
       name: "roadmap_query",
@@ -133,8 +158,7 @@ describe("bridge roadmap tool execution", () => {
   })
 
   it("derives an execution slice through tool.execute without bypassing the existing execution DAG path", async () => {
-    const roadmapBackend = createBridgeRoadmapBackend(ctx.stateDir!)
-    await roadmapBackend.createRoadmap(makeRoadmapDocument())
+    await ctx.roadmapBackend!.createRoadmap(makeRoadmapDocument())
 
     await ctx.engine!.store.update("s1", (draft) => {
       draft.mode = "INCREMENTAL"
@@ -224,7 +248,7 @@ describe("bridge roadmap tool execution", () => {
     }
   })
 
-  it("surfaces roadmap_read and roadmap_query storage failures without corrupting workflow runtime state", async () => {
+  it("surfaces unavailable roadmap services without corrupting workflow runtime state", async () => {
     await ctx.engine!.store.update("s1", (draft) => {
       draft.mode = "INCREMENTAL"
       draft.phase = "IMPLEMENTATION"
@@ -244,10 +268,10 @@ describe("bridge roadmap tool execution", () => {
     })
 
     const before = JSON.parse(JSON.stringify(ctx.engine!.store.get("s1")))
-    const originalStateDir = ctx.stateDir!
-    const blockedStateDir = join(tmpDir, "state-dir-blocker")
-    await Bun.write(blockedStateDir, "not-a-directory")
-    ctx.stateDir = blockedStateDir
+    const originalRoadmapBackend = ctx.roadmapBackend
+    const originalRoadmapService = ctx.roadmapService
+    ctx.roadmapBackend = null
+    ctx.roadmapService = null
 
     try {
       const readResponse = await handleToolExecute({
@@ -259,8 +283,8 @@ describe("bridge roadmap tool execution", () => {
         ok: false,
         error: {
           code: "storage-failure",
-          message: expect.any(String),
-          retryable: true,
+          message: "Roadmap backend was not initialized at lifecycle.init",
+          retryable: false,
         },
       })
 
@@ -277,8 +301,8 @@ describe("bridge roadmap tool execution", () => {
         ok: false,
         error: {
           code: "storage-failure",
-          message: expect.any(String),
-          retryable: true,
+          message: "Roadmap backend was not initialized at lifecycle.init",
+          retryable: false,
         },
       })
 
@@ -286,13 +310,13 @@ describe("bridge roadmap tool execution", () => {
       expect(afterQuery?.currentTaskId).toBe(before?.currentTaskId)
       expect(afterQuery?.implDag).toEqual(before?.implDag)
     } finally {
-      ctx.stateDir = originalStateDir
+      ctx.roadmapBackend = originalRoadmapBackend
+      ctx.roadmapService = originalRoadmapService
     }
   })
 
   it("surfaces roadmap_derive_execution_slice failures without corrupting workflow runtime state", async () => {
-    const roadmapBackend = createBridgeRoadmapBackend(ctx.stateDir!)
-    await roadmapBackend.createRoadmap(makeRoadmapDocument())
+    await ctx.roadmapBackend!.createRoadmap(makeRoadmapDocument())
 
     await ctx.engine!.store.update("s1", (draft) => {
       draft.mode = "INCREMENTAL"
@@ -337,8 +361,7 @@ describe("bridge roadmap tool execution", () => {
   })
 
   it("derives roadmap results through bridge-owned tools from the PGlite backend without mutating execution state", async () => {
-    const roadmapBackend = createBridgeRoadmapBackend(ctx.stateDir!)
-    await roadmapBackend.createRoadmap(makeRoadmapDocument())
+    await ctx.roadmapBackend!.createRoadmap(makeRoadmapDocument())
 
     await ctx.engine!.store.update("s1", (draft) => {
       draft.mode = "INCREMENTAL"

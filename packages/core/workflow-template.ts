@@ -9,10 +9,8 @@
  * - Hermes: `oa_<tool_name>` via registered tools
  * - Future adapters: custom invocation patterns
  *
- * TODO: Integrate into adapter setup scripts (artisan-setup.ts, hermes __main__.py)
- * so templates are generated from this source instead of maintained separately.
- * Currently exported but not called — will be wired in when setup scripts are
- * refactored to use shared generation.
+ * Integration note: adapter setup scripts may call this generator when they want
+ * generated static instructions instead of checked-in templates.
  */
 
 export interface TemplateConfig {
@@ -40,7 +38,7 @@ const TOOLS = [
   { cli: "mark-scan-complete", tool: "mark_scan_complete", desc: "Complete discovery scan (REFACTOR/INCREMENTAL)" },
   { cli: "mark-analyze-complete", tool: "mark_analyze_complete", desc: "Complete discovery analysis" },
   { cli: "mark-satisfied", tool: "mark_satisfied", desc: "Submit self-review criteria assessment" },
-  { cli: "request-review", tool: "request_review", desc: "Submit artifact for review (`artifact_content` for text, `artifact_files` for files)" },
+  { cli: "request-review", tool: "request_review", desc: "Submit review artifacts (`artifact_files`, or markdown via `artifact_markdown`)" },
   { cli: "submit-feedback", tool: "submit_feedback", desc: "Approve or request revision at USER_GATE" },
   { cli: "mark-task-complete", tool: "mark_task_complete", desc: "Complete a DAG task during IMPLEMENTATION" },
   { cli: "check-prior-workflow", tool: "check_prior_workflow", desc: "Check for existing workflow state" },
@@ -124,13 +122,13 @@ export function generateWorkflowTemplate(config: TemplateConfig): string {
   lines.push("| DISCOVERY/SCAN | Read-only tools, workflow tools | File writes, shell execution |")
   lines.push("| DISCOVERY/ANALYZE | Read-only tools, workflow tools | File writes, shell execution |")
   lines.push("| DISCOVERY/CONVENTIONS | `.openartisan/` writes only | Project source writes, shell execution |")
-  lines.push("| PLANNING/DRAFT | Workflow tools only | File writes, shell execution |")
+  lines.push("| PLANNING/DRAFT | `.openartisan/` artifact writes only | Project source writes, shell execution |")
   lines.push("| PLANNING/REVIEW | `.openartisan/` writes, read-only shell | Project source writes |")
   lines.push("| PLANNING/USER_GATE | Read-only shell, workflow tools | File writes |")
   lines.push("| PLANNING/REVISE | `.openartisan/` writes, read-only shell | Project source writes |")
   lines.push("| INTERFACES | Interface/type files only (.py, .ts, .d.ts, .proto, etc.) | Implementation files |")
   lines.push("| TESTS | Test files only | Implementation files |")
-  lines.push("| IMPL_PLAN/DRAFT | Workflow tools only | File writes, shell execution |")
+  lines.push("| IMPL_PLAN/DRAFT | `.openartisan/` artifact writes only | Project source writes, shell execution |")
   lines.push("| IMPL_PLAN/REVIEW | `.openartisan/` writes, read-only shell | Project source writes |")
   lines.push("| IMPL_PLAN/USER_GATE | Read-only shell, workflow tools | File writes |")
   lines.push("| IMPL_PLAN/REVISE | `.openartisan/` writes, read-only shell | Project source writes |")

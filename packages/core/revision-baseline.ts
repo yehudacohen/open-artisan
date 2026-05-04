@@ -35,15 +35,13 @@ export type RevisionBaseline =
 // ---------------------------------------------------------------------------
 
 /**
- * In-memory phases: the artifact is a single file written to .openartisan/
- * via writeArtifact. The agent passes artifact_content to request_review.
+ * Markdown phases: the artifact is a single file written to .openartisan/.
  * Diff detection: hash the file content.
  */
 const CONTENT_HASH_PHASES: Set<Phase> = new Set(["PLANNING", "DISCOVERY", "IMPL_PLAN"])
 
 /**
  * File-based phases: the artifact is spread across source files.
- * The agent edits files directly and typically omits artifact_content.
  * Diff detection: hash of `git diff` output (worktree snapshot).
  */
 const GIT_DIFF_PHASES: Set<Phase> = new Set(["INTERFACES", "TESTS", "IMPLEMENTATION"])
@@ -119,25 +117,18 @@ export async function captureRevisionBaseline(
  *
  * @param baseline - The baseline captured at REVISE entry
  * @param phase - Current phase
- * @param artifactContent - The artifact_content argument from request_review (may be undefined for file-based phases)
  * @param state - Current workflow state (for artifactDiskPaths)
  * @param cwd - Working directory (for git operations)
  */
 export async function hasArtifactChanged(
   baseline: RevisionBaseline,
   phase: Phase,
-  artifactContent: string | undefined,
   state: WorkflowState,
   cwd: string,
 ): Promise<boolean> {
   try {
     if (baseline.type === "content-hash") {
-      // In-memory phase — compare content hash
-      if (artifactContent) {
-        const currentHash = contentHash(artifactContent)
-        return currentHash !== baseline.hash
-      }
-      // Fallback: read the file from disk (agent may have overwritten it)
+      // Markdown phase — compare the current on-disk artifact to the baseline.
       const artifactKey = PHASE_TO_ARTIFACT[phase]
       if (!artifactKey) return true // Cannot check — allow through
       const diskPath = state.artifactDiskPaths[artifactKey]

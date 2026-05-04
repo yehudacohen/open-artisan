@@ -1,6 +1,6 @@
 import type { Logger, NotificationSink } from "./logger"
 import type { SessionStateStore, WorkflowState } from "./types"
-import { extractAgentName, persistActiveAgent } from "./agent-policy"
+import { extractAgentName, isArtisanAgent, persistActiveAgent } from "./agent-policy"
 
 export interface AgentAwareToolContext {
   agent?: string
@@ -35,7 +35,7 @@ export async function detectActiveAgent(
 ): Promise<void> {
   const detectedAgent = extractAgentName(context)
   if (detectedAgent) {
-    await persistActiveAgent(store, sessionId, detectedAgent)
+    await persistActiveAgent(store, sessionId, isArtisanAgent(detectedAgent) ? detectedAgent : "build-artisan")
     return
   }
 

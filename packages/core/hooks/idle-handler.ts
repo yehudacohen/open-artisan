@@ -41,6 +41,10 @@ export function handleIdle(state: WorkflowState): IdleDecision {
   // We check userGateMessageReceived as a secondary signal: the old code path
   // (pre-Fix 3) set this to true before instructing the agent to call submit_feedback.
   // If it's true and the agent is still at USER_GATE, the agent failed to act.
+  if (state.retryCount > MAX_IDLE_RETRIES) {
+    return { action: "ignore" }
+  }
+
   if (state.phaseState === "USER_GATE") {
     const isRobotArtisan = state.activeAgent === "robot-artisan"
     if (!isRobotArtisan) {
@@ -65,20 +69,12 @@ export function handleIdle(state: WorkflowState): IdleDecision {
     }
   }
 
-  if (state.phaseState === "ESCAPE_HATCH" || state.phase === "DONE") {
+  if (state.phaseState === "ESCAPE_HATCH" || state.phaseState === "HUMAN_GATE" || state.phase === "DONE") {
     return { action: "ignore" }
   }
 
   // MODE_SELECT: agent should be presenting options — also expected idle
   if (state.phase === "MODE_SELECT") {
-    return { action: "ignore" }
-  }
-
-  // REVIEW: the agent may be reading files and evaluating criteria before
-  // calling mark_satisfied. Don't reprompt on the first idle — only reprompt
-  // after the second stop (retryCount > 0) to distinguish "still working"
-  // from "actually stuck".
-  if (state.phaseState === "REVIEW" && state.retryCount === 0) {
     return { action: "ignore" }
   }
 

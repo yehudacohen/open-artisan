@@ -17,6 +17,8 @@ import type {
   WorkflowEvent,
   MarkSatisfiedArgs,
   ArtifactKey,
+  AnalyzeTaskBoundaryChangeArgs,
+  ApplyTaskBoundaryChangeArgs,
 } from "../types"
 import { evaluateMarkSatisfied, countExpectedBlockingCriteria } from "./mark-satisfied"
 import { processMarkAnalyzeComplete } from "./mark-analyze-complete"
@@ -51,7 +53,7 @@ export interface MarkSatisfiedTransition {
 export function computeMarkSatisfiedTransition(
   rawCriteria: Array<{
     criterion: string; met: boolean; evidence: string;
-    severity?: "blocking" | "suggestion"; score?: string | number
+    severity?: "blocking" | "suggestion" | "design-invariant"; score?: string | number
   }>,
   state: WorkflowState,
   sm: StateMachine,
@@ -133,7 +135,7 @@ export function computeMarkSatisfiedTransition(
   const hitCap = !result.passed && nextIterationCount >= MAX_REVIEW_ITERATIONS
   const event: WorkflowEvent = result.passed ? "self_review_pass" : hitCap ? "escalate_to_user" : "self_review_fail"
   const outcome = sm.transition(state.phase, state.phaseState, event, state.mode)
-  if (!outcome.success) return { success: false, error: outcome.message }
+  if (!outcome.ok) return { success: false, error: outcome.message }
 
   return {
     success: true,
@@ -181,7 +183,7 @@ export function computeMarkAnalyzeCompleteTransition(
 
   const result = processMarkAnalyzeComplete(args)
   const outcome = sm.transition(state.phase, state.phaseState, "analyze_complete", state.mode)
-  if (!outcome.success) return { success: false, error: outcome.message }
+  if (!outcome.ok) return { success: false, error: outcome.message }
 
   return {
     success: true,
@@ -216,7 +218,7 @@ export function computeSubmitFeedbackReviseTransition(
   now = Date.now(),
 ): { success: true; transition: SubmitFeedbackReviseTransition } | { success: false; error: string } {
   const outcome = sm.transition(state.phase, state.phaseState, "user_feedback", state.mode)
-  if (!outcome.success) return { success: false, error: outcome.message }
+  if (!outcome.ok) return { success: false, error: outcome.message }
 
   return {
     success: true,
@@ -294,7 +296,184 @@ export function computeProposeBacktrackTransition(
         feedback: `[propose_backtrack → ${args.target_phase}] ${args.reason.slice(0, MAX_FEEDBACK_CHARS - 50)}`,
         timestamp: now,
       },
-      responseMessage: `Backtrack accepted. Moved to ${args.target_phase}/DRAFT. ${args.reason}`,
+      responseMessage: `Backtrack accepted. Moved to ${args.target_phase}/REDRAFT. ${args.reason}`,
     },
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Task boundary revision analysis/apply
+// ---------------------------------------------------------------------------
+
+export interface TaskBoundaryChangeAnalysis {
+  taskId: string
+  impactedTaskIds: string[]
+  completedTaskIdsToReset: string[]
+  ownershipConflicts: string[]
+  nextExpectedFiles: string[]
+  nextExpectedTests: string[]
+  message: string
+}
+
+function uniqueStrings(values: string[] | undefined): string[] {
+  return Array.from(new Set((values ?? []).map((value) => value.trim()).filter(Boolean)))
+}
+
+function computeRevisedList(existing: string[] | undefined, add: string[] | undefined, remove: string[] | undefined): string[] {
+  const next = new Set(existing ?? [])
+  for (const value of uniqueStrings(remove)) next.delete(value)
+  for (const value of uniqueStrings(add)) next.add(value)
+  return Array.from(next)
+}
+
+function collectDownstreamTaskIds(implDag: NonNullable<WorkflowState["implDag"]>, seed: Set<string>): Set<string> {
+  const impacted = new Set(seed)
+  let changed = true
+  while (changed) {
+    changed = false
+    for (const task of implDag) {
+      if (impacted.has(task.id)) continue
+      if (task.dependencies.some((dependency) => impacted.has(dependency))) {
+        impacted.add(task.id)
+        changed = true
+      }
+    }
+  }
+  return impacted
+}
+
+export function analyzeTaskBoundaryChange(
+  args: AnalyzeTaskBoundaryChangeArgs,
+  state: WorkflowState,
+): { success: true; analysis: TaskBoundaryChangeAnalysis } | { success: false; error: string } {
+  if (state.phase !== "IMPLEMENTATION") {
+    return { success: false, error: `Task boundary changes can only be analyzed during IMPLEMENTATION (current: ${state.phase}).` }
+  }
+  if (!state.implDag || state.implDag.length === 0) {
+    return { success: false, error: "No implementation DAG found to analyze." }
+  }
+  if (!args.task_id?.trim()) {
+    return { success: false, error: "task_id is required." }
+  }
+  if (!args.reason?.trim() || args.reason.trim().length < 20) {
+    return { success: false, error: "reason must be at least 20 characters." }
+  }
+
+  const target = state.implDag.find((task) => task.id === args.task_id)
+  if (!target) {
+    return { success: false, error: `Task "${args.task_id}" not found in the implementation DAG.` }
+  }
+
+  const nextExpectedFiles = computeRevisedList(target.expectedFiles, args.add_files, args.remove_files)
+  const nextExpectedTests = computeRevisedList(target.expectedTests, args.add_expected_tests, args.remove_expected_tests)
+
+  if (state.mode === "INCREMENTAL") {
+    const allowlist = new Set(state.fileAllowlist)
+    const disallowedFiles = nextExpectedFiles.filter((file) => !allowlist.has(file))
+    const disallowedTests = nextExpectedTests.filter((file) => !allowlist.has(file))
+    if (disallowedFiles.length > 0 || disallowedTests.length > 0) {
+      const detailParts: string[] = []
+      if (disallowedFiles.length > 0) detailParts.push(`files: ${disallowedFiles.join(", ")}`)
+      if (disallowedTests.length > 0) detailParts.push(`tests: ${disallowedTests.join(", ")}`)
+      return {
+        success: false,
+        error:
+          `Proposed boundary change exceeds the approved INCREMENTAL allowlist (${detailParts.join("; ")}). ` +
+          `Revise PLANNING/IMPL_PLAN or request an allowlist change before applying this boundary update.`,
+      }
+    }
+  }
+
+  const impacted = new Set<string>([target.id])
+  const ownershipConflicts = new Set<string>()
+  const addedFiles = uniqueStrings(args.add_files)
+  const addedTests = uniqueStrings(args.add_expected_tests)
+
+  for (const task of state.implDag) {
+    if (task.id === target.id) continue
+    const overlappingFiles = addedFiles.filter((file) => (task.expectedFiles ?? []).includes(file))
+    const overlappingTests = addedTests.filter((file) => (task.expectedTests ?? []).includes(file))
+    if (overlappingFiles.length === 0 && overlappingTests.length === 0) continue
+    impacted.add(task.id)
+    for (const file of overlappingFiles) ownershipConflicts.add(`${task.id}:file:${file}`)
+    for (const file of overlappingTests) ownershipConflicts.add(`${task.id}:test:${file}`)
+  }
+
+  const downstream = collectDownstreamTaskIds(state.implDag, impacted)
+  const completedTaskIdsToReset = Array.from(downstream).filter((taskId) => {
+    const task = state.implDag?.find((candidate) => candidate.id === taskId)
+    return task?.status === "complete"
+  })
+
+  const impactedTaskIds = Array.from(downstream)
+  return {
+    success: true,
+    analysis: {
+      taskId: target.id,
+      impactedTaskIds,
+      completedTaskIdsToReset,
+      ownershipConflicts: Array.from(ownershipConflicts),
+      nextExpectedFiles,
+      nextExpectedTests,
+      message:
+        `Boundary analysis for ${target.id}: impacted tasks=${impactedTaskIds.join(", ") || target.id}; ` +
+        `${completedTaskIdsToReset.length > 0 ? `completed tasks to reset=${completedTaskIdsToReset.join(", ")}` : "no completed tasks need reset"}.`,
+    },
+  }
+}
+
+export function applyTaskBoundaryChange(
+  args: ApplyTaskBoundaryChangeArgs,
+  state: WorkflowState,
+): { success: true; updatedNodes: NonNullable<WorkflowState["implDag"]>; message: string } | { success: false; error: string } {
+  const analyzed = analyzeTaskBoundaryChange(args, state)
+  if (!analyzed.success) return analyzed
+
+  const { analysis } = analyzed
+  const expectedImpacted = uniqueStrings(args.expected_impacted_tasks)
+  if (expectedImpacted.length > 0) {
+    const actual = new Set(analysis.impactedTaskIds)
+    if (expectedImpacted.some((taskId) => !actual.has(taskId)) || analysis.impactedTaskIds.some((taskId) => !expectedImpacted.includes(taskId))) {
+      return { success: false, error: `Impacted task acknowledgement mismatch. Expected: ${expectedImpacted.join(", ")}. Actual: ${analysis.impactedTaskIds.join(", ")}.` }
+    }
+  }
+
+  const expectedReset = uniqueStrings(args.expected_reset_tasks)
+  if (expectedReset.length > 0) {
+    const actual = new Set(analysis.completedTaskIdsToReset)
+    if (expectedReset.some((taskId) => !actual.has(taskId)) || analysis.completedTaskIdsToReset.some((taskId) => !expectedReset.includes(taskId))) {
+      return { success: false, error: `Reset task acknowledgement mismatch. Expected: ${expectedReset.join(", ")}. Actual: ${analysis.completedTaskIdsToReset.join(", ")}.` }
+    }
+  }
+
+  const addFiles = new Set(uniqueStrings(args.add_files))
+  const addTests = new Set(uniqueStrings(args.add_expected_tests))
+  const updatedNodes = state.implDag!.map((task) => {
+    if (task.id === analysis.taskId) {
+      return {
+        ...task,
+        expectedFiles: analysis.nextExpectedFiles,
+        expectedTests: analysis.nextExpectedTests,
+      }
+    }
+
+    const nextTaskExpectedFiles = (task.expectedFiles ?? []).filter((file) => !addFiles.has(file))
+    const nextTaskExpectedTests = (task.expectedTests ?? []).filter((file) => !addTests.has(file))
+    const nextStatus = analysis.completedTaskIdsToReset.includes(task.id) ? "pending" : task.status
+    return {
+      ...task,
+      expectedFiles: nextTaskExpectedFiles,
+      expectedTests: nextTaskExpectedTests,
+      status: nextStatus,
+    }
+  })
+
+  return {
+    success: true,
+    updatedNodes,
+    message:
+      `Task boundary change applied to ${analysis.taskId}. ` +
+      `${analysis.completedTaskIdsToReset.length > 0 ? `Reset completed task(s): ${analysis.completedTaskIdsToReset.join(", ")}. ` : ""}` +
+      `Impacted tasks: ${analysis.impactedTaskIds.join(", ")}.`,
   }
 }

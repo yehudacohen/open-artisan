@@ -24,6 +24,7 @@ from .types import (
     BridgeDiscoveryResult,
     BridgeError,
     BridgeMetadata,
+    BridgeRecoveryResult,
     BridgeShutdownEligibility,
     DetachBridgeParams,
 )
@@ -45,6 +46,22 @@ _SHARED_BRIDGE_PROTOCOL_VERSION = "1"
 _ALLOWED_DETACH_REASONS = {"shutdown", "disconnect", "stale", "force"}
 _NO_RESPONSE_SOCKET_METHODS = {"lifecycle.sessionCreated", "lifecycle.sessionDeleted"}
 _SOCKET_RECOVERY_LIMIT = 1
+
+
+def _persistence_payload_from_env() -> dict[str, Any] | None:
+    kind = os.environ.get("OPENARTISAN_STATE_BACKEND") or os.environ.get(
+        "OPENARTISAN_PERSISTENCE"
+    )
+    if kind not in {"db", "pglite"}:
+        return None
+    pglite: dict[str, Any] = {}
+    if os.environ.get("OPENARTISAN_DB_DIR"):
+        pglite["dataDir"] = os.environ["OPENARTISAN_DB_DIR"]
+    if os.environ.get("OPENARTISAN_DB_FILE"):
+        pglite["databaseFileName"] = os.environ["OPENARTISAN_DB_FILE"]
+    if os.environ.get("OPENARTISAN_DB_SCHEMA"):
+        pglite["schemaName"] = os.environ["OPENARTISAN_DB_SCHEMA"]
+    return {"kind": kind, "pglite": pglite}
 
 
 def _metadata_path(state_dir: str) -> Path:
@@ -124,6 +141,7 @@ class StdioBridgeClient:
         self._transport_mode = "uninitialized"
         self._last_health_status: str | None = None
         self._ensured_sessions: set[tuple[str, str]] = set()
+        self._takeover_after_unreachable_shared_bridge = False
 
     def _set_transport_mode(self, mode: str) -> None:
         self._transport_mode = mode
@@ -167,9 +185,15 @@ class StdioBridgeClient:
         Raises:
             BridgeError: If the subprocess fails to start or init fails.
         """
+        previous_project_dir = self._project_dir
+        if previous_project_dir and previous_project_dir != project_dir:
+            self.shutdown()
+            self._clear_shared_bridge_attachment()
+
         self._project_dir = project_dir
         self._state_dir = f"{project_dir}/{DEFAULT_STATE_DIR_NAME}"
         self._reset_runtime_tracking()
+        self._takeover_after_unreachable_shared_bridge = False
 
         discovery = self.discover_bridge(project_dir, self._state_dir)
         if discovery.get("kind") == "live_compatible_bridge":
@@ -196,6 +220,9 @@ class StdioBridgeClient:
                     )
                     self._log_health_transition("recovering", str(e))
                     self._clear_shared_bridge_attachment()
+                    self._takeover_after_unreachable_shared_bridge = True
+        elif discovery.get("kind") == "stale_bridge_state":
+            self._takeover_after_unreachable_shared_bridge = True
 
         self._socket_path = None
         self._spawn_process()
@@ -203,8 +230,13 @@ class StdioBridgeClient:
         payload = {
             "projectDir": project_dir,
             "stateDir": self._state_dir,
+            "transport": "stdio",
+            "registerRuntime": False,
             "capabilities": DEFAULT_CAPABILITIES,
         }
+        persistence = _persistence_payload_from_env()
+        if persistence:
+            payload["persistence"] = persistence
         try:
             result = self._send_rpc("lifecycle.init", payload)
         except BridgeError as e:
@@ -214,6 +246,7 @@ class StdioBridgeClient:
                 raise
         if result != "ready":
             logger.warning("Bridge init returned unexpected result: %s", result)
+        self._takeover_after_unreachable_shared_bridge = False
         self._log_health_transition("healthy", "local stdio bridge")
 
     def call(self, method: str, params: dict[str, Any] | None = None) -> Any:
@@ -363,6 +396,27 @@ class StdioBridgeClient:
                 result["previousPid"] = pid
             return result
 
+        metadata_socket_path = metadata.get("socketPath")
+        effective_socket_path = (
+            Path(metadata_socket_path)
+            if isinstance(metadata_socket_path, str) and metadata_socket_path
+            else socket_path
+        )
+        if not effective_socket_path.exists():
+            stale_paths = [
+                str(path)
+                for path in (metadata_path, leases_path, pid_path)
+                if path.exists()
+            ]
+            result: BridgeDiscoveryResult = {
+                "kind": "stale_bridge_state",
+                "stalePaths": stale_paths,
+                "reason": "Bridge process is running but the shared bridge socket is missing.",
+            }
+            if pid is not None:
+                result["previousPid"] = pid
+            return result
+
         return {
             "kind": "live_compatible_bridge",
             "metadata": cast(BridgeMetadata, metadata),
@@ -458,6 +512,25 @@ class StdioBridgeClient:
             "lease": lease,
             "leases": cast(dict[str, Any], snapshot),
         }
+
+    def recover_stale_bridge(self, project_dir: str) -> BridgeRecoveryResult:
+        result = subprocess.run(
+            [*resolve_bridge_command(), "recover", project_dir],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode != 0:
+            detail = result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}"
+            raise BridgeError(f"Bridge recovery command failed: {detail}")
+        try:
+            recovery = cast(BridgeRecoveryResult, json.loads(result.stdout))
+        except json.JSONDecodeError as exc:
+            raise BridgeError(f"Bridge recovery command returned invalid JSON: {exc}") from exc
+        self._clear_shared_bridge_attachment()
+        if self._project_dir == project_dir and self._process is not None and self._process.poll() is not None:
+            self._process = None
+        return recovery
 
     def detach_client(self, params: DetachBridgeParams) -> BridgeShutdownEligibility:
         reason = params.get("reason")
@@ -685,7 +758,10 @@ class StdioBridgeClient:
 
     def _should_take_over_bridge(self, error: BridgeError) -> bool:
         return (
-            os.environ.get("OPENARTISAN_BRIDGE_TAKEOVER") == "1"
+            (
+                os.environ.get("OPENARTISAN_BRIDGE_TAKEOVER") == "1"
+                or self._takeover_after_unreachable_shared_bridge
+            )
             and _RUNNING_BRIDGE_RE.search(str(error)) is not None
             and self._project_dir is not None
         )

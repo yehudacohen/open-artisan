@@ -11,6 +11,9 @@ import { createInterface } from "node:readline"
 import type { Readable, Writable } from "node:stream"
 import { JSONRPCServer, JSONRPCErrorException } from "json-rpc-2.0"
 import type { EngineContext } from "../core/engine-context"
+import type { RoadmapSliceService, RoadmapStateBackend } from "../core/types"
+import type { OpenArtisanStateBackendKind } from "../core/open-artisan-runtime-backends"
+import type { OpenArtisanServices } from "../core/open-artisan-services"
 import type pino from "pino"
 import { NOT_INITIALIZED } from "./protocol"
 
@@ -37,6 +40,16 @@ export interface BridgeContext {
     orchestrator: boolean
     discoveryFleet: boolean
   }
+  /** Workflow state backend selected at lifecycle.init. */
+  runtimeBackendKind: OpenArtisanStateBackendKind
+  /** Roadmap backend selected at lifecycle.init when unified DB runtime is enabled. */
+  roadmapBackend: RoadmapStateBackend | null
+  /** Roadmap query/slice service selected at lifecycle.init when unified DB runtime is enabled. */
+  roadmapService: RoadmapSliceService | null
+  /** DB-backed workflow services selected at lifecycle.init when unified DB runtime is enabled. */
+  openArtisanServices: OpenArtisanServices | null
+  /** Runtime backend cleanup hook selected at lifecycle.init. */
+  runtimeBackendDispose?: (() => Promise<void>) | null | undefined
   /** Pino logger instance — set during lifecycle.init. Available for request logging. */
   pinoLogger: pino.Logger | null
   /** Flag for shutdown. */
@@ -89,6 +102,11 @@ export function createBridgeEngine(
   let stateDir: string | null = null
   let projectDir: string | null = null
   let capabilities = { selfReview: "isolated" as const, orchestrator: true, discoveryFleet: true }
+  let runtimeBackendKind: OpenArtisanStateBackendKind = "filesystem"
+  let roadmapBackend: RoadmapStateBackend | null = null
+  let roadmapService: RoadmapSliceService | null = null
+  let openArtisanServices: OpenArtisanServices | null = null
+  let runtimeBackendDispose: (() => Promise<void>) | null = null
   let pinoLogger: pino.Logger | null = null
 
   const bridgeCtx: BridgeContext = {
@@ -102,6 +120,16 @@ export function createBridgeEngine(
     set projectDir(v: string | null) { projectDir = v },
     get capabilities() { return capabilities },
     set capabilities(v: typeof capabilities) { capabilities = v },
+    get runtimeBackendKind() { return runtimeBackendKind },
+    set runtimeBackendKind(v: OpenArtisanStateBackendKind) { runtimeBackendKind = v },
+    get roadmapBackend() { return roadmapBackend },
+    set roadmapBackend(v: RoadmapStateBackend | null) { roadmapBackend = v },
+    get roadmapService() { return roadmapService },
+    set roadmapService(v: RoadmapSliceService | null) { roadmapService = v },
+    get openArtisanServices() { return openArtisanServices },
+    set openArtisanServices(v: OpenArtisanServices | null) { openArtisanServices = v },
+    get runtimeBackendDispose() { return runtimeBackendDispose },
+    set runtimeBackendDispose(v: (() => Promise<void>) | null | undefined) { runtimeBackendDispose = v ?? null },
     get pinoLogger() { return pinoLogger },
     set pinoLogger(v: pino.Logger | null) { pinoLogger = v },
     get shuttingDown() { return shuttingDown },

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test"
-import { mkdtemp, rm } from "node:fs/promises"
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -22,6 +22,10 @@ function makeBridgeContext(): BridgeContext {
     stateDir: null,
     projectDir: null,
     capabilities: { selfReview: "agent-only", orchestrator: false, discoveryFleet: false },
+    runtimeBackendKind: "filesystem",
+    roadmapBackend: null,
+    roadmapService: null,
+    openArtisanServices: null,
     pinoLogger: null,
     shuttingDown: false,
   }
@@ -39,7 +43,36 @@ afterEach(async () => {
 })
 
 describe("bridge parallel scheduler handling", () => {
-  it("surfaces explicit unsupported fallback during human gate resolution", async () => {
+  it("resolves request_review markdown artifact paths from bridge projectDir", async () => {
+    const featureName = "pglite-roadmap-backend"
+    const artifactDir = join(tmpDir, ".openartisan", featureName)
+    await mkdir(artifactDir, { recursive: true })
+    await writeFile(join(artifactDir, "conventions.md"), "# Conventions\n")
+
+    await ctx.engine!.store.update("s1", (draft) => {
+      draft.mode = "INCREMENTAL"
+      draft.phase = "DISCOVERY"
+      draft.phaseState = "CONVENTIONS"
+      draft.featureName = featureName
+    })
+
+    const result = await handleToolExecute({
+      name: "request_review",
+      args: {
+        summary: "Conventions ready",
+        artifact_description: "Discovery conventions",
+        artifact_files: [`.openartisan/${featureName}/conventions.md`],
+      },
+      context: { sessionId: "s1", directory: "/Users/yehudac/.hermes/hermes-agent" },
+    }, ctx) as string
+
+    expect(result).toContain("Artifact submitted for review")
+    expect(result).toContain("DISCOVERY/REVIEW")
+    const state = ctx.engine!.store.get("s1")
+    expect(state?.artifactDiskPaths.conventions).toBe(join(tmpDir, ".openartisan", featureName, "conventions.md"))
+  })
+
+  it("resumes deterministic sequential scheduling when multiple parallel-safe tasks unblock", async () => {
     await ctx.engine!.store.update("s1", (d) => {
       d.mode = "INCREMENTAL"
       d.phase = "IMPLEMENTATION"
@@ -87,12 +120,11 @@ describe("bridge parallel scheduler handling", () => {
       context: { sessionId: "s1", directory: tmpDir },
     }, ctx) as string
 
-    expect(result).toContain("Parallel runtime unsupported")
-    expect(result).toContain("sequential")
+    expect(result).toContain("Returning to IMPLEMENTATION/SCHEDULING")
 
     const state = ctx.engine!.store.get("s1")
     expect(state?.phase).toBe("IMPLEMENTATION")
-    expect(state?.phaseState).toBe("DRAFT")
+    expect(state?.phaseState).toBe("SCHEDULING")
     expect(state?.currentTaskId).toBe("T2")
   })
 })

@@ -57,6 +57,20 @@ class MockBridgeClient:
             ("clear_session", {"sessionId": session_id, "projectDir": project_dir})
         )
 
+    def recover_stale_bridge(self, project_dir: str) -> dict[str, Any]:
+        self._calls.append(("recover_stale_bridge", {"projectDir": project_dir}))
+        if "recover_stale_bridge" in self._responses:
+            resp = self._responses["recover_stale_bridge"]
+            if callable(resp):
+                return resp({"projectDir": project_dir})
+            return resp
+        return {
+            "kind": "no_recovery_needed",
+            "reason": "Bridge discovery is no_bridge; no stale runtime files were cleared.",
+            "clearedPaths": [],
+            "pluginReloaded": False,
+        }
+
     def call(self, method: str, params: dict[str, Any] | None = None) -> Any:
         self._calls.append((method, params))
         if method in self._responses:

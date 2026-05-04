@@ -136,8 +136,10 @@ export type ArtifactKey =
  *        of scanning directories with heuristics.
  *   v23: expanded the structural workflow contract with new PhaseState / WorkflowEvent values
  *        and persisted BacktrackContext provenance on WorkflowState.
+ *   v24: added approvedArtifactFiles so source-file artifacts approved via
+ *        request_review artifact_files remain the downstream source of truth.
  */
-export const SCHEMA_VERSION = 23
+export const SCHEMA_VERSION = 24
 
 /**
  * Runtime concurrency policy for nested or delegated workflow execution.
@@ -191,6 +193,15 @@ export interface WorkflowState {
    * Used for accumulated-drift detection in O_DIVERGE.
    */
   approvedArtifacts: Partial<Record<ArtifactKey, string>>
+
+  /**
+   * Absolute file paths that were reviewed and approved for each artifact key.
+   * This is the source-file counterpart to artifactDiskPaths: INTERFACES and
+   * TESTS often approve project files rather than .openartisan markdown mirrors.
+   * Downstream review and prompt context should prefer these paths over legacy
+   * single-file mirrors when present.
+   */
+  approvedArtifactFiles?: Partial<Record<ArtifactKey, string[]>>
 
   /**
    * The full approved conventions document text.
@@ -982,6 +993,7 @@ export interface RoadmapPGliteRepositoryOptions {
   schemaName?: string
   lockTimeoutMs?: number
   lockPollMs?: number
+  operationQueue?: import("./pglite-operation-lock").DatabaseOperationQueue
 }
 
 /**
@@ -990,6 +1002,7 @@ export interface RoadmapPGliteRepositoryOptions {
  */
 export interface RoadmapRepository {
   initialize(): Promise<RoadmapResult<null>>
+  dispose(): Promise<void>
   createRoadmap(document: RoadmapDocument): Promise<RoadmapResult<RoadmapDocument>>
   readRoadmap(): Promise<RoadmapResult<RoadmapDocument | null>>
   updateRoadmap(document: RoadmapDocument): Promise<RoadmapResult<RoadmapDocument>>
@@ -1302,16 +1315,13 @@ export interface SessionStateStore {
  * and `message` fields so callers have a structured error shape without changing the
  * compatibility contract in this phase.
  */
-export interface WorkflowStateValidationError extends String {
+export type WorkflowStateValidationError = string & {
   code: "INVALID_WORKFLOW_STATE"
   message: string
 }
 
 function workflowStateValidationError(message: string): WorkflowStateValidationError {
-  const error = new String(message) as unknown as WorkflowStateValidationError
-  error.code = "INVALID_WORKFLOW_STATE"
-  error.message = message
-  return error
+  return message as WorkflowStateValidationError
 }
 
 export function validateWorkflowState(state: WorkflowState): WorkflowStateValidationError | null {
@@ -1514,6 +1524,24 @@ export function validateWorkflowState(state: WorkflowState): WorkflowStateValida
       }
       if (!val.startsWith("/")) {
         return workflowStateValidationError(`artifactDiskPaths["${key}"] must be an absolute path (start with "/"), got "${val}"`)
+      }
+    }
+  }
+  // approvedArtifactFiles — validate as object with absolute string path arrays
+  if (state.approvedArtifactFiles !== undefined && (typeof state.approvedArtifactFiles !== "object" || Array.isArray(state.approvedArtifactFiles) || state.approvedArtifactFiles === null)) {
+    return workflowStateValidationError(`approvedArtifactFiles must be an object, got ${typeof state.approvedArtifactFiles}`)
+  }
+  for (const [key, val] of Object.entries(state.approvedArtifactFiles ?? {})) {
+    if (!Array.isArray(val)) {
+      return workflowStateValidationError(`approvedArtifactFiles["${key}"] must be an array`)
+    }
+    for (let i = 0; i < val.length; i++) {
+      const path = val[i]
+      if (typeof path !== "string") {
+        return workflowStateValidationError(`approvedArtifactFiles["${key}"][${i}] must be a string`)
+      }
+      if (!path.startsWith("/")) {
+        return workflowStateValidationError(`approvedArtifactFiles["${key}"][${i}] must be an absolute path (start with "/"), got "${path}"`)
       }
     }
   }
@@ -2008,6 +2036,13 @@ export interface RequestReviewArgs {
    * Inline artifact content is intentionally not part of the public contract.
    */
   artifact_files?: string[]
+  /**
+   * Markdown artifact text for workflow-authored markdown phases only.
+   * Tool handlers may materialize this to .openartisan/<feature>/<artifact>.md
+   * before review. This is intentionally distinct from legacy artifact_content,
+   * which is not accepted as a review source of truth.
+   */
+  artifact_markdown?: string
 }
 
 /**

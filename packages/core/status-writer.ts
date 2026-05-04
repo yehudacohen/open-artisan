@@ -30,6 +30,9 @@ function artifactStatus(
   if (state.approvedArtifacts[artifact]) {
     return "approved"
   }
+  if (state.artifactDiskPaths[artifact]) {
+    return "saved"
+  }
   if (artifact === currentPhaseArtifact) {
     return state.phaseState === "USER_GATE"
       ? "awaiting review"
@@ -66,6 +69,71 @@ function formatReviewResults(
   return lines.join("\n")
 }
 
+function formatPathList(paths: string[]): string[] {
+  return paths.map((p) => `- \`${p}\``)
+}
+
+function formatReviewAssets(state: WorkflowState): string[] {
+  const lines: string[] = []
+  const artifactEntries = Object.entries(state.artifactDiskPaths)
+    .filter((entry): entry is [string, string] => typeof entry[1] === "string" && entry[1].length > 0)
+  const reviewFiles = state.reviewArtifactFiles.filter((p) => p.length > 0)
+
+  if (artifactEntries.length === 0 && reviewFiles.length === 0) return lines
+
+  lines.push(`## Review Assets`)
+  if (artifactEntries.length > 0) {
+    lines.push(`- **Artifact documents:**`)
+    for (const [key, path] of artifactEntries) {
+      lines.push(`- ${key}: \`${path}\``)
+    }
+  }
+  if (reviewFiles.length > 0) {
+    lines.push(`- **Files under review:**`)
+    lines.push(...formatPathList(reviewFiles))
+  }
+  lines.push("")
+  return lines
+}
+
+function formatHumanGates(state: WorkflowState): string[] {
+  const gates = state.implDag?.filter((task) =>
+    task.status === "human-gated" && (!task.humanGate || !task.humanGate.resolved)
+  ) ?? []
+  if (gates.length === 0) return []
+
+  const lines: string[] = [`## Human Gates`]
+  for (const task of gates) {
+    const gate = task.humanGate
+    lines.push(`- **${task.id}:** ${gate?.whatIsNeeded ?? task.description}`)
+    if (gate?.why) lines.push(`- **Why:** ${gate.why}`)
+    if (gate?.verificationSteps) lines.push(`- **Verification:** ${gate.verificationSteps}`)
+  }
+  lines.push("")
+  return lines
+}
+
+function formatReviewEvidence(
+  results: WorkflowState["latestReviewResults"],
+): string[] {
+  if (!results || results.length === 0) return []
+
+  const lines: string[] = [`## Review Evidence`]
+  for (const result of results.slice(0, 8)) {
+    const status = result.met ? "met" : "unmet"
+    const score = result.score ? `, score ${result.score}` : ""
+    const evidence = result.evidence.length > 240
+      ? `${result.evidence.slice(0, 240)}...`
+      : result.evidence
+    lines.push(`- **${result.criterion}** (${status}${score}): ${evidence}`)
+  }
+  if (results.length > 8) {
+    lines.push(`- ${results.length - 8} additional criteria omitted from status summary.`)
+  }
+  lines.push("")
+  return lines
+}
+
 export function generateStatusMarkdown(state: WorkflowState): string {
   const featureName = state.featureName ?? "unknown"
   const lines: string[] = []
@@ -90,6 +158,10 @@ export function generateStatusMarkdown(state: WorkflowState): string {
   lines.push(`## Latest Review Results`)
   lines.push(formatReviewResults(state.latestReviewResults))
   lines.push("")
+
+  lines.push(...formatReviewAssets(state))
+  lines.push(...formatHumanGates(state))
+  lines.push(...formatReviewEvidence(state.latestReviewResults))
 
   return lines.join("\n")
 }

@@ -8,7 +8,7 @@
  *   - CONVENTIONS: writes to .openartisan/ only (conventions authoring), bash blocked
  *   - REVISE: writes to .openartisan/ only (conventions revision), bash allowed
  *   - REVIEW/USER_GATE: no writes or edits, bash allowed for verification
- * - PLANNING / IMPL_PLAN: no writes, no edits (plan is text in memory)
+ * - PLANNING / IMPL_PLAN: writes to .openartisan/ only for required markdown artifacts
  * - INTERFACES: only interface/type/schema files may be written; .env always blocked.
  *   Language-agnostic: accepts .ts, .d.ts, .py, .go, .rs, .java, .rb, .ex, .proto,
  *   .graphql, .gql, .json (schema files), .yaml/.yml (OpenAPI), .thrift, .avsc, .capnp.
@@ -39,7 +39,8 @@ export function isEnvFile(path: string): boolean {
 
 /** Returns true if the file is under the .openartisan/ artifact directory. */
 export function isOpenArtisanFile(path: string): boolean {
-  return path.includes("/.openartisan/") || path.includes("\\.openartisan\\")
+  const normalized = path.replace(/\\/g, "/")
+  return normalized === ".openartisan" || normalized.startsWith(".openartisan/") || normalized.includes("/.openartisan/")
 }
 
 /**
@@ -126,8 +127,53 @@ export function normalizeParallelWritablePath(path: string): string | null {
   return normalized
 }
 
-function isParallelSafeIsolation(isolation: TaskIsolation | undefined): boolean {
-  if (!isolation) return false
+export function extractPatchTargetPaths(patchText: string): string[] {
+  const paths: string[] = []
+  for (const line of patchText.split(/\r?\n/)) {
+    const artisanPatchMatch = line.match(/^\*\*\*\s+(?:Add File|Update File|Delete File|Move to):\s+(.+)\s*$/)
+    const gitPatchMatch = line.match(/^diff --git\s+a\/(.+?)\s+b\/(.+?)\s*$/)
+    const unifiedPatchMatch = line.match(/^\+\+\+\s+(?:b\/)?(.+)\s*$/)
+    const rawPath = artisanPatchMatch?.[1] ?? gitPatchMatch?.[2] ?? unifiedPatchMatch?.[1]
+    if (!rawPath || rawPath === "/dev/null") continue
+    const path = rawPath.trim().replace(/^['"]|['"]$/g, "")
+    if (path) paths.push(path)
+  }
+  return Array.from(new Set(paths))
+}
+
+export function extractWriteToolPaths(args: unknown): string[] {
+  if (!args) return []
+  if (typeof args === "string") {
+    return args.includes("***") || args.includes("diff --git") || args.includes("+++")
+      ? extractPatchTargetPaths(args)
+      : []
+  }
+  if (Array.isArray(args)) {
+    return Array.from(new Set(args.flatMap((item) => extractWriteToolPaths(item))))
+  }
+  if (typeof args !== "object") return []
+
+  const record = args as Record<string, unknown>
+  const directKeys = ["filePath", "file_path", "path", "file", "filename", "file_name", "target", "destination"]
+  const paths: string[] = []
+  for (const key of directKeys) {
+    const value = record[key]
+    if (typeof value === "string" && value.trim().length > 0) paths.push(value.trim().replace(/^['"]|['"]$/g, ""))
+  }
+  for (const key of ["patchText", "patch_text", "patch"]) {
+    const value = record[key]
+    if (typeof value === "string" && (value.includes("***") || value.includes("diff --git") || value.includes("+++"))) {
+      paths.push(...extractPatchTargetPaths(value))
+    }
+  }
+  for (const key of ["input", "args", "parameters", "payload", "body", "toolCall"]) {
+    const value = record[key]
+    if (value && typeof value === "object") paths.push(...extractWriteToolPaths(value))
+  }
+  return Array.from(new Set(paths))
+}
+
+function isParallelSafeIsolation(isolation: TaskIsolation): boolean {
   return isolation.mode !== "sequential-only" && isolation.safeForParallelDispatch
 }
 
@@ -138,6 +184,14 @@ export function assessParallelTaskIsolation(tasks: Array<Pick<TaskNode, "id" | "
 
   for (const task of tasks) {
     const isolation = task.isolation
+    if (!isolation) {
+      return {
+        allowed: false,
+        reason: "runtime-unsupported",
+        taskIds,
+        normalizedWritablePaths,
+      }
+    }
     if (!isParallelSafeIsolation(isolation)) {
       return {
         allowed: false,
@@ -274,6 +328,20 @@ export function getPhaseToolPolicy(
     // -----------------------------------------------------------------------
     case "PLANNING":
     case "IMPL_PLAN": {
+      // DRAFT/CONVENTIONS: the public workflow contract requires markdown
+      // artifacts on disk for request_review, so allow only .openartisan/ writes.
+      // Keep bash blocked to preserve definition-only authoring.
+      if (phaseState === "DRAFT" || phaseState === "CONVENTIONS") {
+        return {
+          blocked: ["bash"],
+          writePathPredicate: (filePath: string) => {
+            if (isEnvFile(filePath)) return false
+            return isOpenArtisanFile(filePath)
+          },
+          allowedDescription:
+            "Planning authoring: writes allowed ONLY to .openartisan/ artifact files. No writes to project source. bash blocked. .env writes are always blocked.",
+        }
+      }
       // REVISE: the plan already exists on disk in .openartisan/. Allow surgical
       // edits to .openartisan/ files so the agent doesn't have to reproduce the
       // entire plan just to make targeted changes. Still block all other writes.
@@ -308,15 +376,22 @@ export function getPhaseToolPolicy(
           allowedDescription: "Planning phase: no file writes or edits. bash allowed for read-only verification.",
         }
       }
-      // DRAFT/CONVENTIONS: fully locked — plans are produced as text output
+      // Unknown planning sub-states stay locked down by default.
       return {
         blocked: ["write", "edit", "bash"],
-        allowedDescription: "Planning phase: no file writes and no shell execution. Produce a plan as text output.",
+        allowedDescription: "Planning phase: no file writes and no shell execution unless the phase state explicitly allows .openartisan/ artifact authoring.",
       }
     }
 
     // -----------------------------------------------------------------------
     case "INTERFACES": {
+      if (phaseState === "SKIP_CHECK" || phaseState === "CASCADE_CHECK") {
+        return {
+          blocked: ["write", "edit", "bash"],
+          allowedDescription:
+            "Structural decision state: no file writes, edits, or bash while skip/cascade evaluation is in progress.",
+        }
+      }
       // During DRAFT/CONVENTIONS: bash is blocked (definition-only authoring).
       // During REVISE/REVIEW/USER_GATE: bash is allowed so the agent can run
       // read-only commands (rg, wc, find, etc.) to verify acceptance criteria
@@ -359,6 +434,13 @@ export function getPhaseToolPolicy(
 
     // -----------------------------------------------------------------------
     case "IMPLEMENTATION": {
+      if (phaseState === "SCHEDULING" || phaseState === "TASK_REVIEW" || phaseState === "HUMAN_GATE" || phaseState === "DELEGATED_WAIT") {
+        return {
+          blocked: ["write", "edit"],
+          allowedDescription:
+            "Structural implementation wait/decision state: no source writes or edits while the workflow is scheduling, awaiting task review, blocked on manual action, or waiting on delegated work.",
+        }
+      }
       if (mode === "INCREMENTAL") {
         // INCREMENTAL with a non-empty allowlist: restrict to listed files only.
         // INCREMENTAL with an empty allowlist: block all writes (do-no-harm guarantee —
@@ -366,7 +448,7 @@ export function getPhaseToolPolicy(
         if (fileAllowlist.length === 0) {
           return {
             blocked: ["write", "edit"],
-            allowedDescription: "INCREMENTAL mode: no file allowlist provided — all writes blocked until an allowlist is set.",
+            allowedDescription: "INCREMENTAL mode: no approved file allowlist is available for the current implementation scope — all writes are blocked until the scope is repaired through the workflow.",
           }
         }
         // In INCREMENTAL, per-task files intersect with the workflow allowlist.
@@ -391,7 +473,7 @@ export function getPhaseToolPolicy(
             // the common case of `echo > file`, `cat > file`, `sed -i`, `tee`.
             // Also blocks heredoc patterns (`<<EOF`, `<<-EOF`, `<<'EOF'`, `<<"EOF"`)
             // which can be used to write file contents via `cat <<EOF > file`.
-            const WRITE_OPS = /(?:>>|>[^&]|\btee\b|\bsed\s+-i\b|\bdd\b.*\bof=|<<-?\s*['"]?\w+['"]?)/
+            const WRITE_OPS = /(?:>>|>[^&]|\btee\b|\bsed\s+-i\b|\bdd\b.*\bof=|<<-?\s*['"]?[A-Za-z_][A-Za-z0-9_]*['"]?)/
             return !WRITE_OPS.test(command)
           },
           allowedDescription: taskSet

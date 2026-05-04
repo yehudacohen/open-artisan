@@ -9,7 +9,7 @@ import { resolve } from "node:path"
 import type { MethodHandler } from "../server"
 import type { GuardCheckParams, GuardPolicyParams, GuardCheckResult, GuardPolicyResult } from "../protocol"
 import { SESSION_NOT_FOUND, INVALID_PARAMS } from "../protocol"
-import { getPhaseToolPolicy, getTaskWriteFiles } from "../../core/hooks/tool-guard"
+import { extractWriteToolPaths, getPhaseToolPolicy, getTaskWriteFiles } from "../../core/hooks/tool-guard"
 import { WORKFLOW_TOOL_NAMES } from "../../core/constants"
 import type { Phase, PhaseState, WorkflowMode } from "../../core/types"
 
@@ -84,11 +84,16 @@ export const handleGuardCheck: MethodHandler = async (params, ctx) => {
   if (policy.writePathPredicate) {
     const writeTokens = ["write", "edit", "patch", "create", "overwrite"]
     if (writeTokens.some((t) => toolName.includes(t))) {
-      const filePath = (
-        p.args?.["filePath"] ?? p.args?.["path"] ?? p.args?.["file"] ??
-        p.args?.["filename"] ?? p.args?.["target"] ?? p.args?.["destination"]
-      ) as string | undefined
-      if (filePath && !policy.writePathPredicate(filePath)) {
+      const filePaths = extractWriteToolPaths(p.args)
+      if (filePaths.length === 0) {
+        return {
+          allowed: false,
+          reason: `Tool "${p.toolName}" is write-like but no target path could be extracted in ${state.phase}/${state.phaseState}. ${policy.allowedDescription}`,
+          policyVersion: ctx.policyVersion,
+        } satisfies GuardCheckResult
+      }
+      for (const filePath of filePaths) {
+        if (policy.writePathPredicate(filePath)) continue
         return {
           allowed: false,
           reason: `Writing to "${filePath}" is blocked in ${state.phase}/${state.phaseState}. ${policy.allowedDescription}`,

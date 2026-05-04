@@ -75,6 +75,70 @@ class TestToolRegistration:
         tool = mock_ctx.get_registered_tool("oa_reset_task")
         assert tool is not None
         assert tool["toolset"] == TOOLSET_NAME
+        assert tool["parameters"]["properties"]["reason"]["type"] == "string"
+
+    def test_submit_feedback_schema_accepts_resolved_human_gates(self, mock_ctx, mock_bridge):
+        register_workflow_tools(mock_ctx, mock_bridge)
+        tool = mock_ctx.get_registered_tool("oa_submit_feedback")
+        assert tool is not None
+        properties = tool["parameters"]["properties"]
+        assert properties["resolved_human_gates"]["type"] == "array"
+        assert properties["resolved_human_gates"]["items"]["type"] == "string"
+
+    def test_registers_boundary_change_tools(self, mock_ctx, mock_bridge):
+        register_workflow_tools(mock_ctx, mock_bridge)
+
+        analyze = mock_ctx.get_registered_tool("oa_analyze_task_boundary_change")
+        assert analyze is not None
+        assert analyze["toolset"] == TOOLSET_NAME
+        assert analyze["parameters"]["required"] == ["task_id", "reason"]
+        assert analyze["parameters"]["properties"]["add_files"]["items"]["type"] == "string"
+
+        apply = mock_ctx.get_registered_tool("oa_apply_task_boundary_change")
+        assert apply is not None
+        assert apply["toolset"] == TOOLSET_NAME
+        assert apply["parameters"]["required"] == ["task_id", "reason"]
+        assert apply["parameters"]["properties"]["expected_reset_tasks"]["items"]["type"] == "string"
+
+    def test_registers_patch_suggestion_application_tool(self, mock_ctx, mock_bridge):
+        register_workflow_tools(mock_ctx, mock_bridge)
+
+        tool = mock_ctx.get_registered_tool("oa_apply_patch_suggestion")
+        assert tool is not None
+        assert tool["toolset"] == TOOLSET_NAME
+        assert tool["parameters"]["required"] == ["patch_suggestion_id"]
+        assert tool["parameters"]["properties"]["force"]["type"] == "boolean"
+
+    def test_registers_drift_repair_tools(self, mock_ctx, mock_bridge):
+        register_workflow_tools(mock_ctx, mock_bridge)
+
+        bridge_tool_names = {bridge_name for _, bridge_name, _, _ in WORKFLOW_TOOLS}
+        assert "report_drift" in bridge_tool_names
+        assert "plan_drift_repair" in bridge_tool_names
+        assert "apply_drift_repair" in bridge_tool_names
+        report = mock_ctx.get_registered_tool("oa_report_drift")
+        plan = mock_ctx.get_registered_tool("oa_plan_drift_repair")
+        apply = mock_ctx.get_registered_tool("oa_apply_drift_repair")
+        assert report is not None
+        assert plan is not None
+        assert apply is not None
+        assert report["parameters"]["properties"]["changed_files"]["items"]["type"] == "string"
+        assert report["parameters"]["properties"]["drifted_artifact_keys"]["items"]["enum"] == ["design", "conventions", "plan", "interfaces", "tests", "impl_plan", "implementation"]
+        assert "artifact_keys" not in report["parameters"]["properties"]
+        assert plan["parameters"]["properties"]["strategy"]["enum"] == ["minimal", "safe-auto", "ask-first"]
+        assert apply["parameters"]["required"] == ["repair_plan_id"]
+
+    def test_manifest_declares_patch_suggestion_application_tool(self):
+        manifest = Path(__file__).parents[1] / "plugin.yaml"
+        content = manifest.read_text()
+        assert "- oa_apply_patch_suggestion" in content
+
+    def test_manifest_declares_drift_tools(self):
+        manifest = Path(__file__).parents[1] / "plugin.yaml"
+        content = manifest.read_text()
+        assert "- oa_report_drift" in content
+        assert "- oa_plan_drift_repair" in content
+        assert "- oa_apply_drift_repair" in content
 
     def test_all_handlers_are_callable(self, mock_ctx, mock_bridge):
         """Every registered tool's handler should be callable."""
@@ -262,6 +326,31 @@ class TestBridgeDelegation:
             message_calls[0][1]["parts"][0]["text"]
             == "(user invoked submit_feedback via Hermes)"
         )
+
+    def test_submit_feedback_passes_resolved_human_gates(self, started_bridge):
+        started_bridge.set_response(
+            "message.process", {"intercepted": True, "parts": []}
+        )
+        started_bridge.set_response(
+            "tool.execute", "Resolved 1 human gate(s): T1."
+        )
+
+        result = _handle_workflow_tool(
+            started_bridge,
+            "submit_feedback",
+            "test-session",
+            "/tmp/project",
+            {
+                "feedback_type": "approve",
+                "feedback_text": "resolved",
+                "resolved_human_gates": ["T1"],
+            },
+        )
+
+        assert "Resolved 1 human gate" in result
+        tool_calls = started_bridge.get_calls("tool.execute")
+        assert len(tool_calls) == 1
+        assert tool_calls[0][1]["args"]["resolved_human_gates"] == ["T1"]
 
     def test_post_tool_reprompt_launches_autonomous_continuation(self, started_bridge):
         """A workflow tool leaving the session in DRAFT/REVISE must not rely on session-end detection."""

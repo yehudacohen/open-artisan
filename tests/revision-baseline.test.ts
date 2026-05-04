@@ -241,26 +241,30 @@ describe("captureRevisionBaseline — edge cases", () => {
 // ---------------------------------------------------------------------------
 
 describe("hasArtifactChanged — content-hash", () => {
-  it("returns false when artifact_content matches baseline hash", async () => {
+  it("returns false when on-disk artifact matches baseline hash", async () => {
     const content = "# Plan\nBuild the thing."
+    const artifactPath = join(tmpDir, "plan.md")
+    writeFileSync(artifactPath, content)
     const baseline = { type: "content-hash" as const, hash: contentHash(content) }
-    const state = makeState({ phase: "PLANNING" })
+    const state = makeState({ phase: "PLANNING", artifactDiskPaths: { plan: artifactPath } })
 
-    const changed = await hasArtifactChanged(baseline, "PLANNING", content, state, tmpDir)
+    const changed = await hasArtifactChanged(baseline, "PLANNING", state, tmpDir)
     expect(changed).toBe(false)
   })
 
-  it("returns true when artifact_content differs from baseline hash", async () => {
+  it("returns true when on-disk artifact differs from baseline hash", async () => {
     const originalContent = "# Plan\nBuild the thing."
     const revisedContent = "# Plan\nBuild the thing with tests."
+    const artifactPath = join(tmpDir, "plan.md")
+    writeFileSync(artifactPath, revisedContent)
     const baseline = { type: "content-hash" as const, hash: contentHash(originalContent) }
-    const state = makeState({ phase: "PLANNING" })
+    const state = makeState({ phase: "PLANNING", artifactDiskPaths: { plan: artifactPath } })
 
-    const changed = await hasArtifactChanged(baseline, "PLANNING", revisedContent, state, tmpDir)
+    const changed = await hasArtifactChanged(baseline, "PLANNING", state, tmpDir)
     expect(changed).toBe(true)
   })
 
-  it("falls back to disk file when artifact_content is undefined", async () => {
+  it("reads the current artifact from disk", async () => {
     const originalContent = "# Plan\nBuild the thing."
     const artifactPath = join(tmpDir, "plan.md")
     writeFileSync(artifactPath, originalContent) // same content → no change
@@ -270,7 +274,7 @@ describe("hasArtifactChanged — content-hash", () => {
       artifactDiskPaths: { plan: artifactPath },
     })
 
-    const changed = await hasArtifactChanged(baseline, "PLANNING", undefined, state, tmpDir)
+    const changed = await hasArtifactChanged(baseline, "PLANNING", state, tmpDir)
     expect(changed).toBe(false)
   })
 
@@ -284,7 +288,7 @@ describe("hasArtifactChanged — content-hash", () => {
       artifactDiskPaths: { plan: artifactPath },
     })
 
-    const changed = await hasArtifactChanged(baseline, "PLANNING", undefined, state, tmpDir)
+    const changed = await hasArtifactChanged(baseline, "PLANNING", state, tmpDir)
     expect(changed).toBe(true)
   })
 
@@ -295,7 +299,7 @@ describe("hasArtifactChanged — content-hash", () => {
       artifactDiskPaths: { plan: "/nonexistent/plan.md" },
     })
 
-    const changed = await hasArtifactChanged(baseline, "PLANNING", undefined, state, tmpDir)
+    const changed = await hasArtifactChanged(baseline, "PLANNING", state, tmpDir)
     expect(changed).toBe(true)
   })
 })
@@ -312,7 +316,7 @@ describe("hasArtifactChanged — git-sha (worktree hash)", () => {
     const baseline = await captureRevisionBaseline("INTERFACES", state, tmpDir)
     expect(baseline).not.toBeNull()
     // No changes made between capture and check
-    const changed = await hasArtifactChanged(baseline!, "INTERFACES", undefined, state, tmpDir)
+    const changed = await hasArtifactChanged(baseline!, "INTERFACES", state, tmpDir)
     expect(changed).toBe(false)
   })
 
@@ -327,7 +331,7 @@ describe("hasArtifactChanged — git-sha (worktree hash)", () => {
     const baseline = await captureRevisionBaseline("TESTS", state, tmpDir)
     expect(baseline).not.toBeNull()
     // No NEW changes — same diff as at capture time
-    const changed = await hasArtifactChanged(baseline!, "TESTS", undefined, state, tmpDir)
+    const changed = await hasArtifactChanged(baseline!, "TESTS", state, tmpDir)
     expect(changed).toBe(false)
   })
 
@@ -342,7 +346,7 @@ describe("hasArtifactChanged — git-sha (worktree hash)", () => {
     expect(baseline).not.toBeNull()
     // Modify tracked file (unstaged change — shows in git diff)
     writeFileSync(filePath, "new content")
-    const changed = await hasArtifactChanged(baseline!, "INTERFACES", undefined, state, tmpDir)
+    const changed = await hasArtifactChanged(baseline!, "INTERFACES", state, tmpDir)
     expect(changed).toBe(true)
   })
 
@@ -358,7 +362,7 @@ describe("hasArtifactChanged — git-sha (worktree hash)", () => {
     expect(baseline).not.toBeNull()
     // Add MORE changes during REVISE (modify the same or different tracked file)
     writeFileSync(file1, "even newer")  // further unstaged change
-    const changed = await hasArtifactChanged(baseline!, "TESTS", undefined, state, tmpDir)
+    const changed = await hasArtifactChanged(baseline!, "TESTS", state, tmpDir)
     expect(changed).toBe(true)
   })
 
@@ -366,7 +370,7 @@ describe("hasArtifactChanged — git-sha (worktree hash)", () => {
     // tmpDir is not a git repo — graceful degradation
     const baseline = { type: "git-sha" as const, sha: contentHash("") }
     const state = makeState({ phase: "INTERFACES" })
-    const changed = await hasArtifactChanged(baseline, "INTERFACES", undefined, state, tmpDir)
+    const changed = await hasArtifactChanged(baseline, "INTERFACES", state, tmpDir)
     expect(changed).toBe(true)
   })
 })
@@ -381,7 +385,7 @@ describe("hasArtifactChanged — graceful degradation", () => {
     const baseline = { type: "unknown", data: "whatever" } as any
     const state = makeState({ phase: "PLANNING" })
 
-    const changed = await hasArtifactChanged(baseline, "PLANNING", "content", state, tmpDir)
+    const changed = await hasArtifactChanged(baseline, "PLANNING", state, tmpDir)
     expect(changed).toBe(true)
   })
 })

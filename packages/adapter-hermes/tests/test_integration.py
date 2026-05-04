@@ -34,6 +34,7 @@ from hermes_adapter.constants import (
     TOOLSET_NAME,
 )
 from hermes_adapter.types import BridgeError
+from hermes_adapter.session_projects import clear_session_project_dir, set_session_project_dir
 
 from .conftest import MockBridgeClient, MockHermesContext
 
@@ -166,25 +167,40 @@ class TestFullRegistration:
 class TestSessionLifecycle:
     """on_session_start/end manage bridge lifecycle."""
 
-    def test_session_start_initializes_bridge(self, mock_ctx, mock_bridge):
-        """on_session_start should call bridge.start and lifecycle.sessionCreated."""
-        mock_bridge.set_response("lifecycle.sessionCreated", None)
+    def test_session_start_defers_bridge_without_selected_project(self, mock_ctx, mock_bridge):
+        """on_session_start should not eagerly start bridges for auxiliary sessions."""
+        clear_session_project_dir(mock_ctx.session_id)
         _on_session_start(mock_ctx, mock_bridge, session_id=mock_ctx.session_id)
-        assert mock_bridge.is_alive
-        session_calls = mock_bridge.get_calls("lifecycle.sessionCreated")
-        assert len(session_calls) == 1
-        assert session_calls[0][1]["sessionId"] == mock_ctx.session_id
+        assert not mock_bridge.is_alive
+        assert mock_bridge.get_calls("lifecycle.sessionCreated") == []
+
+    def test_session_start_initializes_selected_project_bridge(self, mock_ctx, mock_bridge):
+        """on_session_start initializes the bridge only after project selection."""
+        mock_bridge.set_response("lifecycle.sessionCreated", None)
+        try:
+            set_session_project_dir(mock_ctx.session_id, mock_ctx.project_dir)
+            _on_session_start(mock_ctx, mock_bridge, session_id=mock_ctx.session_id)
+            assert mock_bridge.is_alive
+            session_calls = mock_bridge.get_calls("lifecycle.sessionCreated")
+            assert len(session_calls) == 1
+            assert session_calls[0][1]["sessionId"] == mock_ctx.session_id
+        finally:
+            clear_session_project_dir(mock_ctx.session_id)
 
     def test_session_start_forwards_robot_artisan_agent(self, mock_ctx, mock_bridge):
         """robot-artisan sessions should preserve the explicit agent name."""
         mock_bridge.set_response("lifecycle.sessionCreated", None)
 
-        _on_session_start(
-            mock_ctx,
-            mock_bridge,
-            session_id=mock_ctx.session_id,
-            agent="robot-artisan",
-        )
+        try:
+            set_session_project_dir(mock_ctx.session_id, mock_ctx.project_dir)
+            _on_session_start(
+                mock_ctx,
+                mock_bridge,
+                session_id=mock_ctx.session_id,
+                agent="robot-artisan",
+            )
+        finally:
+            clear_session_project_dir(mock_ctx.session_id)
 
         session_calls = mock_bridge.get_calls("lifecycle.sessionCreated")
         assert len(session_calls) == 1
@@ -336,6 +352,78 @@ class TestSessionLifecycle:
         execute_continuation.assert_called_once()
         assert mock_bridge.is_alive
 
+    def test_session_end_falls_back_to_default_workflow_session_for_reprompt(
+        self, mock_ctx, mock_bridge
+    ):
+        """Actionable workflow state under the default OA session must still continue."""
+        mock_bridge.start(mock_ctx.project_dir)
+
+        def idle_response(params):
+            if params and params.get("sessionId") == mock_ctx.session_id:
+                return {"action": "ignore"}
+            if params and params.get("sessionId") == "default":
+                return {
+                    "action": "reprompt",
+                    "message": "Continue revising the Open Artisan artifact.",
+                    "retryCount": 1,
+                }
+            raise BridgeError("unexpected session")
+
+        mock_bridge.set_response_fn("idle.check", idle_response)
+        mock_bridge.set_response("lifecycle.sessionDeleted", None)
+
+        with (
+            patch(
+                "hermes_adapter.continuation.build_continuation_request",
+                return_value={
+                    "sessionId": mock_ctx.session_id,
+                    "surface": {"kind": "gateway_messaging", "platform": "discord"},
+                    "gatewayRouting": {
+                        "platform": "discord",
+                        "chatId": "1498151051981885531",
+                        "threadId": "thread-1",
+                        "userId": "941009272429506612",
+                        "messageId": "msg-1",
+                        "sessionOrigin": "discord:1498151051981885531:thread-1",
+                    },
+                    "message": "Continue revising the Open Artisan artifact.",
+                },
+            ) as build_request,
+            patch(
+                "hermes_adapter.continuation.execute_continuation",
+                return_value={
+                    "kind": "handoff_requested",
+                    "strategy": "gateway_handoff",
+                    "sessionId": mock_ctx.session_id,
+                    "detail": "queued for gateway delivery",
+                },
+            ) as execute_continuation,
+        ):
+            _on_session_end(
+                mock_ctx,
+                mock_bridge,
+                session_id=mock_ctx.session_id,
+                completed=True,
+                interrupted=False,
+                platform="discord",
+                source="gateway",
+                chat_id="1498151051981885531",
+                thread_id="thread-1",
+                user_id="941009272429506612",
+                message_id="msg-1",
+                session_origin="discord:1498151051981885531:thread-1",
+            )
+
+        build_request.assert_called_once()
+        assert build_request.call_args.kwargs["session_id"] == mock_ctx.session_id
+        assert build_request.call_args.kwargs["idle_decision"]["message"] == "Continue revising the Open Artisan artifact."
+        execute_continuation.assert_called_once()
+        assert mock_bridge.get_calls("idle.check") == [
+            ("idle.check", {"sessionId": mock_ctx.session_id}),
+            ("idle.check", {"sessionId": "default"}),
+        ]
+        assert mock_bridge.is_alive
+
     def test_session_end_gateway_blocked_outcome_shuts_down_truthfully(
         self, mock_ctx, mock_bridge, caplog
     ):
@@ -366,7 +454,7 @@ class TestSessionLifecycle:
                     "strategy": "none",
                     "sessionId": mock_ctx.session_id,
                     "detail": "missing gateway routing metadata",
-                    "missingFields": ["chatId", "threadId", "userId", "messageId", "sessionOrigin"],
+                    "missingFields": ["chatId", "platform", "sessionOrigin"],
                 },
             ) as execute_continuation,
             caplog.at_level(logging.WARNING),
@@ -384,7 +472,7 @@ class TestSessionLifecycle:
         build_request.assert_called_once()
         execute_continuation.assert_called_once()
         assert not mock_bridge.is_alive
-        assert "missing fields: chatId, threadId, userId, messageId, sessionOrigin" in caplog.text
+        assert "missing fields: chatId, platform, sessionOrigin" in caplog.text
 
     def test_session_end_clear_session_failure_is_logged_not_silently_swallowed(
         self, mock_ctx, mock_bridge, caplog
@@ -835,6 +923,14 @@ class TestSharedBridgeReuse:
 
 class TestPromptDuringWorkflow:
     """Prompt hook returns phase-appropriate context during workflow."""
+
+    @pytest.fixture(autouse=True)
+    def selected_project(self):
+        set_session_project_dir("s1", "/tmp/test-project")
+        try:
+            yield
+        finally:
+            clear_session_project_dir("s1")
 
     def test_prompt_reflects_current_phase(self, started_bridge):
         """Prompt should change as workflow advances."""

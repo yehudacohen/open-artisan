@@ -17,6 +17,7 @@ from .bridge_client import StdioBridgeClient
 from .workflow_tools import register_workflow_tools
 from .guard_wrappers import register_guard_wrappers
 from .prompt_hook import create_prompt_hook
+from .session_projects import clear_session_project_dir, get_session_project_dir, resolve_project_dir
 
 logger = logging.getLogger(__name__)
 
@@ -67,15 +68,21 @@ def _on_session_start(
     bridge: BridgeClient,
     **kwargs: Any,
 ) -> None:
-    """Session start handler - eagerly initializes the bridge.
+    """Session start handler - initializes only explicitly selected projects.
 
-    1. Calls bridge.start(project_dir) to spawn subprocess
-    2. Calls lifecycle.sessionCreated to register the session
+    Hermes loads plugins for auxiliary/reviewer sessions too. Starting an Open
+    Artisan bridge for every session can collide with the active workflow
+    session, so ordinary workflow tools lazily initialize the bridge instead.
     """
 
     try:
         session_id = str(kwargs.get("session_id", "default"))
-        project_dir = os.getcwd()
+        selected_project_dir = get_session_project_dir(session_id)
+        if not selected_project_dir:
+            logger.info("Bridge start deferred for session %s", session_id)
+            return
+
+        project_dir = resolve_project_dir(session_id, os.getcwd())
         agent = _resolve_agent_name(kwargs)
         bridge.start(project_dir)
         bridge.call(
@@ -100,7 +107,7 @@ def _on_session_end(
     """
 
     session_id = str(kwargs.get("session_id", "default"))
-    project_dir = str(kwargs.get("cwd") or os.getcwd())
+    project_dir = resolve_project_dir(session_id, str(kwargs.get("cwd") or os.getcwd()))
     idle_decision = _get_idle_decision(bridge, session_id, kwargs)
 
     if idle_decision and idle_decision.get("action") == "reprompt":
@@ -148,6 +155,7 @@ def _on_session_end(
         )
 
     _detach_session(bridge, session_id, project_dir)
+    clear_session_project_dir(session_id)
 
     try:
         bridge.shutdown()
@@ -158,23 +166,7 @@ def _on_session_end(
 
 
 def _build_session_context(kwargs: dict[str, Any]) -> dict[str, Any]:
-    context: dict[str, Any] = {}
-    env_fallbacks = {
-        "platform": "OPENARTISAN_CONTINUE_PLATFORM",
-        "source": "OPENARTISAN_CONTINUE_SOURCE",
-        "chat_id": "OPENARTISAN_CONTINUE_CHAT_ID",
-        "thread_id": "OPENARTISAN_CONTINUE_THREAD_ID",
-        "user_id": "OPENARTISAN_CONTINUE_USER_ID",
-        "message_id": "OPENARTISAN_CONTINUE_MESSAGE_ID",
-        "session_origin": "OPENARTISAN_CONTINUE_SESSION_ORIGIN",
-    }
-    for key, env_name in env_fallbacks.items():
-        value = kwargs.get(key)
-        if value is None:
-            value = os.environ.get(env_name)
-        if value is not None:
-            context[key] = value
-    return context
+    return continuation.build_session_context(kwargs)
 
 
 def _resolve_agent_name(kwargs: dict[str, Any]) -> str:
@@ -212,13 +204,38 @@ def _get_idle_decision(
     if not _should_attempt_autonomous_continue(kwargs):
         return None
 
-    try:
-        result = bridge.call("idle.check", {"sessionId": session_id})
-    except Exception as e:
-        logger.debug("idle.check failed for session %s: %s", session_id, e)
-        return None
+    fallback_ignore: dict[str, Any] | None = None
+    candidate_session_ids = [session_id]
+    if session_id != "default":
+        # Older/resumed Hermes dogfood sessions can have the active OA workflow
+        # persisted under the adapter default session while the gateway runtime
+        # reports a platform-specific Hermes session id. Check both so actionable
+        # REVISE/DRAFT states cannot be mistaken for a truthful stop.
+        candidate_session_ids.append("default")
 
-    return result if isinstance(result, dict) else None
+    for candidate_session_id in candidate_session_ids:
+        try:
+            result = bridge.call("idle.check", {"sessionId": candidate_session_id})
+        except Exception as e:
+            logger.debug("idle.check failed for session %s: %s", candidate_session_id, e)
+            continue
+
+        if not isinstance(result, dict):
+            continue
+
+        if result.get("action") in {"reprompt", "escalate"}:
+            if candidate_session_id != session_id:
+                logger.info(
+                    "Using fallback workflow session %s for autonomous continuation of Hermes session %s",
+                    candidate_session_id,
+                    session_id,
+                )
+            return result
+
+        if fallback_ignore is None and result.get("action") == "ignore":
+            fallback_ignore = result
+
+    return fallback_ignore
 
 
 def _detach_session(bridge: BridgeClient, session_id: str, project_dir: str) -> None:

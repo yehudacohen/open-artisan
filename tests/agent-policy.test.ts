@@ -69,6 +69,7 @@ describe("agent-policy", () => {
   it("detects artisan agents", () => {
     expect(isArtisanAgent("artisan")).toBe(true)
     expect(isArtisanAgent("robot-artisan")).toBe(true)
+    expect(isArtisanAgent("build-artisan")).toBe(true)
     expect(isArtisanAgent("build")).toBe(false)
   })
 
@@ -89,6 +90,10 @@ describe("agent-policy", () => {
     expect(isWorkflowSessionActive(makeState({ phase: "PLANNING" }))).toBe(true)
   })
 
+  it("keeps an opted-in build-artisan workflow active even when the current agent override is build", () => {
+    expect(isWorkflowSessionActive(makeState({ activeAgent: "build-artisan" }), "build")).toBe(true)
+  })
+
   it("persists normalized agent names to session state", async () => {
     const dir = await mkdtemp(join(tmpdir(), "agent-policy-"))
     const store = createSessionStateStore(createFileSystemStateBackend(dir))
@@ -98,5 +103,19 @@ describe("agent-policy", () => {
 
     expect(persisted).toBe("build")
     expect(store.get("s1")?.activeAgent).toBe("build")
+  })
+
+  it("does not downgrade an artisan session to build from transient agent metadata", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "agent-policy-lock-"))
+    const store = createSessionStateStore(createFileSystemStateBackend(dir))
+    await store.create("s1")
+    await store.update("s1", (draft) => {
+      draft.activeAgent = "artisan"
+    })
+
+    const persisted = await persistActiveAgent(store, "s1", "build")
+
+    expect(persisted).toBe("artisan")
+    expect(store.get("s1")?.activeAgent).toBe("artisan")
   })
 })

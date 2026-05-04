@@ -30,6 +30,7 @@ import type {
 import type { SubagentDispatcher } from "./subagent-dispatcher"
 import { withTimeout, extractJsonFromText } from "./utils"
 import { SELF_REVIEW_TIMEOUT_MS, MAX_ARTIFACT_CONTENT_CHARS } from "./constants"
+import { buildSelfReviewStructuralGate } from "./rubrics"
 
 // ---------------------------------------------------------------------------
 // Prompt builder
@@ -63,12 +64,16 @@ export interface SelfReviewRequest {
   approvedArtifacts?: Partial<Record<ArtifactKey, string>>
   /** Disk paths for approved artifacts (if available) */
   artifactDiskPaths?: Partial<Record<ArtifactKey, string>>
+  /** Reviewed source files approved for each artifact key. */
+  approvedArtifactFiles?: Partial<Record<ArtifactKey, string[]>>
   /**
-   * User's original request messages for context.
-   * This helps the reviewer assess "Vision alignment" - whether the artifact
-   * actually addresses what the user asked for.
+   * The best available distilled statement of user intent for this workflow.
+   * Prefer this over raw message history so approval/gate chatter does not
+   * pollute vision-alignment review.
    */
-  userMessages?: string[]
+  intentBaseline?: string | null
+  /** Recent user feedback/revision history that may supersede older artifact details. */
+  feedbackHistory?: Array<{ phase: Phase; feedback: string; timestamp: number }>
 }
 
 export function buildReviewPrompt(req: SelfReviewRequest): string {
@@ -77,11 +82,33 @@ export function buildReviewPrompt(req: SelfReviewRequest): string {
   lines.push(`You are reviewing the **${req.phase}** artifact produced by the workflow.`)
   lines.push("")
   lines.push("## Artifact to Review")
+  if (req.phase === "INTERFACES") {
+    lines.push(
+      "Structural gate: every reviewed artifact must be a real interface/type/schema file in the project source tree. " +
+      "Markdown plans/design docs and files under .openartisan/ are invalid for INTERFACES and must be marked unmet before content review.",
+    )
+    lines.push("")
+  } else if (req.phase === "TESTS") {
+    lines.push(
+      "Structural gate: every reviewed artifact must be a real runnable test/spec file in the project test/source tree. " +
+      "Markdown test plans and files under .openartisan/ are invalid for TESTS and must be marked unmet before content review.",
+    )
+    lines.push("")
+  }
   if (req.artifactPaths.length > 0) {
     lines.push(
       "Read each of the following files before evaluating. " +
       "These are the actual artifact files in the project directory (NOT in .openartisan/ — " +
       ".openartisan/ is only for plan documents). Do NOT search .openartisan/ for these files.",
+    )
+    lines.push(
+      "Evaluate ONLY these listed files as the reviewed artifact set. Imported modules, augmented modules, " +
+      "and referenced source files may provide context, but do not mark criteria unmet because an unlisted " +
+      "dependency has pre-existing issues unless the listed artifact itself introduces or relies on that issue.",
+    )
+    lines.push(
+      "For TypeScript module augmentation, review the augmentation declarations in the listed artifact; " +
+      "do not treat the original augmented module as a reviewed artifact unless it is explicitly listed below.",
     )
     for (const p of req.artifactPaths) {
       lines.push(`  - \`${p}\``)
@@ -124,14 +151,26 @@ export function buildReviewPrompt(req: SelfReviewRequest): string {
   lines.push("## Acceptance Criteria")
   lines.push(req.criteriaText)
   lines.push("")
+  lines.push(buildSelfReviewStructuralGate(req.phase))
+  lines.push("")
 
-  // Add user's original request messages for context
-  if (req.userMessages && req.userMessages.length > 0) {
+  // Add the user's original intent for context.
+  if (req.intentBaseline && req.intentBaseline.trim().length > 0) {
     lines.push("## User's Original Request")
-    lines.push("The following is what the user originally asked for. Use this to evaluate Vision alignment:")
+    lines.push("Use this to evaluate Vision alignment:")
     lines.push("")
-    for (const msg of req.userMessages.slice(0, 5)) { // Limit to 5 most recent
-      lines.push(`- ${msg.slice(0, 300)}${msg.length > 300 ? "..." : ""}`)
+    lines.push(`- ${req.intentBaseline.trim()}`)
+    lines.push("")
+  }
+
+  if (req.feedbackHistory && req.feedbackHistory.length > 0) {
+    const recentFeedback = req.feedbackHistory.slice(-5)
+    lines.push("## Recent User Feedback / Approved Direction")
+    lines.push("Use this to resolve conflicts between older artifacts and the latest approved intent.")
+    lines.push("Do not resurrect requirements that the user explicitly superseded in later feedback.")
+    lines.push("")
+    for (const entry of recentFeedback) {
+      lines.push(`- **${entry.phase}**: ${entry.feedback}`)
     }
     lines.push("")
   }
@@ -150,6 +189,20 @@ export function buildReviewPrompt(req: SelfReviewRequest): string {
     lines.push("")
     for (const [key, value] of Object.entries(req.artifactDiskPaths)) {
       if (value) lines.push(`- **${key}**: \`${value}\``)
+    }
+    lines.push("")
+  }
+
+  if (req.approvedArtifactFiles && Object.keys(req.approvedArtifactFiles).length > 0) {
+    lines.push("## Approved Artifact Source Files")
+    lines.push("These are the exact source files reviewed and approved for prior file-based phases. Prefer these over legacy markdown mirrors if they conflict.")
+    lines.push("")
+    for (const [key, paths] of Object.entries(req.approvedArtifactFiles)) {
+      if (!paths || paths.length === 0) continue
+      lines.push(`- **${key}**:`)
+      for (const path of paths) {
+        lines.push(`  - \`${path}\``)
+      }
     }
     lines.push("")
   }
@@ -179,11 +232,14 @@ export function buildReviewPrompt(req: SelfReviewRequest): string {
   lines.push("## Instructions")
   lines.push("1. Read every artifact file listed above before forming any opinion.")
   lines.push("2. Evaluate each acceptance criterion independently.")
-  lines.push("3. For standard criteria: state met (true/false), provide evidence (quote or file:line), and mark severity.")
-  lines.push("4. For [Q] quality criteria: provide a numeric `score` (1-10) and evidence justifying the score. score >= 9 means met, < 9 means not met.")
-  lines.push("5. Be a harsh critic on quality scores — 9/10 means excellent with at most minor nits. 10/10 means flawless. Do NOT inflate scores.")
-  lines.push("6. Set `satisfied` to true ONLY if ALL blocking criteria are met AND ALL [Q] scores are >= 9.")
-  lines.push("7. Return your assessment as a JSON object. IMPORTANT: reply with ONLY the JSON — no preamble, no explanation.")
+  lines.push("3. Reconcile criteria against the latest approved user direction. If older plans or prior artifacts conflict with newer feedback, treat the newer feedback as authoritative unless a design-invariant criterion explicitly says otherwise.")
+  lines.push("4. Do not require concrete fields, files, APIs, or behavior that were explicitly rejected or superseded by recent user feedback. Mark only real gaps against the current approved intent.")
+  lines.push("5. For standard criteria: state met (true/false), provide evidence (quote or file:line), and mark severity.")
+  lines.push("6. For [Q] quality criteria: provide a numeric `score` (1-10) and evidence justifying the score. score >= 9 means met, < 9 means not met.")
+  lines.push("7. Use the full 1-10 range honestly. Reward excellence just as clearly as you punish flaws; do not compress scores into a narrow band.")
+  lines.push("8. Scoring guide: 1-2 = fundamentally broken, 3-4 = major gaps, 5-6 = mixed/adequate but clearly incomplete, 7-8 = strong with meaningful improvement still needed, 9 = excellent and ready to advance, 10 = exceptional work that materially exceeds the normal quality bar for this phase.")
+  lines.push("9. Set `satisfied` to true ONLY if ALL blocking criteria are met AND ALL [Q] scores are >= 9.")
+  lines.push("10. Return your assessment as a JSON object. IMPORTANT: reply with ONLY the JSON — no preamble, no explanation.")
   lines.push("")
   lines.push("The JSON must match this structure:")
   lines.push("```json")
@@ -227,7 +283,7 @@ async function ephemeralReviewPrompt(
 // Result extraction
 // ---------------------------------------------------------------------------
 
-function parseReviewResult(raw: string): SelfReviewResult {
+export function parseReviewResult(raw: string): SelfReviewResult {
   const parsed = JSON.parse(raw) as {
     satisfied: boolean
     criteria_results: Array<{

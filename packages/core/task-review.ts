@@ -29,10 +29,13 @@
  */
 
 import type { TaskNode, TaskCategory, TaskStatus } from "./dag"
+import type { DbWorktreeObservation } from "./open-artisan-repository"
 import type { WorkflowMode } from "./types"
 import type { SubagentDispatcher } from "./subagent-dispatcher"
 import { withTimeout, extractJsonFromText } from "./utils"
 import { TASK_REVIEW_TIMEOUT_MS } from "./constants"
+import { buildTaskReviewRubric, getTaskReviewCheckCountLabel } from "./rubrics"
+import { TaskReviewOutputSchema, formatZodError } from "./schemas"
 
 // ---------------------------------------------------------------------------
 // Types
@@ -70,11 +73,19 @@ export interface TaskReviewRequest {
   adjacentTasks?: AdjacentTask[]
   /** State directory for persistent error logging (passed through from plugin init) */
   stateDir?: string
+  /** Dirty worktree observations classified before review. Informational unless task-owned. */
+  worktreeObservations?: DbWorktreeObservation[]
 }
 
 export interface TaskReviewScores {
   code_quality: number
   error_handling: number
+}
+
+export interface TaskReviewPatchSuggestion {
+  targetPath: string
+  summary: string
+  suggestedPatch: string
 }
 
 export interface TaskReviewSuccess {
@@ -86,6 +97,8 @@ export interface TaskReviewSuccess {
   scores: TaskReviewScores | null
   /** Raw reviewer reasoning */
   reasoning: string
+  /** Optional structured patch suggestions proposed by the reviewer. */
+  patchSuggestions?: TaskReviewPatchSuggestion[]
 }
 
 export interface TaskReviewError {
@@ -172,90 +185,22 @@ export function buildTaskReviewPrompt(req: TaskReviewRequest): string {
     }
   }
 
+  if (req.worktreeObservations && req.worktreeObservations.length > 0) {
+    lines.push("## Worktree Observations")
+    lines.push("")
+    lines.push("The current worktree contains these classified changes. Use them for context, but do not fail this task solely because generated, artifact, ambient, or parallel-claimed files are dirty unless they directly break this task's tests or contracts.")
+    lines.push("")
+    for (const observation of req.worktreeObservations) {
+      lines.push(`  - [${observation.classification}] ${observation.status}: \`${observation.path}\``)
+    }
+    lines.push("")
+  }
+
   // Determine if stubs are acceptable based on task category
   const taskCategory = req.task.category ?? "standalone"
-  const stubsAcceptable = taskCategory === "scaffold"
-
-  lines.push("## Review Instructions")
-  lines.push("")
-  lines.push("Perform the following checks:")
-  lines.push("")
-  lines.push("1. **Run the tests.** Find and run the project's test suite (check package.json, Makefile, or equivalent")
-  lines.push("   for the test command). If specific expected tests are listed above, run those. Report the results.")
-  lines.push("2. **Verify interface alignment.** Read the approved interfaces/types and verify the implementation")
-  lines.push("   matches the signatures exactly — no missing methods, no extra methods, correct types.")
-  lines.push("3. **Check for regressions.** Run the full test suite (not just this task's tests) and confirm")
-  lines.push("   no previously-passing tests are now failing.")
-  lines.push("4. **Check conventions alignment.** If conventions are available, verify the implementation follows")
-  lines.push("   naming, error handling, and structural patterns.")
-  lines.push("5. **Reject placeholder tests for claimed-complete scope.** If the task adds or updates tests for")
-  lines.push("   the behavior it claims to complete, verify they are real tests of runtime behavior — not TODOs,")
-  lines.push("   skipped/pending placeholders, or assertions that only prove helpers exist.")
-
-  // Check #6: Stub/placeholder detection (category-aware)
-  lines.push("6. **Stub/placeholder detection.** Scan the implementation for:")
-  lines.push("   - Functions that return hardcoded values (`return 0`, `return \"\"`, `return []`, `return ok({})`, `return { rowsCopied: 0 }`)")
-  lines.push("   - Functions that only throw `\"not implemented\"`, `\"TODO\"`, or similar sentinel errors")
-  lines.push("   - Placeholder credentials (`localhost:5432`, `test-bucket`, `dummy-api-key`, `xxx`, `changeme`)")
-  lines.push("   - Comments indicating deferred work: `TODO`, `FIXME`, `HACK`, `in production we would...`, `placeholder`")
-  lines.push("   - `console.log` / `print` statements standing in for real logging or error handling")
-  lines.push("   - Empty catch blocks or catch-all error swallowing (`catch (e) {}`, `catch (_) { /* ignore */ }`)")
-  lines.push("   - Conditional stubs: `if (process.env.NODE_ENV === 'test') return mockData`")
-  if (stubsAcceptable) {
-    lines.push("")
-    lines.push(`   **This task has category "scaffold" — stubs ARE acceptable** for methods that will be`)
-    lines.push("   implemented by a later integration task. However, the scaffold must still compile,")
-    lines.push("   satisfy type signatures, and have the correct wiring/structure. Flag stubs only if")
-    lines.push("   they are missing from the interface (unimplemented methods) or have incorrect signatures.")
-  } else {
-    lines.push("")
-    lines.push(`   **This task has category "${taskCategory}" — stubs are NOT acceptable.**`)
-    lines.push("   If ANY of the above patterns are found, the task FAILS. List every instance with file:line.")
-    lines.push("   The implementation must contain real, functional logic — not placeholders.")
-  }
-
-  lines.push("")
-  lines.push("7. **Reject helper-only or drifting policy integrations.** If this task adds shared infrastructure,")
-  lines.push("   client/adapter plumbing, workflow policy, approval routing, or guard logic, verify:")
-  lines.push("   - the new code is wired into a real runtime call path for the scope this task claims")
-  lines.push("   - claimed shared or multi-client behavior is integrated everywhere this task says it is")
-  lines.push("   - policy/gate logic is not duplicated in a second place without a clear justification")
-  lines.push("   Prefix these issues with `INTEGRATION_GAP:` when a runtime path is missing, or `POLICY_DUP:`")
-  lines.push("   when duplicated policy logic can drift between codepaths.")
-
-  // Check #8: Integration seam verification (only when adjacent tasks are provided)
-  if (req.adjacentTasks && req.adjacentTasks.length > 0) {
-    lines.push("")
-    lines.push("8. **Integration seam check.** Review the boundaries between this task and its adjacent tasks")
-    lines.push("   (listed in the \"Adjacent Tasks\" section above). For each boundary, verify:")
-    lines.push("   - **Shared resources are configured:** If this task produces or consumes a shared resource")
-    lines.push("     (queue, database table, config entry, DI binding, environment variable), verify the resource")
-    lines.push("     is actually created/configured — not just assumed to exist.")
-    lines.push("   - **Data contracts match:** If this task passes data to/from an adjacent task, verify the")
-    lines.push("     data shape (types, field names, serialization format) matches on both sides.")
-    lines.push("   - **Error propagation is handled:** If an upstream task can fail, verify this task handles")
-    lines.push("     that failure (not just the happy path). If this task can fail, verify downstream tasks")
-    lines.push("     can detect and handle the failure.")
-    lines.push("   - **No \"not my responsibility\" gaps:** If something needs to happen at the boundary and")
-    lines.push("     neither this task nor the adjacent task clearly owns it, flag it as INTEGRATION_GAP.")
-    lines.push("")
-    lines.push("   Prefix integration issues with 'INTEGRATION_GAP:' and describe what is missing and which")
-    lines.push("   task boundary is affected (e.g., 'INTEGRATION_GAP: T1→T2: queue config not created').")
-  }
-
   const hasAdjacentTasks = req.adjacentTasks && req.adjacentTasks.length > 0
-  const totalChecks = hasAdjacentTasks ? "ten" : "nine"
-
-  // Quality scoring criteria
-  lines.push("")
-  lines.push("## Quality Scoring")
-  lines.push("")
-  lines.push("In addition to the pass/fail checks above, score the implementation on these dimensions (1-10):")
-  lines.push("- **[Q] Code quality** — naming clarity, structure, readability, idiomatic patterns. Minimum: 8/10.")
-  lines.push("- **[Q] Error handling** — edge cases covered, failure modes handled, no silent swallowing. Minimum: 8/10.")
-  lines.push("")
-  lines.push("If ANY quality score is below 8, the task FAILS regardless of other checks. Include specific")
-  lines.push("evidence for each score (cite file:line for low scores, explain what needs improvement).")
+  const totalChecks = getTaskReviewCheckCountLabel(Boolean(hasAdjacentTasks))
+  lines.push(buildTaskReviewRubric({ taskCategory, hasAdjacentTasks: Boolean(hasAdjacentTasks) }))
 
   lines.push("")
   lines.push("## Response Format")
@@ -266,6 +211,7 @@ export function buildTaskReviewPrompt(req: TaskReviewRequest): string {
     passed: false,
     issues: ["Test xyz.test.ts fails with error: ...", "STUB: src/stager.ts:42 returns hardcoded { rowsCopied: 0 }", "INTEGRATION_GAP: T1→T2: DI binding for FooService not registered"],
     scores: { code_quality: 7, error_handling: 9 },
+    patch_suggestions: [{ target_path: "src/example.ts", summary: "Use injected service", suggested_patch: "diff --git ..." }],
     reasoning: "Tests pass but code quality score below threshold due to unclear naming in...",
   }, null, 2))
   lines.push("```")
@@ -276,6 +222,7 @@ export function buildTaskReviewPrompt(req: TaskReviewRequest): string {
   lines.push("For stubs, prefix the issue with 'STUB:' and include the file path and line number.")
   lines.push("For integration gaps, prefix with 'INTEGRATION_GAP:' and identify the boundary.")
   lines.push("For quality scores below 8, explain what needs improvement with file:line references.")
+  lines.push("When a concrete localized fix is obvious, include it in `patch_suggestions`; otherwise use an empty array.")
 
   return lines.join("\n")
 }
@@ -289,12 +236,15 @@ const MIN_QUALITY_SCORE = 8
 export function parseTaskReviewResult(raw: string): TaskReviewResult {
   try {
     const json = extractJsonFromText(raw)
-    const parsed = JSON.parse(json) as {
-      passed: boolean
-      issues: string[]
-      scores?: { code_quality?: number; error_handling?: number }
-      reasoning: string
+    const parsedJson = JSON.parse(json)
+    const schemaResult = TaskReviewOutputSchema.safeParse(parsedJson)
+    if (!schemaResult.success) {
+      return {
+        success: false,
+        error: `Task review output does not match schema: ${formatZodError(schemaResult.error)}`,
+      }
     }
+    const parsed = schemaResult.data
 
     const issues = Array.isArray(parsed.issues) ? parsed.issues.filter((i) => typeof i === "string") : []
 
@@ -319,6 +269,11 @@ export function parseTaskReviewResult(raw: string): TaskReviewResult {
       scores.code_quality < MIN_QUALITY_SCORE || scores.error_handling < MIN_QUALITY_SCORE
     )
     const passed = parsed.passed === true && !qualityFailed
+    const patchSuggestions = parsed.patch_suggestions.map((patch) => ({
+      targetPath: patch.target_path,
+      summary: patch.summary,
+      suggestedPatch: patch.suggested_patch,
+    }))
 
     return {
       success: true,
@@ -326,6 +281,7 @@ export function parseTaskReviewResult(raw: string): TaskReviewResult {
       issues,
       scores,
       reasoning: typeof parsed.reasoning === "string" ? parsed.reasoning : "",
+      patchSuggestions,
     }
   } catch (err) {
     return {

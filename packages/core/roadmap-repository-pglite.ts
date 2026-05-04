@@ -12,6 +12,8 @@ import { PGlite } from "@electric-sql/pglite"
 import { Kysely, type Selectable, sql } from "kysely"
 import { PGliteDialect } from "kysely-pglite-dialect"
 
+import { acquireDatabaseOperationLock, createDatabaseOperationLockOwner } from "./database-operation-lock"
+import { runWithPGliteDatabaseLock } from "./pglite-operation-lock"
 import {
   roadmapError,
   roadmapOk,
@@ -30,6 +32,17 @@ const DEFAULT_DOCUMENT_ID = "default"
 const DEFAULT_DATABASE_FILE_NAME = "roadmap.pg"
 
 interface RoadmapDatabase {
+  schema_migrations: {
+    version: number
+    applied_at: string
+  }
+  database_operation_locks: {
+    lock_key: string
+    owner_id: string
+    lease_expires_at: string
+    created_at: string
+    updated_at: string
+  }
   roadmap_documents: {
     document_id: string
     schema_version: number
@@ -107,19 +120,42 @@ export function createPGliteRoadmapRepository(
   const dbPath = options.connection.databaseFileName
     ? join(options.connection.dataDir, options.connection.databaseFileName)
     : join(options.connection.dataDir, DEFAULT_DATABASE_FILE_NAME)
+  const lockOwnerId = createDatabaseOperationLockOwner("roadmap-repository")
+  let dbPromise: Promise<Kysely<RoadmapDatabase>> | null = null
+  let initializedPromise: Promise<RoadmapResult<null>> | null = null
+  let activeOperations = 0
+
+  async function closeIdleDb(): Promise<void> {
+    if (activeOperations > 0 || !dbPromise) return
+    const dbToClose = dbPromise
+    dbPromise = null
+    try {
+      await (await dbToClose).destroy()
+    } catch {
+      // Best-effort cleanup only; operation-level errors are reported at call sites.
+    }
+  }
 
   async function withDb<T>(run: (db: Kysely<RoadmapDatabase>) => Promise<T>): Promise<T> {
-    await mkdir(dirname(dbPath), { recursive: true })
-    const client = new PGlite(dbPath)
-    const db = new Kysely<RoadmapDatabase>({
-      dialect: new PGliteDialect(client),
+    const runQueued = options.operationQueue
+      ? <Result>(scope: string, operation: () => Promise<Result>) => options.operationQueue!.run(scope, operation)
+      : runWithPGliteDatabaseLock
+    return runQueued(dbPath, async () => {
+      activeOperations++
+      try {
+        dbPromise ??= (async () => {
+          await mkdir(dirname(dbPath), { recursive: true })
+          const client = new PGlite(dbPath)
+          return new Kysely<RoadmapDatabase>({
+            dialect: new PGliteDialect(client),
+          })
+        })()
+        return await run(await dbPromise)
+      } finally {
+        activeOperations--
+        await closeIdleDb()
+      }
     })
-
-    try {
-      return await run(db)
-    } finally {
-      await db.destroy()
-    }
   }
 
   async function initializeSchema(): Promise<RoadmapResult<null>> {
@@ -132,6 +168,25 @@ export function createPGliteRoadmapRepository(
         const roadmapEdgesTable = `${quotedSchema}.${quoteIdentifier("roadmap_edges")}`
 
         await sql.raw(`create schema if not exists ${quotedSchema}`).execute(db)
+        await sql.raw(`
+          create table if not exists ${quotedSchema}.${quoteIdentifier("database_operation_locks")} (
+            lock_key text primary key,
+            owner_id text not null,
+            lease_expires_at text not null,
+            created_at text not null,
+            updated_at text not null
+          )
+        `).execute(db)
+        await sql.raw(`
+          create table if not exists ${quotedSchema}.${quoteIdentifier("schema_migrations")} (
+            version integer primary key,
+            applied_at text not null
+          )
+        `).execute(db)
+        const appliedMigrationRows = await db.withSchema(schemaName).selectFrom("schema_migrations").select("version").execute()
+        const appliedMigrations = new Set(appliedMigrationRows.map((row) => row.version))
+        if (appliedMigrations.has(ROADMAP_SCHEMA_VERSION)) return
+
         await sql.raw(`
           create table if not exists ${roadmapDocumentsTable} (
             document_id text primary key,
@@ -178,6 +233,11 @@ export function createPGliteRoadmapRepository(
           create index if not exists ${quoteIdentifier("roadmap_edges_document_idx")}
           on ${roadmapEdgesTable} (document_id)
         `).execute(db)
+        await db
+          .withSchema(schemaName)
+          .insertInto("schema_migrations")
+          .values({ version: ROADMAP_SCHEMA_VERSION, applied_at: new Date().toISOString() })
+          .execute()
       })
       return roadmapOk(null)
     } catch (error) {
@@ -193,62 +253,71 @@ export function createPGliteRoadmapRepository(
     const validation = validatePersistableRoadmapDocument(document)
     if (!validation.ok) return validation
 
-    const initialized = await initializeSchema()
+    initializedPromise ??= initializeSchema()
+    const initialized = await initializedPromise
     if (!initialized.ok) return initialized
 
     try {
       const persistedDocument = cloneDocument(document)
       await withDb(async (db) => {
-        const schemaDb = db.withSchema(schemaName)
-        await schemaDb.transaction().execute(async (tx) => {
-          await tx.deleteFrom("roadmap_edges").where("document_id", "=", DEFAULT_DOCUMENT_ID).execute()
-          await tx.deleteFrom("roadmap_items").where("document_id", "=", DEFAULT_DOCUMENT_ID).execute()
-          await tx.deleteFrom("roadmap_documents").where("document_id", "=", DEFAULT_DOCUMENT_ID).execute()
-
-          await tx
-            .insertInto("roadmap_documents")
-            .values({
-              document_id: DEFAULT_DOCUMENT_ID,
-              schema_version: persistedDocument.schemaVersion,
-              document: persistedDocument,
-            })
-            .execute()
-
-          if (persistedDocument.items.length > 0) {
-            await tx
-              .insertInto("roadmap_items")
-              .values(
-                persistedDocument.items.map((item) => ({
-                  document_id: DEFAULT_DOCUMENT_ID,
-                  item_id: item.id,
-                  kind: item.kind,
-                  title: item.title,
-                  description: item.description ?? null,
-                  status: item.status,
-                  priority: item.priority,
-                  feature_name: item.featureName ?? null,
-                  created_at: item.createdAt,
-                  updated_at: item.updatedAt,
-                })),
-              )
-              .execute()
-          }
-
-          if (persistedDocument.edges.length > 0) {
-            await tx
-              .insertInto("roadmap_edges")
-              .values(
-                persistedDocument.edges.map((edge) => ({
-                  document_id: DEFAULT_DOCUMENT_ID,
-                  edge_key: `${edge.from}->${edge.to}:${edge.kind}`,
-                  from_item_id: edge.from,
-                  to_item_id: edge.to,
-                  kind: edge.kind,
-                })),
-              )
-              .execute()
-          }
+        const lease = await acquireDatabaseOperationLock(db, schemaName, {
+          lockKey: "roadmap:repository-operation",
+          ownerId: lockOwnerId,
         })
+        try {
+          const schemaDb = db.withSchema(schemaName)
+          await schemaDb.transaction().execute(async (tx) => {
+            await tx.deleteFrom("roadmap_edges").where("document_id", "=", DEFAULT_DOCUMENT_ID).execute()
+            await tx.deleteFrom("roadmap_items").where("document_id", "=", DEFAULT_DOCUMENT_ID).execute()
+            await tx.deleteFrom("roadmap_documents").where("document_id", "=", DEFAULT_DOCUMENT_ID).execute()
+
+            await tx
+              .insertInto("roadmap_documents")
+              .values({
+                document_id: DEFAULT_DOCUMENT_ID,
+                schema_version: persistedDocument.schemaVersion,
+                document: persistedDocument,
+              })
+              .execute()
+
+            if (persistedDocument.items.length > 0) {
+              await tx
+                .insertInto("roadmap_items")
+                .values(
+                  persistedDocument.items.map((item) => ({
+                    document_id: DEFAULT_DOCUMENT_ID,
+                    item_id: item.id,
+                    kind: item.kind,
+                    title: item.title,
+                    description: item.description ?? null,
+                    status: item.status,
+                    priority: item.priority,
+                    feature_name: item.featureName ?? null,
+                    created_at: item.createdAt,
+                    updated_at: item.updatedAt,
+                  })),
+                )
+                .execute()
+            }
+
+            if (persistedDocument.edges.length > 0) {
+              await tx
+                .insertInto("roadmap_edges")
+                .values(
+                  persistedDocument.edges.map((edge) => ({
+                    document_id: DEFAULT_DOCUMENT_ID,
+                    edge_key: `${edge.from}->${edge.to}:${edge.kind}`,
+                    from_item_id: edge.from,
+                    to_item_id: edge.to,
+                    kind: edge.kind,
+                  })),
+                )
+                .execute()
+            }
+          })
+        } finally {
+          await lease.release()
+        }
       })
 
       return roadmapOk(persistedDocument)
@@ -262,23 +331,32 @@ export function createPGliteRoadmapRepository(
   }
 
   async function readPersistedRoadmap(): Promise<RoadmapResult<RoadmapDocument | null>> {
-    const initialized = await initializeSchema()
+    initializedPromise ??= initializeSchema()
+    const initialized = await initializedPromise
     if (!initialized.ok) return initialized
 
     try {
       return await withDb(async (db) => {
-        const row = await db
-          .withSchema(schemaName)
-          .selectFrom("roadmap_documents")
-          .select(["document"])
-          .where("document_id", "=", DEFAULT_DOCUMENT_ID)
-          .executeTakeFirst()
+        const lease = await acquireDatabaseOperationLock(db, schemaName, {
+          lockKey: "roadmap:repository-operation",
+          ownerId: lockOwnerId,
+        })
+        try {
+          const row = await db
+            .withSchema(schemaName)
+            .selectFrom("roadmap_documents")
+            .select(["document"])
+            .where("document_id", "=", DEFAULT_DOCUMENT_ID)
+            .executeTakeFirst()
 
-        if (!row) return roadmapOk(null)
+          if (!row) return roadmapOk(null)
 
-        const validation = validatePersistableRoadmapDocument(row.document)
-        if (!validation.ok) return validation
-        return roadmapOk(cloneDocument(row.document))
+          const validation = validatePersistableRoadmapDocument(row.document)
+          if (!validation.ok) return validation
+          return roadmapOk(cloneDocument(row.document))
+        } finally {
+          await lease.release()
+        }
       })
     } catch (error) {
       return roadmapError(
@@ -291,7 +369,12 @@ export function createPGliteRoadmapRepository(
 
   return {
     async initialize(): Promise<RoadmapResult<null>> {
-      return initializeSchema()
+      initializedPromise ??= initializeSchema()
+      return initializedPromise
+    },
+
+    async dispose(): Promise<void> {
+      await closeIdleDb()
     },
 
     async createRoadmap(document: RoadmapDocument): Promise<RoadmapResult<RoadmapDocument>> {
@@ -307,17 +390,26 @@ export function createPGliteRoadmapRepository(
     },
 
     async deleteRoadmap(): Promise<RoadmapResult<null>> {
-      const initialized = await initializeSchema()
+      initializedPromise ??= initializeSchema()
+      const initialized = await initializedPromise
       if (!initialized.ok) return initialized
 
       try {
         await withDb(async (db) => {
-          const schemaDb = db.withSchema(schemaName)
-          await schemaDb.transaction().execute(async (tx) => {
-            await tx.deleteFrom("roadmap_edges").where("document_id", "=", DEFAULT_DOCUMENT_ID).execute()
-            await tx.deleteFrom("roadmap_items").where("document_id", "=", DEFAULT_DOCUMENT_ID).execute()
-            await tx.deleteFrom("roadmap_documents").where("document_id", "=", DEFAULT_DOCUMENT_ID).execute()
+          const lease = await acquireDatabaseOperationLock(db, schemaName, {
+            lockKey: "roadmap:repository-operation",
+            ownerId: lockOwnerId,
           })
+          try {
+            const schemaDb = db.withSchema(schemaName)
+            await schemaDb.transaction().execute(async (tx) => {
+              await tx.deleteFrom("roadmap_edges").where("document_id", "=", DEFAULT_DOCUMENT_ID).execute()
+              await tx.deleteFrom("roadmap_items").where("document_id", "=", DEFAULT_DOCUMENT_ID).execute()
+              await tx.deleteFrom("roadmap_documents").where("document_id", "=", DEFAULT_DOCUMENT_ID).execute()
+            })
+          } finally {
+            await lease.release()
+          }
         })
         return roadmapOk(null)
       } catch (error) {
@@ -330,41 +422,50 @@ export function createPGliteRoadmapRepository(
     },
 
     async queryRoadmapItems(query: RoadmapQuery): Promise<RoadmapResult<RoadmapItem[]>> {
-      const initialized = await initializeSchema()
+      initializedPromise ??= initializeSchema()
+      const initialized = await initializedPromise
       if (!initialized.ok) return initialized
 
       try {
         return await withDb(async (db) => {
-          let builder = db
-            .withSchema(schemaName)
-            .selectFrom("roadmap_items")
-            .selectAll()
-            .where("document_id", "=", DEFAULT_DOCUMENT_ID)
+          const lease = await acquireDatabaseOperationLock(db, schemaName, {
+            lockKey: "roadmap:repository-operation",
+            ownerId: lockOwnerId,
+          })
+          try {
+            let builder = db
+              .withSchema(schemaName)
+              .selectFrom("roadmap_items")
+              .selectAll()
+              .where("document_id", "=", DEFAULT_DOCUMENT_ID)
 
-          if (query.itemIds && query.itemIds.length > 0) {
-            builder = builder.where("item_id", "in", query.itemIds)
+            if (query.itemIds && query.itemIds.length > 0) {
+              builder = builder.where("item_id", "in", query.itemIds)
+            }
+
+            if (query.kinds && query.kinds.length > 0) {
+              builder = builder.where("kind", "in", query.kinds)
+            }
+
+            if (query.statuses && query.statuses.length > 0) {
+              builder = builder.where("status", "in", query.statuses)
+            }
+
+            if (query.featureName !== undefined) {
+              builder = query.featureName === null
+                ? builder.where("feature_name", "is", null)
+                : builder.where("feature_name", "=", query.featureName)
+            }
+
+            if (query.minPriority !== undefined) {
+              builder = builder.where("priority", ">=", query.minPriority)
+            }
+
+            const rows = await builder.orderBy("priority", "desc").orderBy("created_at").orderBy("item_id").execute()
+            return roadmapOk(rows.map((row) => mapRowToRoadmapItem(row)))
+          } finally {
+            await lease.release()
           }
-
-          if (query.kinds && query.kinds.length > 0) {
-            builder = builder.where("kind", "in", query.kinds)
-          }
-
-          if (query.statuses && query.statuses.length > 0) {
-            builder = builder.where("status", "in", query.statuses)
-          }
-
-          if (query.featureName !== undefined) {
-            builder = query.featureName === null
-              ? builder.where("feature_name", "is", null)
-              : builder.where("feature_name", "=", query.featureName)
-          }
-
-          if (query.minPriority !== undefined) {
-            builder = builder.where("priority", ">=", query.minPriority)
-          }
-
-          const rows = await builder.orderBy("priority", "desc").orderBy("created_at").orderBy("item_id").execute()
-          return roadmapOk(rows.map((row) => mapRowToRoadmapItem(row)))
         })
       } catch (error) {
         return roadmapError(

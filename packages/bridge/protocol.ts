@@ -44,9 +44,24 @@ export const INVALID_PARAMS = -32602
 export interface LifecycleInitParams {
   projectDir: string
   stateDir?: string
+  /** Transport hosting this bridge engine. Stdio transports are process-local and should not advertise a reusable socket. */
+  transport?: "stdio" | "unix-socket"
+  /** Unix socket path when transport is unix-socket. */
+  socketPath?: string
+  /** Whether to publish shared runtime metadata and a PID file. Defaults to true for backward compatibility. */
+  registerRuntime?: boolean
+  /** Workflow state persistence backend. Defaults to filesystem unless OPENARTISAN_STATE_BACKEND=db is set. */
+  persistence?: {
+    kind?: "filesystem" | "db" | "pglite"
+    pglite?: {
+      dataDir?: string
+      databaseFileName?: string
+      schemaName?: string
+    }
+  }
   /**
    * Adapter capabilities — declares which engine features are available.
-   * Defaults: all features require SubagentDispatcher (error if not available).
+   * Defaults: bridge adapters use agent-managed review/orchestration unless a capability is declared.
    *
    * - selfReview: "isolated" (SubagentDispatcher) | "agent-only" (agent self-evaluates)
    * - orchestrator: true (feedback classification via LLM) | false (direct route to REVISE)

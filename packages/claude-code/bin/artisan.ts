@@ -14,7 +14,7 @@
  *   artisan disable
  *
  * Complex commands accept JSON on stdin:
- *   echo '{"summary":"Plan ready","artifact_content":"..."}' | artisan request-review
+ *   echo '{"summary":"Plan ready","artifact_files":[".openartisan/feat/plan.md"]}' | artisan request-review
  *   echo '{"task_id":"T1","implementation_summary":"Built auth","tests_passing":true}' | artisan mark-task-complete
  *   echo '{"criteria_met":[...]}' | artisan mark-satisfied
  *   echo '{"feedback_type":"approve","feedback_text":"LGTM"}' | artisan submit-feedback
@@ -154,6 +154,14 @@ const TOOL_COMMANDS: Record<string, string> = {
   "spawn-sub-workflow": "spawn_sub_workflow",
   "query-parent-workflow": "query_parent_workflow",
   "query-child-workflow": "query_child_workflow",
+  "analyze-task-boundary-change": "analyze_task_boundary_change",
+  "apply-task-boundary-change": "apply_task_boundary_change",
+  "route-patch-suggestions": "route_patch_suggestions",
+  "resolve-patch-suggestion": "resolve_patch_suggestion",
+  "apply-patch-suggestion": "apply_patch_suggestion",
+  "report-drift": "report_drift",
+  "plan-drift-repair": "plan_drift_repair",
+  "apply-drift-repair": "apply_drift_repair",
 }
 
 async function handleState(): Promise<void> {
@@ -263,16 +271,10 @@ async function handleToolCommand(command: string, cliArgs: string[]): Promise<vo
     }
   }
 
-  // Resolve --artifact-file: read file content into artifact_content.
-  // This avoids shell escaping issues when passing multiline content via stdin/flags.
+  // Resolve --artifact-file: pass the path as the review artifact source.
   const artifactFile = args.artifact_file as string | undefined
   if (artifactFile) {
-    try {
-      args.artifact_content = readFileSync(artifactFile, "utf-8")
-    } catch (err) {
-      console.error(`Error: Cannot read artifact file "${artifactFile}": ${err instanceof Error ? err.message : String(err)}`)
-      process.exit(1)
-    }
+    args.artifact_files = [artifactFile]
     delete args.artifact_file
   }
 
@@ -323,9 +325,19 @@ Workflow tools (accepts --flags or JSON on stdin):
   spawn-sub-workflow       Delegate a DAG task to a child workflow
   query-parent-workflow    Read parent workflow state
   query-child-workflow     Read child workflow state
+  analyze-task-boundary-change
+                           Preview a localized DAG task-boundary change
+  apply-task-boundary-change
+                           Apply a localized DAG task-boundary change
+  route-patch-suggestions  Classify pending reviewer patch suggestions
+  resolve-patch-suggestion Record patch suggestion disposition
+  apply-patch-suggestion   Apply a pending reviewer patch suggestion
+  report-drift             Report workflow drift
+  plan-drift-repair        Build a drift repair plan
+  apply-drift-repair       Apply approved drift repair actions
 
 Options:
-  --artifact-file <path>   Read file content into artifact_content (avoids shell escaping)
+  --artifact-file <path>   Add a file path to artifact_files for request-review
 
 Examples:
   artisan select-mode --mode GREENFIELD --feature-name my-feature

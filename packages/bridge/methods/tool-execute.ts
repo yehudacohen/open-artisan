@@ -23,7 +23,7 @@ import { readFileSync } from "node:fs"
 import { readFile } from "node:fs/promises"
 import { parseSelectModeArgs } from "../../core/tools/select-mode"
 import { processMarkTaskComplete, validateMarkTaskCompletePhase } from "../../core/tools/mark-task-complete"
-import { buildAdjacentTasksForTask, buildTaskReviewPrompt, parseTaskReviewResult } from "../../core/task-review"
+import { buildAdjacentTasksForTask, buildTaskReviewAcceptancePlan, buildTaskReviewPrompt, parseTaskReviewResult } from "../../core/task-review"
 import { buildReviewPrompt, parseReviewResult } from "../../core/self-review"
 import { MAX_TASK_REVIEW_ITERATIONS } from "../../core/constants"
 import { processQueryParentWorkflow, processQueryChildWorkflow } from "../../core/tools/query-workflow"
@@ -1095,23 +1095,16 @@ const handleSubmitTaskReview: ToolHandler = async (args, toolCtx, ctx) => {
   // Check iteration cap — force accept after MAX_TASK_REVIEW_ITERATIONS
   const hitCap = state.taskReviewCount >= MAX_TASK_REVIEW_ITERATIONS
   if (hitCap && !review.passed) {
-    const completionNode = state.implDag?.find((t) => t.id === taskId)
+    const acceptancePlan = buildTaskReviewAcceptancePlan({ implDag: state.implDag, concurrency: state.concurrency, taskId })
     const nextMessage = buildTaskReviewResolvedMessage(taskId, state.implDag, state.concurrency)
     await store.update(toolCtx.sessionId, (draft) => {
       const existing = new Set(draft.reviewArtifactFiles)
-      for (const f of completionNode?.expectedFiles ?? []) {
+      for (const f of acceptancePlan.completedTaskFiles) {
         if (!existing.has(f)) draft.reviewArtifactFiles.push(f)
       }
-      const refreshed = buildRuntimeSchedulerDecision({ implDag: draft.implDag, concurrency: draft.concurrency }).fallbackDecision
-      draft.currentTaskId = refreshed.action === "dispatch" ? refreshed.task.id : null
-      draft.phaseState = refreshed.action === "awaiting-human"
-        ? "HUMAN_GATE"
-        : refreshed.action === "dispatch"
-          ? "SCHEDULING"
-          : refreshed.action === "blocked"
-            ? "DELEGATED_WAIT"
-            : draft.phaseState
-      if (refreshed.action === "awaiting-human") {
+      draft.currentTaskId = acceptancePlan.nextTaskId
+      if (acceptancePlan.nextPhaseState) draft.phaseState = acceptancePlan.nextPhaseState
+      if (acceptancePlan.resetUserGateMessage) {
         draft.userGateMessageReceived = false
       }
       draft.taskCompletionInProgress = null
@@ -1125,23 +1118,16 @@ const handleSubmitTaskReview: ToolHandler = async (args, toolCtx, ctx) => {
   }
 
   if (review.passed) {
-    const completionNode = state.implDag?.find((t) => t.id === taskId)
+    const acceptancePlan = buildTaskReviewAcceptancePlan({ implDag: state.implDag, concurrency: state.concurrency, taskId })
     const nextMessage = buildTaskReviewResolvedMessage(taskId, state.implDag, state.concurrency)
     await store.update(toolCtx.sessionId, (draft) => {
       const existing = new Set(draft.reviewArtifactFiles)
-      for (const f of completionNode?.expectedFiles ?? []) {
+      for (const f of acceptancePlan.completedTaskFiles) {
         if (!existing.has(f)) draft.reviewArtifactFiles.push(f)
       }
-      const refreshed = buildRuntimeSchedulerDecision({ implDag: draft.implDag, concurrency: draft.concurrency }).fallbackDecision
-      draft.currentTaskId = refreshed.action === "dispatch" ? refreshed.task.id : null
-      draft.phaseState = refreshed.action === "awaiting-human"
-        ? "HUMAN_GATE"
-        : refreshed.action === "dispatch"
-          ? "SCHEDULING"
-          : refreshed.action === "blocked"
-            ? "DELEGATED_WAIT"
-            : draft.phaseState
-      if (refreshed.action === "awaiting-human") {
+      draft.currentTaskId = acceptancePlan.nextTaskId
+      if (acceptancePlan.nextPhaseState) draft.phaseState = acceptancePlan.nextPhaseState
+      if (acceptancePlan.resetUserGateMessage) {
         draft.userGateMessageReceived = false
       }
       draft.taskCompletionInProgress = null

@@ -8,7 +8,7 @@
  * 3. If all met → fires `self_review_pass` → state machine advances to USER_GATE
  * 4. If any blocking criterion unmet → fires `self_review_fail` → loops in REVIEW
  */
-import type { MarkSatisfiedArgs, CriterionResult } from "../types"
+import type { CriterionResult, MarkSatisfiedArgs } from "../review-types"
 
 // Re-export for test convenience
 export type { CriterionResult }

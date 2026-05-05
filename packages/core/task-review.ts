@@ -32,6 +32,7 @@ import type { TaskNode, TaskCategory, TaskStatus } from "./dag"
 import type { DbWorktreeObservation } from "./open-artisan-repository"
 import type { WorkflowMode } from "./types"
 import type { SubagentDispatcher } from "./subagent-dispatcher"
+import { nextSchedulerDecisionForInput, readDecisionInput, type SchedulerDecision } from "./scheduler"
 import { withTimeout, extractJsonFromText } from "./utils"
 import { TASK_REVIEW_TIMEOUT_MS } from "./constants"
 import { buildTaskReviewRubric, getTaskReviewCheckCountLabel } from "./rubrics"
@@ -136,6 +137,40 @@ export interface TaskReviewError {
 }
 
 export type TaskReviewResult = TaskReviewSuccess | TaskReviewError
+
+export interface TaskReviewAcceptancePlan {
+  completedTaskFiles: string[]
+  nextTaskId: string | null
+  nextPhaseState: "SCHEDULING" | "HUMAN_GATE" | "DELEGATED_WAIT" | null
+  resetUserGateMessage: boolean
+  schedulerDecision: SchedulerDecision
+}
+
+export function buildTaskReviewAcceptancePlan(args: {
+  implDag: TaskNode[] | null
+  concurrency: { maxParallelTasks: number }
+  taskId: string
+}): TaskReviewAcceptancePlan {
+  const completionNode = args.implDag?.find((task) => task.id === args.taskId)
+  const decision = nextSchedulerDecisionForInput(readDecisionInput({
+    implDag: args.implDag,
+    concurrency: args.concurrency,
+  })).decision
+
+  return {
+    completedTaskFiles: completionNode?.expectedFiles ?? [],
+    nextTaskId: decision.action === "dispatch" ? decision.task.id : null,
+    nextPhaseState: decision.action === "awaiting-human"
+      ? "HUMAN_GATE"
+      : decision.action === "dispatch"
+        ? "SCHEDULING"
+        : decision.action === "blocked"
+          ? "DELEGATED_WAIT"
+          : null,
+    resetUserGateMessage: decision.action === "awaiting-human",
+    schedulerDecision: decision,
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Prompt builder

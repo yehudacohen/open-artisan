@@ -9,6 +9,7 @@
 import { describe, expect, it, mock } from "bun:test"
 import {
   buildAdjacentTasksForTask,
+  buildTaskReviewAcceptancePlan,
   buildTaskReviewPrompt,
   parseTaskReviewResult,
   dispatchTaskReview,
@@ -62,6 +63,44 @@ describe("buildAdjacentTasksForTask", () => {
 
   it("returns empty for missing task", () => {
     expect(buildAdjacentTasksForTask([makeTask({ id: "T1" })], "missing")).toEqual([])
+  })
+})
+
+describe("buildTaskReviewAcceptancePlan", () => {
+  it("plans dispatch of the next task and completed file accumulation", () => {
+    const plan = buildTaskReviewAcceptancePlan({
+      concurrency: { maxParallelTasks: 1 },
+      taskId: "T1",
+      implDag: [
+        makeTask({ id: "T1", status: "complete", expectedFiles: ["src/a.ts"] }),
+        makeTask({ id: "T2", dependencies: ["T1"], status: "pending" }),
+      ],
+    })
+
+    expect(plan.completedTaskFiles).toEqual(["src/a.ts"])
+    expect(plan.nextTaskId).toBe("T2")
+    expect(plan.nextPhaseState).toBe("SCHEDULING")
+    expect(plan.resetUserGateMessage).toBe(false)
+  })
+
+  it("plans HUMAN_GATE for awaiting human decisions", () => {
+    const plan = buildTaskReviewAcceptancePlan({
+      concurrency: { maxParallelTasks: 1 },
+      taskId: "T1",
+      implDag: [
+        makeTask({ id: "T1", status: "complete" }),
+        makeTask({
+          id: "T2",
+          dependencies: ["T1"],
+          category: "human-gate",
+          status: "pending",
+        }),
+      ],
+    })
+
+    expect(plan.nextTaskId).toBeNull()
+    expect(plan.nextPhaseState).toBe("HUMAN_GATE")
+    expect(plan.resetUserGateMessage).toBe(true)
   })
 })
 

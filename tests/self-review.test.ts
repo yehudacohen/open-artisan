@@ -15,7 +15,7 @@ import { describe, expect, it, mock } from "bun:test"
 import { dispatchSelfReview, dispatchRebuttal, buildRebuttalPrompt, buildReviewPrompt } from "#core/self-review"
 import type { SelfReviewRequest } from "#core/self-review"
 import type { SubagentDispatcher, SubagentSession } from "#core/subagent-dispatcher"
-import type { RebuttalRequest, CriterionResult } from "#core/types"
+import type { CriterionResult, RebuttalRequest } from "#core/review-types"
 
 // ---------------------------------------------------------------------------
 // Mock dispatcher factory

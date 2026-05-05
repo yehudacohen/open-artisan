@@ -4,7 +4,8 @@
 
 import { createHash } from "node:crypto"
 
-import type { CriterionResult, Phase, PhaseState, WorkflowState } from "./types"
+import type { Phase, PhaseState, WorkflowState } from "./types"
+import type { CriterionResult } from "./review-types"
 import type { TaskReviewSuccess } from "./task-review"
 import type { OpenArtisanServices } from "./open-artisan-services"
 import type { DbAgentLease, DbReviewObservation, DbWorktreeObservation, ReviewRecommendation } from "./open-artisan-repository"

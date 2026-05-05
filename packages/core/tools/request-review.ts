@@ -8,7 +8,7 @@
  * In Layer 1 (current scope), the same session transitions to REVIEW and
  * the agent self-reviews inline using the acceptance criteria.
  */
-import type { RequestReviewArgs } from "../types"
+import type { RequestReviewArgs } from "../review-types"
 
 export const REQUEST_REVIEW_DESCRIPTION = `
 Call this tool when you have completed the current draft and are ready for self-review.

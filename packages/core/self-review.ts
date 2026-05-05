@@ -22,11 +22,8 @@ import type {
   ArtifactKey,
   Phase,
   WorkflowMode,
-  SelfReviewResult,
-  CriterionResult,
-  RebuttalRequest,
-  RebuttalResult,
 } from "./types"
+import type { CriterionResult, RebuttalRequest, RebuttalResult, SelfReviewResult } from "./review-types"
 import type { SubagentDispatcher } from "./subagent-dispatcher"
 import { withTimeout, extractJsonFromText } from "./utils"
 import { SELF_REVIEW_TIMEOUT_MS, MAX_ARTIFACT_CONTENT_CHARS } from "./constants"

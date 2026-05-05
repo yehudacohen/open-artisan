@@ -16,10 +16,9 @@ import type {
   StateMachine,
   WorkflowEvent,
   ArtifactKey,
-  AnalyzeTaskBoundaryChangeArgs,
-  ApplyTaskBoundaryChangeArgs,
 } from "../types"
 import type { MarkSatisfiedArgs } from "../review-types"
+import type { AnalyzeTaskBoundaryChangeArgs, ApplyTaskBoundaryChangeArgs } from "../tool-types"
 import { evaluateMarkSatisfied, countExpectedBlockingCriteria, type MarkSatisfiedResult } from "./mark-satisfied"
 import { processMarkScanComplete } from "./mark-scan-complete"
 import { processMarkAnalyzeComplete } from "./mark-analyze-complete"

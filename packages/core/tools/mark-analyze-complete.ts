@@ -5,7 +5,7 @@
  * DISCOVERY/ANALYZE state. Fires the `analyze_complete` event → transitions
  * to DISCOVERY/CONVENTIONS.
  */
-import type { MarkAnalyzeCompleteArgs } from "../types"
+import type { MarkAnalyzeCompleteArgs } from "../tool-types"
 import { MAX_SUMMARY_CHARS } from "../constants"
 
 // Re-export for test convenience

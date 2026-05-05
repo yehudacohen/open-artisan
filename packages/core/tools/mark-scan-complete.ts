@@ -5,7 +5,7 @@
  * DISCOVERY/SCAN state. Fires the `scan_complete` event → transitions
  * to DISCOVERY/ANALYZE.
  */
-import type { MarkScanCompleteArgs } from "../types"
+import type { MarkScanCompleteArgs } from "../tool-types"
 import { MAX_SUMMARY_CHARS } from "../constants"
 
 // Re-export for test convenience

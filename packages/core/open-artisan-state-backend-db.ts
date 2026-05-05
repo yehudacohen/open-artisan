@@ -10,6 +10,7 @@
 import type { OpenArtisanDbResult, OpenArtisanRepository } from "./open-artisan-repository"
 import type { WorkflowState } from "./types"
 import type { StateBackend } from "./state-backend-types"
+import { exportLegacyWorkflowState, importLegacyWorkflowState } from "./open-artisan-json-compat"
 
 export interface OpenArtisanDbStateBackendOptions {
   lockTimeoutMs?: number
@@ -42,7 +43,7 @@ export function createOpenArtisanDbStateBackend(
       return raw
     }
     if (effectiveFeatureName(parsed) !== featureName) return raw
-    assertOk(await repository.importWorkflowState(parsed))
+    assertOk(await importLegacyWorkflowState(repository, parsed, { bestEffort: true }))
     return raw
   }
 
@@ -54,7 +55,7 @@ export function createOpenArtisanDbStateBackend(
     async read(featureName: string) {
       const projection = assertOk(await repository.getWorkflowByFeature(featureName))
       if (!projection) return importLegacyFallback(featureName)
-      const state = assertOk(await repository.exportWorkflowState(projection.workflow.id))
+      const state = assertOk(await exportLegacyWorkflowState(repository, projection.workflow.id))
       return JSON.stringify(state)
     },
 
@@ -65,7 +66,7 @@ export function createOpenArtisanDbStateBackend(
           `StateBackend feature mismatch: write key "${_featureName}" does not match state feature "${effectiveFeatureName(parsed)}"`,
         )
       }
-      assertOk(await repository.importWorkflowState(parsed))
+      assertOk(await importLegacyWorkflowState(repository, parsed, { bestEffort: true }))
       if (options.legacyFallback) await options.legacyFallback.write(_featureName, data)
     },
 

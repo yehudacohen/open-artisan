@@ -18,6 +18,7 @@ import { tmpdir } from "node:os"
 // resolved via the test shim at #opencode-ai/plugin.
 import { OpenArtisanPlugin, WORKFLOW_TOOL_NAMES } from "#plugin/index"
 import { resolveSessionId } from "#core/utils"
+import { OPENCODE_TOOL_CONTRACTS, WORKFLOW_TOOL_CONTRACTS } from "#core/tool-contracts"
 
 // ---------------------------------------------------------------------------
 // Mock client factory
@@ -429,42 +430,11 @@ describe("Plugin shape — returned object has all required keys", () => {
 
   it("returns all expected tools", () => {
     const tools = plugin.tool
-    expect(tools.select_mode).toBeDefined()
-    expect(tools.mark_scan_complete).toBeDefined()
-    expect(tools.mark_analyze_complete).toBeDefined()
-    expect(tools.mark_satisfied).toBeDefined()
-    expect(tools.mark_task_complete).toBeDefined()
-    expect(tools.request_review).toBeDefined()
-    expect(tools.submit_feedback).toBeDefined()
+    expect(Object.keys(tools).sort()).toEqual(OPENCODE_TOOL_CONTRACTS.map((contract) => contract.name).sort())
   })
 
   it("WORKFLOW_TOOL_NAMES contains every callable workflow tool", () => {
-    expect([...WORKFLOW_TOOL_NAMES].sort()).toEqual([
-      "analyze_task_boundary_change",
-      "apply_drift_repair",
-      "apply_patch_suggestion",
-      "apply_task_boundary_change",
-      "check_prior_workflow",
-      "mark_analyze_complete",
-      "mark_satisfied",
-      "mark_scan_complete",
-      "mark_task_complete",
-      "plan_drift_repair",
-      "propose_backtrack",
-      "query_child_workflow",
-      "query_parent_workflow",
-      "report_drift",
-      "request_review",
-      "reset_task",
-      "resolve_human_gate",
-      "resolve_patch_suggestion",
-      "route_patch_suggestions",
-      "select_mode",
-      "spawn_sub_workflow",
-      "submit_auto_approve",
-      "submit_feedback",
-      "submit_task_review",
-    ])
+    expect([...WORKFLOW_TOOL_NAMES].sort()).toEqual(WORKFLOW_TOOL_CONTRACTS.map((contract) => contract.name).sort())
   })
 })
 

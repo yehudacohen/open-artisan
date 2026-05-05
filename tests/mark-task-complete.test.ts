@@ -13,7 +13,7 @@
  * - Blocked DAG: appropriate message
  */
 import { describe, expect, it } from "bun:test"
-import { processMarkTaskComplete } from "#core/tools/mark-task-complete"
+import { processMarkTaskComplete, validateMarkTaskCompletePhase } from "#core/tools/mark-task-complete"
 import type { TaskNode } from "#core/dag"
 
 // ---------------------------------------------------------------------------
@@ -37,6 +37,26 @@ const VALID_ARGS = {
   implementation_summary: "Implemented the feature",
   tests_passing: true,
 }
+
+// ---------------------------------------------------------------------------
+// Phase validation
+// ---------------------------------------------------------------------------
+
+describe("validateMarkTaskCompletePhase", () => {
+  it("allows IMPLEMENTATION/DRAFT and IMPLEMENTATION/REVISE", () => {
+    expect(validateMarkTaskCompletePhase({ phase: "IMPLEMENTATION", phaseState: "DRAFT" })).toBeNull()
+    expect(validateMarkTaskCompletePhase({ phase: "IMPLEMENTATION", phaseState: "REVISE" })).toBeNull()
+  })
+
+  it("allows SCHEDULING only when requested", () => {
+    expect(validateMarkTaskCompletePhase({ phase: "IMPLEMENTATION", phaseState: "SCHEDULING" })).toContain("DRAFT or REVISE")
+    expect(validateMarkTaskCompletePhase({ phase: "IMPLEMENTATION", phaseState: "SCHEDULING" }, { allowScheduling: true })).toBeNull()
+  })
+
+  it("rejects non-IMPLEMENTATION phases", () => {
+    expect(validateMarkTaskCompletePhase({ phase: "PLANNING", phaseState: "DRAFT" })).toContain("IMPLEMENTATION")
+  })
+})
 
 // ---------------------------------------------------------------------------
 // Tests not passing — early exit without mutation

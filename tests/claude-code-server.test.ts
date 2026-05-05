@@ -51,6 +51,7 @@ async function stopServer(): Promise<void> {
 async function startServer(): Promise<void> {
   serverProcess = spawn("bun", ["run", SERVER_SCRIPT, "--project-dir", tmpDir], {
     stdio: "ignore",
+    env: { ...process.env, OPENARTISAN_STATE_BACKEND: "filesystem" },
   })
 
   // Poll for socket availability

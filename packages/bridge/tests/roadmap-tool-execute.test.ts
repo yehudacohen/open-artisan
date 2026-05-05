@@ -7,7 +7,7 @@ import { handleInit, handleSessionCreated } from "#bridge/methods/lifecycle"
 import { handleToolExecute } from "#bridge/methods/tool-execute"
 import type { BridgeContext } from "#bridge/server"
 import type { EngineContext } from "#core/engine-context"
-import type { RoadmapDocument } from "#core/types"
+import type { RoadmapDocument } from "#core/roadmap-types"
 
 const NOW = "2026-04-16T00:00:00.000Z"
 

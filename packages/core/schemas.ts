@@ -51,12 +51,16 @@ export const TaskReviewOutputSchema = z.object({
   reasoning: z.string().default(""),
 }).strict()
 
+const AbsoluteFilePathSchema = z.string().min(1).refine((path) => path.startsWith("/"), {
+  message: "must be an absolute file path",
+})
+
 export const AnalyzeTaskBoundaryChangeSchema = z.object({
   task_id: z.string().min(1),
-  add_files: z.array(z.string()).optional(),
-  remove_files: z.array(z.string()).optional(),
-  add_expected_tests: z.array(z.string()).optional(),
-  remove_expected_tests: z.array(z.string()).optional(),
+  add_files: z.array(AbsoluteFilePathSchema).optional(),
+  remove_files: z.array(AbsoluteFilePathSchema).optional(),
+  add_expected_tests: z.array(AbsoluteFilePathSchema).optional(),
+  remove_expected_tests: z.array(AbsoluteFilePathSchema).optional(),
   reason: z.string().min(1),
 }).strict()
 
@@ -130,7 +134,7 @@ export const MarkSatisfiedToolSchema = z.object({
     criterion: z.string(),
     met: z.boolean(),
     evidence: z.string(),
-    severity: z.enum(["blocking", "suggestion"]).optional(),
+    severity: z.enum(["blocking", "suggestion", "design-invariant"]).optional(),
     score: z.union([z.string(), z.number()]).optional(),
   }).strict()),
 }).strict()
@@ -172,6 +176,13 @@ export const SpawnSubWorkflowToolSchema = z.object({
 export const QueryParentWorkflowToolSchema = z.object({}).strict()
 export const QueryChildWorkflowToolSchema = z.object({ task_id: z.string().min(1) }).strict()
 export const SubmitTaskReviewToolSchema = z.object({ review_output: z.string().min(1) }).strict()
+export const SubmitPhaseReviewToolSchema = z.object({
+  review_output: z.string().optional(),
+  review_stdout: z.string().optional(),
+  review_stderr: z.string().optional(),
+  review_exit_code: z.number().int().nullable().optional(),
+  review_error: z.string().nullable().optional(),
+}).strict()
 export const SubmitAutoApproveToolSchema = z.object({ review_output: z.string().min(1) }).strict()
 export const ResetTaskToolSchema = z.object({
   task_id: z.string().optional(),
@@ -179,6 +190,25 @@ export const ResetTaskToolSchema = z.object({
   reason: z.string().optional(),
 }).strict()
 export const StateToolSchema = z.object({}).strict()
+
+export const RoadmapQuerySchema = z.object({
+  itemIds: z.array(z.string()).optional(),
+  kinds: z.array(z.enum(["feature", "bug", "debt", "chore"])).optional(),
+  statuses: z.array(z.enum(["todo", "in-progress", "blocked", "done", "dropped"])).optional(),
+  featureName: z.string().optional(),
+  minPriority: z.number().optional(),
+}).strict()
+
+export const RoadmapQueryToolSchema = z.object({
+  query: RoadmapQuerySchema.optional(),
+}).strict()
+
+export const RoadmapDeriveExecutionSliceToolSchema = z.object({
+  roadmap_item_ids: z.array(z.string()).optional(),
+  roadmapItemIds: z.array(z.string()).optional(),
+  feature_name: z.string().optional(),
+  featureName: z.string().optional(),
+}).strict()
 
 export type LifecycleInitParamsFromSchema = z.infer<typeof LifecycleInitParamsSchema>
 export type TaskReviewOutput = z.infer<typeof TaskReviewOutputSchema>

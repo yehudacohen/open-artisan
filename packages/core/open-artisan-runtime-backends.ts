@@ -14,8 +14,9 @@ import {
 import { createOpenArtisanDbRoadmapStateBackend } from "./open-artisan-roadmap-state-backend-db"
 import { createOpenArtisanServices, type OpenArtisanServices } from "./open-artisan-services"
 import type { OpenArtisanRepository } from "./open-artisan-repository"
-import type { DatabaseOperationQueue } from "./pglite-operation-lock"
-import type { RoadmapStateBackend, StateBackend } from "./types"
+import type { PGliteAccessQueue } from "./pglite-access-queue"
+import type { RoadmapStateBackend } from "./roadmap-types"
+import type { StateBackend } from "./state-backend-types"
 
 export type OpenArtisanStateBackendKind = "filesystem" | "db"
 
@@ -29,7 +30,7 @@ export interface OpenArtisanRuntimeBackendOptions {
       debugName?: string
     }
     schemaName?: string
-    operationQueue?: DatabaseOperationQueue
+    accessQueue?: PGliteAccessQueue
   }
 }
 
@@ -53,7 +54,8 @@ export function createOpenArtisanRuntimeBackend(
 ): OpenArtisanRuntimeBackendBundle {
   const kind = resolveRuntimeBackendKind(options.kind)
   if (kind === "filesystem") {
-    return { kind, stateBackend: createFileSystemStateBackend(stateDir), async dispose() {} }
+    const stateBackend = createFileSystemStateBackend(stateDir)
+    return { kind, stateBackend, dispose: () => stateBackend.dispose?.() ?? Promise.resolve() }
   }
 
   const provider = options.provider ?? "pglite"
@@ -71,7 +73,7 @@ export function createOpenArtisanRuntimeBackend(
 
   const repositoryOptions: Parameters<typeof createPGliteOpenArtisanRepository>[0] = { connection }
   if (options.pglite?.schemaName) repositoryOptions.schemaName = options.pglite.schemaName
-  if (options.pglite?.operationQueue) repositoryOptions.operationQueue = options.pglite.operationQueue
+  if (options.pglite?.accessQueue) repositoryOptions.accessQueue = options.pglite.accessQueue
   const repository = createPGliteOpenArtisanRepository(repositoryOptions)
   return {
     kind,

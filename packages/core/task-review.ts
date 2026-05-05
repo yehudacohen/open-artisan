@@ -50,6 +50,35 @@ export interface AdjacentTask {
   direction: "upstream" | "downstream"
 }
 
+export function buildAdjacentTasksForTask(implDag: TaskNode[] | null | undefined, taskId: string): AdjacentTask[] {
+  const task = implDag?.find((node) => node.id === taskId)
+  if (!task || !implDag) return []
+
+  const adjacentTasks: AdjacentTask[] = []
+  for (const node of implDag) {
+    if (node.id === task.id) continue
+    if (task.dependencies.includes(node.id)) {
+      adjacentTasks.push({
+        id: node.id,
+        description: node.description,
+        ...(node.category ? { category: node.category } : {}),
+        status: node.status,
+        direction: "upstream",
+      })
+    }
+    if (node.dependencies.includes(task.id)) {
+      adjacentTasks.push({
+        id: node.id,
+        description: node.description,
+        ...(node.category ? { category: node.category } : {}),
+        status: node.status,
+        direction: "downstream",
+      })
+    }
+  }
+  return adjacentTasks
+}
+
 export interface TaskReviewRequest {
   /** The task being reviewed */
   task: TaskNode

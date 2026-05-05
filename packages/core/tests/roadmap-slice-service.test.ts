@@ -8,7 +8,7 @@ import {
   createFileSystemRoadmapStateBackend,
   createFileSystemStateBackend,
 } from "#core/state-backend-fs"
-import { matchesRoadmapQuery, roadmapOk, type RoadmapDocument, type RoadmapSliceService } from "#core/types"
+import { matchesRoadmapQuery, roadmapOk, type RoadmapDocument, type RoadmapSliceService } from "#core/roadmap-types"
 
 const NOW = "2026-04-16T00:00:00.000Z"
 const tempDirs: string[] = []

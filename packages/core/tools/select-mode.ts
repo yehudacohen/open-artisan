@@ -24,7 +24,7 @@ The auto-detection suggests a mode based on git history and file count, but you 
  * Validates and parses the select_mode tool arguments.
  * Returns the mode if valid, or an error string.
  */
-export function parseSelectModeArgs(args: unknown): { mode: WorkflowMode } | { error: string } {
+export function parseSelectModeArgs(args: unknown): { mode: WorkflowMode; featureName: string | null } | { error: string } {
   if (!args || typeof args !== "object") {
     return { error: "Invalid arguments: expected an object" }
   }
@@ -37,7 +37,12 @@ export function parseSelectModeArgs(args: unknown): { mode: WorkflowMode } | { e
       error: `Invalid mode "${rawMode}". Valid modes: ${VALID_MODES.join(", ")}`,
     }
   }
-  return { mode: mode as WorkflowMode }
+  const rawFeatureName = obj["feature_name"] ?? obj["feature"]
+  if (rawFeatureName !== undefined && typeof rawFeatureName !== "string") {
+    return { error: "Invalid feature_name: expected a string" }
+  }
+  const featureName = typeof rawFeatureName === "string" ? rawFeatureName.trim() || null : null
+  return { mode: mode as WorkflowMode, featureName }
 }
 
 /**

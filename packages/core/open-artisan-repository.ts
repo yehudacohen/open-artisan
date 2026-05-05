@@ -12,13 +12,11 @@ import type {
   ArtifactKey,
   Phase,
   PhaseState,
-  RoadmapItemKind,
-  RoadmapItemStatus,
-  RoadmapDocument,
   WorkflowEvent,
   WorkflowMode,
   WorkflowState,
 } from "./types"
+import type { RoadmapDocument, RoadmapItemKind, RoadmapItemStatus } from "./roadmap-types"
 
 export type DbRecordId = string
 export type IsoTimestamp = string
@@ -118,18 +116,48 @@ export interface DbWorkflow {
   updatedAt: IsoTimestamp
 }
 
-export interface DbWorkflowEvent {
+export type DbWorkflowRuntimeEvent = "repository_import" | "phase_transition" | "fast_forward" | "patch_applied"
+export type DbWorkflowEventSource = "compatibility-import" | "repository-api" | "runtime" | "manual"
+
+export interface DbWorkflowEventMetadata {
+  source?: DbWorkflowEventSource
+}
+
+interface DbWorkflowEventBase {
   id: DbRecordId
   workflowId: DbRecordId
-  event: WorkflowEvent | "repository_import" | "phase_transition" | "fast_forward" | "patch_applied"
+  reason?: string
+  createdAt: IsoTimestamp
+  metadata?: DbWorkflowEventMetadata
+}
+
+export interface DbWorkflowStateMachineEvent extends DbWorkflowEventBase {
+  event: WorkflowEvent
   fromPhase?: Phase
   fromPhaseState?: PhaseState
   toPhase?: Phase
   toPhaseState?: PhaseState
-  reason?: string
-  createdAt: IsoTimestamp
-  metadata?: Record<string, unknown>
 }
+
+export interface DbWorkflowPhaseTransitionEvent extends DbWorkflowEventBase {
+  event: "phase_transition"
+  fromPhase: Phase
+  fromPhaseState: PhaseState
+  toPhase: Phase
+  toPhaseState: PhaseState
+  metadata: DbWorkflowEventMetadata
+}
+
+export interface DbWorkflowRuntimeFactEvent extends DbWorkflowEventBase {
+  event: Exclude<DbWorkflowRuntimeEvent, "phase_transition">
+  fromPhase?: never
+  fromPhaseState?: never
+  toPhase?: never
+  toPhaseState?: never
+}
+
+export type DbWorkflowEvent = DbWorkflowStateMachineEvent | DbWorkflowPhaseTransitionEvent | DbWorkflowRuntimeFactEvent
+export type DbWorkflowEventKind = DbWorkflowEvent["event"]
 
 export interface DbWorkflowRoadmapLink {
   workflowId: DbRecordId
@@ -379,10 +407,22 @@ export interface JsonWorkflowImportResult {
   warnings: string[]
 }
 
+export interface OpenArtisanRepositoryLockOptions {
+  timeoutMs?: number
+  pollMs?: number
+  leaseMs?: number
+}
+
+export interface OpenArtisanRepositoryLock {
+  release(): Promise<void>
+}
+
 export interface OpenArtisanRepository {
   initialize(): Promise<OpenArtisanDbResult<null>>
   dispose(): Promise<void>
   transaction<T>(run: (repo: OpenArtisanRepository) => Promise<OpenArtisanDbResult<T>>): Promise<OpenArtisanDbResult<T>>
+  lockWorkflowState(featureName: string, options?: OpenArtisanRepositoryLockOptions): Promise<OpenArtisanDbResult<OpenArtisanRepositoryLock>>
+  lockRoadmap(options?: OpenArtisanRepositoryLockOptions): Promise<OpenArtisanDbResult<OpenArtisanRepositoryLock>>
 
   createRoadmapItem(item: DbRoadmapItem): Promise<OpenArtisanDbResult<DbRoadmapItem>>
   replaceRoadmap(document: RoadmapDocument): Promise<OpenArtisanDbResult<RoadmapDocument>>

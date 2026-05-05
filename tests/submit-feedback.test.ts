@@ -2,7 +2,31 @@
  * Tests for processSubmitFeedback.
  */
 import { describe, expect, it } from "bun:test"
-import { isUserGateMetaFeedback, processSubmitFeedback } from "#core/tools/submit-feedback"
+import type { TaskNode } from "#core/dag"
+import { buildSubmitFeedbackClarificationMessage, findReviewedArtifactFilesOutsideAllowlist, findUnresolvedHumanGates, isUserGateMetaFeedback, materializeImplPlanDag, normalizeApprovalFilePaths, processSubmitFeedback, resolveSubmitFeedbackHumanGates, validateSubmitFeedbackGate, validateSubmitFeedbackImplPlanApproval } from "#core/tools/submit-feedback"
+
+function task(overrides: Partial<TaskNode>): TaskNode {
+  return {
+    id: "T1",
+    description: "Task one",
+    dependencies: [],
+    expectedTests: [],
+    expectedFiles: [],
+    estimatedComplexity: "small",
+    status: "pending",
+    ...overrides,
+  }
+}
+
+const validImplPlan = `
+## Task T1: Build foundation
+**Dependencies:** none
+**Expected tests:** tests/a.test.ts
+**Files:** src/a.ts
+**Complexity:** small
+
+Implement the foundation.
+`
 
 describe("processSubmitFeedback — approve path", () => {
   it("returns feedbackType='approve'", () => {
@@ -51,6 +75,116 @@ describe("isUserGateMetaFeedback", () => {
 
   it("does not classify real change requests as meta feedback", () => {
     expect(isUserGateMetaFeedback("Can you add section on authentication?")).toBe(false)
+  })
+})
+
+describe("submit_feedback shared gate guards", () => {
+  it("allows user-facing gate states", () => {
+    expect(validateSubmitFeedbackGate("USER_GATE")).toBeNull()
+    expect(validateSubmitFeedbackGate("ESCAPE_HATCH")).toBeNull()
+    expect(validateSubmitFeedbackGate("HUMAN_GATE")).toBeNull()
+  })
+
+  it("rejects non-gate states", () => {
+    expect(validateSubmitFeedbackGate("DRAFT")).toContain("USER_GATE")
+  })
+
+  it("returns clarification messages for meta revise feedback", () => {
+    const msg = buildSubmitFeedbackClarificationMessage("revise", "USER_GATE", "have we implemented all the implementation tasks?")
+    expect(msg).toContain("clarification/status question")
+  })
+
+  it("does not block real revision feedback", () => {
+    const msg = buildSubmitFeedbackClarificationMessage("revise", "USER_GATE", "Please add auth details")
+    expect(msg).toBeNull()
+  })
+})
+
+describe("submit_feedback incremental allowlist helpers", () => {
+  it("normalizes approval file paths against cwd", () => {
+    expect(normalizeApprovalFilePaths(["src/a.ts", "/tmp/b.ts"], "/repo")).toEqual(["/repo/src/a.ts", "/tmp/b.ts"])
+  })
+
+  it("ignores workflow artifact paths when checking reviewed files", () => {
+    const outside = findReviewedArtifactFilesOutsideAllowlist({
+      reviewArtifactFiles: ["/repo/.openartisan/feature/plan.md", "src/a.ts", "src/b.ts"],
+      artifactDiskPaths: { plan: "/repo/.openartisan/feature/plan.md" },
+      allowlist: ["src/a.ts"],
+      cwd: "/repo",
+    })
+    expect(outside).toEqual(["/repo/src/b.ts"])
+  })
+})
+
+describe("submit_feedback IMPL_PLAN approval helpers", () => {
+  it("validates parseable executable implementation plans", () => {
+    const error = validateSubmitFeedbackImplPlanApproval({
+      planContent: validImplPlan,
+      mode: "INCREMENTAL",
+      effectiveAllowlist: ["src/a.ts", "tests/a.test.ts"],
+      cwd: "/repo",
+      parseFixInstruction: "Fix it.",
+    })
+    expect(error).toBeNull()
+  })
+
+  it("reports parse errors with the adapter-provided fix instruction", () => {
+    const error = validateSubmitFeedbackImplPlanApproval({
+      planContent: "## Not a task",
+      mode: "GREENFIELD",
+      effectiveAllowlist: [],
+      cwd: "/repo",
+      parseFixInstruction: "Use the task format.",
+    })
+    expect(error).toContain("Failed to parse implementation plan")
+    expect(error).toContain("Use the task format")
+  })
+
+  it("materializes DAG nodes and first ready task", () => {
+    const materialized = materializeImplPlanDag(validImplPlan)
+    expect(materialized?.nodes.map((node) => node.id)).toEqual(["T1"])
+    expect(materialized?.currentTaskId).toBe("T1")
+  })
+})
+
+describe("submit_feedback human-gate resolution", () => {
+  it("finds unresolved human-gated tasks", () => {
+    const unresolved = findUnresolvedHumanGates({
+      implDag: [
+        task({ id: "T1", status: "human-gated", humanGate: { whatIsNeeded: "Configure creds", why: "Needed", verificationSteps: "Check env", resolved: false } }),
+        task({ id: "T2", status: "complete" }),
+      ],
+    })
+    expect(unresolved.map((node) => node.id)).toEqual(["T1"])
+  })
+
+  it("resolves requested human gates and computes next dispatch", () => {
+    const result = resolveSubmitFeedbackHumanGates(
+      {
+        concurrency: { maxParallelTasks: 1 },
+        implDag: [
+          task({ id: "T1", status: "human-gated", humanGate: { whatIsNeeded: "Configure creds", why: "Needed", verificationSteps: "Check env", resolved: false } }),
+          task({ id: "T2", description: "Follow-up", dependencies: ["T1"], status: "pending" }),
+        ],
+      },
+      ["T1"],
+    )
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    expect(result.resolution.resolvedIds).toEqual(["T1"])
+    expect(result.resolution.remainingGates).toEqual([])
+    expect(result.resolution.nextDecision.action).toBe("dispatch")
+    expect(result.resolution.updatedNodes.find((node) => node.id === "T1")?.humanGate?.resolved).toBe(true)
+  })
+
+  it("reports invalid human-gate ids", () => {
+    const result = resolveSubmitFeedbackHumanGates(
+      { concurrency: { maxParallelTasks: 1 }, implDag: [task({ id: "T1", status: "human-gated" })] },
+      ["missing"],
+    )
+    expect(result.success).toBe(false)
+    if (result.success) return
+    expect(result.error).toContain("not found")
   })
 })
 

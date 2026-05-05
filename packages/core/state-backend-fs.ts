@@ -10,7 +10,8 @@
 import { dirname, join } from "node:path"
 import { existsSync, readdirSync, lstatSync } from "node:fs"
 import { open, writeFile, readFile, mkdir, unlink } from "node:fs/promises"
-import { roadmapError, roadmapOk, validateRoadmapDocument, type RoadmapDocument, type RoadmapResult, type RoadmapStateBackend, type StateBackend } from "./types"
+import { roadmapError, roadmapOk, validateRoadmapDocument, type RoadmapDocument, type RoadmapResult, type RoadmapStateBackend } from "./roadmap-types"
+import type { StateBackend } from "./state-backend-types"
 import { LOCK_TIMEOUT_MS, LOCK_POLL_MS } from "./constants"
 
 const STATE_FILE = "workflow-state.json"

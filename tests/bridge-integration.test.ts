@@ -131,7 +131,7 @@ class BridgeTestClient {
       stdin: "pipe",
       stdout: "pipe",
       stderr: "ignore",
-      env: { ...process.env, ...(opts?.env ?? {}) },
+      env: { ...process.env, OPENARTISAN_STATE_BACKEND: "filesystem", ...(opts?.env ?? {}) },
     })
     return new BridgeTestClient(proc)
   }

@@ -7,14 +7,11 @@
  * projection for incremental runtime wiring.
  */
 
-import { join } from "node:path"
-
-import { acquireFileLock, type FileLockOptions } from "./state-backend-fs"
 import type { OpenArtisanDbResult, OpenArtisanRepository } from "./open-artisan-repository"
-import type { StateBackend, WorkflowState } from "./types"
+import type { WorkflowState } from "./types"
+import type { StateBackend } from "./state-backend-types"
 
 export interface OpenArtisanDbStateBackendOptions {
-  lockDir?: string
   lockTimeoutMs?: number
   lockPollMs?: number
   legacyFallback?: StateBackend
@@ -31,11 +28,9 @@ function effectiveFeatureName(state: WorkflowState): string {
 
 export function createOpenArtisanDbStateBackend(
   repository: OpenArtisanRepository,
-  stateDir: string,
+  _stateDir: string,
   options: OpenArtisanDbStateBackendOptions = {},
 ): StateBackend {
-  const lockDir = options.lockDir ?? join(stateDir, "workflow-db-locks")
-
   async function importLegacyFallback(featureName: string): Promise<string | null> {
     if (!options.legacyFallback) return null
     const raw = await options.legacyFallback.read(featureName)
@@ -52,6 +47,10 @@ export function createOpenArtisanDbStateBackend(
   }
 
   return {
+    dispose() {
+      return repository.dispose()
+    },
+
     async read(featureName: string) {
       const projection = assertOk(await repository.getWorkflowByFeature(featureName))
       if (!projection) return importLegacyFallback(featureName)
@@ -85,10 +84,10 @@ export function createOpenArtisanDbStateBackend(
     },
 
     async lock(featureName: string) {
-      const lockOptions: FileLockOptions = {}
-      if (options.lockTimeoutMs !== undefined) lockOptions.timeoutMs = options.lockTimeoutMs
-      if (options.lockPollMs !== undefined) lockOptions.pollMs = options.lockPollMs
-      return acquireFileLock(lockDir, featureName, lockOptions)
+      return assertOk(await repository.lockWorkflowState(featureName, {
+        ...(options.lockTimeoutMs === undefined ? {} : { timeoutMs: options.lockTimeoutMs }),
+        ...(options.lockPollMs === undefined ? {} : { pollMs: options.lockPollMs }),
+      }))
     },
   }
 }

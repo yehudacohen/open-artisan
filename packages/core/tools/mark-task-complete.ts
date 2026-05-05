@@ -18,6 +18,7 @@
 import type { TaskNode } from "../dag"
 import { createImplDAG } from "../dag"
 import { markTaskComplete, nextSchedulerDecision } from "../scheduler"
+import type { WorkflowState } from "../types"
 
 export interface MarkTaskCompleteArgs {
   /** The DAG task ID that was just completed (e.g. "T1", "auth-service") */
@@ -49,6 +50,21 @@ export interface MarkTaskCompleteResult {
    * no expected files declared in the IMPL_PLAN.
    */
   completedTaskFiles: string[]
+}
+
+export function validateMarkTaskCompletePhase(
+  state: Pick<WorkflowState, "phase" | "phaseState">,
+  options: { allowScheduling?: boolean } = {},
+): string | null {
+  if (state.phase !== "IMPLEMENTATION") {
+    return `mark_task_complete can only be called during IMPLEMENTATION (current: ${state.phase}).`
+  }
+  const allowed = options.allowScheduling ? ["DRAFT", "REVISE", "SCHEDULING"] : ["DRAFT", "REVISE"]
+  if (!allowed.includes(state.phaseState)) {
+    const allowedText = allowed.length === 2 ? `${allowed[0]} or ${allowed[1]}` : `${allowed.slice(0, -1).join(", ")}, or ${allowed.at(-1)}`
+    return `mark_task_complete can only be called in ${allowedText} state (current: ${state.phase}/${state.phaseState}).`
+  }
+  return null
 }
 
 /**

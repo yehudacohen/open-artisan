@@ -200,8 +200,8 @@ describe("drift impact interfaces", () => {
 
     expect(buildRepairToolCall({
       ...boundaryAction,
-      toolCall: { toolName: "apply_task_boundary_change", args: { task_id: "T1", add_files: ["src/a.ts"], reason: "Reviewer found ownership drift in implementation task." }, requiredPhase: "IMPLEMENTATION" },
-    })).toEqual({ toolName: "apply_task_boundary_change", args: { task_id: "T1", add_files: ["src/a.ts"], reason: "Reviewer found ownership drift in implementation task." }, requiredPhase: "IMPLEMENTATION" })
+      toolCall: { toolName: "apply_task_boundary_change", args: { task_id: "T1", add_files: ["/repo/src/a.ts"], reason: "Reviewer found ownership drift in implementation task." }, requiredPhase: "IMPLEMENTATION" },
+    })).toEqual({ toolName: "apply_task_boundary_change", args: { task_id: "T1", add_files: ["/repo/src/a.ts"], reason: "Reviewer found ownership drift in implementation task." }, requiredPhase: "IMPLEMENTATION" })
 
     expect(buildRepairToolCall({
       ...patchAction,
@@ -210,7 +210,7 @@ describe("drift impact interfaces", () => {
 
     expect(buildRepairToolCall({
       ...boundaryAction,
-      toolCall: { toolName: "apply_task_boundary_change", args: { task_id: "T1", add_files: ["src/a.ts"] }, requiredPhase: "IMPLEMENTATION" },
+      toolCall: { toolName: "apply_task_boundary_change", args: { task_id: "T1", add_files: ["/repo/src/a.ts"] }, requiredPhase: "IMPLEMENTATION" },
     })).toBeNull()
 
     expect(buildRepairToolCall({

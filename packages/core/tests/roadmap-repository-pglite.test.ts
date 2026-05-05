@@ -10,13 +10,15 @@ import { PGliteDialect } from "kysely-pglite-dialect"
 import { createSessionStateStore } from "#core/session-state"
 import { createFileSystemStateBackend } from "#core/state-backend-fs"
 import { createPGliteRoadmapRepository } from "#core/roadmap-repository-pglite"
-import type { DatabaseOperationQueue } from "#core/open-artisan-db"
-import type { RoadmapDocument, RoadmapPGliteRepositoryOptions, RoadmapRepository } from "#core/types"
+import type { PGliteAccessQueue } from "#core/open-artisan-db"
+import type { RoadmapDocument, RoadmapPGliteRepositoryOptions, RoadmapRepository } from "#core/roadmap-types"
 
 const NOW = "2026-04-16T00:00:00.000Z"
 const tempDirs: string[] = []
+const tempRepos: RoadmapRepository[] = []
 
 afterEach(async () => {
+  await Promise.all(tempRepos.splice(0).map((repository) => repository.dispose()))
   await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })))
 })
 
@@ -77,7 +79,9 @@ function makeRepositoryOptions(stateDir: string): RoadmapPGliteRepositoryOptions
 }
 
 function makeRepository(stateDir: string): RoadmapRepository {
-  return createPGliteRoadmapRepository(makeRepositoryOptions(stateDir))
+  const repository = createPGliteRoadmapRepository(makeRepositoryOptions(stateDir))
+  tempRepos.push(repository)
+  return repository
 }
 
 describe("createPGliteRoadmapRepository", () => {
@@ -85,6 +89,7 @@ describe("createPGliteRoadmapRepository", () => {
     const stateDir = await makeTempStateDir()
     const repository = makeRepository(stateDir)
     expect(await repository.initialize()).toEqual({ ok: true, value: null })
+    await repository.dispose()
 
     const dbPath = join(makeRepositoryOptions(stateDir).connection.dataDir, "roadmap.pg")
     const db = new Kysely<any>({ dialect: new PGliteDialect(new PGlite(dbPath)) })
@@ -97,13 +102,14 @@ describe("createPGliteRoadmapRepository", () => {
   it("uses injectable operation queues and exposes explicit disposal", async () => {
     const stateDir = await makeTempStateDir()
     const scopes: string[] = []
-    const queue: DatabaseOperationQueue = {
+    const queue: PGliteAccessQueue = {
       run: async (scope, run) => {
         scopes.push(scope)
         return run()
       },
     }
-    const repository = createPGliteRoadmapRepository({ ...makeRepositoryOptions(stateDir), operationQueue: queue })
+    const repository = createPGliteRoadmapRepository({ ...makeRepositoryOptions(stateDir), accessQueue: queue })
+    tempRepos.push(repository)
 
     expect(await repository.initialize()).toEqual({ ok: true, value: null })
     await repository.dispose()

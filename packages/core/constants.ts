@@ -5,6 +5,8 @@
  * Modules import from here to ensure consistency and single-source-of-truth.
  */
 
+import { WORKFLOW_TOOL_NAME_LIST } from "./tool-contracts"
+
 // ---------------------------------------------------------------------------
 // Text truncation limits
 // ---------------------------------------------------------------------------
@@ -221,18 +223,28 @@ export const LOCK_POLL_MS = 50
  * Timeout for acquiring a DB operation lease (ms).
  * Keeps multi-worker runtimes from waiting indefinitely behind a wedged writer.
  */
-export const DB_OPERATION_LOCK_TIMEOUT_MS = 30_000
+export const DB_OPERATION_LEASE_TIMEOUT_MS = 30_000
 
 /**
  * Polling interval while waiting for a DB operation lease (ms).
  */
-export const DB_OPERATION_LOCK_POLL_MS = 50
+export const DB_OPERATION_LEASE_POLL_MS = 50
 
 /**
  * Lease duration for DB operation locks (ms).
  * Long enough for normal repository operations; stale leases can be taken over.
  */
-export const DB_OPERATION_LOCK_LEASE_MS = 300_000
+export const DB_OPERATION_LEASE_MS = 300_000
+
+/**
+ * Renew DB operation leases halfway through their configured duration.
+ */
+export const DB_OPERATION_LEASE_RENEWAL_DIVISOR = 2
+
+/**
+ * Minimum DB lease renewal interval; keeps very short test leases renewable.
+ */
+export const DB_OPERATION_LEASE_MIN_RENEWAL_MS = 1
 
 // ---------------------------------------------------------------------------
 // Sub-workflows
@@ -285,31 +297,6 @@ export const PHASE_ORDER: import("./types").Phase[] = [
  * Both the adapter and the bridge import this set. Adding a tool here
  * ensures it's recognized in both contexts.
  */
-export const WORKFLOW_TOOL_NAMES = new Set([
-  "check_prior_workflow",
-  "select_mode",
-  "mark_scan_complete",
-  "mark_analyze_complete",
-  "mark_satisfied",
-  "mark_task_complete",
-  "request_review",
-  "submit_feedback",
-  "resolve_human_gate",
-  "propose_backtrack",
-  "spawn_sub_workflow",
-  "query_parent_workflow",
-  "query_child_workflow",
-  "submit_task_review",
-  "submit_auto_approve",
-  "reset_task",
-  "route_patch_suggestions",
-  "resolve_patch_suggestion",
-  "apply_patch_suggestion",
-  "analyze_task_boundary_change",
-  "apply_task_boundary_change",
-  "report_drift",
-  "plan_drift_repair",
-  "apply_drift_repair",
-])
+export const WORKFLOW_TOOL_NAMES = new Set(WORKFLOW_TOOL_NAME_LIST)
 
 export const DB_TASK_LEASE_TTL_MS = 60 * 60 * 1000

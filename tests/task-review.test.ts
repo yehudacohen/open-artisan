@@ -8,6 +8,7 @@
  */
 import { describe, expect, it, mock } from "bun:test"
 import {
+  buildAdjacentTasksForTask,
   buildTaskReviewPrompt,
   parseTaskReviewResult,
   dispatchTaskReview,
@@ -40,6 +41,29 @@ function makeRequest(overrides: Partial<TaskReviewRequest> = {}): TaskReviewRequ
     ...overrides,
   }
 }
+
+// ---------------------------------------------------------------------------
+// buildAdjacentTasksForTask
+// ---------------------------------------------------------------------------
+
+describe("buildAdjacentTasksForTask", () => {
+  it("returns direct upstream and downstream tasks", () => {
+    const adjacent = buildAdjacentTasksForTask([
+      makeTask({ id: "T1", description: "Foundation", status: "complete" }),
+      makeTask({ id: "T2", description: "Feature", dependencies: ["T1"], status: "in-flight" }),
+      makeTask({ id: "T3", description: "Integration", dependencies: ["T2"], status: "pending", category: "integration" }),
+    ], "T2")
+
+    expect(adjacent).toEqual([
+      { id: "T1", description: "Foundation", status: "complete", direction: "upstream" },
+      { id: "T3", description: "Integration", category: "integration", status: "pending", direction: "downstream" },
+    ])
+  })
+
+  it("returns empty for missing task", () => {
+    expect(buildAdjacentTasksForTask([makeTask({ id: "T1" })], "missing")).toEqual([])
+  })
+})
 
 // ---------------------------------------------------------------------------
 // buildTaskReviewPrompt

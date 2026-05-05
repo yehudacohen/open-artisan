@@ -34,7 +34,8 @@ import type {
   OpenArtisanRepository,
   PatchSuggestionStatus,
 } from "./open-artisan-repository"
-import type { Phase, RoadmapDocument, RoadmapItemStatus } from "./types"
+import type { Phase } from "./types"
+import type { RoadmapDocument, RoadmapItemStatus } from "./roadmap-types"
 
 export interface RoadmapService {
   replaceRoadmap(document: RoadmapDocument): Promise<OpenArtisanDbResult<RoadmapDocument>>

@@ -19,10 +19,10 @@ import {
   validateWorkflowState,
   type WorkflowState,
   type SessionStateStore,
-  type StateBackend,
   type StoreLoadResult,
   type StoreLoadError,
 } from "./types"
+import type { StateBackend } from "./state-backend-types"
 import { readDecisionInput, nextSchedulerDecisionForInput } from "./scheduler"
 import { extractApprovedFileAllowlist } from "./tools/plan-allowlist"
 

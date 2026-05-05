@@ -56,6 +56,7 @@ beforeEach(async () => {
 })
 
 afterEach(async () => {
+  await ctx.runtimeBackendDispose?.()
   await rm(tmpDir, { recursive: true, force: true })
 })
 
@@ -118,6 +119,8 @@ describe("lifecycle.init", () => {
     const { existsSync } = await import("node:fs")
     const { join } = await import("node:path")
     await handleInit({ projectDir: tmpDir, transport: "stdio", registerRuntime: false }, ctx)
+    expect(ctx.runtimeBackendKind).toBe("db")
+    expect(ctx.roadmapBackend).not.toBeNull()
     const stateDir = join(tmpDir, ".openartisan")
     expect(existsSync(join(stateDir, ".bridge-pid"))).toBe(false)
     expect(await loadBridgeMetadata(stateDir)).toBeNull()

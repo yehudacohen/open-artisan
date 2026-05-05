@@ -68,8 +68,25 @@ describe("parseSelectModeArgs — invalid inputs", () => {
     expect(result.mode).toBe("INCREMENTAL")
   })
 
+  it("parses canonical and legacy feature name fields", () => {
+    const canonical = parseSelectModeArgs({ mode: "GREENFIELD", feature_name: "runtime-cleanup" })
+    expect("error" in canonical).toBe(false)
+    if ("error" in canonical) return
+    expect(canonical.featureName).toBe("runtime-cleanup")
+
+    const legacy = parseSelectModeArgs({ mode: "GREENFIELD", feature: "runtime-cleanup" })
+    expect("error" in legacy).toBe(false)
+    if ("error" in legacy) return
+    expect(legacy.featureName).toBe("runtime-cleanup")
+  })
+
   it("rejects non-string mode value", () => {
     const result = parseSelectModeArgs({ mode: 42 })
+    expect("error" in result).toBe(true)
+  })
+
+  it("rejects non-string feature names", () => {
+    const result = parseSelectModeArgs({ mode: "GREENFIELD", feature_name: 42 })
     expect("error" in result).toBe(true)
   })
 })

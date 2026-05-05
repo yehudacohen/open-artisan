@@ -11,7 +11,7 @@
  * 4. mark_task_complete rejects when per-task review fails
  * 5. mark_task_complete accepts when per-task review dispatch fails (graceful degradation)
  */
-import { describe, expect, it, beforeEach, mock } from "bun:test"
+import { describe, expect, it, beforeEach, afterEach, mock } from "bun:test"
 import { mkdtempSync, mkdirSync, rmSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
@@ -142,13 +142,25 @@ let tempDir: string
 let client: ReturnType<typeof makeMockClient>
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let plugin: any
+let previousStateBackend: string | undefined
 
 beforeEach(async () => {
   tempDir = mkdtempSync(join(tmpdir(), "sw-gate-"))
   // Create the .opencode subdirectory (the plugin derives stateDir from directory)
   mkdirSync(join(tempDir, ".opencode"), { recursive: true })
+  previousStateBackend = process.env["OPENARTISAN_STATE_BACKEND"]
+  process.env["OPENARTISAN_STATE_BACKEND"] = "filesystem"
   client = makeMockClient()
   plugin = await OpenArtisanPlugin({ client, directory: tempDir } as any)
+})
+
+afterEach(() => {
+  if (previousStateBackend === undefined) {
+    delete process.env["OPENARTISAN_STATE_BACKEND"]
+  } else {
+    process.env["OPENARTISAN_STATE_BACKEND"] = previousStateBackend
+  }
+  rmSync(tempDir, { recursive: true, force: true })
 })
 
 async function writeFileInProject(relativePath: string, content: string) {

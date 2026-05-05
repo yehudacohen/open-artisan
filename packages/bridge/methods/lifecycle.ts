@@ -32,7 +32,7 @@ import { detachBridgeClient, evaluateBridgeShutdownEligibility } from "../bridge
 import { upsertBridgeClientLease } from "../bridge-leases"
 import { DEFAULT_BRIDGE_SOCKET_FILENAME, SHARED_BRIDGE_PROTOCOL_VERSION } from "../bridge-discovery"
 import { createRoadmapSliceService } from "../../core/roadmap-slice-service"
-import { matchesRoadmapQuery, roadmapError, roadmapOk } from "../../core/types"
+import { matchesRoadmapQuery, roadmapError, roadmapOk } from "../../core/roadmap-types"
 import type { EngineContext } from "../../core/engine-context"
 import type { SubagentDispatcher } from "../../core/subagent-dispatcher"
 import type { NotificationSink } from "../../core/logger"
@@ -123,7 +123,7 @@ export const handleInit: MethodHandler = async (params, ctx) => {
     await upsertBridgeMetadata(stateDir, buildBridgeMetadata(projectDir, stateDir, transport, p.socketPath, existingMetadata))
   }
 
-  // Create backend and store. Filesystem remains the default; DB/PGlite is explicit opt-in.
+  // Create backend and store. DB/PGlite is the default; filesystem is an explicit legacy opt-out.
   const runtimeOptions: Parameters<typeof createOpenArtisanRuntimeBackend>[1] = {}
   if (p.persistence?.kind) runtimeOptions.kind = p.persistence.kind
   if (p.persistence?.pglite) {

@@ -6,12 +6,14 @@ import { join } from "node:path"
 import { createPGliteRoadmapStateBackend } from "#core/roadmap-state-backend-pglite"
 import { createSessionStateStore } from "#core/session-state"
 import { createFileSystemStateBackend } from "#core/state-backend-fs"
-import type { RoadmapDocument } from "#core/types"
+import type { RoadmapDocument, RoadmapStateBackend } from "#core/roadmap-types"
 
 const NOW = "2026-04-16T00:00:00.000Z"
 const tempDirs: string[] = []
+const tempBackends: RoadmapStateBackend[] = []
 
 afterEach(async () => {
+  await Promise.all(tempBackends.splice(0).map((backend) => backend.dispose?.() ?? Promise.resolve()))
   await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })))
 })
 
@@ -51,7 +53,7 @@ function makeRoadmapDocument(overrides: Partial<RoadmapDocument> = {}): RoadmapD
 }
 
 function makeBackend(stateDir: string, overrides: Record<string, unknown> = {}) {
-  return createPGliteRoadmapStateBackend(stateDir, {
+  const backend = createPGliteRoadmapStateBackend(stateDir, {
     connection: {
       dataDir: join(stateDir, "roadmap", "pglite-backend-db"),
       debugName: "roadmap-backend-test",
@@ -60,6 +62,8 @@ function makeBackend(stateDir: string, overrides: Record<string, unknown> = {}) 
     lockPollMs: 5,
     ...overrides,
   })
+  tempBackends.push(backend)
+  return backend
 }
 
 describe("createPGliteRoadmapStateBackend", () => {

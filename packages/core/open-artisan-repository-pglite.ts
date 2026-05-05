@@ -5,16 +5,21 @@
  * StateBackend facade while adapters continue to use the WorkflowState contract.
  */
 
-import { mkdir } from "node:fs/promises"
 import { AsyncLocalStorage } from "node:async_hooks"
-import { dirname, join } from "node:path"
+import { join } from "node:path"
 
-import { PGlite } from "@electric-sql/pglite"
-import { Kysely, type Selectable, sql } from "kysely"
-import { PGliteDialect } from "kysely-pglite-dialect"
+import { Kysely, type Selectable } from "kysely"
 
-import { acquireDatabaseOperationLock, createDatabaseOperationLockOwner } from "./database-operation-lock"
-import { runWithPGliteDatabaseLock, type DatabaseOperationQueue } from "./pglite-operation-lock"
+import { acquireDatabaseOperationLease, asDatabaseOperationLeaseDb, createDatabaseOperationLeaseOwner } from "./database-operation-lease"
+import { createPGliteDatabaseHandle } from "./pglite-connection-manager"
+import { ensureOpenArtisanSchema } from "./open-artisan-repository-migrations"
+import type { PGliteAccessQueue } from "./pglite-access-queue"
+import {
+  DEFAULT_OPEN_ARTISAN_DB_FILE_NAME,
+  DEFAULT_OPEN_ARTISAN_DB_SCHEMA,
+  OPEN_ARTISAN_ROADMAP_DOCUMENT_SCHEMA_VERSION,
+  type OpenArtisanDatabase,
+} from "./open-artisan-repository-schema"
 import {
   openArtisanDbError,
   openArtisanDbOk,
@@ -44,52 +49,29 @@ import {
   type DbTaskReview,
   type DbWorkflow,
   type DbWorkflowEvent,
+  type DbWorkflowEventSource,
   type DbWorkflowRoadmapLink,
   type DbWorktreeObservation,
   type IsoTimestamp,
   type JsonWorkflowImportResult,
   type OpenArtisanDbResult,
   type OpenArtisanRepository,
+  type OpenArtisanRepositoryLock,
+  type OpenArtisanRepositoryLockOptions,
   type PatchSuggestionStatus,
   type WorkflowProjection,
 } from "./open-artisan-repository"
 import type { TaskStatus } from "./dag"
-import { SCHEMA_VERSION, type ArtifactKey, type Phase, type PhaseState, type RoadmapDocument, type WorkflowState } from "./types"
+import { SCHEMA_VERSION, type ArtifactKey, type Phase, type PhaseState, type WorkflowState } from "./types"
+import type { RoadmapDocument } from "./roadmap-types"
 
-export const OPEN_ARTISAN_DB_SCHEMA_VERSION = 2
-export const OPEN_ARTISAN_ROADMAP_DOCUMENT_SCHEMA_VERSION = 1
-export const DEFAULT_OPEN_ARTISAN_DB_SCHEMA = "open_artisan"
-export const DEFAULT_OPEN_ARTISAN_DB_FILE_NAME = "open-artisan.pg"
-
-export const OPEN_ARTISAN_DB_TABLES = [
-  "database_operation_locks",
-  "roadmap_items",
-  "roadmap_edges",
-  "execution_slices",
-  "execution_slice_items",
-  "workflows",
-  "workflow_events",
-  "workflow_roadmap_links",
-  "artifacts",
-  "artifact_versions",
-  "artifact_approvals",
-  "artifact_roadmap_links",
-  "tasks",
-  "task_dependencies",
-  "task_owned_files",
-  "task_expected_tests",
-  "task_roadmap_links",
-  "task_reviews",
-  "phase_reviews",
-  "review_observations",
-  "patch_suggestions",
-  "patch_applications",
-  "agent_leases",
-  "file_claims",
-  "worktree_observations",
-  "human_gates",
-  "fast_forward_records",
-] as const
+export { OPEN_ARTISAN_DB_SCHEMA_VERSION } from "./open-artisan-repository-migrations"
+export {
+  DEFAULT_OPEN_ARTISAN_DB_FILE_NAME,
+  DEFAULT_OPEN_ARTISAN_DB_SCHEMA,
+  OPEN_ARTISAN_DB_TABLES,
+  OPEN_ARTISAN_ROADMAP_DOCUMENT_SCHEMA_VERSION,
+} from "./open-artisan-repository-schema"
 
 export interface OpenArtisanPGliteRepositoryOptions {
   connection: {
@@ -98,196 +80,7 @@ export interface OpenArtisanPGliteRepositoryOptions {
     debugName?: string
   }
   schemaName?: string
-  operationQueue?: DatabaseOperationQueue
-}
-
-interface OpenArtisanDatabase {
-  database_operation_locks: {
-    lock_key: string
-    owner_id: string
-    lease_expires_at: string
-    created_at: string
-    updated_at: string
-  }
-  schema_migrations: {
-    version: number
-    applied_at: string
-  }
-  roadmap_items: {
-    id: string
-    feature_name: string | null
-    status: string
-    priority: number
-    record: unknown
-    created_at: string
-    updated_at: string
-  }
-  roadmap_edges: {
-    edge_key: string
-    from_item_id: string
-    to_item_id: string
-    kind: string
-    record: unknown
-  }
-  execution_slices: {
-    id: string
-    feature_name: string | null
-    status: string
-    record: unknown
-    created_at: string
-    updated_at: string
-  }
-  execution_slice_items: {
-    slice_id: string
-    roadmap_item_id: string
-  }
-  workflows: {
-    id: string
-    feature_name: string
-    mode: string
-    phase: string
-    phase_state: string
-    record: unknown
-    state_snapshot: unknown | null
-    created_at: string
-    updated_at: string
-  }
-  workflow_events: {
-    id: string
-    workflow_id: string
-    created_at: string
-    record: unknown
-  }
-  workflow_roadmap_links: {
-    workflow_id: string
-    roadmap_item_id: string
-  }
-  artifacts: {
-    id: string
-    workflow_id: string
-    artifact_key: string
-    current_version_id: string | null
-    record: unknown
-    created_at: string
-    updated_at: string
-  }
-  artifact_versions: {
-    id: string
-    artifact_id: string
-    content_hash: string
-    record: unknown
-    created_at: string
-  }
-  artifact_approvals: {
-    id: string
-    artifact_version_id: string
-    record: unknown
-    created_at: string
-  }
-  artifact_roadmap_links: {
-    artifact_id: string
-    roadmap_item_id: string
-  }
-  tasks: {
-    id: string
-    workflow_id: string
-    task_key: string
-    status: string
-    record: unknown
-    created_at: string
-    updated_at: string
-  }
-  task_dependencies: {
-    workflow_id: string
-    from_task_id: string
-    to_task_id: string
-  }
-  task_owned_files: {
-    task_id: string
-    path: string
-  }
-  task_expected_tests: {
-    task_id: string
-    path: string
-  }
-  task_roadmap_links: {
-    task_id: string
-    roadmap_item_id: string
-  }
-  task_reviews: {
-    id: string
-    workflow_id: string
-    task_id: string
-    created_at: string
-    record: unknown
-  }
-  phase_reviews: {
-    id: string
-    workflow_id: string
-    phase: string
-    created_at: string
-    record: unknown
-  }
-  review_observations: {
-    id: string
-    review_id: string
-    kind: string
-    record: unknown
-  }
-  patch_suggestions: {
-    id: string
-    workflow_id: string
-    status: string
-    record: unknown
-    created_at: string
-    updated_at: string
-  }
-  patch_applications: {
-    id: string
-    patch_suggestion_id: string
-    record: unknown
-    created_at: string
-  }
-  agent_leases: {
-    id: string
-    workflow_id: string
-    session_id: string
-    task_id: string | null
-    expires_at: string
-    record: unknown
-    created_at: string
-  }
-  file_claims: {
-    id: string
-    agent_lease_id: string
-    path: string
-    mode: string
-    record: unknown
-    created_at: string
-  }
-  worktree_observations: {
-    id: string
-    workflow_id: string
-    path: string
-    classification: string
-    record: unknown
-    created_at: string
-  }
-  human_gates: {
-    id: string
-    workflow_id: string
-    task_id: string
-    resolved: boolean
-    record: unknown
-    created_at: string
-    resolved_at: string | null
-  }
-  fast_forward_records: {
-    id: string
-    workflow_id: string
-    record: unknown
-    created_at: string
-  }
+  accessQueue?: PGliteAccessQueue
 }
 
 type DbExecutor = Kysely<OpenArtisanDatabase>
@@ -300,16 +93,8 @@ function clone<T>(value: T): T {
   return structuredClone(value)
 }
 
-function quoteIdentifier(identifier: string): string {
-  return `"${identifier.replace(/"/g, '""')}"`
-}
-
 function edgeKey(edge: DbRoadmapEdge): string {
   return `${edge.fromItemId}->${edge.toItemId}:${edge.kind}`
-}
-
-function tableName(schemaName: string, table: string): string {
-  return `${quoteIdentifier(schemaName)}.${quoteIdentifier(table)}`
 }
 
 function dbFailure<T>(message: string, error: unknown): OpenArtisanDbResult<T> {
@@ -342,6 +127,36 @@ function unique<T>(items: T[]): T[] {
 
 function transitionEventId(workflowId: string, createdAt: string, fromPhase: Phase, fromPhaseState: PhaseState, toPhase: Phase, toPhaseState: PhaseState): string {
   return `${workflowId}:transition:${createdAt}:${fromPhase}/${fromPhaseState}:${toPhase}/${toPhaseState}`
+}
+
+function buildPhaseTransitionEvent(input: {
+  workflowId: string
+  previousWorkflow: DbWorkflow
+  nextPhase: Phase
+  nextPhaseState: PhaseState
+  createdAt: string
+  reason: string
+  source: DbWorkflowEventSource
+}): DbWorkflowEvent {
+  return {
+    id: transitionEventId(
+      input.workflowId,
+      input.createdAt,
+      input.previousWorkflow.phase,
+      input.previousWorkflow.phaseState,
+      input.nextPhase,
+      input.nextPhaseState,
+    ),
+    workflowId: input.workflowId,
+    event: "phase_transition",
+    fromPhase: input.previousWorkflow.phase,
+    fromPhaseState: input.previousWorkflow.phaseState,
+    toPhase: input.nextPhase,
+    toPhaseState: input.nextPhaseState,
+    reason: input.reason,
+    createdAt: input.createdAt,
+    metadata: { source: input.source },
+  }
 }
 
 function freshWorkflowState(sessionId: string): WorkflowState {
@@ -430,336 +245,40 @@ export function createPGliteOpenArtisanRepository(
     ? join(options.connection.dataDir, options.connection.databaseFileName)
     : join(options.connection.dataDir, DEFAULT_OPEN_ARTISAN_DB_FILE_NAME)
   const transactionStorage = new AsyncLocalStorage<DbExecutor>()
-  const lockOwnerId = createDatabaseOperationLockOwner("open-artisan-repository")
-  let dbPromise: Promise<DbExecutor> | null = null
+  const leaseOwnerId = createDatabaseOperationLeaseOwner("open-artisan-repository")
+  const dbHandle = createPGliteDatabaseHandle<OpenArtisanDatabase>({
+    databasePath: dbPath,
+    ...(options.accessQueue ? { accessQueue: options.accessQueue } : {}),
+  })
   let initializedPromise: Promise<void> | null = null
-  let activeOperations = 0
 
-  async function closeIdleDb(): Promise<void> {
-    if (activeOperations > 0 || !dbPromise) return
-    const dbToClose = dbPromise
-    dbPromise = null
-    try {
-      await (await dbToClose).destroy()
-    } catch {
-      // Best-effort cleanup only; operation-level errors are reported at call sites.
-    }
-  }
-
-  async function withDb<T>(run: (db: DbExecutor) => Promise<T>): Promise<T> {
-    const runQueued = options.operationQueue
-      ? <Result>(scope: string, operation: () => Promise<Result>) => options.operationQueue!.run(scope, operation)
-      : runWithPGliteDatabaseLock
-    return runQueued(dbPath, async () => {
-      activeOperations++
-      try {
-        dbPromise ??= (async () => {
-          await mkdir(dirname(dbPath), { recursive: true })
-          const client = new PGlite(dbPath)
-          return new Kysely<OpenArtisanDatabase>({ dialect: new PGliteDialect(client) })
-        })()
-        return await run(await dbPromise)
-      } finally {
-        activeOperations--
-        await closeIdleDb()
-      }
-    })
+  async function withDb<T>(label: string, run: (db: DbExecutor) => Promise<T>): Promise<T> {
+    return dbHandle.run(run, label)
   }
 
   async function initializeSchema(db: DbExecutor): Promise<void> {
-    const schema = quoteIdentifier(schemaName)
-    await sql.raw(`create schema if not exists ${schema}`).execute(db)
-    await sql.raw(`
-      create table if not exists ${tableName(schemaName, "database_operation_locks")} (
-        lock_key text primary key,
-        owner_id text not null,
-        lease_expires_at text not null,
-        created_at text not null,
-        updated_at text not null
-      )
-    `).execute(db)
-    await sql.raw(`
-      create table if not exists ${tableName(schemaName, "schema_migrations")} (
-        version integer primary key,
-        applied_at text not null
-      )
-    `).execute(db)
-    const appliedMigrationRows = await db.withSchema(schemaName).selectFrom("schema_migrations").select("version").execute()
-    const appliedMigrations = new Set(appliedMigrationRows.map((row) => row.version))
+    await ensureOpenArtisanSchema({ db, databasePath: dbPath, schemaName })
+  }
 
-    if (!appliedMigrations.has(1)) {
-    await sql.raw(`
-      create table if not exists ${tableName(schemaName, "roadmap_items")} (
-        id text primary key,
-        feature_name text,
-        status text not null,
-        priority integer not null,
-        record jsonb not null,
-        created_at text not null,
-        updated_at text not null
-      )
-    `).execute(db)
-    await sql.raw(`
-      create table if not exists ${tableName(schemaName, "roadmap_edges")} (
-        edge_key text primary key,
-        from_item_id text not null,
-        to_item_id text not null,
-        kind text not null,
-        record jsonb not null
-      )
-    `).execute(db)
-    await sql.raw(`
-      create table if not exists ${tableName(schemaName, "execution_slices")} (
-        id text primary key,
-        feature_name text,
-        status text not null,
-        record jsonb not null,
-        created_at text not null,
-        updated_at text not null
-      )
-    `).execute(db)
-    await sql.raw(`
-      create table if not exists ${tableName(schemaName, "execution_slice_items")} (
-        slice_id text not null,
-        roadmap_item_id text not null,
-        primary key (slice_id, roadmap_item_id)
-      )
-    `).execute(db)
-    await sql.raw(`
-      create table if not exists ${tableName(schemaName, "workflows")} (
-        id text primary key,
-        feature_name text not null unique,
-        mode text not null,
-        phase text not null,
-        phase_state text not null,
-        record jsonb not null,
-        state_snapshot jsonb,
-        created_at text not null,
-        updated_at text not null
-      )
-    `).execute(db)
-    await sql.raw(`
-      create table if not exists ${tableName(schemaName, "workflow_events")} (
-        id text primary key,
-        workflow_id text not null,
-        created_at text not null,
-        record jsonb not null
-      )
-    `).execute(db)
-    await sql.raw(`
-      create table if not exists ${tableName(schemaName, "workflow_roadmap_links")} (
-        workflow_id text not null,
-        roadmap_item_id text not null,
-        primary key (workflow_id, roadmap_item_id)
-      )
-    `).execute(db)
-    await sql.raw(`
-      create table if not exists ${tableName(schemaName, "artifacts")} (
-        id text primary key,
-        workflow_id text not null,
-        artifact_key text not null,
-        current_version_id text,
-        record jsonb not null,
-        created_at text not null,
-        updated_at text not null
-      )
-    `).execute(db)
-    await sql.raw(`
-      create table if not exists ${tableName(schemaName, "artifact_versions")} (
-        id text primary key,
-        artifact_id text not null,
-        content_hash text not null,
-        record jsonb not null,
-        created_at text not null
-      )
-    `).execute(db)
-    await sql.raw(`
-      create table if not exists ${tableName(schemaName, "artifact_approvals")} (
-        id text primary key,
-        artifact_version_id text not null,
-        record jsonb not null,
-        created_at text not null
-      )
-    `).execute(db)
-    await sql.raw(`
-      create table if not exists ${tableName(schemaName, "artifact_roadmap_links")} (
-        artifact_id text not null,
-        roadmap_item_id text not null,
-        primary key (artifact_id, roadmap_item_id)
-      )
-    `).execute(db)
-    await sql.raw(`
-      create table if not exists ${tableName(schemaName, "tasks")} (
-        id text primary key,
-        workflow_id text not null,
-        task_key text not null,
-        status text not null,
-        record jsonb not null,
-        created_at text not null,
-        updated_at text not null
-      )
-    `).execute(db)
-    await sql.raw(`
-      create table if not exists ${tableName(schemaName, "task_dependencies")} (
-        workflow_id text not null,
-        from_task_id text not null,
-        to_task_id text not null,
-        primary key (workflow_id, from_task_id, to_task_id)
-      )
-    `).execute(db)
-    await sql.raw(`
-      create table if not exists ${tableName(schemaName, "task_owned_files")} (
-        task_id text not null,
-        path text not null,
-        primary key (task_id, path)
-      )
-    `).execute(db)
-    await sql.raw(`
-      create table if not exists ${tableName(schemaName, "task_expected_tests")} (
-        task_id text not null,
-        path text not null,
-        primary key (task_id, path)
-      )
-    `).execute(db)
-    await sql.raw(`
-      create table if not exists ${tableName(schemaName, "task_roadmap_links")} (
-        task_id text not null,
-        roadmap_item_id text not null,
-        primary key (task_id, roadmap_item_id)
-      )
-    `).execute(db)
-    await sql.raw(`
-      create table if not exists ${tableName(schemaName, "task_reviews")} (
-        id text primary key,
-        workflow_id text not null,
-        task_id text not null,
-        created_at text not null,
-        record jsonb not null
-      )
-    `).execute(db)
-    await sql.raw(`
-      create table if not exists ${tableName(schemaName, "phase_reviews")} (
-        id text primary key,
-        workflow_id text not null,
-        phase text not null,
-        created_at text not null,
-        record jsonb not null
-      )
-    `).execute(db)
-    await sql.raw(`
-      create table if not exists ${tableName(schemaName, "review_observations")} (
-        id text primary key,
-        review_id text not null,
-        kind text not null,
-        record jsonb not null
-      )
-    `).execute(db)
-    await sql.raw(`
-      create table if not exists ${tableName(schemaName, "patch_suggestions")} (
-        id text primary key,
-        workflow_id text not null,
-        status text not null,
-        record jsonb not null,
-        created_at text not null,
-        updated_at text not null
-      )
-    `).execute(db)
-    await sql.raw(`
-      create table if not exists ${tableName(schemaName, "patch_applications")} (
-        id text primary key,
-        patch_suggestion_id text not null,
-        record jsonb not null,
-        created_at text not null
-      )
-    `).execute(db)
-    await sql.raw(`
-      create table if not exists ${tableName(schemaName, "agent_leases")} (
-        id text primary key,
-        workflow_id text not null,
-        session_id text not null,
-        task_id text,
-        expires_at text not null,
-        record jsonb not null,
-        created_at text not null
-      )
-    `).execute(db)
-    await sql.raw(`
-      create table if not exists ${tableName(schemaName, "file_claims")} (
-        id text primary key,
-        agent_lease_id text not null,
-        path text not null,
-        mode text not null,
-        record jsonb not null,
-        created_at text not null
-      )
-    `).execute(db)
-    await sql.raw(`
-      create table if not exists ${tableName(schemaName, "worktree_observations")} (
-        id text primary key,
-        workflow_id text not null,
-        path text not null,
-        classification text not null,
-        record jsonb not null,
-        created_at text not null
-      )
-    `).execute(db)
-    await sql.raw(`
-      create table if not exists ${tableName(schemaName, "human_gates")} (
-        id text primary key,
-        workflow_id text not null,
-        task_id text not null,
-        resolved boolean not null,
-        record jsonb not null,
-        created_at text not null,
-        resolved_at text
-      )
-    `).execute(db)
-    await sql.raw(`
-      create table if not exists ${tableName(schemaName, "fast_forward_records")} (
-        id text primary key,
-        workflow_id text not null,
-        record jsonb not null,
-        created_at text not null
-      )
-    `).execute(db)
-      await db
-        .withSchema(schemaName)
-        .insertInto("schema_migrations")
-        .values({ version: 1, applied_at: nowIso() })
-        .execute()
-    }
-
-    if (!appliedMigrations.has(2)) {
-    await sql.raw(`create index if not exists ${quoteIdentifier("roadmap_items_feature_status_idx")} on ${tableName(schemaName, "roadmap_items")} (feature_name, status, priority desc)`).execute(db)
-    await sql.raw(`create index if not exists ${quoteIdentifier("roadmap_edges_from_idx")} on ${tableName(schemaName, "roadmap_edges")} (from_item_id)`).execute(db)
-    await sql.raw(`create index if not exists ${quoteIdentifier("roadmap_edges_to_idx")} on ${tableName(schemaName, "roadmap_edges")} (to_item_id)`).execute(db)
-    await sql.raw(`create index if not exists ${quoteIdentifier("execution_slices_feature_status_idx")} on ${tableName(schemaName, "execution_slices")} (feature_name, status)`).execute(db)
-    await sql.raw(`create index if not exists ${quoteIdentifier("execution_slice_items_item_idx")} on ${tableName(schemaName, "execution_slice_items")} (roadmap_item_id)`).execute(db)
-    await sql.raw(`create index if not exists ${quoteIdentifier("workflow_events_workflow_idx")} on ${tableName(schemaName, "workflow_events")} (workflow_id)`).execute(db)
-    await sql.raw(`create index if not exists ${quoteIdentifier("workflow_roadmap_links_roadmap_idx")} on ${tableName(schemaName, "workflow_roadmap_links")} (roadmap_item_id)`).execute(db)
-    await sql.raw(`create index if not exists ${quoteIdentifier("artifacts_workflow_idx")} on ${tableName(schemaName, "artifacts")} (workflow_id)`).execute(db)
-    await sql.raw(`create index if not exists ${quoteIdentifier("artifact_versions_artifact_idx")} on ${tableName(schemaName, "artifact_versions")} (artifact_id)`).execute(db)
-    await sql.raw(`create index if not exists ${quoteIdentifier("artifact_approvals_version_idx")} on ${tableName(schemaName, "artifact_approvals")} (artifact_version_id)`).execute(db)
-    await sql.raw(`create index if not exists ${quoteIdentifier("artifact_roadmap_links_roadmap_idx")} on ${tableName(schemaName, "artifact_roadmap_links")} (roadmap_item_id)`).execute(db)
-    await sql.raw(`create index if not exists ${quoteIdentifier("tasks_workflow_idx")} on ${tableName(schemaName, "tasks")} (workflow_id)`).execute(db)
-    await sql.raw(`create index if not exists ${quoteIdentifier("task_dependencies_to_idx")} on ${tableName(schemaName, "task_dependencies")} (to_task_id)`).execute(db)
-    await sql.raw(`create index if not exists ${quoteIdentifier("task_roadmap_links_roadmap_idx")} on ${tableName(schemaName, "task_roadmap_links")} (roadmap_item_id)`).execute(db)
-    await sql.raw(`create index if not exists ${quoteIdentifier("task_reviews_workflow_task_idx")} on ${tableName(schemaName, "task_reviews")} (workflow_id, task_id)`).execute(db)
-    await sql.raw(`create index if not exists ${quoteIdentifier("phase_reviews_workflow_phase_idx")} on ${tableName(schemaName, "phase_reviews")} (workflow_id, phase)`).execute(db)
-    await sql.raw(`create index if not exists ${quoteIdentifier("review_observations_review_idx")} on ${tableName(schemaName, "review_observations")} (review_id)`).execute(db)
-    await sql.raw(`create index if not exists ${quoteIdentifier("patch_suggestions_workflow_status_idx")} on ${tableName(schemaName, "patch_suggestions")} (workflow_id, status)`).execute(db)
-    await sql.raw(`create index if not exists ${quoteIdentifier("patch_applications_suggestion_idx")} on ${tableName(schemaName, "patch_applications")} (patch_suggestion_id)`).execute(db)
-    await sql.raw(`create index if not exists ${quoteIdentifier("agent_leases_workflow_idx")} on ${tableName(schemaName, "agent_leases")} (workflow_id)`).execute(db)
-    await sql.raw(`create index if not exists ${quoteIdentifier("file_claims_lease_idx")} on ${tableName(schemaName, "file_claims")} (agent_lease_id)`).execute(db)
-    await sql.raw(`create index if not exists ${quoteIdentifier("file_claims_path_idx")} on ${tableName(schemaName, "file_claims")} (path)`).execute(db)
-    await sql.raw(`create index if not exists ${quoteIdentifier("worktree_observations_workflow_idx")} on ${tableName(schemaName, "worktree_observations")} (workflow_id)`).execute(db)
-    await sql.raw(`create index if not exists ${quoteIdentifier("human_gates_workflow_resolved_idx")} on ${tableName(schemaName, "human_gates")} (workflow_id, resolved)`).execute(db)
-    await sql.raw(`create index if not exists ${quoteIdentifier("fast_forward_records_workflow_idx")} on ${tableName(schemaName, "fast_forward_records")} (workflow_id)`).execute(db)
-      await db
-        .withSchema(schemaName)
-        .insertInto("schema_migrations")
-        .values({ version: 2, applied_at: nowIso() })
-        .execute()
+  async function acquireRepositoryLock(
+    leaseKey: string,
+    options: OpenArtisanRepositoryLockOptions = {},
+  ): Promise<OpenArtisanDbResult<OpenArtisanRepositoryLock>> {
+    try {
+      return await withDb("openartisan.acquireRepositoryLock", async (db) => {
+        initializedPromise ??= initializeSchema(db)
+        await initializedPromise
+        const lease = await acquireDatabaseOperationLease(asDatabaseOperationLeaseDb(db), schemaName, {
+          leaseKey,
+          ownerId: leaseOwnerId,
+          ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+          ...(options.pollMs === undefined ? {} : { pollMs: options.pollMs }),
+          ...(options.leaseMs === undefined ? {} : { leaseMs: options.leaseMs }),
+        })
+        return openArtisanDbOk({ release: lease.release })
+      })
+    } catch (error) {
+      return dbFailure(`Open Artisan DB lock acquisition failed for ${leaseKey}`, error)
     }
   }
 
@@ -774,12 +293,12 @@ export function createPGliteOpenArtisanRepository(
     }
 
     try {
-      return await withDb(async (db) => {
+        return await withDb("openartisan.withInitializedDb", async (db) => {
         initializedPromise ??= initializeSchema(db)
         await initializedPromise
-        const lease = await acquireDatabaseOperationLock(db, schemaName, {
-          lockKey: "open-artisan:repository-operation",
-          ownerId: lockOwnerId,
+        const lease = await acquireDatabaseOperationLease(asDatabaseOperationLeaseDb(db), schemaName, {
+          leaseKey: "open-artisan:repository-operation",
+          ownerId: leaseOwnerId,
         })
         try {
           return await run(db)
@@ -941,7 +460,10 @@ export function createPGliteOpenArtisanRepository(
     },
 
     dispose() {
-      return closeIdleDb()
+      return (async () => {
+        initializedPromise = null
+        await dbHandle.dispose()
+      })()
     },
 
     transaction<T>(run: (repository: OpenArtisanRepository) => Promise<OpenArtisanDbResult<T>>) {
@@ -963,6 +485,14 @@ export function createPGliteOpenArtisanRepository(
           throw error
         }
       })
+    },
+
+    lockWorkflowState(featureName, options) {
+      return acquireRepositoryLock(`workflow-state:${featureName}`, options)
+    },
+
+    lockRoadmap(options) {
+      return acquireRepositoryLock("roadmap:document", options)
     },
 
     createRoadmapItem(item: DbRoadmapItem) {
@@ -1176,17 +706,15 @@ export function createPGliteOpenArtisanRepository(
           updated_at: workflow.updatedAt,
         }).where("id", "=", workflowId).execute()
         if (previousWorkflow.phase !== phase || previousWorkflow.phaseState !== phaseState) {
-          const event: DbWorkflowEvent = {
-            id: transitionEventId(workflowId, updatedAt, previousWorkflow.phase, previousWorkflow.phaseState, phase, phaseState),
+          const event = buildPhaseTransitionEvent({
             workflowId,
-            event: "phase_transition",
-            fromPhase: previousWorkflow.phase,
-            fromPhaseState: previousWorkflow.phaseState,
-            toPhase: phase,
-            toPhaseState: phaseState,
+            previousWorkflow,
+            nextPhase: phase,
+            nextPhaseState: phaseState,
             reason: "setWorkflowPhase",
             createdAt: updatedAt,
-          }
+            source: "repository-api",
+          })
           await schemaDb.insertInto("workflow_events").values({
             id: event.id,
             workflow_id: event.workflowId,
@@ -1729,18 +1257,15 @@ export function createPGliteOpenArtisanRepository(
           updated_at: workflow.updatedAt,
         })).execute()
         if (previousWorkflow && (previousWorkflow.phase !== workflow.phase || previousWorkflow.phaseState !== workflow.phaseState)) {
-          const event: DbWorkflowEvent = {
-            id: transitionEventId(workflowId, timestamp, previousWorkflow.phase, previousWorkflow.phaseState, workflow.phase, workflow.phaseState),
+          const event = buildPhaseTransitionEvent({
             workflowId,
-            event: "phase_transition",
-            fromPhase: previousWorkflow.phase,
-            fromPhaseState: previousWorkflow.phaseState,
-            toPhase: workflow.phase,
-            toPhaseState: workflow.phaseState,
+            previousWorkflow,
+            nextPhase: workflow.phase,
+            nextPhaseState: workflow.phaseState,
             reason: "WorkflowState compatibility import",
             createdAt: timestamp,
-            metadata: { source: "importWorkflowState" },
-          }
+            source: "compatibility-import",
+          })
           await schemaDb.insertInto("workflow_events").values({
             id: event.id,
             workflow_id: event.workflowId,

@@ -1,18 +1,27 @@
-import { afterEach, describe, expect, it } from "bun:test"
+import { afterAll, afterEach, describe, expect, it } from "bun:test"
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
-import { createOpenArtisanServices, createPGliteOpenArtisanRepository, type DbPatchSuggestion } from "#core/open-artisan-db"
+import { createOpenArtisanServices, createPGliteOpenArtisanRepository, type DbPatchSuggestion, type OpenArtisanRepository } from "#core/open-artisan-db"
 import { applyPatchSuggestionToWorktree, extractPatchTouchedPaths } from "#core/patch-suggestion-application"
 import { workflowDbId } from "#core/runtime-persistence"
 import { SCHEMA_VERSION, type WorkflowState } from "#core/types"
 
 const tempDirs: string[] = []
+const sharedTempDirs: string[] = []
+const tempRepos: OpenArtisanRepository[] = []
+let sharedDbDir: string | null = null
+let schemaCounter = 0
 
 afterEach(async () => {
+  await Promise.all(tempRepos.splice(0).map((repo) => repo.dispose()))
   for (const dir of tempDirs) await rm(dir, { recursive: true, force: true })
   tempDirs.length = 0
+})
+
+afterAll(async () => {
+  await Promise.all(sharedTempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })))
 })
 
 function now() {
@@ -24,6 +33,19 @@ function tempDir(prefix: string) {
     tempDirs.push(dir)
     return dir
   })
+}
+
+async function sharedPGliteDir(): Promise<string> {
+  if (!sharedDbDir) {
+    sharedDbDir = await mkdtemp(join(tmpdir(), "oa-patch-db-shared-"))
+    sharedTempDirs.push(sharedDbDir)
+  }
+  return sharedDbDir
+}
+
+function nextSchemaName(): string {
+  schemaCounter++
+  return `open_artisan_patch_${schemaCounter}`
 }
 
 function makeState(overrides: Partial<WorkflowState> = {}): WorkflowState {
@@ -84,8 +106,9 @@ function makeState(overrides: Partial<WorkflowState> = {}): WorkflowState {
 }
 
 async function servicesFor(state: WorkflowState) {
-  const dbDir = await tempDir("oa-patch-db-")
-  const repo = createPGliteOpenArtisanRepository({ connection: { dataDir: dbDir } })
+  const dbDir = await sharedPGliteDir()
+  const repo = createPGliteOpenArtisanRepository({ connection: { dataDir: dbDir }, schemaName: nextSchemaName() })
+  tempRepos.push(repo)
   const services = createOpenArtisanServices(repo)
   const workflowId = workflowDbId(state)
   const created = await services.workflow.createWorkflow({

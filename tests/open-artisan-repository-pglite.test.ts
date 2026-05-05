@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test"
+import { afterAll, afterEach, describe, expect, it } from "bun:test"
 import { mkdtempSync, rmSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
@@ -21,23 +21,50 @@ import {
   type DbPatchSuggestion,
   type DbTaskGraph,
   type DbWorkflow,
-  type DatabaseOperationQueue,
   type OpenArtisanDbResult,
+  type OpenArtisanRepository,
+  type PGliteAccessQueue,
 } from "#core/open-artisan-db"
 import { createFileSystemStateBackend } from "#core/state-backend-fs"
 import { SCHEMA_VERSION, type WorkflowState } from "#core/types"
 
 let tempDirs: string[] = []
+let sharedTempDirs: string[] = []
+let tempRepos: OpenArtisanRepository[] = []
+let sharedDbDir: string | null = null
+let schemaCounter = 0
 
-afterEach(() => {
+afterEach(async () => {
+  await Promise.all(tempRepos.splice(0).map((repo) => repo.dispose()))
   for (const dir of tempDirs) rmSync(dir, { recursive: true, force: true })
   tempDirs = []
 })
 
+afterAll(() => {
+  for (const dir of sharedTempDirs) rmSync(dir, { recursive: true, force: true })
+  sharedTempDirs = []
+})
+
+function trackRepo(repo: OpenArtisanRepository): OpenArtisanRepository {
+  tempRepos.push(repo)
+  return repo
+}
+
 function tempRepo() {
-  const dir = mkdtempSync(join(tmpdir(), "oa-db-"))
-  tempDirs.push(dir)
-  return createPGliteOpenArtisanRepository({ connection: { dataDir: dir } })
+  return trackRepo(createPGliteOpenArtisanRepository({ connection: { dataDir: sharedPGliteDir() }, schemaName: nextSchemaName() }))
+}
+
+function sharedPGliteDir(): string {
+  if (!sharedDbDir) {
+    sharedDbDir = mkdtempSync(join(tmpdir(), "oa-db-shared-"))
+    sharedTempDirs.push(sharedDbDir)
+  }
+  return sharedDbDir
+}
+
+function nextSchemaName(): string {
+  schemaCounter++
+  return `open_artisan_test_${schemaCounter}`
 }
 
 function tempDir() {
@@ -54,6 +81,10 @@ function valueOf<T>(result: OpenArtisanDbResult<T>): T {
   expect(result.ok).toBe(true)
   if (!result.ok) throw new Error(result.error.message)
   return result.value
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 function workflow(overrides: Partial<DbWorkflow> = {}): DbWorkflow {
@@ -170,27 +201,30 @@ function legacyState(): WorkflowState {
 
 describe("PGlite Open Artisan repository", () => {
   it("records ordered schema migrations", async () => {
-    const dir = tempDir()
-    const repo = createPGliteOpenArtisanRepository({ connection: { dataDir: dir } })
+    const dir = sharedPGliteDir()
+    const schemaName = nextSchemaName()
+    const repo = trackRepo(createPGliteOpenArtisanRepository({ connection: { dataDir: dir }, schemaName }))
     expect((await repo.initialize()).ok).toBe(true)
+    await repo.dispose()
 
     const db = new Kysely<any>({ dialect: new PGliteDialect(new PGlite(join(dir, DEFAULT_OPEN_ARTISAN_DB_FILE_NAME))) })
-    const rows = await db.withSchema("open_artisan").selectFrom("schema_migrations").select("version").orderBy("version").execute()
+    const rows = await db.withSchema(schemaName).selectFrom("schema_migrations").select("version").orderBy("version").execute()
     await db.destroy()
 
     expect(rows.map((row: { version: number }) => row.version)).toEqual([1, 2])
   })
 
   it("uses injectable operation queues and exposes explicit disposal", async () => {
-    const dir = tempDir()
+    const dir = sharedPGliteDir()
+    const schemaName = nextSchemaName()
     const scopes: string[] = []
-    const queue: DatabaseOperationQueue = {
+    const queue: PGliteAccessQueue = {
       run: async (scope, run) => {
         scopes.push(scope)
         return run()
       },
     }
-    const repo = createPGliteOpenArtisanRepository({ connection: { dataDir: dir }, operationQueue: queue })
+    const repo = trackRepo(createPGliteOpenArtisanRepository({ connection: { dataDir: dir }, schemaName, accessQueue: queue }))
 
     expect((await repo.initialize()).ok).toBe(true)
     await repo.dispose()
@@ -199,12 +233,13 @@ describe("PGlite Open Artisan repository", () => {
   })
 
   it("takes over stale database operation locks", async () => {
-    const dir = tempDir()
-    const repo = createPGliteOpenArtisanRepository({ connection: { dataDir: dir } })
+    const dir = sharedPGliteDir()
+    const schemaName = nextSchemaName()
+    const repo = trackRepo(createPGliteOpenArtisanRepository({ connection: { dataDir: dir }, schemaName }))
     expect((await repo.initialize()).ok).toBe(true)
 
     const db = new Kysely<any>({ dialect: new PGliteDialect(new PGlite(join(dir, DEFAULT_OPEN_ARTISAN_DB_FILE_NAME))) })
-    await db.withSchema("open_artisan").insertInto("database_operation_locks").values({
+    await db.withSchema(schemaName).insertInto("database_operation_locks").values({
       lock_key: "open-artisan:repository-operation",
       owner_id: "stale-worker",
       lease_expires_at: "2000-01-01T00:00:00.000Z",
@@ -214,17 +249,19 @@ describe("PGlite Open Artisan repository", () => {
     await db.destroy()
 
     expect((await repo.createWorkflow(workflow())).ok).toBe(true)
+    await repo.dispose()
 
     const readDb = new Kysely<any>({ dialect: new PGliteDialect(new PGlite(join(dir, DEFAULT_OPEN_ARTISAN_DB_FILE_NAME))) })
-    const lockRows = await readDb.withSchema("open_artisan").selectFrom("database_operation_locks").selectAll().execute()
+    const lockRows = await readDb.withSchema(schemaName).selectFrom("database_operation_locks").selectAll().execute()
     await readDb.destroy()
     expect(lockRows).toEqual([])
   })
 
   it("serializes concurrent repository instances that share one PGlite database", async () => {
-    const dir = tempDir()
+    const dir = sharedPGliteDir()
+    const schemaName = nextSchemaName()
     const results = await Promise.all(Array.from({ length: 8 }, (_, index) => {
-      const repo = createPGliteOpenArtisanRepository({ connection: { dataDir: dir } })
+      const repo = trackRepo(createPGliteOpenArtisanRepository({ connection: { dataDir: dir }, schemaName }))
       return repo.createWorkflow(workflow({
         id: `workflow-${index}`,
         featureName: `db-runtime-${index}`,
@@ -232,7 +269,7 @@ describe("PGlite Open Artisan repository", () => {
     }))
 
     expect(results.every((result) => result.ok)).toBe(true)
-    const listed = valueOf(await createPGliteOpenArtisanRepository({ connection: { dataDir: dir } }).listWorkflows())
+    const listed = valueOf(await trackRepo(createPGliteOpenArtisanRepository({ connection: { dataDir: dir }, schemaName })).listWorkflows())
     expect(listed).toHaveLength(8)
   })
 
@@ -486,6 +523,7 @@ describe("PGlite Open Artisan repository", () => {
     expect(events[0]?.toPhase).toBe("IMPLEMENTATION")
     expect(events[0]?.toPhaseState).toBe("SCHEDULING")
     expect(events[0]?.reason).toBe("WorkflowState compatibility import")
+    expect(events[0]?.metadata?.source).toBe("compatibility-import")
   })
 
   it("records workflow transition events from direct phase updates", async () => {
@@ -500,6 +538,7 @@ describe("PGlite Open Artisan repository", () => {
     expect(events[0]?.fromPhaseState).toBe("SCHEDULING")
     expect(events[0]?.toPhaseState).toBe("REVIEW")
     expect(events[0]?.reason).toBe("setWorkflowPhase")
+    expect(events[0]?.metadata?.source).toBe("repository-api")
   })
 
   it("preserves runtime review and observation facts across compatibility state imports", async () => {
@@ -573,6 +612,36 @@ describe("PGlite Open Artisan repository", () => {
     expect(await backend.read("legacy-feature")).toBeNull()
   })
 
+  it("uses repository-backed workflow locks for DB StateBackend compatibility", async () => {
+    const schemaName = nextSchemaName()
+    const repoA = trackRepo(createPGliteOpenArtisanRepository({ connection: { dataDir: sharedPGliteDir() }, schemaName }))
+    const repoB = trackRepo(createPGliteOpenArtisanRepository({ connection: { dataDir: sharedPGliteDir() }, schemaName }))
+    const dir = mkdtempSync(join(tmpdir(), "oa-db-lock-backend-"))
+    tempDirs.push(dir)
+    const holderBackend = createOpenArtisanDbStateBackend(repoA, dir, { lockTimeoutMs: 25, lockPollMs: 5 })
+    const contenderBackend = createOpenArtisanDbStateBackend(repoB, dir, { lockTimeoutMs: 25, lockPollMs: 5 })
+
+    const heldLock = await holderBackend.lock("legacy-feature")
+    await expect(contenderBackend.lock("legacy-feature")).rejects.toThrow("Timed out acquiring DB operation lease")
+    await heldLock.release()
+    const retryLock = await contenderBackend.lock("legacy-feature")
+    await retryLock.release()
+  })
+
+  it("renews repository workflow locks before short leases expire", async () => {
+    const schemaName = nextSchemaName()
+    const repoA = trackRepo(createPGliteOpenArtisanRepository({ connection: { dataDir: sharedPGliteDir() }, schemaName }))
+    const repoB = trackRepo(createPGliteOpenArtisanRepository({ connection: { dataDir: sharedPGliteDir() }, schemaName }))
+
+    const heldLock = valueOf(await repoA.lockWorkflowState("legacy-feature", { leaseMs: 100, timeoutMs: 60, pollMs: 10 }))
+    await sleep(220)
+    const contended = await repoB.lockWorkflowState("legacy-feature", { leaseMs: 100, timeoutMs: 60, pollMs: 10 })
+    expect(contended.ok).toBe(false)
+    await heldLock.release()
+    const retryLock = valueOf(await repoB.lockWorkflowState("legacy-feature", { leaseMs: 100, timeoutMs: 60, pollMs: 10 }))
+    await retryLock.release()
+  })
+
   it("imports legacy filesystem workflow state into the DB compatibility backend", async () => {
     const repo = tempRepo()
     const dir = mkdtempSync(join(tmpdir(), "oa-db-legacy-fs-"))
@@ -629,6 +698,27 @@ describe("PGlite Open Artisan repository", () => {
     expect((await backend.deleteRoadmap()).ok).toBe(true)
     const deleted = await backend.readRoadmap()
     expect(deleted.ok && deleted.value).toBeNull()
+  })
+
+  it("uses repository-backed roadmap locks for DB RoadmapStateBackend compatibility", async () => {
+    const schemaName = nextSchemaName()
+    const repoA = trackRepo(createPGliteOpenArtisanRepository({ connection: { dataDir: sharedPGliteDir() }, schemaName }))
+    const repoB = trackRepo(createPGliteOpenArtisanRepository({ connection: { dataDir: sharedPGliteDir() }, schemaName }))
+    const dir = mkdtempSync(join(tmpdir(), "oa-roadmap-db-lock-backend-"))
+    tempDirs.push(dir)
+    const holderBackend = createOpenArtisanDbRoadmapStateBackend(repoA, dir, { lockTimeoutMs: 25, lockPollMs: 5 })
+    const contenderBackend = createOpenArtisanDbRoadmapStateBackend(repoB, dir, { lockTimeoutMs: 25, lockPollMs: 5 })
+
+    const heldLock = await holderBackend.lockRoadmap()
+    expect(heldLock.ok).toBe(true)
+    if (!heldLock.ok) throw new Error("expected initial roadmap lock acquisition to succeed")
+    const contended = await contenderBackend.lockRoadmap()
+    expect(contended.ok).toBe(false)
+    if (!contended.ok) expect(contended.error.code).toBe("lock-timeout")
+    await heldLock.value.release()
+    const retryLock = await contenderBackend.lockRoadmap()
+    expect(retryLock.ok).toBe(true)
+    if (retryLock.ok) await retryLock.value.release()
   })
 
   it("provides thin service seams over repository operations", async () => {

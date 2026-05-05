@@ -6,7 +6,7 @@ import {
   type RoadmapDocument,
   type RoadmapResult,
   type WorkflowRoadmapLink,
-} from "#core/types"
+} from "#core/roadmap-types"
 
 const NOW = "2026-04-16T00:00:00.000Z"
 

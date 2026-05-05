@@ -20,12 +20,77 @@ import type {
   AnalyzeTaskBoundaryChangeArgs,
   ApplyTaskBoundaryChangeArgs,
 } from "../types"
-import { evaluateMarkSatisfied, countExpectedBlockingCriteria } from "./mark-satisfied"
+import { evaluateMarkSatisfied, countExpectedBlockingCriteria, type MarkSatisfiedResult } from "./mark-satisfied"
+import { processMarkScanComplete } from "./mark-scan-complete"
 import { processMarkAnalyzeComplete } from "./mark-analyze-complete"
 import { getAcceptanceCriteria } from "../hooks/system-transform"
 import { PHASE_TO_ARTIFACT } from "../artifacts"
 import { MAX_REVIEW_ITERATIONS, MAX_FEEDBACK_CHARS, PHASE_ORDER } from "../constants"
 import type { MarkAnalyzeCompleteArgs } from "./mark-analyze-complete"
+import type { MarkScanCompleteArgs } from "./mark-scan-complete"
+
+// ---------------------------------------------------------------------------
+// request_review — shared draft/revision completion transition
+// ---------------------------------------------------------------------------
+
+export interface RequestReviewTransition {
+  event: WorkflowEvent
+  nextPhase: Phase
+  nextPhaseState: PhaseState
+}
+
+export function computeRequestReviewTransition(
+  state: WorkflowState,
+  sm: StateMachine,
+): { success: true; transition: RequestReviewTransition } | { success: false; error: string } {
+  if (state.phaseState === "REVIEW") {
+    return { success: false, error: "request_review resubmission does not use a state-machine transition." }
+  }
+  if (state.phaseState !== "DRAFT" && state.phaseState !== "CONVENTIONS" && state.phaseState !== "REVISE") {
+    return { success: false, error: `request_review can only be called in DRAFT, CONVENTIONS, REVISE, or REVIEW state (current: ${state.phase}/${state.phaseState}).` }
+  }
+  const event: WorkflowEvent = state.phaseState === "REVISE" ? "revision_complete" : "draft_complete"
+  const outcome = sm.transition(state.phase, state.phaseState, event, state.mode)
+  if (!outcome.ok) return { success: false, error: outcome.message }
+  return {
+    success: true,
+    transition: {
+      event,
+      nextPhase: outcome.nextPhase,
+      nextPhaseState: outcome.nextPhaseState,
+    },
+  }
+}
+
+// ---------------------------------------------------------------------------
+// mark_scan_complete — shared DISCOVERY/SCAN transition
+// ---------------------------------------------------------------------------
+
+export interface MarkScanCompleteTransition {
+  nextPhase: Phase
+  nextPhaseState: PhaseState
+  responseMessage: string
+}
+
+export function computeMarkScanCompleteTransition(
+  args: MarkScanCompleteArgs,
+  state: WorkflowState,
+  sm: StateMachine,
+): { success: true; transition: MarkScanCompleteTransition } | { success: false; error: string } {
+  if (state.phase !== "DISCOVERY" || state.phaseState !== "SCAN") {
+    return { success: false, error: `mark_scan_complete can only be called in DISCOVERY/SCAN (current: ${state.phase}/${state.phaseState}).` }
+  }
+  const outcome = sm.transition(state.phase, state.phaseState, "scan_complete", state.mode)
+  if (!outcome.ok) return { success: false, error: outcome.message }
+  return {
+    success: true,
+    transition: {
+      nextPhase: outcome.nextPhase,
+      nextPhaseState: outcome.nextPhaseState,
+      responseMessage: processMarkScanComplete(args).responseMessage,
+    },
+  }
+}
 
 // ---------------------------------------------------------------------------
 // mark_satisfied — agent self-review (no isolated reviewer)
@@ -35,6 +100,7 @@ export interface MarkSatisfiedTransition {
   nextPhase: Phase
   nextPhaseState: PhaseState
   nextIterationCount: number
+  event: WorkflowEvent
   responseMessage: string
   latestReviewResults: Array<{ criterion: string; met: boolean; evidence: string; score?: string }>
   clearReviewArtifactHash: boolean
@@ -131,6 +197,15 @@ export function computeMarkSatisfiedTransition(
   const iterationInfo = { current: state.iterationCount + 1, max: MAX_REVIEW_ITERATIONS }
   const result = evaluateMarkSatisfied({ criteria_met: criteriaMet }, expectedBlocking, iterationInfo)
 
+  return computeMarkSatisfiedTransitionFromResult(result, criteriaMet, state, sm)
+}
+
+export function computeMarkSatisfiedTransitionFromResult(
+  result: MarkSatisfiedResult,
+  criteriaMet: Array<{ criterion: string; met: boolean; evidence: string; score?: string | number }>,
+  state: WorkflowState,
+  sm: StateMachine,
+): { success: true; transition: MarkSatisfiedTransition } | { success: false; error: string } {
   const nextIterationCount = result.passed ? 0 : state.iterationCount + 1
   const hitCap = !result.passed && nextIterationCount >= MAX_REVIEW_ITERATIONS
   const event: WorkflowEvent = result.passed ? "self_review_pass" : hitCap ? "escalate_to_user" : "self_review_fail"
@@ -143,6 +218,7 @@ export function computeMarkSatisfiedTransition(
       nextPhase: outcome.nextPhase,
       nextPhaseState: outcome.nextPhaseState,
       nextIterationCount,
+      event,
       responseMessage: result.responseMessage,
       latestReviewResults: criteriaMet.map((c) => ({
         criterion: c.criterion,
@@ -192,6 +268,51 @@ export function computeMarkAnalyzeCompleteTransition(
       nextPhaseState: outcome.nextPhaseState,
       analysisSummary: args.analysis_summary?.trim() || null,
       responseMessage: result.responseMessage,
+    },
+  }
+}
+
+// ---------------------------------------------------------------------------
+// submit_feedback(approve) — shared approval state-machine transition
+// ---------------------------------------------------------------------------
+
+export interface SubmitFeedbackApproveTransition {
+  nextPhase: Phase
+  nextPhaseState: PhaseState
+  phaseCount: number
+  newApprovalCount: number
+  artifactKey: ArtifactKey | null
+  responseMessage: string
+}
+
+/**
+ * Compute the structural approval transition. Adapter-specific approval side
+ * effects (checkpoints, allowlists, DAG parsing, artifact markers) stay in the
+ * caller because they depend on platform/runtime services.
+ */
+export function computeSubmitFeedbackApproveTransition(
+  state: WorkflowState,
+  sm: StateMachine,
+): { success: true; transition: SubmitFeedbackApproveTransition } | { success: false; error: string } {
+  if (state.phaseState !== "USER_GATE") {
+    return {
+      success: false,
+      error: `submit_feedback(approve) can only approve from USER_GATE (current: ${state.phase}/${state.phaseState}).`,
+    }
+  }
+
+  const outcome = sm.transition(state.phase, state.phaseState, "user_approve", state.mode)
+  if (!outcome.ok) return { success: false, error: outcome.message }
+
+  return {
+    success: true,
+    transition: {
+      nextPhase: outcome.nextPhase,
+      nextPhaseState: outcome.nextPhaseState,
+      phaseCount: (state.phaseApprovalCounts[state.phase] ?? 0) + 1,
+      newApprovalCount: state.approvalCount + 1,
+      artifactKey: PHASE_TO_ARTIFACT[state.phase] ?? null,
+      responseMessage: `Approved. Transitioning to ${outcome.nextPhase}/${outcome.nextPhaseState}. Continue immediately in this same turn; do not stop.`,
     },
   }
 }

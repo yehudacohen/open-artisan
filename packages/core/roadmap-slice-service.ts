@@ -15,8 +15,8 @@ import type {
   RoadmapResult,
   RoadmapSliceService,
   RoadmapStateBackend,
-} from "./types"
-import { roadmapError, roadmapOk } from "./types"
+} from "./roadmap-types"
+import { roadmapError, roadmapOk } from "./roadmap-types"
 
 type RoadmapQuerySource = Pick<RoadmapRepository, "queryRoadmapItems">
 

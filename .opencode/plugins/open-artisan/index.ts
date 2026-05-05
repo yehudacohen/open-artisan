@@ -51,16 +51,14 @@ import {
 
 // Tool handlers
 import { parseSelectModeArgs, buildSelectModeResponse } from "../../../packages/core/tools/select-mode"
-import { processMarkScanComplete } from "../../../packages/core/tools/mark-scan-complete"
-import { processMarkAnalyzeComplete } from "../../../packages/core/tools/mark-analyze-complete"
 import { evaluateMarkSatisfied, countExpectedBlockingCriteria } from "../../../packages/core/tools/mark-satisfied"
 import { processRequestReview } from "../../../packages/core/tools/request-review"
-import { isEscapeHatchClarificationFeedback, isUserGateMetaFeedback, processSubmitFeedback, stripWorkflowRoutingNotes } from "../../../packages/core/tools/submit-feedback"
-import { processMarkTaskComplete } from "../../../packages/core/tools/mark-task-complete"
+import { buildSubmitFeedbackClarificationMessage, findReviewedArtifactFilesOutsideAllowlist, findUnresolvedHumanGates, materializeImplPlanDag, normalizeApprovalFilePaths, processSubmitFeedback, resolveSubmitFeedbackHumanGates, stripWorkflowRoutingNotes, validateSubmitFeedbackGate, validateSubmitFeedbackImplPlanApproval } from "../../../packages/core/tools/submit-feedback"
+import { processMarkTaskComplete, validateMarkTaskCompletePhase } from "../../../packages/core/tools/mark-task-complete"
 import { processSpawnSubWorkflow, SPAWN_SUB_WORKFLOW_DESCRIPTION } from "../../../packages/core/tools/spawn-sub-workflow"
 import { processQueryParentWorkflow, processQueryChildWorkflow, QUERY_PARENT_WORKFLOW_DESCRIPTION, QUERY_CHILD_WORKFLOW_DESCRIPTION } from "../../../packages/core/tools/query-workflow"
 import { applyChildCompletion, findTimedOutChildren, applyDelegationTimeout, syncChildWorkflowsWithDag } from "../../../packages/core/tools/complete-sub-workflow"
-import { analyzeTaskBoundaryChange, applyTaskBoundaryChange } from "../../../packages/core/tools/transitions"
+import { analyzeTaskBoundaryChange, applyTaskBoundaryChange, computeMarkAnalyzeCompleteTransition, computeMarkSatisfiedTransitionFromResult, computeMarkScanCompleteTransition, computeRequestReviewTransition, computeSubmitFeedbackApproveTransition } from "../../../packages/core/tools/transitions"
 import { handleProposeBacktrack } from "../../../packages/core/tools/propose-backtrack"
 
 // Orchestrator (Layer 2)
@@ -73,13 +71,12 @@ import { createOpenCodeSubagentDispatcher } from "./opencode-subagent-dispatcher
 import { getAcceptanceCriteria } from "../../../packages/core/hooks/system-transform"
 import { runDiscoveryFleet } from "../../../packages/core/discovery/index"
 import { createPluginHooks } from "./plugin-hooks"
-import { parseImplPlan, validateExecutableImplPlan } from "../../../packages/core/impl-plan-parser"
 import { createImplDAG, type TaskCategory, type HumanGateInfo } from "../../../packages/core/dag"
-import { nextSchedulerDecision, nextSchedulerDecisionForInput, readDecisionInput, resolveHumanGate } from "../../../packages/core/scheduler"
+import { nextSchedulerDecision, nextSchedulerDecisionForInput, readDecisionInput } from "../../../packages/core/scheduler"
 import { resolveArtifactPaths } from "../../../packages/core/tools/artifact-paths"
 import { validateFileBasedReviewArtifacts } from "../../../packages/core/tools/file-artifact-validation"
 import { writeArtifact, detectDesignDoc } from "../../../packages/core/artifact-store"
-import { dispatchTaskReview, type AdjacentTask } from "../../../packages/core/task-review"
+import { buildAdjacentTasksForTask, dispatchTaskReview } from "../../../packages/core/task-review"
 import { dispatchDriftCheck } from "../../../packages/core/task-drift"
 import { collectWorktreeObservations } from "../../../packages/core/worktree-observation"
 import {
@@ -796,7 +793,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
           if (isSubWorkflow && state.featureName) {
             featureName = state.featureName
           } else {
-            featureName = args.feature_name?.trim() || null
+            featureName = parsed.featureName
             if (!featureName) {
               return "Error: feature_name is required. Provide a short kebab-case slug derived from the user's request (e.g. 'cloud-cost-platform')."
             }
@@ -1027,22 +1024,18 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
           const state = await ensureState(store, sessionId, notify)
           await detectActiveAgent(store, sessionId, context)
 
-          if (state.phase !== "DISCOVERY" || state.phaseState !== "SCAN") {
-            return `Error: mark_scan_complete can only be called in DISCOVERY/SCAN (current: ${state.phase}/${state.phaseState}).`
-          }
+          const result = computeMarkScanCompleteTransition(args, state, sm)
+          if (!result.success) return `Error: ${result.error}`
+          const t = result.transition
 
-          const outcome = sm.transition(state.phase, state.phaseState, "scan_complete", state.mode)
-          if (!outcome.ok) return `Error: ${outcome.message}`
-
-          logTransition(state, outcome, "mark_scan_complete", notify)
+          logTransition(state, { nextPhase: t.nextPhase, nextPhaseState: t.nextPhaseState }, "mark_scan_complete", notify)
           await store.update(sessionId, (draft) => {
-            draft.phase = outcome.nextPhase
-            draft.phaseState = outcome.nextPhaseState
+            draft.phase = t.nextPhase
+            draft.phaseState = t.nextPhaseState
             draft.retryCount = 0
           })
 
-          const result = processMarkScanComplete(args)
-          return result.responseMessage
+          return t.responseMessage
         },
       }),
 
@@ -1066,12 +1059,9 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
           const state = await ensureState(store, sessionId, notify)
           await detectActiveAgent(store, sessionId, context)
 
-          if (state.phase !== "DISCOVERY" || state.phaseState !== "ANALYZE") {
-            return `Error: mark_analyze_complete can only be called in DISCOVERY/ANALYZE (current: ${state.phase}/${state.phaseState}).`
-          }
-
-          const outcome = sm.transition(state.phase, state.phaseState, "analyze_complete", state.mode)
-          if (!outcome.ok) return `Error: ${outcome.message}`
+          const result = computeMarkAnalyzeCompleteTransition(args, state, sm)
+          if (!result.success) return `Error: ${result.error}`
+          const t = result.transition
 
           // Layer 3 — Discovery fleet: dispatch 6 parallel scanner subagents.
           // This runs BEFORE the state transition so the report is available
@@ -1118,10 +1108,10 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
           }
 
           // Single atomic update: phase transition + fleet report together
-          logTransition(state, outcome, "mark_analyze_complete", notify)
+          logTransition(state, { nextPhase: t.nextPhase, nextPhaseState: t.nextPhaseState }, "mark_analyze_complete", notify)
           await store.update(sessionId, (draft) => {
-            draft.phase = outcome.nextPhase
-            draft.phaseState = outcome.nextPhaseState
+            draft.phase = t.nextPhase
+            draft.phaseState = t.nextPhaseState
             draft.retryCount = 0
             if (fleetReport !== null) {
               draft.discoveryReport = fleetReport
@@ -1131,8 +1121,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             }
           })
 
-          const result = processMarkAnalyzeComplete(args)
-          return result.responseMessage + fleetMsg
+          return t.responseMessage + fleetMsg
         },
       }),
 
@@ -1429,16 +1418,12 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             // If reviewer never ran (no criteriaText), result is agent's self-report.
           }
 
-          // Iteration cap: if self-review has failed MAX_REVIEW_ITERATIONS times
-          // already, escalate to USER_GATE instead of looping again. The user can
-          // provide direction that the agent cannot resolve autonomously.
-          const nextIterationCount = result.passed ? 0 : state.iterationCount + 1
-          const hitIterationCap = !result.passed && nextIterationCount >= MAX_REVIEW_ITERATIONS
-
-          // Force escalation to USER_GATE if cap reached (M12: dedicated escalate_to_user event).
-          const event = result.passed ? "self_review_pass" : hitIterationCap ? "escalate_to_user" : "self_review_fail"
-          const outcome = sm.transition(state.phase, state.phaseState, event, state.mode)
-          if (!outcome.ok) return `Error: ${outcome.message}`
+          const transition = computeMarkSatisfiedTransitionFromResult(result, parsedArgs.criteria_met, state, sm)
+          if (!transition.success) return `Error: ${transition.error}`
+          const t = transition.transition
+          const event = t.event
+          const outcome = { nextPhase: t.nextPhase, nextPhaseState: t.nextPhaseState }
+          const hitIterationCap = event === "escalate_to_user"
 
           logTransition(state, outcome, `mark_satisfied/${event}`, notify)
           await persistPhaseReviewResult(runtimeBackend.services, state, parsedArgs.criteria_met.map((criterion) => ({
@@ -1449,24 +1434,19 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             ...(criterion.score !== undefined ? { score: Number(criterion.score) } : {}),
           })), JSON.stringify(parsedArgs.criteria_met))
           await store.update(sessionId, (draft) => {
-            draft.phase = outcome.nextPhase
-            draft.phaseState = outcome.nextPhaseState
-            draft.iterationCount = nextIterationCount
+            draft.phase = t.nextPhase
+            draft.phaseState = t.nextPhaseState
+            draft.iterationCount = t.nextIterationCount
             draft.retryCount = 0
             // Store latest review results for the status file (Change 5)
-            draft.latestReviewResults = parsedArgs.criteria_met.map((c) => ({
-              criterion: c.criterion,
-              met: c.met,
-              evidence: c.evidence,
-              ...(c.score !== undefined ? { score: String(c.score) } : {}),
-            }))
+            draft.latestReviewResults = t.latestReviewResults
             // Clear reviewArtifactHash when leaving REVIEW
-            if (outcome.nextPhaseState !== "REVIEW") {
+            if (t.clearReviewArtifactHash) {
               draft.reviewArtifactHash = null
             }
             // Reset the user gate flag whenever we enter USER_GATE so the agent
             // cannot reuse a stale approval signal from a previous gate.
-            if (outcome.nextPhaseState === "USER_GATE") {
+            if (t.resetUserGateMessage) {
               draft.userGateMessageReceived = false
             }
             // self_review_fail now routes to REVISE: the agent addresses the
@@ -1476,7 +1456,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             // Clear revision baseline for review-fail REVISE — the diff gate should
             // NOT block request_review here. The agent needs to address the reviewer's
             // feedback and re-submit, not prove the artifact changed from a baseline.
-            if (outcome.nextPhaseState === "REVISE") {
+            if (t.clearRevisionBaseline) {
               draft.revisionBaseline = null
             }
           })
@@ -1769,13 +1749,8 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
           const state = await ensureState(store, sessionId, notify)
           await detectActiveAgent(store, sessionId, context)
 
-          if (state.phase !== "IMPLEMENTATION") {
-            return `Error: mark_task_complete can only be called during the IMPLEMENTATION phase (current: ${state.phase}).`
-          }
-
-          if (state.phaseState !== "DRAFT" && state.phaseState !== "REVISE") {
-            return `Error: mark_task_complete can only be called in DRAFT or REVISE state (current: ${state.phase}/${state.phaseState}).`
-          }
+          const phaseError = validateMarkTaskCompletePhase(state)
+          if (phaseError) return `Error: ${phaseError}`
 
           // Re-entry guard (14.1): prevent concurrent mark_task_complete calls.
           // Per-task review + DAG mutation is not atomic — concurrent calls could
@@ -1812,35 +1787,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             const reviewCapped = state.taskReviewCount + 1 >= MAX_TASK_REVIEW_ITERATIONS
             const taskNode = state.implDag?.find((t) => t.id === args.task_id)
             if (taskNode && !reviewCapped) {
-              // Compute adjacent tasks for integration seam checking
-              const adjacentTasks: AdjacentTask[] = []
-              if (state.implDag) {
-                // Upstream: tasks this task depends on (direct dependencies only)
-                for (const depId of taskNode.dependencies) {
-                  const dep = state.implDag.find((t) => t.id === depId)
-                  if (dep) {
-                    adjacentTasks.push({
-                      id: dep.id,
-                      description: dep.description,
-                      ...(dep.category ? { category: dep.category } : {}),
-                      status: dep.status,
-                      direction: "upstream",
-                    })
-                  }
-                }
-                // Downstream: tasks that directly depend on this task
-                for (const t of state.implDag) {
-                  if (t.dependencies.includes(taskNode.id)) {
-                    adjacentTasks.push({
-                      id: t.id,
-                      description: t.description,
-                      ...(t.category ? { category: t.category } : {}),
-                      status: t.status,
-                      direction: "downstream",
-                    })
-                  }
-                }
-              }
+              const adjacentTasks = buildAdjacentTasksForTask(state.implDag, taskNode.id)
 
               const reviewCwd = context.directory || process.cwd()
               const workflowId = workflowDbId(state)
@@ -2460,8 +2407,10 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             }
           }
 
-          const event = state.phaseState === "REVISE" ? "revision_complete" : "draft_complete"
-            const artifactValidationError = validateFileBasedReviewArtifacts({
+          const transition = computeRequestReviewTransition(state, sm)
+          if (!transition.success) return `Error: ${transition.error}`
+          const t = transition.transition
+          const artifactValidationError = validateFileBasedReviewArtifacts({
               phase: state.phase,
               artifactFiles,
               cwd,
@@ -2469,10 +2418,9 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             })
           if (artifactValidationError) return `Error: ${artifactValidationError}`
 
-          const outcome = sm.transition(state.phase, state.phaseState, event, state.mode)
-          if (!outcome.ok) return `Error: ${outcome.message}`
+          const outcome = { nextPhase: t.nextPhase, nextPhaseState: t.nextPhaseState }
 
-          logTransition(state, outcome, `request_review/${event}`, notify)
+          logTransition(state, outcome, `request_review/${t.event}`, notify)
           let artifactDiskPath: string | null = null
           const artifactKey = PHASE_TO_ARTIFACT[state.phase]
           if (artifactKey && artifactKey !== "implementation") {
@@ -2557,24 +2505,13 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
           await detectActiveAgent(store, sessionId, context)
           args.feedback_text = stripWorkflowRoutingNotes(args.feedback_text)
 
-          if (state.phaseState !== "USER_GATE" && state.phaseState !== "ESCAPE_HATCH" && state.phaseState !== "HUMAN_GATE") {
-            return `Error: submit_feedback can only be called at USER_GATE, ESCAPE_HATCH, or HUMAN_GATE (current: ${state.phaseState}).`
-          }
+          const gateError = validateSubmitFeedbackGate(state.phaseState)
+          if (gateError) return `Error: ${gateError}`
 
           const result = processSubmitFeedback(args)
 
-          if (result.feedbackType === "revise" && state.phaseState === "USER_GATE" && isUserGateMetaFeedback(result.feedbackText)) {
-            return (
-              "That message looks like a clarification/status question, not artifact revision feedback. " +
-              "Do not change workflow state; answer the user's question normally and continue waiting at USER_GATE for an explicit approval or revision request."
-            )
-          }
-          if (result.feedbackType === "revise" && state.phaseState === "ESCAPE_HATCH" && isEscapeHatchClarificationFeedback(result.feedbackText)) {
-            return (
-              "That message looks like an escape-hatch clarification question, not an escape-hatch decision. " +
-              "Do not change workflow state; explain the options normally and continue waiting at ESCAPE_HATCH for an explicit decision."
-            )
-          }
+          const clarificationMessage = buildSubmitFeedbackClarificationMessage(result.feedbackType, state.phaseState, result.feedbackText)
+          if (clarificationMessage) return clarificationMessage
 
           if (result.feedbackType === "approve") {
             const resolvedHumanGates = Array.isArray(args.resolved_human_gates) ? args.resolved_human_gates : []
@@ -2607,43 +2544,9 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             // This is a special approval path — we resolve the gates and return to DRAFT to
             // continue implementation (not advance to the next phase).
             if (state.phase === "IMPLEMENTATION" && state.implDag && resolvedHumanGates.length > 0) {
-              const dag = createImplDAG(Array.from(state.implDag))
-              const resolvedIds: string[] = []
-              const errors: string[] = []
-
-              for (const gateId of resolvedHumanGates) {
-                const resolved = resolveHumanGate(dag, gateId)
-                if (resolved) {
-                  resolvedIds.push(gateId)
-                } else {
-                  const task = Array.from(dag.tasks).find((t) => t.id === gateId)
-                  if (!task) {
-                    errors.push(`Task "${gateId}" not found in DAG`)
-                  } else if (task.status !== "human-gated") {
-                    errors.push(`Task "${gateId}" is not human-gated (status: ${task.status})`)
-                  }
-                }
-              }
-
-              if (errors.length > 0) {
-                return `Error resolving human gates:\n${errors.map((e) => `  - ${e}`).join("\n")}`
-              }
-
-              // Check if there's still work to do after resolving gates
-              const updatedNodes = Array.from(dag.tasks).map((t) => ({
-                ...t,
-                ...(t.humanGate ? { humanGate: { ...t.humanGate } } : {}),
-              }))
-              const evaluation = nextSchedulerDecisionForInput(readDecisionInput({
-                implDag: updatedNodes,
-                concurrency: state.concurrency,
-              }))
-              const nextDecision = evaluation.decision
-
-              // Check for any remaining unresolved human gates
-              const remainingGates = Array.from(dag.tasks).filter(
-                (t) => t.status === "human-gated" && (!t.humanGate || !t.humanGate.resolved),
-              )
+              const resolutionResult = resolveSubmitFeedbackHumanGates(state, resolvedHumanGates)
+              if (!resolutionResult.success) return resolutionResult.error
+              const { resolvedIds, updatedNodes, remainingGates, nextDecision } = resolutionResult.resolution
 
               if (remainingGates.length > 0) {
                 // Still have unresolved gates — warn the user
@@ -2731,8 +2634,9 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
               }
             }
 
-            const outcome = sm.transition(state.phase, state.phaseState, "user_approve", state.mode)
-            if (!outcome.ok) return `Error: ${outcome.message}`
+            const approvalResult = computeSubmitFeedbackApproveTransition(state, sm)
+            if (!approvalResult.success) return `Error: ${approvalResult.error}`
+            const approval = approvalResult.transition
 
             // Guard: block approval at IMPLEMENTATION/USER_GATE if unresolved human gates exist
             // and the user didn't provide resolved_human_gates. The user must explicitly confirm
@@ -2742,9 +2646,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
               state.implDag &&
               (!args.resolved_human_gates || args.resolved_human_gates.length === 0)
             ) {
-              const unresolvedGates = state.implDag.filter(
-                (t) => t.status === "human-gated" && (!t.humanGate || !t.humanGate.resolved),
-              )
+              const unresolvedGates = findUnresolvedHumanGates(state)
               if (unresolvedGates.length > 0) {
                 const gateList = unresolvedGates
                   .map((t) => `  - **${t.id}:** ${t.humanGate?.whatIsNeeded ?? t.description}\n    Verify: ${t.humanGate?.verificationSteps ?? "N/A"}`)
@@ -2812,12 +2714,12 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
               )
             }
 
-            logTransition(state, outcome, "submit_feedback/approve", notify)
+            logTransition(state, approval, "submit_feedback/approve", notify)
 
             const deriveIncrementalAllowlist = async (): Promise<string[]> => {
               const cwd = context.directory || process.cwd()
               if (args.approved_files) {
-                return args.approved_files.map((p) => p.startsWith("/") ? p : resolve(cwd, p))
+                return normalizeApprovalFilePaths(args.approved_files, cwd)
               }
               let planContent: string | undefined
               if (state.artifactDiskPaths.plan) {
@@ -2829,20 +2731,6 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
               }
               return planContent ? extractApprovedFileAllowlist(planContent, cwd) : []
             }
-            const validateReviewedArtifactFilesAgainstAllowlist = (allowlist: string[]): string[] => {
-              if (state.reviewArtifactFiles.length === 0) return []
-              const cwd = context.directory || process.cwd()
-              const normalizedAllowlist = new Set(allowlist.map((path) => path.startsWith("/") ? path : resolve(cwd, path)))
-              const artifactPaths = new Set(
-                Object.values(state.artifactDiskPaths)
-                  .filter((path): path is string => typeof path === "string"),
-              )
-              return state.reviewArtifactFiles
-                .map((path) => path.startsWith("/") ? path : resolve(cwd, path))
-                .filter((path) => !artifactPaths.has(path))
-                .filter((path) => !normalizedAllowlist.has(path))
-            }
-
             // Forward-pass skip: in INCREMENTAL mode, if the fileAllowlist proves
             // the next phase has no relevant files (e.g. no interface files for
             // INTERFACES), skip directly past it. This avoids forcing the agent
@@ -2883,7 +2771,12 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
               state.mode === "INCREMENTAL" &&
               (state.phase === "INTERFACES" || state.phase === "TESTS")
             ) {
-              const reviewedOutsideAllowlist = validateReviewedArtifactFilesAgainstAllowlist(effectiveAllowlist)
+              const reviewedOutsideAllowlist = findReviewedArtifactFilesOutsideAllowlist({
+                reviewArtifactFiles: state.reviewArtifactFiles,
+                artifactDiskPaths: state.artifactDiskPaths,
+                allowlist: effectiveAllowlist,
+                cwd: context.directory || process.cwd(),
+              })
               if (reviewedOutsideAllowlist.length > 0) {
                 return (
                   `Error: ${state.phase} approval failed allowlist validation: reviewed artifact files fall outside the approved INCREMENTAL allowlist: ` +
@@ -2892,20 +2785,20 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
               }
             }
             const shouldDeferForwardSkipToStructuralState =
-              outcome.nextPhaseState === "SKIP_CHECK" || outcome.nextPhaseState === "SCHEDULING"
+              approval.nextPhaseState === "SKIP_CHECK" || approval.nextPhaseState === "SCHEDULING"
             const forwardSkip = shouldDeferForwardSkipToStructuralState
               ? null
               : computeForwardSkip(
-                  outcome.nextPhase,
+                  approval.nextPhase,
                   state.mode,
                   effectiveAllowlist,
                 )
-            const effectiveNextPhase = forwardSkip?.targetPhase ?? outcome.nextPhase
-            const effectiveNextPhaseState = forwardSkip?.targetPhaseState ?? outcome.nextPhaseState
+            const effectiveNextPhase = forwardSkip?.targetPhase ?? approval.nextPhase
+            const effectiveNextPhaseState = forwardSkip?.targetPhaseState ?? approval.nextPhaseState
 
             // Git checkpoint — use per-phase approval count for tag versioning (M11)
-            const phaseCount = (state.phaseApprovalCounts[state.phase] ?? 0) + 1
-            const newApprovalCount = state.approvalCount + 1
+            const phaseCount = approval.phaseCount
+            const newApprovalCount = approval.newApprovalCount
             const expectedFiles = deriveExpectedFiles(state)
             const checkpointOpts = {
               phase: state.phase,
@@ -2995,13 +2888,10 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
               // stays null and the agent falls back to sequential task execution without
               // DAG tracking.
               if (state.phase === "IMPL_PLAN" && implPlanContentForApproval) {
-                const parseResult = parseImplPlan(implPlanContentForApproval)
-                if (parseResult.success) {
-                  const nodes = Array.from(parseResult.dag.tasks).map((t) => ({ ...t }))
-                  draft.implDag = nodes
-                  // M8: Set currentTaskId to the first ready task from the DAG
-                  const firstReady = nodes.find((t) => t.status === "pending" && t.dependencies.length === 0)
-                  draft.currentTaskId = firstReady?.id ?? null
+                const materialized = materializeImplPlanDag(implPlanContentForApproval)
+                if (materialized) {
+                  draft.implDag = materialized.nodes
+                  draft.currentTaskId = materialized.currentTaskId
                 } else {
                   draft.implDag = null
                 }
@@ -3083,25 +2973,14 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                 }
                 // Justification accepted — skip DAG parsing (no artifact to parse)
               } else {
-                const parseCheck = parseImplPlan(implPlanContentForApproval)
-                if (!parseCheck.success) {
-                  return (
-                    `Error: Failed to parse implementation plan into DAG: ${parseCheck.errors.join("; ")}. ` +
-                    `Fix the plan format and re-submit approval with a corrected on-disk implementation plan.`
-                  )
-                }
-                const contractErrors = validateExecutableImplPlan(
-                  implPlanContentForApproval,
-                  state.mode,
+                const implPlanApprovalError = validateSubmitFeedbackImplPlanApproval({
+                  planContent: implPlanContentForApproval,
+                  mode: state.mode,
                   effectiveAllowlist,
-                  context.directory || process.cwd(),
-                )
-                if (contractErrors.length > 0) {
-                  return (
-                    `Error: IMPL_PLAN approval failed executable-contract validation: ${contractErrors.join("; ")}. ` +
-                    `Fix the plan metadata or expand the approved allowlist before approving this implementation plan.`
-                  )
-                }
+                  cwd: context.directory || process.cwd(),
+                  parseFixInstruction: "Fix the plan format and re-submit approval with a corrected on-disk implementation plan.",
+                })
+                if (implPlanApprovalError) return `Error: ${implPlanApprovalError}`
               }
             }
 

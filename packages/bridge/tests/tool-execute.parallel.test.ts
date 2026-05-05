@@ -34,11 +34,12 @@ function makeBridgeContext(): BridgeContext {
 beforeEach(async () => {
   tmpDir = await mkdtemp(join(tmpdir(), "bridge-parallel-"))
   ctx = makeBridgeContext()
-  await handleInit({ projectDir: tmpDir }, ctx)
+  await handleInit({ projectDir: tmpDir, persistence: { kind: "filesystem" } }, ctx)
   await handleSessionCreated({ sessionId: "s1", agent: "hermes" }, ctx)
 })
 
 afterEach(async () => {
+  await ctx.runtimeBackendDispose?.()
   await rm(tmpDir, { recursive: true, force: true })
 })
 

@@ -4,8 +4,11 @@
  */
 import { describe, expect, it } from "bun:test"
 import {
+  computeMarkScanCompleteTransition,
   computeMarkSatisfiedTransition,
   computeMarkAnalyzeCompleteTransition,
+  computeRequestReviewTransition,
+  computeSubmitFeedbackApproveTransition,
   computeSubmitFeedbackReviseTransition,
   computeProposeBacktrackTransition,
 } from "#core/tools/transitions"
@@ -71,6 +74,59 @@ function makeState(overrides: Partial<WorkflowState> = {}): WorkflowState {
     ...overrides,
   }
 }
+
+// ---------------------------------------------------------------------------
+// computeMarkScanCompleteTransition
+// ---------------------------------------------------------------------------
+
+describe("computeMarkScanCompleteTransition", () => {
+  it("transitions from DISCOVERY/SCAN to ANALYZE", () => {
+    const state = makeState({ phase: "DISCOVERY", phaseState: "SCAN", mode: "REFACTOR" })
+    const result = computeMarkScanCompleteTransition({ scan_summary: "Scanned source" }, state, sm)
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    expect(result.transition.nextPhase).toBe("DISCOVERY")
+    expect(result.transition.nextPhaseState).toBe("ANALYZE")
+    expect(result.transition.responseMessage).toContain("Scan complete")
+  })
+
+  it("rejects when not in DISCOVERY/SCAN", () => {
+    const result = computeMarkScanCompleteTransition({ scan_summary: "x" }, makeState(), sm)
+    expect(result.success).toBe(false)
+    if (result.success) return
+    expect(result.error).toContain("DISCOVERY/SCAN")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// computeRequestReviewTransition
+// ---------------------------------------------------------------------------
+
+describe("computeRequestReviewTransition", () => {
+  it("uses draft_complete outside REVISE", () => {
+    const state = makeState({ phase: "PLANNING", phaseState: "DRAFT", mode: "GREENFIELD" })
+    const result = computeRequestReviewTransition(state, sm)
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    expect(result.transition.event).toBe("draft_complete")
+    expect(result.transition.nextPhase).toBe("PLANNING")
+    expect(result.transition.nextPhaseState).toBe("REVIEW")
+  })
+
+  it("uses revision_complete from REVISE", () => {
+    const state = makeState({ phase: "PLANNING", phaseState: "REVISE", mode: "GREENFIELD" })
+    const result = computeRequestReviewTransition(state, sm)
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    expect(result.transition.event).toBe("revision_complete")
+    expect(result.transition.nextPhaseState).toBe("REVIEW")
+  })
+
+  it("rejects REVIEW resubmission path", () => {
+    const result = computeRequestReviewTransition(makeState({ phaseState: "REVIEW" }), sm)
+    expect(result.success).toBe(false)
+  })
+})
 
 // ---------------------------------------------------------------------------
 // computeMarkSatisfiedTransition
@@ -211,6 +267,31 @@ describe("computeMarkAnalyzeCompleteTransition", () => {
 })
 
 // ---------------------------------------------------------------------------
+// computeSubmitFeedbackApproveTransition
+// ---------------------------------------------------------------------------
+
+describe("computeSubmitFeedbackApproveTransition", () => {
+  it("transitions from USER_GATE to the next phase", () => {
+    const state = makeState({ phase: "PLANNING", phaseState: "USER_GATE", approvalCount: 2, phaseApprovalCounts: { PLANNING: 1 } })
+    const result = computeSubmitFeedbackApproveTransition(state, sm)
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    expect(result.transition.nextPhase).toBe("INTERFACES")
+    expect(result.transition.nextPhaseState).toBe("DRAFT")
+    expect(result.transition.phaseCount).toBe(2)
+    expect(result.transition.newApprovalCount).toBe(3)
+    expect(result.transition.artifactKey).toBe("plan")
+  })
+
+  it("rejects approval outside persisted USER_GATE", () => {
+    const result = computeSubmitFeedbackApproveTransition(makeState({ phaseState: "REVIEW" }), sm)
+    expect(result.success).toBe(false)
+    if (result.success) return
+    expect(result.error).toContain("USER_GATE")
+  })
+})
+
+// ---------------------------------------------------------------------------
 // computeSubmitFeedbackReviseTransition
 // ---------------------------------------------------------------------------
 
@@ -332,4 +413,3 @@ describe("computeProposeBacktrackTransition", () => {
     expect(result.error).toContain("DRAFT or REVISE")
   })
 })
-

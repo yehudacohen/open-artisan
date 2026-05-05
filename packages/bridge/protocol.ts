@@ -50,7 +50,7 @@ export interface LifecycleInitParams {
   socketPath?: string
   /** Whether to publish shared runtime metadata and a PID file. Defaults to true for backward compatibility. */
   registerRuntime?: boolean
-  /** Workflow state persistence backend. Defaults to filesystem unless OPENARTISAN_STATE_BACKEND=db is set. */
+  /** Workflow state persistence backend. Defaults to DB/PGlite; set filesystem for legacy opt-out. */
   persistence?: {
     kind?: "filesystem" | "db" | "pglite"
     pglite?: {

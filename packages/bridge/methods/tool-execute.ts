@@ -14,7 +14,7 @@ import { JSONRPCErrorException } from "json-rpc-2.0"
 import type { MethodHandler, BridgeContext } from "../server"
 import type { ToolExecuteParams } from "../protocol"
 import { SESSION_NOT_FOUND, INVALID_PARAMS } from "../protocol"
-import type { ArtifactKey, WorkflowState } from "../../core/types"
+import type { AnalyzeTaskBoundaryChangeArgs, ApplyTaskBoundaryChangeArgs, ArtifactKey, WorkflowState } from "../../core/types"
 import type { OpenArtisanServices } from "../../core/open-artisan-services"
 
 import { createHash } from "node:crypto"
@@ -22,16 +22,17 @@ import { resolve } from "node:path"
 import { readFileSync } from "node:fs"
 import { readFile } from "node:fs/promises"
 import { parseSelectModeArgs } from "../../core/tools/select-mode"
-import { processMarkScanComplete } from "../../core/tools/mark-scan-complete"
-import { processMarkTaskComplete } from "../../core/tools/mark-task-complete"
-import { buildTaskReviewPrompt, parseTaskReviewResult } from "../../core/task-review"
-import type { AdjacentTask } from "../../core/task-review"
+import { processMarkTaskComplete, validateMarkTaskCompletePhase } from "../../core/tools/mark-task-complete"
+import { buildAdjacentTasksForTask, buildTaskReviewPrompt, parseTaskReviewResult } from "../../core/task-review"
 import { buildReviewPrompt, parseReviewResult } from "../../core/self-review"
 import { MAX_TASK_REVIEW_ITERATIONS } from "../../core/constants"
 import { processQueryParentWorkflow, processQueryChildWorkflow } from "../../core/tools/query-workflow"
 import {
+  computeMarkScanCompleteTransition,
   computeMarkSatisfiedTransition,
   computeMarkAnalyzeCompleteTransition,
+  computeRequestReviewTransition,
+  computeSubmitFeedbackApproveTransition,
   computeSubmitFeedbackReviseTransition,
   computeProposeBacktrackTransition,
 } from "../../core/tools/transitions"
@@ -40,10 +41,9 @@ import { createGitCheckpoint } from "../../core/hooks/git-checkpoint"
 import type { AutoApproveResult } from "../../core/auto-approve"
 import { extractApprovedFileAllowlist } from "../../core/tools/plan-allowlist"
 import { writeArtifact } from "../../core/artifact-store"
-import { parseImplPlan, validateExecutableImplPlan } from "../../core/impl-plan-parser"
 import { PHASE_TO_ARTIFACT } from "../../core/artifacts"
 import { createImplDAG } from "../../core/dag"
-import { nextSchedulerDecision, nextSchedulerDecisionForInput, readDecisionInput, resolveHumanGate } from "../../core/scheduler"
+import { nextSchedulerDecision, nextSchedulerDecisionForInput, readDecisionInput } from "../../core/scheduler"
 import { validateFileBasedReviewArtifacts } from "../../core/tools/file-artifact-validation"
 import { buildInvalidPhaseReviewJsonReason, normalizePhaseReviewOutput } from "../../core/phase-review"
 import {
@@ -54,16 +54,42 @@ import {
 } from "../../core/autonomous-user-gate"
 import { activateHumanGateTasks, resolveAwaitingHumanState } from "../../core/human-gate-policy"
 import { buildWorkflowSwitchMessage, parkCurrentWorkflowSession } from "../../core/session-switch"
-import type { RoadmapQuery } from "../../core/types"
+import type { RoadmapQuery } from "../../core/roadmap-types"
 import type { DbAgentLease } from "../../core/open-artisan-repository"
 import { getAcceptanceCriteria } from "../../core/hooks/system-transform"
 import { resolveArtifactPaths } from "../../core/tools/artifact-paths"
 import { extractJsonFromText } from "../../core/utils"
 import { countExpectedBlockingCriteria } from "../../core/tools/mark-satisfied"
 import { analyzeTaskBoundaryChange, applyTaskBoundaryChange } from "../../core/tools/transitions"
-import { isEscapeHatchClarificationFeedback, isUserGateMetaFeedback, stripWorkflowRoutingNotes } from "../../core/tools/submit-feedback"
+import { buildSubmitFeedbackClarificationMessage, findReviewedArtifactFilesOutsideAllowlist, findUnresolvedHumanGates, materializeImplPlanDag, normalizeApprovalFilePaths, resolveSubmitFeedbackHumanGates, stripWorkflowRoutingNotes, validateSubmitFeedbackGate, validateSubmitFeedbackImplPlanApproval } from "../../core/tools/submit-feedback"
 import { collectWorktreeObservations } from "../../core/worktree-observation"
-import { ApplyDriftRepairToolSchema, ApplyPatchSuggestionSchema, PlanDriftRepairToolSchema, ReportDriftToolSchema, ResolvePatchSuggestionSchema, formatZodError } from "../../core/schemas"
+import {
+  AnalyzeTaskBoundaryChangeSchema,
+  ApplyDriftRepairToolSchema,
+  ApplyPatchSuggestionSchema,
+  ApplyTaskBoundaryChangeSchema,
+  CheckPriorWorkflowToolSchema,
+  MarkAnalyzeCompleteToolSchema,
+  MarkScanCompleteToolSchema,
+  MarkSatisfiedToolSchema,
+  MarkTaskCompleteToolSchema,
+  PlanDriftRepairToolSchema,
+  ProposeBacktrackToolSchema,
+  QueryChildWorkflowToolSchema,
+  RoadmapDeriveExecutionSliceToolSchema,
+  RoadmapQueryToolSchema,
+  ResetTaskToolSchema,
+  RequestReviewToolSchema,
+  ReportDriftToolSchema,
+  ResolveHumanGateToolSchema,
+  ResolvePatchSuggestionSchema,
+  SubmitAutoApproveToolSchema,
+  SubmitFeedbackToolSchema,
+  SubmitPhaseReviewToolSchema,
+  SubmitTaskReviewToolSchema,
+  type z,
+} from "../../core/schemas"
+import { parseToolArgs } from "../../core/tool-args"
 import {
   loadWorkflowFileClaims,
   persistPhaseReviewResult,
@@ -265,31 +291,7 @@ async function buildReviewContextForTask(
   const task = state.implDag?.find((t) => t.id === taskId)
   if (!task) return null
 
-  // Compute adjacent tasks for integration seam checking
-  const adjacentTasks: AdjacentTask[] = []
-  if (state.implDag) {
-    for (const node of state.implDag) {
-      if (node.id === task.id) continue
-      if (task.dependencies.includes(node.id)) {
-        adjacentTasks.push({
-          id: node.id,
-          description: node.description,
-          ...(node.category ? { category: node.category } : {}),
-          status: node.status,
-          direction: "upstream",
-        })
-      }
-      if (node.dependencies.includes(task.id)) {
-        adjacentTasks.push({
-          id: node.id,
-          description: node.description,
-          ...(node.category ? { category: node.category } : {}),
-          status: node.status,
-          direction: "downstream",
-        })
-      }
-    }
-  }
+  const adjacentTasks = buildAdjacentTasksForTask(state.implDag, taskId)
 
   const workflowId = workflowDbId(state)
   const currentAgentLeaseId = await persistTaskDispatchClaims(services, state, taskId, state.sessionId, agentKindFromSession(state.activeAgent))
@@ -378,6 +380,14 @@ type ToolHandler = (
   ctx: BridgeContext,
 ) => Promise<string>
 
+function toAnalyzeTaskBoundaryChangeArgs(args: z.output<typeof AnalyzeTaskBoundaryChangeSchema>): AnalyzeTaskBoundaryChangeArgs {
+  return args as AnalyzeTaskBoundaryChangeArgs
+}
+
+function toApplyTaskBoundaryChangeArgs(args: z.output<typeof ApplyTaskBoundaryChangeSchema>): ApplyTaskBoundaryChangeArgs {
+  return args as ApplyTaskBoundaryChangeArgs
+}
+
 // ---- select_mode ----
 
 const handleSelectMode: ToolHandler = async (args, toolCtx, ctx) => {
@@ -387,7 +397,7 @@ const handleSelectMode: ToolHandler = async (args, toolCtx, ctx) => {
 
   let state = requireState(ctx, toolCtx.sessionId)
 
-  const requestedFeatureName = ((args.feature_name ?? args.feature) as string)?.trim() ?? ""
+  const requestedFeatureName = parsed.featureName ?? ""
   const switchingFeatures = state.phase !== "MODE_SELECT" && state.featureName !== null && requestedFeatureName !== "" && state.featureName !== requestedFeatureName
 
   if (state.phase !== "MODE_SELECT" && !switchingFeatures) {
@@ -469,27 +479,24 @@ const handleSelectMode: ToolHandler = async (args, toolCtx, ctx) => {
 // ---- mark_scan_complete ----
 
 const handleMarkScanComplete: ToolHandler = async (args, toolCtx, ctx) => {
-  const { store, sm } = ctx.engine!
+  const { store } = ctx.engine!
   const state = requireState(ctx, toolCtx.sessionId)
 
-  if (state.phase !== "DISCOVERY" || state.phaseState !== "SCAN") {
-    return `Error: mark_scan_complete can only be called at DISCOVERY/SCAN (current: ${state.phase}/${state.phaseState}).`
-  }
-
-  const result = processMarkScanComplete(args as any)
-
-  const outcome = sm.transition("DISCOVERY", "SCAN", "scan_complete", state.mode)
-  if (!outcome.ok) return `Error: ${outcome.message}`
+  const parsedArgs = parseToolArgs(MarkScanCompleteToolSchema, args)
+  if (!parsedArgs.success) return `Error: ${parsedArgs.error}`
+  const result = computeMarkScanCompleteTransition(parsedArgs.data, state, ctx.engine!.sm)
+  if (!result.success) return `Error: ${result.error}`
+  const t = result.transition
 
   await store.update(toolCtx.sessionId, (draft) => {
-    draft.phase = outcome.nextPhase
-    draft.phaseState = outcome.nextPhaseState
+    draft.phase = t.nextPhase
+    draft.phaseState = t.nextPhaseState
     draft.iterationCount = 0
     draft.retryCount = 0
   })
 
   // policyVersion bumped automatically by setPostUpdateHook on store.update
-  return result.responseMessage
+  return t.responseMessage
 }
 
 // ---- mark_analyze_complete ----
@@ -499,7 +506,9 @@ const handleMarkAnalyzeComplete: ToolHandler = async (args, toolCtx, ctx) => {
     return subagentError("mark_analyze_complete", "the discovery fleet (SubagentDispatcher)")
   }
   const state = requireState(ctx, toolCtx.sessionId)
-  const result = computeMarkAnalyzeCompleteTransition(args as any, state, ctx.engine!.sm)
+  const parsedArgs = parseToolArgs(MarkAnalyzeCompleteToolSchema, args)
+  if (!parsedArgs.success) return `Error: ${parsedArgs.error}`
+  const result = computeMarkAnalyzeCompleteTransition(parsedArgs.data, state, ctx.engine!.sm)
   if (!result.success) return `Error: ${result.error}`
   const { nextPhase, nextPhaseState, analysisSummary, responseMessage } = result.transition
   await ctx.engine!.store.update(toolCtx.sessionId, (draft) => {
@@ -524,11 +533,16 @@ const handleMarkSatisfied: ToolHandler = async (args, toolCtx, ctx) => {
       "Call `request_review` again so the reviewer evaluates the current artifact instead of stale content."
     )
   }
-  const rawCriteria = (args.criteria_met ?? []) as Array<{
-    criterion: string; met: boolean; evidence: string;
-    severity?: "blocking" | "suggestion"; score?: string | number
-  }>
-  const result = computeMarkSatisfiedTransition(rawCriteria, state, ctx.engine!.sm)
+  const parsedArgs = parseToolArgs(MarkSatisfiedToolSchema, args)
+  if (!parsedArgs.success) return `Error: ${parsedArgs.error}`
+  const criteria = parsedArgs.data.criteria_met.map((item) => ({
+    criterion: item.criterion,
+    met: item.met,
+    evidence: item.evidence,
+    ...(item.severity !== undefined ? { severity: item.severity } : {}),
+    ...(item.score !== undefined ? { score: item.score } : {}),
+  }))
+  const result = computeMarkSatisfiedTransition(criteria, state, ctx.engine!.sm)
   if (!result.success) return `Error: ${result.error}`
   const t = result.transition
   await ctx.engine!.store.update(toolCtx.sessionId, (draft) => {
@@ -547,23 +561,25 @@ const handleMarkSatisfied: ToolHandler = async (args, toolCtx, ctx) => {
 // ---- request_review ----
 
 const handleRequestReview: ToolHandler = async (args, toolCtx, ctx) => {
-  const { store, sm } = ctx.engine!
+  const { store } = ctx.engine!
   const state = requireState(ctx, toolCtx.sessionId)
 
   const validReviewStates = new Set(["DRAFT", "CONVENTIONS", "REVISE", "REVIEW"])
   if (!validReviewStates.has(state.phaseState)) {
     return `Error: request_review can only be called in DRAFT, CONVENTIONS, REVISE, or REVIEW state (current: ${state.phase}/${state.phaseState}).`
   }
+  if (Object.prototype.hasOwnProperty.call(args, "artifact_content")) {
+    return "Error: request_review no longer accepts artifact_content; write the artifact to disk and pass artifact_files instead."
+  }
+  const parsedArgs = parseToolArgs(RequestReviewToolSchema, args)
+  if (!parsedArgs.success) return `Error: ${parsedArgs.error}`
 
   if (state.phaseState === "REVIEW") {
-    if ((args.artifact_content as string | undefined)?.trim()) {
-      return "Error: request_review no longer accepts artifact_content; write the artifact to disk and pass artifact_files instead."
-    }
-    let artifactFiles = ((args.artifact_files as string[] | undefined) ?? []).map((file) =>
+    let artifactFiles = parsedArgs.data.artifact_files.map((file) =>
       file.startsWith("/") ? file : resolve(toolCtx.directory, file),
     )
     const artifactKey = PHASE_TO_ARTIFACT[state.phase]
-    const artifactMarkdown = args.artifact_markdown as string | undefined
+    const artifactMarkdown = parsedArgs.data.artifact_markdown
     if (artifactMarkdown?.trim()) {
       if (!artifactKey || !["DISCOVERY", "PLANNING", "IMPL_PLAN"].includes(state.phase)) {
         return "Error: artifact_markdown is only supported for DISCOVERY, PLANNING, and IMPL_PLAN markdown artifacts."
@@ -600,19 +616,15 @@ const handleRequestReview: ToolHandler = async (args, toolCtx, ctx) => {
     return `Artifact re-submitted for ${state.phase} review.${diskMsg}${filesMsg}`
   }
 
-  const event = state.phaseState === "REVISE" ? "revision_complete" : "draft_complete"
-  const outcome = sm.transition(state.phase, state.phaseState, event, state.mode)
-  if (!outcome.ok) return `Error: ${outcome.message}`
+  const transition = computeRequestReviewTransition(state, ctx.engine!.sm)
+  if (!transition.success) return `Error: ${transition.error}`
+  const t = transition.transition
 
-  const artifactContent = args.artifact_content as string | undefined
-  if (artifactContent?.trim()) {
-    return "Error: request_review no longer accepts artifact_content; write the artifact to disk and pass artifact_files instead."
-  }
   const artifactKey = PHASE_TO_ARTIFACT[state.phase]
-  let artifactFiles = ((args.artifact_files as string[] | undefined) ?? []).map((file) =>
+  let artifactFiles = parsedArgs.data.artifact_files.map((file) =>
     file.startsWith("/") ? file : resolve(toolCtx.directory, file),
   )
-  const artifactMarkdown = args.artifact_markdown as string | undefined
+  const artifactMarkdown = parsedArgs.data.artifact_markdown
   if (artifactMarkdown?.trim()) {
     if (!artifactKey || !["DISCOVERY", "PLANNING", "IMPL_PLAN"].includes(state.phase)) {
       return "Error: artifact_markdown is only supported for DISCOVERY, PLANNING, and IMPL_PLAN markdown artifacts."
@@ -630,8 +642,8 @@ const handleRequestReview: ToolHandler = async (args, toolCtx, ctx) => {
   const reviewHash = artifactFilesHash(artifactFiles, toolCtx.directory)
 
   await store.update(toolCtx.sessionId, (draft) => {
-    draft.phase = outcome.nextPhase
-    draft.phaseState = outcome.nextPhaseState
+    draft.phase = t.nextPhase
+    draft.phaseState = t.nextPhaseState
     draft.retryCount = 0
     draft.latestReviewResults = null
     draft.reviewArtifactHash = null
@@ -646,7 +658,7 @@ const handleRequestReview: ToolHandler = async (args, toolCtx, ctx) => {
 
   // policyVersion bumped automatically by setPostUpdateHook on store.update
   const diskMsg = artifactDiskPath ? ` Artifact written to ${artifactDiskPath}.` : ""
-  return `Artifact submitted for review. Transitioning to ${outcome.nextPhase}/${outcome.nextPhaseState}.${diskMsg}`
+  return `Artifact submitted for review. Transitioning to ${t.nextPhase}/${t.nextPhaseState}.${diskMsg}`
 }
 
 // ---- submit_feedback ----
@@ -658,12 +670,14 @@ const handleSubmitFeedback: ToolHandler = async (args, toolCtx, ctx) => {
   if (Object.prototype.hasOwnProperty.call(args, "artifact_content")) {
     return "Error: submit_feedback no longer accepts artifact_content; approve the artifact already submitted on disk via request_review artifact_files."
   }
-  const feedbackTextArg = typeof args.feedback_text === "string" ? stripWorkflowRoutingNotes(args.feedback_text) : ""
+  const parsedArgs = parseToolArgs(SubmitFeedbackToolSchema, args)
+  if (!parsedArgs.success) return `Error: ${parsedArgs.error}`
+  const feedbackTextArg = parsedArgs.data.feedback_text ? stripWorkflowRoutingNotes(parsedArgs.data.feedback_text) : ""
 
   let derivedApprovedFiles: string[] | null = null
   const getEffectiveIncrementalAllowlist = (): string[] => {
-    if (args.approved_files) {
-      return (args.approved_files as string[]).map((p) => (p.startsWith("/") ? p : resolve(cwd, p)))
+    if (parsedArgs.data.approved_files) {
+      return normalizeApprovalFilePaths(parsedArgs.data.approved_files, cwd)
     }
     if (derivedApprovedFiles) return derivedApprovedFiles
     let planContent: string | undefined
@@ -677,22 +691,9 @@ const handleSubmitFeedback: ToolHandler = async (args, toolCtx, ctx) => {
     derivedApprovedFiles = planContent ? extractApprovedFileAllowlist(planContent, cwd) : []
     return derivedApprovedFiles
   }
-  const validateReviewedArtifactFilesAgainstAllowlist = (allowlist: string[]): string[] => {
-    if (!state.reviewArtifactFiles.length) return []
-    const normalizedAllowlist = new Set(allowlist.map((path) => (path.startsWith("/") ? path : resolve(cwd, path))))
-    const artifactPaths = new Set(
-      Object.values(state.artifactDiskPaths)
-        .filter((path): path is string => typeof path === "string"),
-    )
-    return state.reviewArtifactFiles
-      .map((path) => (path.startsWith("/") ? path : resolve(cwd, path)))
-      .filter((path) => !artifactPaths.has(path))
-      .filter((path) => !normalizedAllowlist.has(path))
-  }
 
-  if (state.phaseState !== "USER_GATE" && state.phaseState !== "ESCAPE_HATCH" && state.phaseState !== "HUMAN_GATE") {
-    return `Error: submit_feedback can only be called at USER_GATE, ESCAPE_HATCH, or HUMAN_GATE (current: ${state.phaseState}).`
-  }
+  const gateError = validateSubmitFeedbackGate(state.phaseState)
+  if (gateError) return `Error: ${gateError}`
 
   // Structural enforcement: agent cannot self-approve. The user must have
   // sent a message first (detected via message.process or session resume).
@@ -704,23 +705,11 @@ const handleSubmitFeedback: ToolHandler = async (args, toolCtx, ctx) => {
     )
   }
 
-  const feedbackType = args.feedback_type as string
-  if (feedbackType === "revise" && state.phaseState === "USER_GATE" && isUserGateMetaFeedback(feedbackTextArg)) {
-    return (
-      "That message looks like a clarification/status question, not artifact revision feedback. " +
-      "Do not change workflow state; answer the user's question normally and continue waiting at USER_GATE for an explicit approval or revision request."
-    )
-  }
-  if (feedbackType === "revise" && state.phaseState === "ESCAPE_HATCH" && isEscapeHatchClarificationFeedback(feedbackTextArg)) {
-    return (
-      "That message looks like an escape-hatch clarification question, not an escape-hatch decision. " +
-      "Do not change workflow state; explain the options normally and continue waiting at ESCAPE_HATCH for an explicit decision."
-    )
-  }
+  const feedbackType = parsedArgs.data.feedback_type
+  const clarificationMessage = buildSubmitFeedbackClarificationMessage(feedbackType, state.phaseState, feedbackTextArg)
+  if (clarificationMessage) return clarificationMessage
   if (feedbackType === "approve") {
-    const resolvedHumanGates = Array.isArray(args.resolved_human_gates)
-      ? args.resolved_human_gates as string[]
-      : []
+    const resolvedHumanGates = parsedArgs.data.resolved_human_gates ?? []
     if (state.phaseState === "HUMAN_GATE" && resolvedHumanGates.length === 0) {
       return "Cannot approve — HUMAN_GATE is a structural manual-action state, not a user approval surface. Resolve human-gated tasks via resolved_human_gates instead."
     }
@@ -731,11 +720,9 @@ const handleSubmitFeedback: ToolHandler = async (args, toolCtx, ctx) => {
     if (
       state.phase === "IMPLEMENTATION" &&
       state.implDag &&
-      (!args.resolved_human_gates || (args.resolved_human_gates as string[]).length === 0)
+      resolvedHumanGates.length === 0
     ) {
-      const unresolvedGates = state.implDag.filter(
-        (t) => t.status === "human-gated" && (!t.humanGate || !t.humanGate.resolved),
-      )
+      const unresolvedGates = findUnresolvedHumanGates(state)
       if (unresolvedGates.length > 0) {
         const gateList = unresolvedGates
           .map((t) => `  - **${t.id}:** ${t.humanGate?.whatIsNeeded ?? t.description}`)
@@ -749,37 +736,9 @@ const handleSubmitFeedback: ToolHandler = async (args, toolCtx, ctx) => {
     }
 
     if (state.phase === "IMPLEMENTATION" && state.implDag && resolvedHumanGates.length > 0) {
-      const dag = createImplDAG(Array.from(state.implDag))
-      const resolvedIds: string[] = []
-      const errors: string[] = []
-
-      for (const gateId of resolvedHumanGates) {
-        const resolved = resolveHumanGate(dag, gateId)
-        if (resolved) {
-          resolvedIds.push(gateId)
-        } else {
-          const task = Array.from(dag.tasks).find((t) => t.id === gateId)
-          if (!task) errors.push(`Task "${gateId}" not found in DAG`)
-          else if (task.status !== "human-gated") errors.push(`Task "${gateId}" is not human-gated (status: ${task.status})`)
-        }
-      }
-
-      if (errors.length > 0) {
-        return `Error resolving human gates:\n${errors.map((e) => `  - ${e}`).join("\n")}`
-      }
-
-      const updatedNodes = Array.from(dag.tasks).map((t) => ({
-        ...t,
-        ...(t.humanGate ? { humanGate: { ...t.humanGate } } : {}),
-      }))
-      const { evaluation, fallbackDecision: nextDecision } = buildRuntimeSchedulerDecision({
-        implDag: updatedNodes,
-        concurrency: state.concurrency,
-      })
-
-      const remainingGates = Array.from(dag.tasks).filter(
-        (t) => t.status === "human-gated" && (!t.humanGate || !t.humanGate.resolved),
-      )
+      const resolutionResult = resolveSubmitFeedbackHumanGates(state, resolvedHumanGates)
+      if (!resolutionResult.success) return resolutionResult.error
+      const { resolvedIds, updatedNodes, remainingGates, nextDecision } = resolutionResult.resolution
       if (remainingGates.length > 0) {
         await store.update(toolCtx.sessionId, (draft) => {
           draft.implDag = updatedNodes
@@ -858,24 +817,18 @@ const handleSubmitFeedback: ToolHandler = async (args, toolCtx, ctx) => {
           "so the plan can be parsed into a DAG before entering IMPLEMENTATION."
         )
       }
-      const parseCheck = parseImplPlan(planContent)
-      if (!parseCheck.success) {
-        return (
-          `Error: Failed to parse implementation plan into DAG: ${parseCheck.errors.join("; ")}. ` +
-          "Fix the plan format and re-submit request_review with corrected artifact_files."
-        )
-      }
       const effectiveAllowlist =
         state.mode === "INCREMENTAL" && state.fileAllowlist.length === 0
           ? getEffectiveIncrementalAllowlist()
           : state.fileAllowlist
-      const contractErrors = validateExecutableImplPlan(planContent, state.mode, effectiveAllowlist, cwd)
-      if (contractErrors.length > 0) {
-        return (
-          `Error: IMPL_PLAN approval failed executable-contract validation: ${contractErrors.join("; ")}. ` +
-          "Fix the plan metadata or expand the approved allowlist before approving this implementation plan."
-        )
-      }
+      const implPlanApprovalError = validateSubmitFeedbackImplPlanApproval({
+        planContent,
+        mode: state.mode,
+        effectiveAllowlist,
+        cwd,
+        parseFixInstruction: "Fix the plan format and re-submit request_review with corrected artifact_files.",
+      })
+      if (implPlanApprovalError) return `Error: ${implPlanApprovalError}`
     }
 
     if (
@@ -884,7 +837,12 @@ const handleSubmitFeedback: ToolHandler = async (args, toolCtx, ctx) => {
     ) {
       const effectiveAllowlist =
         state.fileAllowlist.length === 0 ? getEffectiveIncrementalAllowlist() : state.fileAllowlist
-      const reviewedOutsideAllowlist = validateReviewedArtifactFilesAgainstAllowlist(effectiveAllowlist)
+      const reviewedOutsideAllowlist = findReviewedArtifactFilesOutsideAllowlist({
+        reviewArtifactFiles: state.reviewArtifactFiles,
+        artifactDiskPaths: state.artifactDiskPaths,
+        allowlist: effectiveAllowlist,
+        cwd,
+      })
       if (reviewedOutsideAllowlist.length > 0) {
         return (
           `Error: ${state.phase} approval failed allowlist validation: reviewed artifact files fall outside the approved INCREMENTAL allowlist: ` +
@@ -893,7 +851,7 @@ const handleSubmitFeedback: ToolHandler = async (args, toolCtx, ctx) => {
       }
     }
 
-    if (state.phase === "PLANNING" && state.mode === "INCREMENTAL" && !args.approved_files) {
+    if (state.phase === "PLANNING" && state.mode === "INCREMENTAL" && !parsedArgs.data.approved_files) {
       let planContent: string | undefined
       if (!planContent && state.artifactDiskPaths.plan) {
         try {
@@ -910,7 +868,7 @@ const handleSubmitFeedback: ToolHandler = async (args, toolCtx, ctx) => {
     if (
       state.phase === "PLANNING" &&
       state.mode === "INCREMENTAL" &&
-      !args.approved_files &&
+      !parsedArgs.data.approved_files &&
       (!derivedApprovedFiles || derivedApprovedFiles.length === 0)
     ) {
       return (
@@ -919,10 +877,11 @@ const handleSubmitFeedback: ToolHandler = async (args, toolCtx, ctx) => {
       )
     }
 
-    const outcome = sm.transition(state.phase, state.phaseState, "user_approve", state.mode)
-    if (!outcome.ok) return `Error: ${outcome.message}`
+    const approvalResult = computeSubmitFeedbackApproveTransition(state, sm)
+    if (!approvalResult.success) return `Error: ${approvalResult.error}`
+    const approval = approvalResult.transition
 
-    const approveArtifactKey = PHASE_TO_ARTIFACT[state.phase]
+    const approveArtifactKey = approval.artifactKey
     const approveArtifactPath = approveArtifactKey && approveArtifactKey !== "implementation"
       ? state.artifactDiskPaths[approveArtifactKey] ?? null
       : null
@@ -930,19 +889,17 @@ const handleSubmitFeedback: ToolHandler = async (args, toolCtx, ctx) => {
       ? buildApprovedArtifactMarker(state, approveArtifactKey, approveArtifactPath)
       : null
 
-    const phaseCount = (state.phaseApprovalCounts[state.phase] ?? 0) + 1
     const preserveFinalImplementationReview =
       state.phase === "IMPLEMENTATION" &&
       state.phaseState === "USER_GATE" &&
-      Array.isArray(args.resolved_human_gates) &&
-      (args.resolved_human_gates as string[]).length > 0 &&
-      outcome.nextPhase === "DONE"
+      resolvedHumanGates.length > 0 &&
+      approval.nextPhase === "DONE"
 
     await store.update(toolCtx.sessionId, (draft) => {
-      draft.phase = outcome.nextPhase
-      draft.phaseState = outcome.nextPhaseState
-      draft.approvalCount++
-      draft.phaseApprovalCounts[state.phase] = phaseCount
+      draft.phase = approval.nextPhase
+      draft.phaseState = approval.nextPhaseState
+      draft.approvalCount = approval.newApprovalCount
+      draft.phaseApprovalCounts[state.phase] = approval.phaseCount
       draft.iterationCount = 0
       draft.retryCount = 0
       draft.userGateMessageReceived = false
@@ -981,23 +938,18 @@ const handleSubmitFeedback: ToolHandler = async (args, toolCtx, ctx) => {
           }
         }
         if (planContent) {
-          const parseResult = parseImplPlan(planContent)
-          if (parseResult.success) {
-            const nodes = Array.from(parseResult.dag.tasks).map((t) => ({ ...t }))
-            draft.implDag = nodes
-            const firstReady = nodes.find((t) => t.status === "pending" && t.dependencies.length === 0)
-            draft.currentTaskId = firstReady?.id ?? null
+          const materialized = materializeImplPlanDag(planContent)
+          if (materialized) {
+            draft.implDag = materialized.nodes
+            draft.currentTaskId = materialized.currentTaskId
           } else {
             draft.implDag = null
           }
         }
       }
       // Capture file allowlist at PLANNING approval in INCREMENTAL mode
-      if (state.phase === "PLANNING" && state.mode === "INCREMENTAL" && args.approved_files) {
-        const files = args.approved_files as string[]
-        draft.fileAllowlist = files.map((p) =>
-          p.startsWith("/") ? p : resolve(cwd, p),
-        )
+      if (state.phase === "PLANNING" && state.mode === "INCREMENTAL" && parsedArgs.data.approved_files) {
+        draft.fileAllowlist = normalizeApprovalFilePaths(parsedArgs.data.approved_files, cwd)
       } else if (state.phase === "PLANNING" && state.mode === "INCREMENTAL" && derivedApprovedFiles) {
         draft.fileAllowlist = derivedApprovedFiles
       } else if (
@@ -1021,12 +973,11 @@ const handleSubmitFeedback: ToolHandler = async (args, toolCtx, ctx) => {
 
     // Git checkpoint: tag the approval in version control (non-fatal)
     try {
-      const phaseCount = (state.phaseApprovalCounts[state.phase] ?? 0) + 1
       await createGitCheckpoint(
         { cwd: toolCtx.directory },
         {
           phase: state.phase,
-          approvalCount: phaseCount,
+          approvalCount: approval.phaseCount,
           featureName: state.featureName,
           ...(state.mode === "INCREMENTAL" ? { fileAllowlist: state.fileAllowlist } : {}),
           ...(state.reviewArtifactFiles.length > 0 ? { expectedFiles: state.reviewArtifactFiles } : {}),
@@ -1039,7 +990,7 @@ const handleSubmitFeedback: ToolHandler = async (args, toolCtx, ctx) => {
       })
     }
 
-    return `Approved. Transitioning to ${outcome.nextPhase}/${outcome.nextPhaseState}. Continue immediately in this same turn; do not stop.`
+    return approval.responseMessage
   }
 
   if (feedbackType === "revise") {
@@ -1071,26 +1022,24 @@ const handleMarkTaskComplete: ToolHandler = async (args, toolCtx, ctx) => {
   const { store } = ctx.engine!
   const state = requireState(ctx, toolCtx.sessionId)
 
-  if (state.phase !== "IMPLEMENTATION") {
-    return `Error: mark_task_complete can only be called during IMPLEMENTATION (current: ${state.phase}).`
-  }
-  if (state.phaseState !== "DRAFT" && state.phaseState !== "REVISE" && state.phaseState !== "SCHEDULING") {
-    return `Error: mark_task_complete can only be called in DRAFT, REVISE, or SCHEDULING state (current: ${state.phase}/${state.phaseState}).`
-  }
+  const phaseError = validateMarkTaskCompletePhase(state, { allowScheduling: true })
+  if (phaseError) return `Error: ${phaseError}`
 
   // Re-entry guard: prevent concurrent task completions
   if (state.taskCompletionInProgress) {
     return `Error: Task "${state.taskCompletionInProgress}" is already awaiting review. Call submit_task_review first.`
   }
 
-  const result = processMarkTaskComplete(args as any, state.implDag, state.currentTaskId)
+  const parsedArgs = parseToolArgs(MarkTaskCompleteToolSchema, args)
+  if (!parsedArgs.success) return `Error: ${parsedArgs.error}`
+  const result = processMarkTaskComplete(parsedArgs.data, state.implDag, state.currentTaskId)
   if ("error" in result) return `Error: ${result.error}`
 
   // Persist DAG changes and set review gate
   await store.update(toolCtx.sessionId, (draft) => {
     draft.implDag = result.updatedNodes
-    draft.currentTaskId = (args.task_id as string) ?? null
-    draft.taskCompletionInProgress = (args.task_id as string) ?? null
+    draft.currentTaskId = parsedArgs.data.task_id
+    draft.taskCompletionInProgress = parsedArgs.data.task_id
     draft.taskReviewCount = (draft.taskReviewCount ?? 0) + 1
     draft.phaseState = "TASK_REVIEW"
   })
@@ -1098,8 +1047,8 @@ const handleMarkTaskComplete: ToolHandler = async (args, toolCtx, ctx) => {
   // Build the isolated review prompt for the adapter to dispatch.
   // Use the freshly-updated state (with completed task) for context.
   const updatedState = requireState(ctx, toolCtx.sessionId)
-  const taskId = args.task_id as string
-  const implSummary = (args.implementation_summary as string) ?? ""
+  const taskId = parsedArgs.data.task_id
+  const implSummary = parsedArgs.data.implementation_summary
   const reviewPrompt = await buildReviewContextForTask(updatedState, taskId, toolCtx.directory, ctx.openArtisanServices, implSummary)
   if (!reviewPrompt) {
     // Should not happen — task was just completed. Clear guard and return.
@@ -1130,10 +1079,9 @@ const handleSubmitTaskReview: ToolHandler = async (args, toolCtx, ctx) => {
     return "Error: No task review is pending. Call mark_task_complete first."
   }
 
-  const reviewOutput = (args.review_output as string)?.trim()
-  if (!reviewOutput) {
-    return "Error: review_output is required. Pass the raw output from the isolated reviewer."
-  }
+  const parsedArgs = parseToolArgs(SubmitTaskReviewToolSchema, args)
+  if (!parsedArgs.success) return `Error: ${parsedArgs.error}`
+  const reviewOutput = parsedArgs.data.review_output.trim()
 
   const taskId = state.taskCompletionInProgress
   const review = parseTaskReviewResult(reviewOutput)
@@ -1231,13 +1179,15 @@ const handleSubmitPhaseReview: ToolHandler = async (args, toolCtx, ctx) => {
     return `Error: submit_phase_review can only be called in REVIEW state (current: ${state.phase}/${state.phaseState}).`
   }
 
+  const parsedArgs = parseToolArgs(SubmitPhaseReviewToolSchema, args)
+  if (!parsedArgs.success) return `Error: ${parsedArgs.error}`
   const normalizedPhaseReviewInput = {
-    ...((args.review_stdout as string | undefined) !== undefined ? { stdout: args.review_stdout as string } : {}),
-    ...((args.review_stderr as string | undefined) !== undefined ? { stderr: args.review_stderr as string } : {}),
-    ...((args.review_exit_code as number | null | undefined) !== undefined ? { exitCode: args.review_exit_code as number | null } : {}),
-    ...((args.review_error as string | null | undefined) !== undefined ? { error: args.review_error as string | null } : {}),
+    ...(parsedArgs.data.review_stdout !== undefined ? { stdout: parsedArgs.data.review_stdout } : {}),
+    ...(parsedArgs.data.review_stderr !== undefined ? { stderr: parsedArgs.data.review_stderr } : {}),
+    ...(parsedArgs.data.review_exit_code !== undefined ? { exitCode: parsedArgs.data.review_exit_code } : {}),
+    ...(parsedArgs.data.review_error !== undefined ? { error: parsedArgs.data.review_error } : {}),
   }
-  const reviewOutput = ((args.review_output as string | undefined)?.trim()) || normalizePhaseReviewOutput(normalizedPhaseReviewInput).trim()
+  const reviewOutput = parsedArgs.data.review_output?.trim() || normalizePhaseReviewOutput(normalizedPhaseReviewInput).trim()
   if (!reviewOutput) {
     return "Error: review_output is required. Pass the raw output from the isolated phase reviewer."
   }
@@ -1293,8 +1243,9 @@ const handleSubmitPhaseReview: ToolHandler = async (args, toolCtx, ctx) => {
 
 const handleCheckPriorWorkflow: ToolHandler = async (args, toolCtx, ctx) => {
   const { store } = ctx.engine!
-  const featureName = (args.feature_name as string)?.trim()
-  if (!featureName) return "Error: feature_name is required."
+  const parsedArgs = parseToolArgs(CheckPriorWorkflowToolSchema, args)
+  if (!parsedArgs.success) return `Error: ${parsedArgs.error}`
+  const featureName = parsedArgs.data.feature_name.trim()
 
   const priorState = await store.findPersistedByFeatureName(featureName)
   if (!priorState) {
@@ -1327,8 +1278,9 @@ const handleResolveHumanGate: ToolHandler = async (args, toolCtx, ctx) => {
     return `Error: resolve_human_gate can only be called during IMPLEMENTATION.`
   }
 
-  const taskId = args.task_id as string
-  if (!taskId) return "Error: task_id is required."
+  const parsedArgs = parseToolArgs(ResolveHumanGateToolSchema, args)
+  if (!parsedArgs.success) return `Error: ${parsedArgs.error}`
+  const taskId = parsedArgs.data.task_id
 
   if (!state.implDag) return "Error: No implementation DAG found."
 
@@ -1340,9 +1292,9 @@ const handleResolveHumanGate: ToolHandler = async (args, toolCtx, ctx) => {
   }
 
   const activatedNodes = activateHumanGateTasks(state.implDag, taskId, {
-    whatIsNeeded: (args.what_is_needed as string) || task.description,
-    why: (args.why as string) || "Required for implementation.",
-    verificationSteps: (args.verification_steps as string) || "Verify the setup is complete.",
+    whatIsNeeded: parsedArgs.data.what_is_needed,
+    why: parsedArgs.data.why || "Required for implementation.",
+    verificationSteps: parsedArgs.data.verification_steps || "Verify the setup is complete.",
     resolved: false,
   })
   const resolution = resolveAwaitingHumanState(activatedNodes, isRobotArtisanSession(state))
@@ -1403,10 +1355,9 @@ const handleProposeBacktrack: ToolHandler = async (args, toolCtx, ctx) => {
     return subagentError("propose_backtrack", "the orchestrator (SubagentDispatcher)")
   }
   const state = requireState(ctx, toolCtx.sessionId)
-  const result = computeProposeBacktrackTransition(
-    { target_phase: (args.target_phase ?? "") as string, reason: (args.reason ?? "") as string },
-    state,
-  )
+  const parsedArgs = parseToolArgs(ProposeBacktrackToolSchema, args)
+  if (!parsedArgs.success) return `Error: ${parsedArgs.error}`
+  const result = computeProposeBacktrackTransition(parsedArgs.data, state)
   if (!result.success) return `Error: ${result.error}`
   const t = result.transition
   await ctx.engine!.store.update(toolCtx.sessionId, (draft) => {
@@ -1421,7 +1372,7 @@ const handleProposeBacktrack: ToolHandler = async (args, toolCtx, ctx) => {
     draft.backtrackContext = {
       sourcePhase: state.phase,
       targetPhase: t.targetPhase,
-      reason: (args.reason ?? "") as string,
+      reason: parsedArgs.data.reason,
     }
     for (const key of t.clearedArtifactKeys) {
       delete draft.approvedArtifacts[key]
@@ -1445,7 +1396,9 @@ const handleSpawnSubWorkflow: ToolHandler = async () => {
 
 const handleAnalyzeTaskBoundaryChange: ToolHandler = async (args, toolCtx, ctx) => {
   const state = requireState(ctx, toolCtx.sessionId)
-  const result = analyzeTaskBoundaryChange(args as any, state)
+  const parsedArgs = parseToolArgs(AnalyzeTaskBoundaryChangeSchema, args)
+  if (!parsedArgs.success) return `Error: ${parsedArgs.error}`
+  const result = analyzeTaskBoundaryChange(toAnalyzeTaskBoundaryChangeArgs(parsedArgs.data), state)
   if (!result.success) return `Error: ${result.error}`
   return JSON.stringify(result.analysis, null, 2)
 }
@@ -1453,7 +1406,9 @@ const handleAnalyzeTaskBoundaryChange: ToolHandler = async (args, toolCtx, ctx) 
 const handleApplyTaskBoundaryChange: ToolHandler = async (args, toolCtx, ctx) => {
   const { store } = ctx.engine!
   const state = requireState(ctx, toolCtx.sessionId)
-  const result = applyTaskBoundaryChange(args as any, state)
+  const parsedArgs = parseToolArgs(ApplyTaskBoundaryChangeSchema, args)
+  if (!parsedArgs.success) return `Error: ${parsedArgs.error}`
+  const result = applyTaskBoundaryChange(toApplyTaskBoundaryChangeArgs(parsedArgs.data), state)
   if (!result.success) return `Error: ${result.error}`
   await store.update(toolCtx.sessionId, (draft) => {
     draft.implDag = result.updatedNodes
@@ -1472,16 +1427,16 @@ const handleRoutePatchSuggestions: ToolHandler = async (_args, toolCtx, ctx) => 
 
 const handleResolvePatchSuggestion: ToolHandler = async (args, toolCtx, ctx) => {
   if (!ctx.openArtisanServices) return "Error: DB-backed patch suggestion services are not enabled."
-  const parsed = ResolvePatchSuggestionSchema.safeParse(args)
-  if (!parsed.success) return `Error: ${formatZodError(parsed.error)}`
-  const { patch_suggestion_id: suggestionId, resolution } = parsed.data
-  const message = parsed.data.message ?? ""
+  const parsedArgs = parseToolArgs(ResolvePatchSuggestionSchema, args)
+  if (!parsedArgs.success) return `Error: ${parsedArgs.error}`
+  const { patch_suggestion_id: suggestionId, resolution } = parsedArgs.data
+  const message = parsedArgs.data.message ?? ""
   const now = new Date().toISOString()
   if (resolution === "applied" || resolution === "failed") {
     const applied = await ctx.openArtisanServices.patchSuggestions.applySuggestion({
       id: stableId(suggestionId, resolution, now),
       patchSuggestionId: suggestionId,
-      appliedBy: parsed.data.applied_by ?? "agent",
+      appliedBy: parsedArgs.data.applied_by ?? "agent",
       result: resolution,
       ...(message ? { message } : {}),
       createdAt: now,
@@ -1497,26 +1452,26 @@ const handleResolvePatchSuggestion: ToolHandler = async (args, toolCtx, ctx) => 
 
 const handleApplyPatchSuggestion: ToolHandler = async (args, toolCtx, ctx) => {
   if (!ctx.openArtisanServices) return "Error: DB-backed patch suggestion services are not enabled."
-  const parsed = ApplyPatchSuggestionSchema.safeParse(args)
-  if (!parsed.success) return `Error: ${formatZodError(parsed.error)}`
+  const parsedArgs = parseToolArgs(ApplyPatchSuggestionSchema, args)
+  if (!parsedArgs.success) return `Error: ${parsedArgs.error}`
   const state = requireState(ctx, toolCtx.sessionId)
   const result = await applyPatchSuggestionToWorktree({
     services: ctx.openArtisanServices,
     state,
     cwd: toolCtx.directory,
-    patchSuggestionId: parsed.data.patch_suggestion_id,
-    appliedBy: parsed.data.applied_by ?? "agent",
-    ...(parsed.data.force === undefined ? {} : { force: parsed.data.force }),
+    patchSuggestionId: parsedArgs.data.patch_suggestion_id,
+    appliedBy: parsedArgs.data.applied_by ?? "agent",
+    ...(parsedArgs.data.force === undefined ? {} : { force: parsedArgs.data.force }),
   })
   return JSON.stringify(result, null, 2)
 }
 
 const handleReportDrift: ToolHandler = async (args, toolCtx, ctx) => {
-  const parsed = ReportDriftToolSchema.safeParse(args)
-  if (!parsed.success) return `Error: ${formatZodError(parsed.error)}`
+  const parsedArgs = parseToolArgs(ReportDriftToolSchema, args)
+  if (!parsedArgs.success) return `Error: ${parsedArgs.error}`
   const state = requireState(ctx, toolCtx.sessionId)
   const workflowId = workflowDbId(state)
-  const worktreeObservations = parsed.data.include_worktree === false
+  const worktreeObservations = parsedArgs.data.include_worktree === false
     ? []
     : await collectWorktreeObservations({
       cwd: toolCtx.directory,
@@ -1525,17 +1480,17 @@ const handleReportDrift: ToolHandler = async (args, toolCtx, ctx) => {
       artifactFiles: Object.values(state.artifactDiskPaths).filter((item): item is string => typeof item === "string"),
       fileClaims: [],
     })
-  const pendingPatchSuggestions = ctx.openArtisanServices && parsed.data.include_db !== false
+  const pendingPatchSuggestions = ctx.openArtisanServices && parsedArgs.data.include_db !== false
     ? await ctx.openArtisanServices.patchSuggestions.listSuggestions(workflowId, "pending")
     : null
   if (pendingPatchSuggestions && !pendingPatchSuggestions.ok) return `Error: ${pendingPatchSuggestions.error.message}`
   const report = buildWorkflowDriftReport({
     workflowId,
     state,
-    ...(parsed.data.scope === undefined ? {} : { scope: parsed.data.scope }),
-    ...(parsed.data.drifted_artifact_keys === undefined ? {} : { artifactKeys: parsed.data.drifted_artifact_keys }),
-    ...(parsed.data.task_ids === undefined ? {} : { taskIds: parsed.data.task_ids }),
-    ...(parsed.data.changed_files === undefined ? {} : { changedFiles: parsed.data.changed_files }),
+    ...(parsedArgs.data.scope === undefined ? {} : { scope: parsedArgs.data.scope }),
+    ...(parsedArgs.data.drifted_artifact_keys === undefined ? {} : { artifactKeys: parsedArgs.data.drifted_artifact_keys }),
+    ...(parsedArgs.data.task_ids === undefined ? {} : { taskIds: parsedArgs.data.task_ids }),
+    ...(parsedArgs.data.changed_files === undefined ? {} : { changedFiles: parsedArgs.data.changed_files }),
     worktreeObservations,
     routedPatchSuggestions: pendingPatchSuggestions?.ok ? routePatchSuggestions(state, pendingPatchSuggestions.value) : [],
   })
@@ -1545,17 +1500,17 @@ const handleReportDrift: ToolHandler = async (args, toolCtx, ctx) => {
 }
 
 const handlePlanDriftRepair: ToolHandler = async (args, toolCtx) => {
-  const parsed = PlanDriftRepairToolSchema.safeParse(args)
-  if (!parsed.success) return `Error: ${formatZodError(parsed.error)}`
-  const reportId = parsed.data.drift_report_id ?? latestDriftReportBySession.get(toolCtx.sessionId)
+  const parsedArgs = parseToolArgs(PlanDriftRepairToolSchema, args)
+  if (!parsedArgs.success) return `Error: ${parsedArgs.error}`
+  const reportId = parsedArgs.data.drift_report_id ?? latestDriftReportBySession.get(toolCtx.sessionId)
   if (!reportId) return "Error: No drift report available. Call report_drift first or pass drift_report_id."
   const report = driftReports.get(driftStoreKey(toolCtx.sessionId, reportId))
   if (!report) return `Error: Drift report "${reportId}" was not found for this session.`
   const createdAt = new Date().toISOString()
   const plan = buildDriftRepairPlan({
-    id: stableId("drift-repair-plan", report.id, parsed.data.strategy ?? "minimal", createdAt),
+    id: stableId("drift-repair-plan", report.id, parsedArgs.data.strategy ?? "minimal", createdAt),
     driftReport: report,
-    strategy: parsed.data.strategy ?? "minimal",
+    strategy: parsedArgs.data.strategy ?? "minimal",
     createdAt,
   })
   driftRepairPlans.set(driftStoreKey(toolCtx.sessionId, plan.id), plan)
@@ -1575,14 +1530,14 @@ async function executeDriftToolCall(toolCall: DriftToolCallPlan, toolCtx: ToolCo
 }
 
 const handleApplyDriftRepair: ToolHandler = async (args, toolCtx, ctx) => {
-  const parsed = ApplyDriftRepairToolSchema.safeParse(args)
-  if (!parsed.success) return `Error: ${formatZodError(parsed.error)}`
-  const plan = driftRepairPlans.get(driftStoreKey(toolCtx.sessionId, parsed.data.repair_plan_id))
-  if (!plan) return `Error: Drift repair plan "${parsed.data.repair_plan_id}" was not found for this session.`
-  const approved = new Set(parsed.data.approved_actions ?? [])
+  const parsedArgs = parseToolArgs(ApplyDriftRepairToolSchema, args)
+  if (!parsedArgs.success) return `Error: ${parsedArgs.error}`
+  const plan = driftRepairPlans.get(driftStoreKey(toolCtx.sessionId, parsedArgs.data.repair_plan_id))
+  if (!plan) return `Error: Drift repair plan "${parsedArgs.data.repair_plan_id}" was not found for this session.`
+  const approved = new Set(parsedArgs.data.approved_actions ?? [])
   const results: Array<{ actionId: string; skipped?: string; toolName?: string; result?: string }> = []
   for (const action of plan.actions) {
-    const shouldApply = (parsed.data.apply_safe_actions && action.safety === "safe-auto") || approved.has(action.id)
+    const shouldApply = (parsedArgs.data.apply_safe_actions && action.safety === "safe-auto") || approved.has(action.id)
     if (!shouldApply) {
       results.push({ actionId: action.id, skipped: `Action safety is ${action.safety}.` })
       continue
@@ -1614,8 +1569,9 @@ const handleQueryParentWorkflow: ToolHandler = async (_args, toolCtx, ctx) => {
 
 const handleQueryChildWorkflow: ToolHandler = async (args, toolCtx, ctx) => {
   const state = requireState(ctx, toolCtx.sessionId)
-  const taskId = args.task_id as string
-  if (!taskId) return "Error: task_id is required."
+  const parsedArgs = parseToolArgs(QueryChildWorkflowToolSchema, args)
+  if (!parsedArgs.success) return `Error: ${parsedArgs.error}`
+  const taskId = parsedArgs.data.task_id
   const childEntry = state.childWorkflows.find((c) => c.taskId === taskId)
   const childState = childEntry
     ? ctx.engine!.store.findByFeatureName(childEntry.featureName)
@@ -1638,10 +1594,9 @@ const handleSubmitAutoApprove: ToolHandler = async (args, toolCtx, ctx) => {
     return "Error: submit_auto_approve requires robot-artisan mode."
   }
 
-  const reviewOutput = (args.review_output as string)?.trim()
-  if (!reviewOutput) {
-    return "Error: review_output is required."
-  }
+  const parsedArgs = parseToolArgs(SubmitAutoApproveToolSchema, args)
+  if (!parsedArgs.success) return `Error: ${parsedArgs.error}`
+  const reviewOutput = parsedArgs.data.review_output.trim()
 
   const result = parseAutoApproveResult(reviewOutput) as AutoApproveResult
   if (!result.success) {
@@ -1724,8 +1679,10 @@ const handleResetTask: ToolHandler = async (args, toolCtx, ctx) => {
     return `Error: Task "${state.taskCompletionInProgress}" is awaiting review. Call submit_task_review first.`
   }
 
-  const taskIds = args.task_ids as string[] | undefined
-  const taskId = args.task_id as string | undefined
+  const parsedArgs = parseToolArgs(ResetTaskToolSchema, args)
+  if (!parsedArgs.success) return `Error: ${parsedArgs.error}`
+  const taskIds = parsedArgs.data.task_ids
+  const taskId = parsedArgs.data.task_id
   const ids = taskIds ?? (taskId ? [taskId] : [])
 
   if (ids.length === 0) {
@@ -1801,7 +1758,9 @@ const handleRoadmapQuery: ToolHandler = async (args, _toolCtx, ctx) => {
   const services = createRoadmapServices(ctx)
   if (!services.ok) return roadmapStorageFailure(services.message, false)
   const { roadmapService } = services
-  const query = (args.query ?? {}) as RoadmapQuery
+  const parsedArgs = parseToolArgs(RoadmapQueryToolSchema, args)
+  if (!parsedArgs.success) return `Error: ${parsedArgs.error}`
+  const query = (parsedArgs.data.query ?? {}) as RoadmapQuery
   return JSON.stringify(await roadmapService.queryRoadmap(query))
 }
 
@@ -1814,17 +1773,10 @@ const handleRoadmapDeriveExecutionSlice: ToolHandler = async (args, _toolCtx, ct
   const services = createRoadmapServices(ctx)
   if (!services.ok) return roadmapStorageFailure(services.message, false)
   const { roadmapService } = services
-  const roadmapItemIds = Array.isArray(args.roadmap_item_ids)
-    ? (args.roadmap_item_ids as string[])
-    : Array.isArray(args.roadmapItemIds)
-      ? (args.roadmapItemIds as string[])
-      : []
-  const featureName =
-    typeof args.feature_name === "string"
-      ? args.feature_name
-      : typeof args.featureName === "string"
-        ? args.featureName
-        : undefined
+  const parsedArgs = parseToolArgs(RoadmapDeriveExecutionSliceToolSchema, args)
+  if (!parsedArgs.success) return `Error: ${parsedArgs.error}`
+  const roadmapItemIds = parsedArgs.data.roadmap_item_ids ?? parsedArgs.data.roadmapItemIds ?? []
+  const featureName = parsedArgs.data.feature_name ?? parsedArgs.data.featureName
   const input = featureName === undefined ? { roadmapItemIds } : { roadmapItemIds, featureName }
 
   return JSON.stringify(await roadmapService.deriveExecutionSlice(input))
@@ -1834,7 +1786,7 @@ const handleRoadmapDeriveExecutionSlice: ToolHandler = async (args, _toolCtx, ct
 // Dispatch table
 // ---------------------------------------------------------------------------
 
-const TOOL_HANDLERS: Record<string, ToolHandler> = {
+export const TOOL_HANDLERS: Record<string, ToolHandler> = {
   select_mode: handleSelectMode,
   mark_scan_complete: handleMarkScanComplete,
   mark_analyze_complete: handleMarkAnalyzeComplete,

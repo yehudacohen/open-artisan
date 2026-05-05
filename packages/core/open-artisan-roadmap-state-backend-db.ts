@@ -2,14 +2,10 @@
  * open-artisan-roadmap-state-backend-db.ts — RoadmapStateBackend facade over OpenArtisanRepository.
  */
 
-import { join } from "node:path"
-
-import { acquireFileLock, type FileLockOptions } from "./state-backend-fs"
 import type { OpenArtisanRepository } from "./open-artisan-repository"
-import { roadmapError, roadmapOk, type RoadmapErrorCode, type RoadmapStateBackend } from "./types"
+import { roadmapError, roadmapOk, type RoadmapErrorCode, type RoadmapStateBackend } from "./roadmap-types"
 
 export interface OpenArtisanDbRoadmapStateBackendOptions {
-  lockDir?: string
   lockTimeoutMs?: number
   lockPollMs?: number
 }
@@ -34,11 +30,9 @@ function toRoadmapError(result: { error: { code: string; message: string; retrya
 
 export function createOpenArtisanDbRoadmapStateBackend(
   repository: OpenArtisanRepository,
-  stateDir: string,
+  _stateDir: string,
   options: OpenArtisanDbRoadmapStateBackendOptions = {},
 ): RoadmapStateBackend {
-  const lockDir = options.lockDir ?? join(stateDir, "roadmap-db-locks")
-
   return {
     async createRoadmap(document) {
       const result = await repository.replaceRoadmap(document)
@@ -62,10 +56,11 @@ export function createOpenArtisanDbRoadmapStateBackend(
 
     async lockRoadmap() {
       try {
-        const lockOptions: FileLockOptions = {}
-        if (options.lockTimeoutMs !== undefined) lockOptions.timeoutMs = options.lockTimeoutMs
-        if (options.lockPollMs !== undefined) lockOptions.pollMs = options.lockPollMs
-        return roadmapOk(await acquireFileLock(lockDir, "roadmap namespace", lockOptions))
+        const result = await repository.lockRoadmap({
+          ...(options.lockTimeoutMs === undefined ? {} : { timeoutMs: options.lockTimeoutMs }),
+          ...(options.lockPollMs === undefined ? {} : { pollMs: options.lockPollMs }),
+        })
+        return result.ok ? roadmapOk(result.value) : roadmapError("lock-timeout", result.error.message, result.error.retryable)
       } catch (error) {
         return roadmapError("lock-timeout", error instanceof Error ? error.message : "Failed to lock roadmap", true)
       }

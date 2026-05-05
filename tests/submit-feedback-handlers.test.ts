@@ -25,7 +25,8 @@ import {
   handleCascade,
   handleNormalRevise,
 } from "#core/tools/submit-feedback-handlers"
-import type { WorkflowState, RevisionStep } from "#core/types"
+import type { WorkflowState } from "#core/types"
+import type { RevisionStep } from "#core/orchestrator-types"
 import { SCHEMA_VERSION } from "#core/types"
 import { createStateMachine } from "#core/state-machine"
 

@@ -23,13 +23,10 @@
 
 import type {
   WorkflowState,
-  RevisionStep,
   Phase,
-  OrchestratorAssessResult,
-  OrchestratorDivergeResult,
 } from "../types"
+import type { Orchestrator, OrchestratorAssessResult, OrchestratorDivergeResult, RevisionStep } from "../orchestrator-types"
 import { isEscapeHatchAbort, isEscapeHatchAccept, isEscapeHatchAmbiguous, parseEscapeHatchNewDirection, buildEscapeHatchPresentation } from "../orchestrator/escape-hatch"
-import type { Orchestrator } from "../types"
 import type { StateMachine } from "../types"
 
 // ---------------------------------------------------------------------------

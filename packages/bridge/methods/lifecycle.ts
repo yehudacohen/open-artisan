@@ -36,7 +36,8 @@ import { matchesRoadmapQuery, roadmapError, roadmapOk } from "../../core/roadmap
 import type { EngineContext } from "../../core/engine-context"
 import type { SubagentDispatcher } from "../../core/subagent-dispatcher"
 import type { NotificationSink } from "../../core/logger"
-import type { ArtifactKey, OrchestratorRouteInput, Phase } from "../../core/types"
+import type { ArtifactKey, Phase } from "../../core/types"
+import type { OrchestratorRouteInput } from "../../core/orchestrator-types"
 import type { BridgeClientLease, BridgeMetadata } from "../shared-bridge-types"
 
 // Bridge adapters run review/discovery externally and submit results back via bridge tools.

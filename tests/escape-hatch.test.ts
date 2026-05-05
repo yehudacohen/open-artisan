@@ -8,7 +8,7 @@ import {
   isEscapeHatchAccept,
   isEscapeHatchAmbiguous,
 } from "#core/orchestrator/escape-hatch"
-import type { OrchestratorAssessResult, OrchestratorDivergeResult, RevisionStep } from "#core/types"
+import type { OrchestratorAssessResult, OrchestratorDivergeResult, RevisionStep } from "#core/orchestrator-types"
 
 // ---------------------------------------------------------------------------
 // Helpers

@@ -11,14 +11,10 @@
  */
 import type {
   Orchestrator,
-  OrchestratorDeps,
-  OrchestratorPlanResult,
-  OrchestratorRouteInput,
-  RevisionStep,
   ArtifactKey,
   Phase,
-  OrchestratorAssessResult,
 } from "../types"
+import type { OrchestratorAssessResult, OrchestratorDeps, OrchestratorPlanResult, OrchestratorRouteInput, RevisionStep } from "../orchestrator-types"
 import { PHASE_TO_ARTIFACT } from "../artifacts"
 
 // ---------------------------------------------------------------------------

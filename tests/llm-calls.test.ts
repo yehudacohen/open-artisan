@@ -4,7 +4,7 @@
  */
 import { describe, expect, it, mock } from "bun:test"
 import { createAssessFn, createDivergeFn } from "#core/orchestrator/llm-calls"
-import type { OrchestratorAssessResult } from "#core/types"
+import type { OrchestratorAssessResult } from "#core/orchestrator-types"
 import type { SubagentDispatcher } from "#core/subagent-dispatcher"
 
 // ---------------------------------------------------------------------------

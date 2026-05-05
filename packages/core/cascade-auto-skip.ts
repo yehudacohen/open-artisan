@@ -14,7 +14,8 @@
  * dependencies instead of closing over plugin-scope variables.
  */
 
-import type { WorkflowState, SessionStateStore, StateMachine, RevisionStep } from "./types"
+import type { WorkflowState, SessionStateStore, StateMachine } from "./types"
+import type { RevisionStep } from "./orchestrator-types"
 import type { Logger } from "./logger"
 import { hasArtifactChanged, captureRevisionBaseline } from "./revision-baseline"
 

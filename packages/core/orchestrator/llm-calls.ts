@@ -16,9 +16,11 @@
 
 import type {
   ArtifactKey,
+} from "../types"
+import type {
   OrchestratorAssessResult,
   OrchestratorDivergeResult,
-} from "../types"
+} from "../orchestrator-types"
 import type { SubagentDispatcher } from "../subagent-dispatcher"
 import { extractJsonFromText, withTimeout } from "../utils"
 

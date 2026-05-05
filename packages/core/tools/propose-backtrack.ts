@@ -15,11 +15,8 @@
 import type {
   Phase,
   WorkflowState,
-  Orchestrator,
-  OrchestratorPlanResult,
-  RevisionStep,
-  DivergenceClass,
 } from "../types"
+import type { DivergenceClass, Orchestrator, OrchestratorPlanResult, RevisionStep } from "../orchestrator-types"
 
 // ---------------------------------------------------------------------------
 // Outcome types

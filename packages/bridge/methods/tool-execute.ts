@@ -31,7 +31,6 @@ import { handleSubmitFeedback } from "./feedback-tool-handlers"
 import { createHash } from "node:crypto"
 import { resolve } from "node:path"
 import { readFileSync } from "node:fs"
-import { readFile } from "node:fs/promises"
 import { parseSelectModeArgs } from "../../core/tools/select-mode"
 import { processMarkTaskComplete, validateMarkTaskCompletePhase } from "../../core/tools/mark-task-complete"
 import { buildAdjacentTasksForTask, buildTaskReviewAcceptancePlan, buildTaskReviewPrompt, parseTaskReviewResult } from "../../core/task-review"
@@ -41,17 +40,10 @@ import {
   computeMarkScanCompleteTransition,
   computeMarkSatisfiedTransition,
   computeMarkAnalyzeCompleteTransition,
-  computeRequestReviewTransition,
-  computeSubmitFeedbackApproveTransition,
-  computeSubmitFeedbackReviseTransition,
   computeProposeBacktrackTransition,
 } from "../../core/tools/transitions"
-import { createGitCheckpoint } from "../../core/hooks/git-checkpoint"
-import { extractApprovedFileAllowlist } from "../../core/tools/plan-allowlist"
-import { writeArtifact } from "../../core/artifact-store"
 import { PHASE_TO_ARTIFACT } from "../../core/artifacts"
 import { nextSchedulerDecisionForInput, readDecisionInput } from "../../core/scheduler"
-import { validateFileBasedReviewArtifacts } from "../../core/tools/file-artifact-validation"
 import { buildInvalidPhaseReviewJsonReason, normalizePhaseReviewOutput } from "../../core/phase-review"
 import { buildWorkflowSwitchMessage, parkCurrentWorkflowSession } from "../../core/session-switch"
 import type { DbAgentLease } from "../../core/open-artisan-repository"
@@ -59,15 +51,11 @@ import { getAcceptanceCriteria } from "../../core/hooks/system-transform"
 import { resolveArtifactPaths } from "../../core/tools/artifact-paths"
 import { extractJsonFromText } from "../../core/utils"
 import { countExpectedBlockingCriteria } from "../../core/tools/mark-satisfied"
-import { buildSubmitFeedbackClarificationMessage, findReviewedArtifactFilesOutsideAllowlist, findUnresolvedHumanGates, materializeImplPlanDag, normalizeApprovalFilePaths, resolveSubmitFeedbackHumanGates, stripWorkflowRoutingNotes, validateSubmitFeedbackGate, validateSubmitFeedbackImplPlanApproval } from "../../core/tools/submit-feedback"
 import {
   MarkAnalyzeCompleteToolSchema,
   MarkScanCompleteToolSchema,
-  MarkSatisfiedToolSchema,
   MarkTaskCompleteToolSchema,
   ProposeBacktrackToolSchema,
-  RequestReviewToolSchema,
-  SubmitFeedbackToolSchema,
   SubmitPhaseReviewToolSchema,
   SubmitTaskReviewToolSchema,
 } from "../../core/schemas"
@@ -119,21 +107,6 @@ async function persistCurrentTaskClaim(
 ): Promise<void> {
   if (!state?.currentTaskId) return
   await persistTaskDispatchClaims(services, state, state.currentTaskId, sessionId, agentKindFromSession(state.activeAgent))
-}
-
-function artifactFilesHash(files: string[], cwd: string): string | null {
-  if (files.length === 0) return null
-  try {
-    const payload = files
-      .map((file) => {
-        const resolvedPath = file.startsWith("/") ? file : resolve(cwd, file)
-        return `${resolvedPath}\n${readFileSync(resolvedPath, "utf-8")}`
-      })
-      .join("\n---\n")
-    return artifactHash(payload)
-  } catch {
-    return null
-  }
 }
 
 function buildApprovedArtifactMarker(
@@ -197,22 +170,6 @@ function buildTaskReviewResolvedMessage(
   }
 
   return `**${formatSchedulerDecisionMessage(fallbackDecision)}**`
-}
-
-async function readCurrentArtifactHash(state: WorkflowState): Promise<string | null> {
-  if (state.reviewArtifactFiles.length > 0) {
-    return artifactFilesHash(state.reviewArtifactFiles, process.cwd())
-  }
-  const artifactKey = PHASE_TO_ARTIFACT[state.phase]
-  if (!artifactKey) return null
-  const artifactPath = state.artifactDiskPaths[artifactKey]
-  if (!artifactPath) return null
-  try {
-    const content = await readFile(artifactPath, "utf-8")
-    return artifactHash(content)
-  } catch {
-    return null
-  }
 }
 
 /**

@@ -115,6 +115,11 @@ describe("bridge roadmap tool execution", () => {
       expect(health.pgliteDataDir).toBe(join(dbStateDir, "runtime-db"))
       expect(health.pgliteDatabaseFileName).toBe("open-artisan.pg")
       expect(health.pgliteSchemaName).toBe("open_artisan")
+      expect(health.dbAgentLeaseCount).toBe(0)
+      expect(health.dbActiveAgentLeaseCount).toBe(0)
+      expect(health.dbExpiredAgentLeaseCount).toBe(0)
+      expect(health.dbCurrentSessionLeaseCount).toBe(0)
+      expect(health.dbLeaseDiagnosticsError).toBeNull()
       await dbCtx.roadmapBackend!.createRoadmap(makeRoadmapDocument())
 
       const response = await handleToolExecute({

@@ -114,6 +114,11 @@ export interface BridgeRuntimeHealthSummary {
   bridgeSocketPath: string | null
   bridgeAttachedClients: number
   bridgeActiveClientKinds: string[]
+  dbAgentLeaseCount: number | null
+  dbActiveAgentLeaseCount: number | null
+  dbExpiredAgentLeaseCount: number | null
+  dbCurrentSessionLeaseCount: number | null
+  dbLeaseDiagnosticsError: string | null
   pendingTaskReview: boolean
   currentTaskId: string | null
   lastRecoveryAction: string

@@ -9,6 +9,47 @@ import { INVALID_PARAMS } from "../protocol"
 import type { BridgeRuntimeHealthSummary, StateGetParams, StateHealthParams } from "../protocol"
 import { loadBridgeLeaseSnapshot, loadBridgeMetadata } from "../bridge-meta"
 import type { BridgeContext } from "../server"
+import { workflowDbId } from "../../core/runtime-persistence"
+
+type DbLeaseHealthSummary = Pick<
+  BridgeRuntimeHealthSummary,
+  "dbAgentLeaseCount" | "dbActiveAgentLeaseCount" | "dbExpiredAgentLeaseCount" | "dbCurrentSessionLeaseCount" | "dbLeaseDiagnosticsError"
+>
+
+async function buildDbLeaseHealthSummary(
+  sessionId: string,
+  state: Record<string, unknown>,
+  ctx: BridgeContext,
+): Promise<DbLeaseHealthSummary> {
+  const empty = {
+    dbAgentLeaseCount: null,
+    dbActiveAgentLeaseCount: null,
+    dbExpiredAgentLeaseCount: null,
+    dbCurrentSessionLeaseCount: null,
+    dbLeaseDiagnosticsError: null,
+  }
+  if (ctx.runtimeBackendInfo.backendKind !== "db" || !ctx.openArtisanServices) return empty
+
+  const featureName = typeof state.featureName === "string" ? state.featureName : null
+  const leases = await ctx.openArtisanServices.agentLeases.listLeases(workflowDbId({ featureName, sessionId }))
+  if (!leases.ok) {
+    return {
+      ...empty,
+      dbLeaseDiagnosticsError: leases.error.message,
+    }
+  }
+
+  const now = Date.now()
+  const activeLeases = leases.value.filter((lease) => Date.parse(lease.expiresAt) > now)
+  const currentSessionLeases = leases.value.filter((lease) => lease.sessionId === sessionId)
+  return {
+    dbAgentLeaseCount: leases.value.length,
+    dbActiveAgentLeaseCount: activeLeases.length,
+    dbExpiredAgentLeaseCount: leases.value.length - activeLeases.length,
+    dbCurrentSessionLeaseCount: currentSessionLeases.length,
+    dbLeaseDiagnosticsError: null,
+  }
+}
 
 async function buildRuntimeHealthSummary(
   sessionId: string,
@@ -24,6 +65,7 @@ async function buildRuntimeHealthSummary(
   const phaseState = typeof state.phaseState === "string" ? state.phaseState : "DRAFT"
   const pendingTaskReview = typeof state.taskCompletionInProgress === "string" && state.taskCompletionInProgress.length > 0
   const awaitingUserGate = phaseState === "USER_GATE"
+  const dbLeaseHealth = await buildDbLeaseHealthSummary(sessionId, state, ctx)
   const noopReason = pendingTaskReview
     ? `pending task review for ${state.taskCompletionInProgress as string}`
     : awaitingUserGate
@@ -45,6 +87,7 @@ async function buildRuntimeHealthSummary(
     bridgeSocketPath: metadata?.socketPath ?? null,
     bridgeAttachedClients: clients.length,
     bridgeActiveClientKinds: activeKinds,
+    ...dbLeaseHealth,
     pendingTaskReview,
     currentTaskId: typeof state.currentTaskId === "string" ? state.currentTaskId : null,
     lastRecoveryAction:

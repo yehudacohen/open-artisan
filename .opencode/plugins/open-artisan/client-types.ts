@@ -91,3 +91,13 @@ export interface PluginClient {
   session?: SessionAPI
   tui?: TuiAPI
 }
+
+/** Tool execution context passed by OpenCode to custom tool handlers. */
+export interface ToolExecuteContext {
+  directory: string
+  sessionId?: string
+  session?: { id: string }
+  /** Agent name from the session's agent file (e.g. "artisan", "robot-artisan") */
+  agent?: string
+  [key: string]: unknown
+}

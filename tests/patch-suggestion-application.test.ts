@@ -6,7 +6,7 @@ import { join } from "node:path"
 import { createOpenArtisanServices, createPGliteOpenArtisanRepository, type DbPatchSuggestion, type OpenArtisanRepository } from "#core/open-artisan-db"
 import { applyPatchSuggestionToWorktree, extractPatchTouchedPaths } from "#core/patch-suggestion-application"
 import { workflowDbId } from "#core/runtime-persistence"
-import { SCHEMA_VERSION, type WorkflowState } from "#core/types"
+import { SCHEMA_VERSION, type WorkflowState } from "#core/workflow-state-types"
 
 const tempDirs: string[] = []
 const sharedTempDirs: string[] = []

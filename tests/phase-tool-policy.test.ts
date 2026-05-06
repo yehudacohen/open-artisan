@@ -4,7 +4,7 @@
 import { describe, expect, it } from "bun:test"
 
 import { extractWriteToolPaths, getPhaseToolPolicy } from "#core/hooks/tool-guard"
-import type { PhaseToolPolicy } from "#core/types"
+import type { PhaseToolPolicy } from "#core/phase-tool-policy-types"
 
 describe("Tool policy — DISCOVERY/SCAN and DISCOVERY/ANALYZE are strictly read-only", () => {
   for (const ps of ["SCAN", "ANALYZE"] as const) {

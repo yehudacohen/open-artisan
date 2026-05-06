@@ -4,7 +4,7 @@
  * JSON-RPC 2.0 protocol handling is provided by the `json-rpc-2.0` library.
  * This file defines only the method-specific parameter and result types.
  */
-import type { Phase, PhaseState, WorkflowMode } from "../core/types"
+import type { Phase, PhaseState, WorkflowMode } from "../core/workflow-primitives"
 import type {
   AttachBridgeResult,
   AttachBridgeClientParams,

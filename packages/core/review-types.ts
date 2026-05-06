@@ -2,7 +2,7 @@
  * review-types.ts — Review, self-review, and review tool argument contracts.
  */
 
-import type { Phase, WorkflowMode } from "./types"
+import type { Phase, WorkflowMode } from "./workflow-primitives"
 
 export interface CriterionResult {
   criterion: string

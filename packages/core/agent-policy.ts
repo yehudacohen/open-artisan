@@ -1,4 +1,4 @@
-import type { SessionStateStore, WorkflowState } from "./types"
+import type { SessionStateStore, WorkflowState } from "./workflow-state-types"
 
 /** Known workflow-active agent names. */
 export const ARTISAN_AGENT_NAMES = new Set(["artisan", "robot-artisan", "build-artisan"])

@@ -6,9 +6,9 @@
  */
 import { describe, expect, it, mock } from "bun:test"
 import { handleProposeBacktrack } from "#core/tools/propose-backtrack"
-import type { WorkflowState } from "#core/types"
+import type { WorkflowState } from "#core/workflow-state-types"
 import type { Orchestrator, OrchestratorPlanResult, RevisionStep } from "#core/orchestrator-types"
-import { SCHEMA_VERSION } from "#core/types"
+import { SCHEMA_VERSION } from "#core/workflow-state-types"
 
 // ---------------------------------------------------------------------------
 // Fixtures

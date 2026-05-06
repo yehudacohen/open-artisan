@@ -19,7 +19,8 @@
 import { createHash } from "node:crypto"
 import { readFileSync, existsSync } from "node:fs"
 import { execSync } from "node:child_process"
-import type { Phase, ArtifactKey, WorkflowState } from "./types"
+import type { WorkflowState } from "./workflow-state-types"
+import type { ArtifactKey, Phase } from "./workflow-primitives"
 import { PHASE_TO_ARTIFACT } from "./artifacts"
 
 // ---------------------------------------------------------------------------

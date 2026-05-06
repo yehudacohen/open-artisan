@@ -3,8 +3,7 @@
  */
 import { describe, expect, it } from "bun:test"
 import { processQueryParentWorkflow, processQueryChildWorkflow } from "#core/tools/query-workflow"
-import { SCHEMA_VERSION } from "#core/types"
-import type { WorkflowState } from "#core/types"
+import { SCHEMA_VERSION, type WorkflowState } from "#core/workflow-state-types"
 
 function makeState(overrides: Partial<WorkflowState> = {}): WorkflowState {
   return {

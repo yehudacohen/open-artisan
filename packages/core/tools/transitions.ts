@@ -12,11 +12,11 @@
 import type {
   Phase,
   PhaseState,
-  WorkflowState,
-  StateMachine,
   WorkflowEvent,
   ArtifactKey,
-} from "../types"
+} from "../workflow-primitives"
+import type { WorkflowState } from "../workflow-state-types"
+import type { StateMachine } from "../state-machine-types"
 import type { MarkSatisfiedArgs } from "../review-types"
 import type { AnalyzeTaskBoundaryChangeArgs, ApplyTaskBoundaryChangeArgs } from "../tool-types"
 import { evaluateMarkSatisfied, countExpectedBlockingCriteria, type MarkSatisfiedResult } from "./mark-satisfied"

@@ -12,8 +12,7 @@
  */
 import { describe, expect, it } from "bun:test"
 import { processSpawnSubWorkflow } from "#core/tools/spawn-sub-workflow"
-import { SCHEMA_VERSION } from "#core/types"
-import type { WorkflowState } from "#core/types"
+import { SCHEMA_VERSION, type WorkflowState } from "#core/workflow-state-types"
 import type { TaskNode } from "#core/dag"
 import { MAX_SUB_WORKFLOWS } from "#core/constants"
 

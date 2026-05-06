@@ -9,7 +9,7 @@ import type { OpenArtisanServices } from "./open-artisan-services"
 import type { DbPatchApplication } from "./open-artisan-repository"
 import { routePatchSuggestion } from "./patch-suggestion-routing"
 import { workflowDbId } from "./runtime-persistence"
-import type { WorkflowState } from "./types"
+import type { WorkflowState } from "./workflow-state-types"
 
 export interface ApplyPatchSuggestionInput {
   services: OpenArtisanServices

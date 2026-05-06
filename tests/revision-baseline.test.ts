@@ -15,8 +15,7 @@ import { tmpdir } from "node:os"
 import { createHash } from "node:crypto"
 
 import { captureRevisionBaseline, hasArtifactChanged } from "#core/revision-baseline"
-import type { WorkflowState } from "#core/types"
-import { SCHEMA_VERSION } from "#core/types"
+import { SCHEMA_VERSION, type WorkflowState } from "#core/workflow-state-types"
 
 // ---------------------------------------------------------------------------
 // Helpers

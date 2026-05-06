@@ -23,8 +23,7 @@ import {
 } from "#core/scheduler"
 import { parseImplPlan } from "#core/impl-plan-parser"
 import { buildTaskReviewPrompt } from "#core/task-review"
-import { validateWorkflowState, SCHEMA_VERSION } from "#core/types"
-import type { WorkflowState } from "#core/types"
+import { SCHEMA_VERSION, validateWorkflowState, type WorkflowState } from "#core/workflow-state-types"
 import { processMarkTaskComplete } from "#core/tools/mark-task-complete"
 
 // ---------------------------------------------------------------------------

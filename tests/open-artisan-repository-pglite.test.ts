@@ -26,7 +26,7 @@ import {
   type PGliteAccessQueue,
 } from "#core/open-artisan-db"
 import { createFileSystemStateBackend } from "#core/state-backend-fs"
-import { SCHEMA_VERSION, type WorkflowState } from "#core/types"
+import { SCHEMA_VERSION, type WorkflowState } from "#core/workflow-state-types"
 
 let tempDirs: string[] = []
 let sharedTempDirs: string[] = []

@@ -10,7 +10,8 @@
  * - feedback_type="revise": triggers `user_feedback` event → orchestrator routes
  *   to appropriate REVISE state
  */
-import type { PhaseState, WorkflowMode, WorkflowState } from "../types"
+import type { WorkflowState } from "../workflow-state-types"
+import type { PhaseState, WorkflowMode } from "../workflow-primitives"
 import type { SubmitFeedbackArgs } from "../tool-types"
 import { looksLikeUserGateMetaQuestion } from "../hooks/chat-message"
 import { createImplDAG, type TaskNode } from "../dag"

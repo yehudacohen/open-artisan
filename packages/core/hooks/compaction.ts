@@ -15,7 +15,7 @@
  * 7. What the agent should do next
  */
 import { existsSync } from "node:fs"
-import type { WorkflowState } from "../types"
+import type { WorkflowState } from "../workflow-state-types"
 import { MAX_CONVENTIONS_CHARS, MAX_REPORT_CHARS } from "../constants"
 import { getNextActionForState } from "../utils"
 

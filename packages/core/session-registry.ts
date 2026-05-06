@@ -5,7 +5,7 @@
  * Child sessions (subagent reviewers, orchestrator, discovery fleet) inherit
  * the parent's tool policy and do NOT get their own state.
  */
-import type { SessionRegistry } from "./types"
+import type { SessionRegistry } from "./session-registry-types"
 
 /**
  * Create a new in-memory session registry.

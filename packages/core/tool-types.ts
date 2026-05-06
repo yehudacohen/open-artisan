@@ -3,7 +3,7 @@
  */
 
 import type { TaskNode } from "./dag"
-import type { WorkflowMode } from "./types"
+import type { WorkflowMode } from "./workflow-primitives"
 
 export interface SelectModeArgs {
   mode: WorkflowMode

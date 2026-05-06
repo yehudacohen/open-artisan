@@ -8,7 +8,7 @@
  * This is NOT a user-facing tool — it's called automatically by the adapter
  * when the submit_feedback approve handler transitions a sub-workflow to DONE.
  */
-import type { WorkflowState } from "../types"
+import type { WorkflowState } from "../workflow-state-types"
 import { createImplDAG } from "../dag"
 import { markDelegatedComplete, markTaskAborted } from "../scheduler"
 import { SUB_WORKFLOW_TIMEOUT_MS } from "../constants"

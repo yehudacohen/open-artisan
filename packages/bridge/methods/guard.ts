@@ -11,7 +11,7 @@ import type { GuardCheckParams, GuardPolicyParams, GuardCheckResult, GuardPolicy
 import { SESSION_NOT_FOUND, INVALID_PARAMS } from "../protocol"
 import { extractWriteToolPaths, getPhaseToolPolicy, getTaskWriteFiles } from "../../core/hooks/tool-guard"
 import { WORKFLOW_TOOL_NAMES } from "../../core/constants"
-import type { Phase, PhaseState, WorkflowMode } from "../../core/types"
+import type { Phase, PhaseState, WorkflowMode } from "../../core/workflow-primitives"
 
 export const handleGuardCheck: MethodHandler = async (params, ctx) => {
   const p = params as Partial<GuardCheckParams>

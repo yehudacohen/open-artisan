@@ -6,7 +6,7 @@ import { describe, expect, it, mock, beforeEach } from "bun:test"
 
 import { createOrchestrator } from "#core/orchestrator/route"
 import { createArtifactGraph } from "#core/artifacts"
-import type { ArtifactKey } from "#core/types"
+import type { ArtifactKey } from "#core/workflow-primitives"
 import type { OrchestratorAssessResult, OrchestratorDeps, OrchestratorDivergeResult } from "#core/orchestrator-types"
 
 // Typed mocks — cast to any to allow .mockImplementation() / .mock access

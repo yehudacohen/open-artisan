@@ -20,7 +20,8 @@
  * - MODE_SELECT / DONE: no writes, no edits
  */
 import type { TaskIsolation, TaskIsolationFailureReason, TaskNode } from "../dag"
-import type { Phase, PhaseState, WorkflowMode, PhaseToolPolicy } from "../types"
+import type { PhaseToolPolicy } from "../phase-tool-policy-types"
+import type { Phase, PhaseState, WorkflowMode } from "../workflow-primitives"
 
 export interface ParallelIsolationAssessment {
   allowed: boolean

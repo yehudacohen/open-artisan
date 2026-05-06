@@ -1,5 +1,5 @@
 import type { TaskCategory } from "./dag"
-import type { Phase, PhaseState, WorkflowMode } from "./types"
+import type { Phase, PhaseState, WorkflowMode } from "./workflow-primitives"
 
 function getQualityCriteria(phase: Phase): string {
   const descriptions: Record<Phase, Record<string, string>> = {

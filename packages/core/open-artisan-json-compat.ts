@@ -12,7 +12,7 @@ import {
   type OpenArtisanDbResult,
   type OpenArtisanRepository,
 } from "./open-artisan-repository"
-import type { WorkflowState } from "./types"
+import type { WorkflowState } from "./workflow-state-types"
 
 export interface LegacyWorkflowImportOptions {
   /** When true, tolerate repairable legacy inconsistencies and report warnings. */

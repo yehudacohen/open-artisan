@@ -20,12 +20,11 @@ import { handleCascade } from "#core/tools/submit-feedback-handlers"
 import type {
   OrchestratorAssessResult,
   OrchestratorDivergeResult,
-  ArtifactKey,
   RevisionStep,
   OrchestratorPlanResult,
-  WorkflowState,
-} from "#core/types"
-import { SCHEMA_VERSION } from "#core/types"
+} from "#core/orchestrator-types"
+import type { ArtifactKey } from "#core/workflow-primitives"
+import { SCHEMA_VERSION, type WorkflowState } from "#core/workflow-state-types"
 
 // ---------------------------------------------------------------------------
 // Lightweight orchestrator factory driven by mocked assess/diverge

@@ -9,7 +9,10 @@
  * the OpenCode plugin factory.
  */
 
-import type { SessionStateStore, StateMachine, ArtifactGraph, SessionRegistry } from "./types"
+import type { SessionStateStore } from "./workflow-state-types"
+import type { ArtifactGraph } from "./artifact-types"
+import type { SessionRegistry } from "./session-registry-types"
+import type { StateMachine } from "./state-machine-types"
 import type { Orchestrator } from "./orchestrator-types"
 import type { SubagentDispatcher } from "./subagent-dispatcher"
 import type { Logger, NotificationSink } from "./logger"

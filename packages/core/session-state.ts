@@ -21,7 +21,7 @@ import {
   type SessionStateStore,
   type StoreLoadResult,
   type StoreLoadError,
-} from "./types"
+} from "./workflow-state-types"
 import type { StateBackend } from "./state-backend-types"
 import { readDecisionInput, nextSchedulerDecisionForInput } from "./scheduler"
 import { extractApprovedFileAllowlist } from "./tools/plan-allowlist"

@@ -1,4 +1,4 @@
-import type { Phase } from "../types"
+import type { Phase } from "../workflow-primitives"
 import { isInterfaceFile, isOpenArtisanFile, isTestFile } from "../hooks/tool-guard"
 import { existsSync } from "node:fs"
 import { resolve } from "node:path"

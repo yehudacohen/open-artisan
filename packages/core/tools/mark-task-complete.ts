@@ -18,7 +18,7 @@
 import type { TaskNode } from "../dag"
 import { createImplDAG } from "../dag"
 import { markTaskComplete, nextSchedulerDecision } from "../scheduler"
-import type { WorkflowState } from "../types"
+import type { WorkflowState } from "../workflow-state-types"
 
 export interface MarkTaskCompleteArgs {
   /** The DAG task ID that was just completed (e.g. "T1", "auth-service") */

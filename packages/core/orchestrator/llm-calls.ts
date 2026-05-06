@@ -14,9 +14,7 @@
  * main session conversation.
  */
 
-import type {
-  ArtifactKey,
-} from "../types"
+import type { ArtifactKey } from "../workflow-primitives"
 import type {
   OrchestratorAssessResult,
   OrchestratorDivergeResult,

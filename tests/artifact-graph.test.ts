@@ -8,7 +8,7 @@ import { tmpdir } from "node:os"
 
 import { createArtifactGraph } from "#core/artifacts"
 import { detectDesignDoc } from "#core/artifact-store"
-import type { ArtifactGraph } from "#core/types"
+import type { ArtifactGraph } from "#core/artifact-types"
 
 let graph: ArtifactGraph
 

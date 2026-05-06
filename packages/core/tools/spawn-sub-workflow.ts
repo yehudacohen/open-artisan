@@ -8,7 +8,7 @@
  * This module contains pure validation and state-preparation logic.
  * The adapter handles session creation via SubagentDispatcher.
  */
-import type { WorkflowState } from "../types"
+import type { WorkflowState } from "../workflow-state-types"
 import type { SpawnSubWorkflowArgs } from "../tool-types"
 import type { TaskNode } from "../dag"
 import { MAX_SUB_WORKFLOWS, MAX_SUB_WORKFLOW_DEPTH } from "../constants"

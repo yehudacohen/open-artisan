@@ -5,8 +5,7 @@
 import { describe, expect, it } from "bun:test"
 import { handleIdle } from "#core/hooks/idle-handler"
 import { MAX_IDLE_RETRIES } from "#core/constants"
-import type { WorkflowState } from "#core/types"
-import { SCHEMA_VERSION } from "#core/types"
+import { SCHEMA_VERSION, type WorkflowState } from "#core/workflow-state-types"
 
 function makeState(overrides: Partial<WorkflowState> = {}): WorkflowState {
   return {

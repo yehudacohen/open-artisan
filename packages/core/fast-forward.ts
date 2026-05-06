@@ -24,7 +24,7 @@
 import { existsSync } from "node:fs"
 import { readFile } from "node:fs/promises"
 import { createHash } from "node:crypto"
-import type { Phase, WorkflowMode, ArtifactKey } from "./types"
+import type { ArtifactKey, Phase, WorkflowMode } from "./workflow-primitives"
 import { PHASE_TO_ARTIFACT } from "./artifacts"
 import { PHASE_ORDER } from "./constants"
 import { isInterfaceFile, isTestFile } from "./hooks/tool-guard"

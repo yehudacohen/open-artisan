@@ -20,7 +20,7 @@
 
 import { join } from "node:path"
 import { readdirSync, existsSync, statSync } from "node:fs"
-import type { Phase, WorkflowMode, ArtifactKey } from "../types"
+import type { ArtifactKey, Phase, WorkflowMode } from "../workflow-primitives"
 import { isInterfaceFile, isTestFile } from "../hooks/tool-guard"
 import { MAX_ARTIFACT_PATHS, SOURCE_EXTENSIONS } from "../constants"
 

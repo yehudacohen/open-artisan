@@ -14,7 +14,7 @@ import { buildSubagentContext, buildWorkflowSystemPrompt } from "#core/hooks/sys
 import { extractWriteToolPaths, getPhaseToolPolicy, getTaskWriteFiles } from "#core/hooks/tool-guard"
 import { detectMode } from "#core/mode-detect"
 import { extractAgentName, isArtisanAgent, isWorkflowSessionActive, normalizeAgentName, persistActiveAgent } from "#core/agent-policy"
-import type { ModeDetectionResult } from "#core/types"
+import type { ModeDetectionResult } from "#core/mode-detection-types"
 
 type SessionEvent = { type: string; properties?: Record<string, unknown> }
 

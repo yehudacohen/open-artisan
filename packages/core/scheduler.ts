@@ -17,7 +17,7 @@
 
 import { createImplDAG, type TaskIsolation, type TaskNode, type ImplDAG } from "./dag"
 import { buildTaskImplementationRubricPreview } from "./rubrics"
-import type { WorkflowState } from "./types"
+import type { WorkflowState } from "./workflow-state-types"
 
 // ---------------------------------------------------------------------------
 // Types

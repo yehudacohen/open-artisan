@@ -4,7 +4,8 @@
 
 import { createHash } from "node:crypto"
 
-import type { Phase, PhaseState, WorkflowState } from "./types"
+import type { WorkflowState } from "./workflow-state-types"
+import type { Phase, PhaseState } from "./workflow-primitives"
 import type { CriterionResult } from "./review-types"
 import type { TaskReviewSuccess } from "./task-review"
 import type { OpenArtisanServices } from "./open-artisan-services"

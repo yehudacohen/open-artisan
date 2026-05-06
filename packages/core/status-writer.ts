@@ -11,7 +11,8 @@
 
 import { join } from "node:path"
 import { writeFile, mkdir } from "node:fs/promises"
-import type { WorkflowState, Phase, ArtifactKey } from "./types"
+import type { WorkflowState } from "./workflow-state-types"
+import type { ArtifactKey, Phase } from "./workflow-primitives"
 import { PHASE_TO_ARTIFACT } from "./artifacts"
 
 const ARTIFACT_DISPLAY_ORDER: ArtifactKey[] = [

@@ -13,7 +13,8 @@
  */
 import { execFileSync } from "node:child_process"
 import { realpath } from "node:fs/promises"
-import type { GitCheckpointResult, Phase } from "../types"
+import type { GitCheckpointResult } from "../git-checkpoint-types"
+import type { Phase } from "../workflow-primitives"
 
 /**
  * Run a git command in the given cwd. Uses execFileSync (no shell) to avoid

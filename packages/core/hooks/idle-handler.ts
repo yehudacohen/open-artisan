@@ -10,7 +10,8 @@
  * When the agent is at a user gate (USER_GATE), idle is expected — the agent
  * should be waiting for user input. No re-prompt in that case.
  */
-import type { WorkflowState, Phase, PhaseState } from "../types"
+import type { WorkflowState } from "../workflow-state-types"
+import type { Phase, PhaseState } from "../workflow-primitives"
 import { getNextActionForState } from "../utils"
 import { MAX_IDLE_RETRIES } from "../constants"
 import { buildRobotArtisanIdleReprompt } from "../autonomous-user-gate"

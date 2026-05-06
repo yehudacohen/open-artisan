@@ -2,7 +2,8 @@
  * orchestrator-types.ts — Feedback routing and revision-cascade contracts.
  */
 
-import type { ArtifactGraph, ArtifactKey, Phase, PhaseState, WorkflowMode } from "./types"
+import type { ArtifactGraph } from "./artifact-types"
+import type { ArtifactKey, Phase, PhaseState, WorkflowMode } from "./workflow-primitives"
 
 /**
  * The Orchestrator routes user feedback through the artifact dependency graph

@@ -62,7 +62,8 @@ import {
   type WorkflowProjection,
 } from "./open-artisan-repository"
 import type { TaskStatus } from "./dag"
-import { SCHEMA_VERSION, type ArtifactKey, type Phase, type PhaseState, type WorkflowState } from "./types"
+import { SCHEMA_VERSION, type WorkflowState } from "./workflow-state-types"
+import type { ArtifactKey, Phase, PhaseState } from "./workflow-primitives"
 import type { RoadmapDocument } from "./roadmap-types"
 
 export { OPEN_ARTISAN_DB_SCHEMA_VERSION } from "./open-artisan-repository-migrations"

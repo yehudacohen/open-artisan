@@ -18,8 +18,8 @@ import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { cascadeAutoSkip, type CascadeAutoSkipDeps } from "#core/cascade-auto-skip"
 import { createStateMachine } from "#core/state-machine"
-import { SCHEMA_VERSION } from "#core/types"
-import type { WorkflowState, SessionStateStore, Phase } from "#core/types"
+import { SCHEMA_VERSION, type SessionStateStore, type WorkflowState } from "#core/workflow-state-types"
+import type { Phase } from "#core/workflow-primitives"
 import type { Logger } from "#core/logger"
 
 // ---------------------------------------------------------------------------

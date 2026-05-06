@@ -27,10 +27,10 @@
  */
 import type {
   ArtifactKey,
-  ArtifactGraph,
   Phase,
   WorkflowMode,
-} from "./types"
+} from "./workflow-primitives"
+import type { ArtifactGraph } from "./artifact-types"
 
 // ---------------------------------------------------------------------------
 // Static dependency graph

@@ -8,7 +8,7 @@
  */
 
 import type { OpenArtisanDbResult, OpenArtisanRepository } from "./open-artisan-repository"
-import type { WorkflowState } from "./types"
+import type { WorkflowState } from "./workflow-state-types"
 import type { StateBackend } from "./state-backend-types"
 import { exportLegacyWorkflowState, importLegacyWorkflowState } from "./open-artisan-json-compat"
 

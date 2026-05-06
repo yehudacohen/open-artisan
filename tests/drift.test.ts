@@ -14,7 +14,8 @@ import {
 } from "#core/drift"
 import { WORKFLOW_TOOL_NAMES } from "#core/constants"
 import { ApplyDriftRepairToolSchema, PlanDriftRepairToolSchema, ReportDriftToolSchema, toJsonSchema } from "#core/schemas"
-import type { ArtifactKey, Phase, WorkflowState } from "#core/types"
+import type { WorkflowState } from "#core/workflow-state-types"
+import type { ArtifactKey, Phase } from "#core/workflow-primitives"
 
 function stateWithDag(tasks: NonNullable<WorkflowState["implDag"]>): Pick<WorkflowState, "implDag"> {
   return { implDag: tasks }

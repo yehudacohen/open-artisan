@@ -13,7 +13,7 @@ import {
   computeProposeBacktrackTransition,
 } from "#core/tools/transitions"
 import { createStateMachine } from "#core/state-machine"
-import { SCHEMA_VERSION } from "#core/types"
+import { SCHEMA_VERSION } from "#core/workflow-state-types"
 import type {
   StructuralTransitionDescriptor,
   StructuralTransitionDescriptorStore,
@@ -23,8 +23,8 @@ import type {
   StructuralWorkflowHealthCheck,
   StructuralWorkflowLogEvent,
   StructuralWorkflowMetricsSnapshot,
-  WorkflowState,
-} from "#core/types"
+} from "#core/structural-workflow-types"
+import type { WorkflowState } from "#core/workflow-state-types"
 
 const sm = createStateMachine()
 

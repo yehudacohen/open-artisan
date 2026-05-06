@@ -3,7 +3,7 @@
  */
 
 import type { DbPatchSuggestion } from "./open-artisan-repository"
-import type { WorkflowState } from "./types"
+import type { WorkflowState } from "./workflow-state-types"
 
 export type PatchSuggestionRoute = "apply-current-task" | "defer-downstream" | "backtrack" | "ask-user"
 

@@ -17,7 +17,8 @@ import {
   ResolveHumanGateToolSchema,
   SubmitFeedbackToolSchema,
 } from "./schemas"
-import type { ArtifactKey, Phase, PhaseState, WorkflowMode, WorkflowState } from "./types"
+import type { WorkflowState } from "./workflow-state-types"
+import type { ArtifactKey, Phase, PhaseState, WorkflowMode } from "./workflow-primitives"
 
 export type DriftScope = "current-task" | "current-phase" | "workflow" | "roadmap"
 export type DriftSeverity = "info" | "warning" | "blocking"

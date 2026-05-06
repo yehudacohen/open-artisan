@@ -13,7 +13,8 @@
  */
 import { join } from "node:path"
 import { existsSync, readFileSync } from "node:fs"
-import type { WorkflowState, Phase, PhaseState, WorkflowMode } from "../types"
+import type { WorkflowState } from "../workflow-state-types"
+import type { Phase, PhaseState, WorkflowMode } from "../workflow-primitives"
 import { MAX_CONVENTIONS_CHARS, MAX_REPORT_CHARS } from "../constants"
 import { createImplDAG } from "../dag"
 import { nextSchedulerDecision } from "../scheduler"

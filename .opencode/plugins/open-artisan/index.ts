@@ -108,10 +108,11 @@ import { activateHumanGateTasks, resolveAwaitingHumanState } from "../../../pack
 import { parkCurrentWorkflowSession } from "../../../packages/core/session-switch"
 import { buildWorkflowSwitchMessage } from "../../../packages/core/session-switch"
 import { createHash } from "node:crypto"
-import type { WorkflowMode, WorkflowState, SessionStateStore, ArtifactKey, Phase } from "../../../packages/core/types"
+import type { SessionStateStore, WorkflowState } from "../../../packages/core/workflow-state-types"
+import type { WorkflowMode, ArtifactKey, Phase } from "../../../packages/core/workflow-primitives"
 import type { RevisionStep } from "../../../packages/core/orchestrator-types"
 import type { CriterionResult, MarkSatisfiedArgs } from "../../../packages/core/review-types"
-import { VALID_PHASE_STATES } from "../../../packages/core/types"
+import { VALID_PHASE_STATES } from "../../../packages/core/workflow-primitives"
 import type { PluginClient } from "./client-types"
 import { resolveSessionId } from "../../../packages/core/utils"
 import {

@@ -22,7 +22,7 @@
  * CONVENTIONS drafting prompt via the system-transform hook.
  */
 
-import type { WorkflowMode } from "../types"
+import type { WorkflowMode } from "../workflow-primitives"
 import type { SubagentDispatcher } from "../subagent-dispatcher"
 import { withTimeout } from "../utils"
 import { SCANNER_TIMEOUT_MS, MIN_SCANNERS_THRESHOLD } from "../constants"

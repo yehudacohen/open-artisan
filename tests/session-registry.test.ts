@@ -3,7 +3,7 @@
  */
 import { describe, expect, it, beforeEach } from "bun:test"
 import { createSessionRegistry } from "#core/session-registry"
-import type { SessionRegistry } from "#core/types"
+import type { SessionRegistry } from "#core/session-registry-types"
 
 let registry: SessionRegistry
 

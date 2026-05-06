@@ -6,7 +6,7 @@
  *
  * Both are pure functions that read from WorkflowState. No mutations.
  */
-import type { WorkflowState } from "../types"
+import type { WorkflowState } from "../workflow-state-types"
 
 // ---------------------------------------------------------------------------
 // query_parent_workflow

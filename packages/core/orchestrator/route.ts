@@ -9,11 +9,8 @@
  *    - Strategic: root-cause artifact + all downstream dependents → REVISE (topo order)
  * 4. Falls back gracefully when assess or diverge fails.
  */
-import type {
-  Orchestrator,
-  ArtifactKey,
-  Phase,
-} from "../types"
+import type { ArtifactKey, Phase } from "../workflow-primitives"
+import type { Orchestrator } from "../orchestrator-types"
 import type { OrchestratorAssessResult, OrchestratorDeps, OrchestratorPlanResult, OrchestratorRouteInput, RevisionStep } from "../orchestrator-types"
 import { PHASE_TO_ARTIFACT } from "../artifacts"
 

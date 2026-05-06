@@ -12,10 +12,7 @@
  *
  * Design doc §12: Escape Hatch User Experience
  */
-import type {
-  ArtifactKey,
-  Phase,
-} from "../types"
+import type { ArtifactKey, Phase } from "../workflow-primitives"
 import type { OrchestratorAssessResult, OrchestratorDivergeResult, RevisionStep } from "../orchestrator-types"
 import { APPROVAL_WORDS, ABORT_WORDS } from "../vocabulary"
 import { MAX_ESCAPE_FEEDBACK_CHARS, MAX_AMBIGUOUS_RESPONSE_LENGTH } from "../constants"

@@ -30,7 +30,7 @@
 
 import type { TaskNode, TaskCategory, TaskStatus } from "./dag"
 import type { DbWorktreeObservation } from "./open-artisan-repository"
-import type { WorkflowMode } from "./types"
+import type { WorkflowMode } from "./workflow-primitives"
 import type { SubagentDispatcher } from "./subagent-dispatcher"
 import { nextSchedulerDecisionForInput, readDecisionInput, type SchedulerDecision } from "./scheduler"
 import { withTimeout, extractJsonFromText } from "./utils"

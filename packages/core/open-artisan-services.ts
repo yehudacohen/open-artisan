@@ -34,7 +34,7 @@ import type {
   OpenArtisanRepository,
   PatchSuggestionStatus,
 } from "./open-artisan-repository"
-import type { Phase } from "./types"
+import type { Phase } from "./workflow-primitives"
 import type { RoadmapDocument, RoadmapItemStatus } from "./roadmap-types"
 
 export interface RoadmapService {

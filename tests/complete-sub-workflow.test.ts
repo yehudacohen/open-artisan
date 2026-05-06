@@ -8,9 +8,9 @@ import {
   applyDelegationTimeout,
   syncChildWorkflowsWithDag,
 } from "#core/tools/complete-sub-workflow"
-import { SCHEMA_VERSION } from "#core/types"
+import { SCHEMA_VERSION } from "#core/workflow-state-types"
 import { SUB_WORKFLOW_TIMEOUT_MS } from "#core/constants"
-import type { WorkflowState } from "#core/types"
+import type { WorkflowState } from "#core/workflow-state-types"
 import type { TaskNode } from "#core/dag"
 
 function makeTask(overrides: Partial<TaskNode> & { id: string }): TaskNode {

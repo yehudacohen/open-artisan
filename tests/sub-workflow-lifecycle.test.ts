@@ -26,8 +26,7 @@ import { applyChildCompletion, findTimedOutChildren, applyDelegationTimeout } fr
 import { createImplDAG } from "#core/dag"
 import { nextSchedulerDecision } from "#core/scheduler"
 import { SUB_WORKFLOW_TIMEOUT_MS } from "#core/constants"
-import { SCHEMA_VERSION } from "#core/types"
-import type { SessionStateStore, WorkflowState } from "#core/types"
+import { SCHEMA_VERSION, type SessionStateStore, type WorkflowState } from "#core/workflow-state-types"
 import type { TaskNode } from "#core/dag"
 
 function makeTask(overrides: Partial<TaskNode> & { id: string }): TaskNode {

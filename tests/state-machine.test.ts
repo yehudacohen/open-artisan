@@ -6,8 +6,8 @@
  * runtime as the supported public boundary for these behaviors.
  */
 import { describe, expect, it, beforeEach } from "bun:test"
-import { STRUCTURAL_WORKFLOW_EXECUTABLE_TESTING_POLICY, SUPPORTED_EXECUTABLE_SEAM_DESCRIPTORS } from "#core/types"
-import type { StateMachine } from "#core/types"
+import { STRUCTURAL_WORKFLOW_EXECUTABLE_TESTING_POLICY, SUPPORTED_EXECUTABLE_SEAM_DESCRIPTORS } from "#core/structural-workflow-types"
+import type { StateMachine } from "#core/state-machine-types"
 
 import { createStateMachine } from "#core/state-machine"
 

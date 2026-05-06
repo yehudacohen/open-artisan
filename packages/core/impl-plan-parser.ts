@@ -33,7 +33,7 @@
 import { resolve } from "node:path"
 import { createImplDAG } from "./dag"
 import type { ImplDAG, TaskNode, TaskComplexity, TaskCategory } from "./dag"
-import type { WorkflowMode } from "./types"
+import type { WorkflowMode } from "./workflow-primitives"
 
 // ---------------------------------------------------------------------------
 // Types

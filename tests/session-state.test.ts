@@ -9,8 +9,7 @@ import { tmpdir } from "node:os"
 
 import { createSessionStateStore } from "#core/session-state"
 import { createFileSystemStateBackend, migrateLegacyStateFile } from "#core/state-backend-fs"
-import { SCHEMA_VERSION } from "#core/types"
-import type { SessionStateStore, WorkflowState } from "#core/types"
+import { SCHEMA_VERSION, type SessionStateStore, type WorkflowState } from "#core/workflow-state-types"
 
 /** Build a minimal valid WorkflowState for test fixtures. */
 function makeState(sessionId: string, featureName: string | null, overrides?: Partial<WorkflowState>): WorkflowState {

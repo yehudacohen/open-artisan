@@ -1,5 +1,5 @@
 import type { Logger, NotificationSink } from "./logger"
-import type { SessionStateStore, WorkflowState } from "./types"
+import type { SessionStateStore, WorkflowState } from "./workflow-state-types"
 import { extractAgentName, isArtisanAgent, persistActiveAgent } from "./agent-policy"
 
 export interface AgentAwareToolContext {

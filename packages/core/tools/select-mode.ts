@@ -5,7 +5,7 @@
  * After calling this tool, the state machine transitions to DISCOVERY (REFACTOR/INCREMENTAL)
  * or PLANNING (GREENFIELD). Modes are validated against the WorkflowMode enum.
  */
-import type { WorkflowMode } from "../types"
+import type { WorkflowMode } from "../workflow-primitives"
 import type { SelectModeArgs } from "../tool-types"
 
 export const VALID_MODES: WorkflowMode[] = ["GREENFIELD", "REFACTOR", "INCREMENTAL"]

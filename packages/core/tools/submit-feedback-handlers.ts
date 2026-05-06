@@ -21,13 +21,11 @@
  * encode cross-phase jumps without coupling it to the artifact graph.
  */
 
-import type {
-  WorkflowState,
-  Phase,
-} from "../types"
+import type { WorkflowState } from "../workflow-state-types"
+import type { Phase } from "../workflow-primitives"
 import type { Orchestrator, OrchestratorAssessResult, OrchestratorDivergeResult, RevisionStep } from "../orchestrator-types"
 import { isEscapeHatchAbort, isEscapeHatchAccept, isEscapeHatchAmbiguous, parseEscapeHatchNewDirection, buildEscapeHatchPresentation } from "../orchestrator/escape-hatch"
-import type { StateMachine } from "../types"
+import type { StateMachine } from "../state-machine-types"
 
 // ---------------------------------------------------------------------------
 // Shared types

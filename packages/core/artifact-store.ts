@@ -24,7 +24,7 @@
 import { join } from "node:path"
 import { mkdirSync, existsSync } from "node:fs"
 import { writeFile } from "node:fs/promises"
-import type { ArtifactKey } from "./types"
+import type { ArtifactKey } from "./workflow-primitives"
 
 // ---------------------------------------------------------------------------
 // Constants

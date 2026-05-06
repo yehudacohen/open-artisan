@@ -280,7 +280,7 @@ export const SUB_WORKFLOW_TIMEOUT_MS = 1_800_000
  *
  * Imported by: state-machine.ts (implicit), propose-backtrack.ts, transitions.ts
  */
-export const PHASE_ORDER: import("./types").Phase[] = [
+export const PHASE_ORDER: import("./workflow-primitives").Phase[] = [
   "MODE_SELECT", "DISCOVERY", "PLANNING", "INTERFACES",
   "TESTS", "IMPL_PLAN", "IMPLEMENTATION", "DONE",
 ]

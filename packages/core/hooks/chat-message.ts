@@ -13,7 +13,8 @@
  * which the agent calls after seeing this hook's injected routing instructions.
  * This hook is a "hint injector" — it doesn't mutate state, it guides the agent.
  */
-import type { WorkflowState, Phase, PhaseState } from "../types"
+import type { WorkflowState } from "../workflow-state-types"
+import type { Phase, PhaseState } from "../workflow-primitives"
 import {
   APPROVAL_DISQUALIFIER_RE,
   APPROVAL_FILLER_WORDS,

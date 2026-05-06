@@ -12,7 +12,7 @@ import {
 } from "#core/agent-policy"
 import { createSessionStateStore } from "#core/session-state"
 import { createFileSystemStateBackend } from "#core/state-backend-fs"
-import { SCHEMA_VERSION, type WorkflowState } from "#core/types"
+import { SCHEMA_VERSION, type WorkflowState } from "#core/workflow-state-types"
 
 function makeState(overrides: Partial<WorkflowState> = {}): WorkflowState {
   return {

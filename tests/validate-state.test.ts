@@ -3,8 +3,7 @@
  * Also tests resolveSessionId — the session ID resolver (G19).
  */
 import { describe, expect, it } from "bun:test"
-import { validateWorkflowState, SCHEMA_VERSION } from "#core/types"
-import type { WorkflowState } from "#core/types"
+import { SCHEMA_VERSION, validateWorkflowState, type WorkflowState } from "#core/workflow-state-types"
 import { resolveSessionId } from "#core/utils"
 
 function makeValidState(overrides: Partial<WorkflowState> = {}): WorkflowState {

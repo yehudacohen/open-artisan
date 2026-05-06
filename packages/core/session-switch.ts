@@ -1,4 +1,4 @@
-import type { SessionStateStore, WorkflowState } from "./types"
+import type { SessionStateStore, WorkflowState } from "./workflow-state-types"
 
 function buildParkedSessionId(sessionId: string, featureName: string | null): string {
   const suffix = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`

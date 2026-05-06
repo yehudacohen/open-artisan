@@ -18,7 +18,7 @@
  * can still intervene by switching to the artisan agent or sending a message.
  */
 
-import type { Phase, WorkflowMode, ArtifactKey } from "./types"
+import type { ArtifactKey, Phase, WorkflowMode } from "./workflow-primitives"
 import type { SubagentDispatcher } from "./subagent-dispatcher"
 import { extractJsonFromText, withTimeout } from "./utils"
 

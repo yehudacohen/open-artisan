@@ -29,7 +29,7 @@ import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { createHash } from "node:crypto"
 import { computeFastForward, computeForwardSkip } from "#core/fast-forward"
-import type { ArtifactKey, Phase } from "#core/types"
+import type { ArtifactKey, Phase } from "#core/workflow-primitives"
 
 // ---------------------------------------------------------------------------
 // Helpers

@@ -14,8 +14,8 @@ import type {
   PhaseState,
   WorkflowEvent,
   WorkflowMode,
-  WorkflowState,
-} from "./types"
+} from "./workflow-primitives"
+import type { WorkflowState } from "./workflow-state-types"
 import type { RoadmapDocument, RoadmapItemKind, RoadmapItemStatus } from "./roadmap-types"
 
 export type DbRecordId = string

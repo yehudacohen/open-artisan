@@ -14,7 +14,8 @@
 import { execSync } from "node:child_process"
 import { readdirSync, type Dirent } from "node:fs"
 import { join, extname } from "node:path"
-import type { ModeDetectionResult, WorkflowMode } from "./types"
+import type { ModeDetectionResult } from "./mode-detection-types"
+import type { WorkflowMode } from "./workflow-primitives"
 import { SOURCE_EXTENSIONS } from "./constants"
 
 function hasGitCommits(cwd: string): boolean {

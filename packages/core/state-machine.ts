@@ -8,9 +8,8 @@ import {
   type PhaseState,
   type WorkflowEvent,
   type WorkflowMode,
-  type StateMachine,
-  type TransitionOutcome,
-} from "./types"
+} from "./workflow-primitives"
+import type { StateMachine, TransitionOutcome } from "./state-machine-types"
 import { PHASE_ORDER } from "./constants"
 
 // ---------------------------------------------------------------------------

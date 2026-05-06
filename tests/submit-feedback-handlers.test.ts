@@ -25,9 +25,9 @@ import {
   handleCascade,
   handleNormalRevise,
 } from "#core/tools/submit-feedback-handlers"
-import type { WorkflowState } from "#core/types"
+import type { WorkflowState } from "#core/workflow-state-types"
 import type { RevisionStep } from "#core/orchestrator-types"
-import { SCHEMA_VERSION } from "#core/types"
+import { SCHEMA_VERSION } from "#core/workflow-state-types"
 import { createStateMachine } from "#core/state-machine"
 
 // ---------------------------------------------------------------------------
@@ -84,7 +84,7 @@ function makeState(overrides: Partial<WorkflowState> = {}): WorkflowState {
 
 function makeRevisionStep(artifact: string): RevisionStep {
   return {
-    artifact: artifact as import("#core/types").ArtifactKey,
+    artifact: artifact as import("#core/workflow-primitives").ArtifactKey,
     phase: "PLANNING",
     phaseState: "REVISE",
     instructions: `Revise the ${artifact} artifact.`,

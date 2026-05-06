@@ -1,5 +1,7 @@
 import type { AutoApproveRequest, AutoApproveSuccess } from "./auto-approve"
-import type { ArtifactKey, Phase, StateMachine, TransitionOutcome, WorkflowMode, WorkflowState } from "./types"
+import type { WorkflowState } from "./workflow-state-types"
+import type { StateMachine, TransitionOutcome } from "./state-machine-types"
+import type { ArtifactKey, Phase, WorkflowMode } from "./workflow-primitives"
 
 export function isRobotArtisanSession(state: Pick<WorkflowState, "activeAgent">): boolean {
   return state.activeAgent === "robot-artisan"

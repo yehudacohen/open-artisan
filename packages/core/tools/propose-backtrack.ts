@@ -12,10 +12,8 @@
  * caller (index.ts) applies to the store.
  */
 
-import type {
-  Phase,
-  WorkflowState,
-} from "../types"
+import type { WorkflowState } from "../workflow-state-types"
+import type { Phase } from "../workflow-primitives"
 import type { DivergenceClass, Orchestrator, OrchestratorPlanResult, RevisionStep } from "../orchestrator-types"
 
 // ---------------------------------------------------------------------------

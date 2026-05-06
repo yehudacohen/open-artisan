@@ -18,11 +18,7 @@
  * let the agent loop, or escalate to USER_GATE).
  */
 
-import type {
-  ArtifactKey,
-  Phase,
-  WorkflowMode,
-} from "./types"
+import type { ArtifactKey, Phase, WorkflowMode } from "./workflow-primitives"
 import type { CriterionResult, RebuttalRequest, RebuttalResult, SelfReviewResult } from "./review-types"
 import type { SubagentDispatcher } from "./subagent-dispatcher"
 import { withTimeout, extractJsonFromText } from "./utils"

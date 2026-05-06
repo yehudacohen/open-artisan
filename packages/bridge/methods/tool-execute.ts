@@ -25,7 +25,8 @@ import { handleQueryChildWorkflow, handleQueryParentWorkflow } from "./query-wor
 import { handleAnalyzeTaskBoundaryChange, handleApplyTaskBoundaryChange } from "./task-boundary-tool-handlers"
 import { handleCheckPriorWorkflow, handleResetTask, handleResolveHumanGate, handleSpawnSubWorkflow } from "./implementation-control-tool-handlers"
 import { createAutoApproveToolHandlers } from "./auto-approve-tool-handlers"
-import { handleMarkSatisfied, handleRequestReview, handleSubmitFeedback } from "./review-feedback-tool-handlers"
+import { handleMarkSatisfied, handleRequestReview } from "./review-feedback-tool-handlers"
+import { handleSubmitFeedback } from "./feedback-tool-handlers"
 
 import { createHash } from "node:crypto"
 import { resolve } from "node:path"

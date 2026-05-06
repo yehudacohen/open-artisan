@@ -154,10 +154,7 @@ export const MarkTaskCompleteToolSchema = z.object({
 
 export const MarkScanCompleteToolSchema = z.object({ scan_summary: z.string() }).strict()
 export const MarkAnalyzeCompleteToolSchema = z.object({ analysis_summary: z.string() }).strict()
-export const CheckPriorWorkflowToolSchema = z.object({
-  feature_name: z.string().min(1),
-  user_intent: z.string().optional(),
-}).strict()
+export const CheckPriorWorkflowToolSchema = z.object({ feature_name: z.string().min(1) }).strict()
 
 export const ProposeBacktrackToolSchema = z.object({
   target_phase: z.string().min(1),

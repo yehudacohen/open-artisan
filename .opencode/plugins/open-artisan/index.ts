@@ -593,12 +593,6 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
               "The feature name to check for prior workflow state. " +
               "This should match what the user is asking to work on.",
             ),
-          user_intent: tool.schema
-            .string()
-            .optional()
-            .describe(
-              "The user's current request/goal. If not provided, will be derived from the session context.",
-            ),
         },
         async execute(
           args: { feature_name: string; user_intent?: string | undefined },

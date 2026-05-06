@@ -788,7 +788,7 @@ describe("SessionStateStore — load", () => {
         retryCount: 0,
         approvedArtifacts: { plan: "abc123" },
         conventions: null,
-        fileAllowlist: ["/tmp/project/packages/core/types.ts"],
+        fileAllowlist: ["/tmp/project/packages/core/workflow-state-types.ts"],
         lastCheckpointTag: null,
         approvalCount: 2,
         orchestratorSessionId: null,
@@ -818,7 +818,7 @@ describe("SessionStateStore — load", () => {
         parentWorkflow: null,
         childWorkflows: [],
         concurrency: { maxParallelTasks: 1 },
-        reviewArtifactFiles: ["/tmp/project/packages/core/types.ts"],
+        reviewArtifactFiles: ["/tmp/project/packages/core/workflow-state-types.ts"],
         // Note: no backtrackContext — v23 field
       }),
     )

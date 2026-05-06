@@ -221,7 +221,7 @@ class TestBridgeDelegation:
             "request_review",
             "runtime-session",
             "/tmp/project",
-            {"artifact_files": ["/tmp/project/packages/core/types.ts"]},
+            {"artifact_files": ["/tmp/project/packages/core/workflow-state-types.ts"]},
         )
 
         assert "Review requested" in result

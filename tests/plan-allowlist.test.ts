@@ -7,7 +7,7 @@ describe("extractApprovedFileAllowlist", () => {
     const plan = `# Plan
 
 ## Narrow allowlist
-- \`packages/core/types.ts\`
+- \`packages/core/workflow-state-types.ts\`
 - \`packages/core/session-state.ts\`
 - Existing DAG/state model files already used by workflow execution:
   - \`packages/core/dag.ts\`
@@ -18,7 +18,7 @@ describe("extractApprovedFileAllowlist", () => {
 `
 
     expect(extractApprovedFileAllowlist(plan, "/project")).toEqual([
-      "/project/packages/core/types.ts",
+      "/project/packages/core/workflow-state-types.ts",
       "/project/packages/core/session-state.ts",
       "/project/packages/core/dag.ts",
       "/project/packages/core/scheduler.ts",

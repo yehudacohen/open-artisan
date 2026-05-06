@@ -12,6 +12,7 @@ import type { OpenArtisanServices } from "../../core/open-artisan-services"
 import type { DbAgentLease } from "../../core/open-artisan-repository"
 import type { ToolContext, ToolHandler } from "./tool-handler-types"
 import type { SchedulerDecision } from "../../core/scheduler"
+import { applyDispatch } from "../../core/scheduler"
 import { createGitCheckpoint } from "../../core/hooks/git-checkpoint"
 import { extractApprovedFileAllowlist } from "../../core/tools/plan-allowlist"
 import { parseToolArgs } from "../../core/tool-args"
@@ -194,8 +195,9 @@ async function resolveHumanGateFeedback(
     await store.update(toolCtx.sessionId, (draft) => {
       draft.implDag = updatedNodes
       draft.phase = "IMPLEMENTATION"
-      draft.phaseState = "SCHEDULING"
+      draft.phaseState = "DRAFT"
       draft.currentTaskId = nextDecision.task.id
+      draft.implDag = applyDispatch(draft, nextDecision.task.id)
       draft.iterationCount = 0
       draft.retryCount = 0
       draft.userGateMessageReceived = false
@@ -203,7 +205,7 @@ async function resolveHumanGateFeedback(
     await persistCurrentTaskClaim(ctx.openArtisanServices, store.get(toolCtx.sessionId), toolCtx.sessionId)
     return (
       `Resolved ${resolvedIds.length} human gate(s): ${resolvedIds.join(", ")}.\n\n` +
-      "Returning to IMPLEMENTATION/SCHEDULING — downstream tasks are now unblocked."
+      "Returning to IMPLEMENTATION/DRAFT — downstream tasks are now unblocked."
     )
   }
 
@@ -221,7 +223,7 @@ async function resolveHumanGateFeedback(
     await store.update(toolCtx.sessionId, (draft) => {
       draft.implDag = updatedNodes
       draft.phase = "IMPLEMENTATION"
-      draft.phaseState = "SCHEDULING"
+      draft.phaseState = "DRAFT"
       draft.currentTaskId = null
       draft.iterationCount = 0
       draft.retryCount = 0
@@ -229,7 +231,7 @@ async function resolveHumanGateFeedback(
     })
     return (
       `Resolved ${resolvedIds.length} human gate(s): ${resolvedIds.join(", ")}.\n\n` +
-      "All DAG tasks are now complete. Returning to IMPLEMENTATION/SCHEDULING so the runtime can request final implementation review."
+      "All DAG tasks are now complete. Returning to IMPLEMENTATION/DRAFT so the runtime can request final implementation review."
     )
   }
 
@@ -371,6 +373,10 @@ async function applyApprovalTransition(
         if (materialized) {
           draft.implDag = materialized.nodes
           draft.currentTaskId = materialized.currentTaskId
+          if (materialized.currentTaskId) {
+            draft.implDag = applyDispatch(draft, materialized.currentTaskId)
+            draft.phaseState = "DRAFT"
+          }
         } else {
           draft.implDag = null
         }

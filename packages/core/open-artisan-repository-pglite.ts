@@ -276,7 +276,11 @@ export function createPGliteOpenArtisanRepository(
           ...(options.pollMs === undefined ? {} : { pollMs: options.pollMs }),
           ...(options.leaseMs === undefined ? {} : { leaseMs: options.leaseMs }),
         })
-        return openArtisanDbOk({ release: lease.release })
+        return openArtisanDbOk({
+          release: () => withDb("openartisan.releaseRepositoryLock", async () => {
+            await lease.release()
+          }),
+        })
       })
     } catch (error) {
       return dbFailure(`Open Artisan DB lock acquisition failed for ${leaseKey}`, error)
@@ -882,7 +886,11 @@ export function createPGliteOpenArtisanRepository(
     },
 
     replaceTaskGraph(workflowId: DbRecordId, graph: DbTaskGraph) {
-      return withInitializedDb((db) => replaceTaskGraphInDb(db, workflowId, graph))
+      return withInitializedDb(async (db) => {
+        return db.transaction().execute(async (tx) => {
+          return transactionStorage.run(tx as unknown as DbExecutor, () => replaceTaskGraphInDb(tx as unknown as DbExecutor, workflowId, graph))
+        })
+      })
     },
 
     getTaskGraph(workflowId: DbRecordId) {
@@ -1213,6 +1221,8 @@ export function createPGliteOpenArtisanRepository(
 
     importWorkflowState(state: WorkflowState) {
       return withInitializedDb(async (db) => {
+        return db.transaction().execute(async (tx) => transactionStorage.run(tx as unknown as DbExecutor, async () => {
+        const db = tx as unknown as DbExecutor
         const featureName = state.featureName ?? state.sessionId
         const workflowId = `workflow:${featureName}`
         const schemaDb = db.withSchema(schemaName)
@@ -1297,6 +1307,7 @@ export function createPGliteOpenArtisanRepository(
           }
         }
         return openArtisanDbOk({ workflowId, featureName, warnings: [] })
+        }))
       })
     },
 

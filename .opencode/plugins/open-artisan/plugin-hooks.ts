@@ -37,6 +37,7 @@ function enforceWritePathPredicate(input: {
   phase: string
   phaseState: string
   allowedDescription: string
+  projectRoot: string
   args: Record<string, unknown> | undefined
   predicate: (filePath: string) => boolean
 }): void {
@@ -48,7 +49,8 @@ function enforceWritePathPredicate(input: {
     )
   }
   for (const filePath of filePaths) {
-    if (!input.predicate(filePath)) {
+    const checkedPath = filePath.startsWith("/") ? filePath : resolve(input.projectRoot, filePath)
+    if (!input.predicate(checkedPath)) {
       throw new Error(
         `[Workflow] Writing to "${filePath}" is blocked in ${input.phase}/${input.phaseState}. ` +
         `${input.allowedDescription}`,
@@ -504,6 +506,7 @@ export function createPluginHooks({
                 phase: parentState.phase,
                 phaseState: parentState.phaseState,
                 allowedDescription: policy.allowedDescription,
+                projectRoot,
                 args: input.args,
                 predicate: policy.writePathPredicate,
               })
@@ -563,6 +566,7 @@ export function createPluginHooks({
             phase: refreshedState.phase,
             phaseState: refreshedState.phaseState,
             allowedDescription: policy.allowedDescription,
+            projectRoot,
             args: input.args,
             predicate: policy.writePathPredicate,
           })

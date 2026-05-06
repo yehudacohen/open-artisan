@@ -483,9 +483,9 @@ export function markTaskComplete(dag: ImplDAG, taskId: string): TaskNode | null 
   // ImplDAG.tasks is ReadonlyArray but TaskNode fields are mutable
   const task = Array.from(dag.tasks).find((t) => t.id === taskId)
   if (!task) return null
-  // Only in-flight, pending, or human-gated tasks can be marked complete.
-  // Human-gated tasks are completed via resolveHumanGate(), but markTaskComplete
-  // also accepts them for flexibility (e.g. if a gate is resolved during approval).
+  // The low-level scheduler helper accepts pending/in-flight/human-gated nodes
+  // so pure DAG tests and internal graph repair can model transitions directly.
+  // Public workflow tools add stricter dispatched-task validation before calling.
   if (task.status !== "in-flight" && task.status !== "pending" && task.status !== "human-gated") return null
   task.status = "complete"
   return task

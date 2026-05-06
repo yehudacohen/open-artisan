@@ -109,6 +109,10 @@ async function ensureSession(): Promise<void> {
 
 /** Call tool.execute with the given tool name and args. */
 async function execTool(name: string, args: Record<string, unknown> = {}): Promise<string> {
+  if (name === "mark_satisfied") {
+    return "Error: mark_satisfied is reserved for isolated reviewers. Use request_review and let the Claude Code hook submit submit_phase_review."
+  }
+
   await ensureSession()
 
   // For submit_feedback: the CLI is invoked directly by the user, so we

@@ -278,6 +278,48 @@ export async function handleStop(input: HookInput): Promise<HookOutput> {
     }
   }
 
+  // Phase-level isolated review: Claude Code exposes workflow tools to the
+  // authoring agent, so REVIEW must be completed by an isolated subprocess that
+  // submits submit_phase_review rather than by author-callable mark_satisfied.
+  if (state?.phaseState === "REVIEW") {
+    const reviewPrompt = await bridgeCall(stateDir, "task.getPhaseReviewContext", { sessionId })
+    if (reviewPrompt && typeof reviewPrompt === "string") {
+      const projectDir = input.cwd ?? process.env["CLAUDE_PROJECT_DIR"] ?? process.cwd()
+      try {
+        const reviewOutput = execFileSync("claude", ["--print", "--max-turns", "1", "-p", reviewPrompt], {
+          timeout: 300_000,
+          encoding: "utf-8",
+          stdio: ["pipe", "pipe", "pipe"],
+        })
+        await bridgeCall(stateDir, "tool.execute", {
+          name: "submit_phase_review",
+          args: { review_output: reviewOutput },
+          context: { sessionId, directory: projectDir },
+        })
+        return {
+          stdout: null,
+          stderr: "Phase review completed. Continue with the workflow.",
+          exitCode: 2,
+        }
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : String(err)
+        await bridgeCall(stateDir, "tool.execute", {
+          name: "submit_phase_review",
+          args: {
+            review_error: errMsg,
+            review_exit_code: 1,
+          },
+          context: { sessionId, directory: projectDir },
+        })
+        return {
+          stdout: null,
+          stderr: "Phase review dispatch failed and was recorded as a blocking review failure. Revise the artifact or retry review.",
+          exitCode: 2,
+        }
+      }
+    }
+  }
+
   // -----------------------------------------------------------------------
   // Robot-artisan auto-approval: when at USER_GATE with activeAgent
   // "robot-artisan", dispatch an isolated auto-approver subprocess instead

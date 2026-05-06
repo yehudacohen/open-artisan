@@ -214,11 +214,11 @@ describe("Tool policy — PLANNING/REVIEW allows .openartisan/ writes + bash for
     expect(policy.writePathPredicate?.("/project/src/index.ts")).toBe(false)
   })
 
-  it("PLANNING/USER_GATE blocks write and edit but allows bash", () => {
+  it("PLANNING/USER_GATE blocks write, edit, and bash", () => {
     const policy = getPhaseToolPolicy("PLANNING", "USER_GATE", "GREENFIELD", [])
     expect(policy.blocked).toContain("write")
     expect(policy.blocked).toContain("edit")
-    expect(policy.blocked).not.toContain("bash")
+    expect(policy.blocked).toContain("bash")
   })
 
   it("IMPL_PLAN/REVIEW allows .openartisan/ writes and bash for verification", () => {
@@ -252,9 +252,10 @@ describe("Tool policy — INTERFACES allows .ts/.tsx/.d.ts writes only (G1)", ()
     expect(policy.blocked).not.toContain("bash")
   })
 
-  it("bash is allowed in INTERFACES/USER_GATE (read-only verification)", () => {
+  it("INTERFACES/USER_GATE blocks bash and writes", () => {
     const policy = getPhaseToolPolicy("INTERFACES", "USER_GATE", "GREENFIELD", [])
-    expect(policy.blocked).not.toContain("bash")
+    expect(policy.blocked).toEqual(expect.arrayContaining(["write", "edit", "bash"]))
+    expect(policy.writePathPredicate).toBeUndefined()
   })
 
   it("INTERFACES/REVIEW still restricts writes to interface files", () => {
@@ -356,9 +357,10 @@ describe("Tool policy — TESTS allows .test.ts/.test.tsx writes only (G1)", () 
     expect(policy.blocked).not.toContain("bash")
   })
 
-  it("bash is allowed in TESTS/USER_GATE (read-only verification)", () => {
+  it("TESTS/USER_GATE blocks bash and writes", () => {
     const policy = getPhaseToolPolicy("TESTS", "USER_GATE", "GREENFIELD", [])
-    expect(policy.blocked).not.toContain("bash")
+    expect(policy.blocked).toEqual(expect.arrayContaining(["write", "edit", "bash"]))
+    expect(policy.writePathPredicate).toBeUndefined()
   })
 
   it("TESTS/REVIEW still restricts writes to test files", () => {
@@ -690,67 +692,40 @@ describe("Tool policy — PLANNING/ESCAPE_HATCH blocks write and edit", () => {
     expect(policy.blocked).toContain("edit")
   })
 
-  it("PLANNING/ESCAPE_HATCH does not block bash", () => {
+  it("PLANNING/ESCAPE_HATCH blocks bash", () => {
     const policy = getPhaseToolPolicy("PLANNING", "ESCAPE_HATCH", "GREENFIELD", [])
-    expect(policy.blocked).not.toContain("bash")
+    expect(policy.blocked).toContain("bash")
   })
 
   it("IMPL_PLAN/ESCAPE_HATCH blocks write and edit", () => {
     const policy = getPhaseToolPolicy("IMPL_PLAN", "ESCAPE_HATCH", "GREENFIELD", [])
     expect(policy.blocked).toContain("write")
     expect(policy.blocked).toContain("edit")
-    expect(policy.blocked).not.toContain("bash")
+    expect(policy.blocked).toContain("bash")
   })
 })
 
-describe("Tool policy — INTERFACES/ESCAPE_HATCH allows interface writes and bash", () => {
-  it("INTERFACES/ESCAPE_HATCH does not block bash", () => {
+describe("Tool policy — INTERFACES/ESCAPE_HATCH blocks writes and bash", () => {
+  it("INTERFACES/ESCAPE_HATCH blocks bash", () => {
     const policy = getPhaseToolPolicy("INTERFACES", "ESCAPE_HATCH", "GREENFIELD", [])
-    expect(policy.blocked).not.toContain("bash")
+    expect(policy.blocked).toContain("bash")
   })
 
-  it("INTERFACES/ESCAPE_HATCH allows writes to interface files via predicate", () => {
+  it("INTERFACES/ESCAPE_HATCH has no write predicate", () => {
     const policy = getPhaseToolPolicy("INTERFACES", "ESCAPE_HATCH", "GREENFIELD", [])
-    expect(policy.writePathPredicate).toBeDefined()
-    expect(policy.writePathPredicate?.("/project/src/types.ts")).toBe(true)
-    expect(policy.writePathPredicate?.("/project/src/foo.d.ts")).toBe(true)
-    expect(policy.writePathPredicate?.("/project/schema.proto")).toBe(true)
-  })
-
-  it("INTERFACES/ESCAPE_HATCH blocks writes to non-interface files", () => {
-    const policy = getPhaseToolPolicy("INTERFACES", "ESCAPE_HATCH", "GREENFIELD", [])
-    expect(policy.writePathPredicate?.("/project/src/server.ts")).toBe(false)
-    expect(policy.writePathPredicate?.("/project/src/index.ts")).toBe(false)
-  })
-
-  it("INTERFACES/ESCAPE_HATCH blocks .env writes", () => {
-    const policy = getPhaseToolPolicy("INTERFACES", "ESCAPE_HATCH", "GREENFIELD", [])
-    expect(policy.writePathPredicate?.("/project/.env")).toBe(false)
+    expect(policy.writePathPredicate).toBeUndefined()
   })
 })
 
-describe("Tool policy — TESTS/ESCAPE_HATCH allows test file writes and bash", () => {
-  it("TESTS/ESCAPE_HATCH does not block bash", () => {
+describe("Tool policy — TESTS/ESCAPE_HATCH blocks writes and bash", () => {
+  it("TESTS/ESCAPE_HATCH blocks bash", () => {
     const policy = getPhaseToolPolicy("TESTS", "ESCAPE_HATCH", "GREENFIELD", [])
-    expect(policy.blocked).not.toContain("bash")
+    expect(policy.blocked).toContain("bash")
   })
 
-  it("TESTS/ESCAPE_HATCH allows writes to test files via predicate", () => {
+  it("TESTS/ESCAPE_HATCH has no write predicate", () => {
     const policy = getPhaseToolPolicy("TESTS", "ESCAPE_HATCH", "GREENFIELD", [])
-    expect(policy.writePathPredicate).toBeDefined()
-    expect(policy.writePathPredicate?.("/project/tests/foo.test.ts")).toBe(true)
-    expect(policy.writePathPredicate?.("/project/src/foo.spec.ts")).toBe(true)
-  })
-
-  it("TESTS/ESCAPE_HATCH blocks writes to non-test files", () => {
-    const policy = getPhaseToolPolicy("TESTS", "ESCAPE_HATCH", "GREENFIELD", [])
-    expect(policy.writePathPredicate?.("/project/src/index.ts")).toBe(false)
-    expect(policy.writePathPredicate?.("/project/src/Component.tsx")).toBe(false)
-  })
-
-  it("TESTS/ESCAPE_HATCH blocks .env writes", () => {
-    const policy = getPhaseToolPolicy("TESTS", "ESCAPE_HATCH", "GREENFIELD", [])
-    expect(policy.writePathPredicate?.("/project/.env")).toBe(false)
+    expect(policy.writePathPredicate).toBeUndefined()
   })
 })
 

@@ -49,6 +49,15 @@ export const handleGuardCheck: MethodHandler = async (params, ctx) => {
     throw new JSONRPCErrorException(`Session "${p.sessionId}" not found`, SESSION_NOT_FOUND)
   }
 
+  if (WORKFLOW_TOOL_NAMES.has(toolName)) {
+    return {
+      allowed: true,
+      policyVersion: ctx.policyVersion,
+      phase: state.phase,
+      phaseState: state.phaseState,
+    } satisfies GuardCheckResult
+  }
+
   // Resolve per-task expected files for the current task.
   // Resolve relative paths to absolute using the project directory.
   const rawTaskFiles = state.currentTaskId && state.implDag
@@ -92,8 +101,10 @@ export const handleGuardCheck: MethodHandler = async (params, ctx) => {
           policyVersion: ctx.policyVersion,
         } satisfies GuardCheckResult
       }
+      const baseDir = ctx.projectDir ?? process.cwd()
       for (const filePath of filePaths) {
-        if (policy.writePathPredicate(filePath)) continue
+        const checkedPath = filePath.startsWith("/") ? filePath : resolve(baseDir, filePath)
+        if (policy.writePathPredicate(checkedPath)) continue
         return {
           allowed: false,
           reason: `Writing to "${filePath}" is blocked in ${state.phase}/${state.phaseState}. ${policy.allowedDescription}`,

@@ -351,7 +351,7 @@ describe("tool.execute — task boundary revision workflow", () => {
     await exec("select_mode", { mode: "GREENFIELD", feature_name: "boundary-apply" })
     await ctx.engine!.store.update("s1", (d) => {
       d.phase = "IMPLEMENTATION"
-      d.phaseState = "DRAFT"
+      d.phaseState = "TASK_REVIEW"
       d.mode = "INCREMENTAL"
       d.featureName = "boundary-apply"
       d.fileAllowlist = ["/repo/src/a.ts", "/repo/src/b.ts", "/repo/tests/a.test.ts", "/repo/tests/b.test.ts"]
@@ -863,7 +863,7 @@ describe("tool.execute — mark_task_complete", () => {
       d.phase = "IMPLEMENTATION"
       d.phaseState = "DRAFT"
       d.implDag = [
-        { id: "T1", description: "Setup", dependencies: [], expectedTests: [], expectedFiles: [], estimatedComplexity: "small", status: "pending" },
+        { id: "T1", description: "Setup", dependencies: [], expectedTests: [], expectedFiles: [], estimatedComplexity: "small", status: "in-flight" },
         { id: "T2", description: "Core", dependencies: ["T1"], expectedTests: [], expectedFiles: [], estimatedComplexity: "medium", status: "pending" },
       ]
       d.currentTaskId = "T1"
@@ -890,13 +890,14 @@ describe("tool.execute — mark_task_complete", () => {
     await exec("select_mode", { mode: "GREENFIELD", feature_name: "str-feat" })
     await ctx.engine!.store.update("s1", (d) => {
       d.phase = "IMPLEMENTATION"
-      d.phaseState = "DRAFT"
+      d.phaseState = "TASK_REVIEW"
       d.implDag = [
         { id: "T1", description: "Setup", dependencies: [], expectedTests: [], expectedFiles: [], estimatedComplexity: "small", status: "complete" },
         { id: "T2", description: "Core", dependencies: ["T1"], expectedTests: [], expectedFiles: [], estimatedComplexity: "medium", status: "pending" },
       ]
       d.currentTaskId = "T1"
       d.taskCompletionInProgress = "T1"
+      d.phaseState = "TASK_REVIEW"
     })
 
     const result = await exec("submit_task_review", {
@@ -905,10 +906,11 @@ describe("tool.execute — mark_task_complete", () => {
     expect(result).toContain("review passed")
 
     const state = ctx.engine!.store.get("s1")
-    expect(state?.phaseState).toBe("SCHEDULING")
+    expect(state?.phaseState).toBe("DRAFT")
     expect(state?.taskCompletionInProgress).toBeNull()
     expect(state?.taskReviewCount).toBe(0)
     expect(state?.currentTaskId).toBe("T2")
+    expect(state?.implDag?.find((t) => t.id === "T2")?.status).toBe("in-flight")
   })
 
   it("submit_task_review moves to HUMAN_GATE when only unresolved human gates remain", async () => {
@@ -954,6 +956,7 @@ describe("tool.execute — mark_task_complete", () => {
       ] as any
       d.currentTaskId = "T1"
       d.taskCompletionInProgress = "T1"
+      d.phaseState = "TASK_REVIEW"
       d.userGateMessageReceived = true
     })
 
@@ -979,6 +982,7 @@ describe("tool.execute — mark_task_complete", () => {
       ]
       d.currentTaskId = "T1"
       d.taskCompletionInProgress = "T1"
+      d.phaseState = "TASK_REVIEW"
     })
 
     const result = await exec("submit_task_review", {
@@ -990,6 +994,7 @@ describe("tool.execute — mark_task_complete", () => {
     const state = ctx.engine!.store.get("s1")
     expect(state?.taskCompletionInProgress).toBeNull()
     expect(state?.implDag?.find((t) => t.id === "T1")?.status).toBe("pending")
+    expect(state?.phaseState).toBe("TASK_REVISE")
     expect(state?.currentTaskId).toBe("T1")
     expect(state?.taskReviewCount).toBe(1)
   })
@@ -1004,6 +1009,7 @@ describe("tool.execute — mark_task_complete", () => {
       ]
       d.currentTaskId = "T1"
       d.taskCompletionInProgress = "T1"
+      d.phaseState = "TASK_REVIEW"
     })
 
     const result = await exec("mark_task_complete", {
@@ -1642,8 +1648,9 @@ describe("tool.execute — resolve_human_gate", () => {
 
     expect(result).toContain("Human gate set for task \"T1\"")
     const state = ctx.engine!.store.get("s1")
-    expect(state?.phaseState).toBe("SCHEDULING")
+    expect(state?.phaseState).toBe("DRAFT")
     expect(state?.currentTaskId).toBe("T2")
+    expect(state?.implDag?.find((t) => t.id === "T2")?.status).toBe("in-flight")
   })
 })
 
@@ -1721,11 +1728,12 @@ describe("tool.execute — submit_feedback human gate handling", () => {
     })
 
     expect(result).toContain("Resolved 1 human gate(s): T1")
-    expect(result).toContain("Returning to IMPLEMENTATION/SCHEDULING")
+    expect(result).toContain("Returning to IMPLEMENTATION/DRAFT")
     const state = ctx.engine!.store.get("s1")
     expect(state?.phase).toBe("IMPLEMENTATION")
-    expect(state?.phaseState).toBe("SCHEDULING")
+    expect(state?.phaseState).toBe("DRAFT")
     expect(state?.currentTaskId).toBe("T2")
+    expect(state?.implDag?.find((t) => t.id === "T2")?.status).toBe("in-flight")
     expect(state?.implDag?.find((t) => t.id === "T1")?.status).toBe("complete")
     expect(state?.implDag?.find((t) => t.id === "T1")?.humanGate?.resolved).toBe(true)
   })
@@ -1765,7 +1773,7 @@ describe("tool.execute — submit_feedback human gate handling", () => {
     expect(result).toContain("request final implementation review")
     const state = ctx.engine!.store.get("s1")
     expect(state?.phase).toBe("IMPLEMENTATION")
-    expect(state?.phaseState).toBe("SCHEDULING")
+    expect(state?.phaseState).toBe("DRAFT")
     expect(state?.currentTaskId).toBeNull()
     expect(state?.implDag?.[0]?.status).toBe("complete")
     expect(state?.implDag?.[0]?.humanGate?.resolved).toBe(true)
@@ -1936,6 +1944,7 @@ describe("tool.execute — submit_task_review quality scoring", () => {
       ]
       d.currentTaskId = "T1"
       d.taskCompletionInProgress = "T1"
+      d.phaseState = "TASK_REVIEW"
     })
 
     // passed=true but code_quality=7 (below 8 threshold) — should be overridden to fail
@@ -1966,6 +1975,7 @@ describe("tool.execute — submit_task_review quality scoring", () => {
       ]
       d.currentTaskId = "T1"
       d.taskCompletionInProgress = "T1"
+      d.phaseState = "TASK_REVIEW"
     })
 
     // Both scores exactly at 8 — should pass
@@ -1995,6 +2005,7 @@ describe("tool.execute — submit_task_review quality scoring", () => {
       d.currentTaskId = "T1"
       d.taskCompletionInProgress = "T1"
       d.taskReviewCount = 0
+      d.phaseState = "TASK_REVIEW"
     })
 
     // Simulate graceful degradation: passed=true but scores={0,0}
@@ -2046,6 +2057,7 @@ describe("task.getReviewContext", () => {
       ]
       d.currentTaskId = "T1"
       d.taskCompletionInProgress = "T1"
+      d.phaseState = "TASK_REVIEW"
     })
 
     const result = await handleTaskGetReviewContext({ sessionId: "rc-session" }, agentCtx)
@@ -2116,7 +2128,7 @@ describe("tool.execute — task review edge cases", () => {
       d.phase = "IMPLEMENTATION"
       d.phaseState = "DRAFT"
       d.implDag = [
-        { id: "T1", description: "First", dependencies: [], expectedTests: [], expectedFiles: [], estimatedComplexity: "small", status: "pending" },
+        { id: "T1", description: "First", dependencies: [], expectedTests: [], expectedFiles: [], estimatedComplexity: "small", status: "in-flight" },
         { id: "T2", description: "Second", dependencies: ["T1"], expectedTests: [], expectedFiles: [], estimatedComplexity: "small", status: "pending" },
       ]
       d.currentTaskId = "T1"
@@ -2139,7 +2151,7 @@ describe("tool.execute — task review edge cases", () => {
 
     // Complete T2 — should NOT hit re-entry guard
     await ctx.engine!.store.update("s1", (d) => {
-      d.implDag![1]!.status = "pending"
+      d.implDag![1]!.status = "in-flight"
     })
     const r3 = await exec("mark_task_complete", { task_id: "T2", implementation_summary: "Built T2", tests_passing: true })
     expect(r3).toContain("Per-task review required")
@@ -2150,7 +2162,7 @@ describe("tool.execute — task review edge cases", () => {
     await exec("select_mode", { mode: "GREENFIELD", feature_name: "cap-feat" })
     await ctx.engine!.store.update("s1", (d) => {
       d.phase = "IMPLEMENTATION"
-      d.phaseState = "DRAFT"
+      d.phaseState = "TASK_REVIEW"
       d.implDag = [
         { id: "T1", description: "Stubborn task", dependencies: [], expectedTests: [], expectedFiles: [], estimatedComplexity: "small", status: "complete" },
       ]
@@ -2177,7 +2189,7 @@ describe("tool.execute — task review edge cases", () => {
       d.phase = "IMPLEMENTATION"
       d.phaseState = "DRAFT"
       d.implDag = [
-        { id: "T1", description: "Setup", dependencies: [], expectedTests: [], expectedFiles: [], estimatedComplexity: "small", status: "pending" },
+        { id: "T1", description: "Setup", dependencies: [], expectedTests: [], expectedFiles: [], estimatedComplexity: "small", status: "in-flight" },
       ]
       d.currentTaskId = "T1"
     })
@@ -2209,9 +2221,9 @@ describe("tool.execute — task review edge cases", () => {
 
     expect(result).toContain("Reset 1 task")
     const state = ctx.engine!.store.get("s1")
-    expect(state?.phaseState).toBe("SCHEDULING")
+    expect(state?.phaseState).toBe("DRAFT")
     expect(state?.currentTaskId).toBe("T1")
-    expect(state?.implDag?.find((task) => task.id === "T1")?.status).toBe("pending")
+    expect(state?.implDag?.find((task) => task.id === "T1")?.status).toBe("in-flight")
   })
 
   it("rejects reset_task when completed downstream dependencies are not reset together", async () => {
@@ -2254,7 +2266,7 @@ describe("tool.execute — task review edge cases", () => {
     expect(result).toContain("Reset 2 task")
     const state = ctx.engine!.store.get("s1")
     expect(state?.currentTaskId).toBe("T1")
-    expect(state?.implDag?.map((task) => task.status)).toEqual(["pending", "pending", "pending"])
+    expect(state?.implDag?.map((task) => task.status)).toEqual(["in-flight", "pending", "pending"])
   })
 
   it("records service file claims when reset_task selects the current task", async () => {
@@ -2332,6 +2344,6 @@ describe("tool.execute — task review edge cases", () => {
     expect(applied.value.results[0].toolName).toBe("reset_task")
     const state = ctx.engine!.store.get("s1")
     expect(state?.currentTaskId).toBe("T1")
-    expect(state?.implDag?.[0]?.status).toBe("pending")
+    expect(state?.implDag?.[0]?.status).toBe("in-flight")
   })
 })

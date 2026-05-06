@@ -20,6 +20,7 @@ import { OpenArtisanPlugin, WORKFLOW_TOOL_NAMES } from "#plugin/index"
 import { resolveSessionId } from "#core/utils"
 import { OPENCODE_TOOL_CONTRACTS, WORKFLOW_TOOL_CONTRACTS } from "#core/tool-contracts"
 import { toJsonSchema } from "#core/schemas"
+import type { TaskNode } from "#core/dag"
 
 // ---------------------------------------------------------------------------
 // Mock client factory
@@ -251,8 +252,9 @@ describe("OpenCode integration — structural workflow parity", () => {
     expect(result).toContain("Resolved 1 human gate(s): T1")
     const state = plugin._testStore.get(sid)
     expect(state?.phase).toBe("IMPLEMENTATION")
-    expect(state?.phaseState).toBe("SCHEDULING")
+    expect(state?.phaseState).toBe("DRAFT")
     expect(state?.currentTaskId).toBe("T2")
+    expect(state?.implDag?.find((task: TaskNode) => task.id === "T2")?.status).toBe("in-flight")
   })
 
   it("rolls back delegated state when child sub-workflow prompt fails", async () => {
@@ -405,7 +407,7 @@ describe("OpenCode integration — drift repair parity", () => {
     const appliedRaw = await plugin.tool.apply_drift_repair.execute({ repair_plan_id: plan.value.id, apply_safe_actions: true }, ctx)
     const applied = JSON.parse(appliedRaw)
     expect(applied.value.results[0].result).toContain("Reset 1 task")
-    expect(plugin._testStore.get(sid)?.implDag?.[0]?.status).toBe("pending")
+    expect(plugin._testStore.get(sid)?.implDag?.[0]?.status).toBe("in-flight")
   })
 })
 
@@ -1571,7 +1573,7 @@ describe("mark_task_complete — phase gating and final-task cleanup", () => {
           expectedTests: [],
           expectedFiles: [],
           estimatedComplexity: "small",
-          status: "pending",
+          status: "in-flight",
         },
       ]
       draft.currentTaskId = "T1"
@@ -2692,7 +2694,8 @@ describe("fileAllowlist — relative paths are normalized to absolute", () => {
     expect(result).toContain("T2")
     const state = store.get(sid)
     expect(state.currentTaskId).toBe("T2")
-    expect(state.phaseState).toBe("SCHEDULING")
+    expect(state.phaseState).toBe("DRAFT")
+    expect(state.implDag?.find((task: TaskNode) => task.id === "T2")?.status).toBe("in-flight")
   })
 
   it("normalizes preserved fileAllowlist from prior cycle at select_mode time", async () => {

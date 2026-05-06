@@ -8,7 +8,7 @@ import type { DbAgentLease } from "../../core/open-artisan-repository"
 import type { OpenArtisanServices } from "../../core/open-artisan-services"
 import { CheckPriorWorkflowToolSchema, ResetTaskToolSchema, ResolveHumanGateToolSchema } from "../../core/schemas"
 import { parseToolArgs } from "../../core/tool-args"
-import { nextSchedulerDecision } from "../../core/scheduler"
+import { applyDispatch, nextSchedulerDecision } from "../../core/scheduler"
 import { activateHumanGateTasks, resolveAwaitingHumanState } from "../../core/human-gate-policy"
 import { isRobotArtisanSession } from "../../core/autonomous-user-gate"
 import { persistTaskDispatchClaims } from "../../core/runtime-persistence"
@@ -135,11 +135,14 @@ export const handleResolveHumanGate: ToolHandler = async (args, toolCtx, ctx) =>
   await store.update(toolCtx.sessionId, (draft) => {
     draft.implDag = resolution.updatedNodes
     draft.currentTaskId = refreshedDecision.action === "dispatch" ? refreshedDecision.task.id : null
-    draft.phaseState = "SCHEDULING"
+    draft.phaseState = refreshedDecision.action === "dispatch" ? "DRAFT" : "SCHEDULING"
+    if (refreshedDecision.action === "dispatch") {
+      draft.implDag = applyDispatch(draft, refreshedDecision.task.id)
+    }
   })
   await persistCurrentTaskClaim(ctx.openArtisanServices, store.get(toolCtx.sessionId), toolCtx.sessionId)
 
-  return `Human gate set for task "${taskId}". Returning to IMPLEMENTATION/SCHEDULING for remaining work.`
+  return `Human gate set for task "${taskId}". Returning to IMPLEMENTATION/${refreshedDecision.action === "dispatch" ? "DRAFT" : "SCHEDULING"} for remaining work.`
 }
 
 export const handleResetTask: ToolHandler = async (args, toolCtx, ctx) => {
@@ -149,8 +152,8 @@ export const handleResetTask: ToolHandler = async (args, toolCtx, ctx) => {
   if (state.phase !== "IMPLEMENTATION") {
     return `Error: reset_task can only be called during IMPLEMENTATION (current: ${state.phase}).`
   }
-  if (state.phaseState !== "DRAFT" && state.phaseState !== "REVISE" && state.phaseState !== "SCHEDULING") {
-    return `Error: reset_task can only be called in DRAFT, REVISE, or SCHEDULING state (current: ${state.phaseState}).`
+  if (state.phaseState !== "DRAFT" && state.phaseState !== "REVISE" && state.phaseState !== "TASK_REVISE" && state.phaseState !== "SCHEDULING") {
+    return `Error: reset_task can only be called in DRAFT, REVISE, TASK_REVISE, or SCHEDULING state (current: ${state.phaseState}).`
   }
   if (state.taskCompletionInProgress) {
     return `Error: Task "${state.taskCompletionInProgress}" is awaiting review. Call submit_task_review first.`
@@ -200,6 +203,8 @@ export const handleResetTask: ToolHandler = async (args, toolCtx, ctx) => {
     const firstReset = dagOrder.find((id) => ids.includes(id))
     if (firstReset) {
       draft.currentTaskId = firstReset
+      draft.implDag = applyDispatch(draft, firstReset)
+      draft.phaseState = "DRAFT"
     }
     draft.taskReviewCount = 0
     draft.taskCompletionInProgress = null

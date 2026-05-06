@@ -20,6 +20,25 @@ function buildSnapshot(bridgeInstanceId: string, clients: BridgeClientLease[]): 
   return { bridgeInstanceId, clients }
 }
 
+const leaseWriteQueues = new Map<string, Promise<void>>()
+
+async function withLeaseWriteLock<T>(stateDir: string, run: () => Promise<T>): Promise<T> {
+  const previous = leaseWriteQueues.get(stateDir) ?? Promise.resolve()
+  let release!: () => void
+  const current = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  const queued = previous.catch(() => {}).then(() => current)
+  leaseWriteQueues.set(stateDir, queued)
+  await previous.catch(() => {})
+  try {
+    return await run()
+  } finally {
+    release()
+    if (leaseWriteQueues.get(stateDir) === queued) leaseWriteQueues.delete(stateDir)
+  }
+}
+
 export function createBridgeLeaseStore(bridgeInstanceId: string, initialClients: BridgeClientLease[] = []) {
   let snapshot = buildSnapshot(bridgeInstanceId, [...initialClients])
 
@@ -50,6 +69,7 @@ export function createBridgeLeaseStore(bridgeInstanceId: string, initialClients:
 export async function upsertBridgeClientLease(
   params: UpsertBridgeClientLeaseParams,
 ): Promise<UpsertBridgeClientLeaseResult> {
+  return withLeaseWriteLock(params.stateDir, async () => {
   const existing = await loadBridgeLeaseSnapshot(params.stateDir)
   const metadata = existing ? null : await loadBridgeMetadata(params.stateDir)
   const store = createBridgeLeaseStore(
@@ -60,26 +80,31 @@ export async function upsertBridgeClientLease(
   const snapshot = store.snapshot()
   await upsertBridgeLeaseSnapshot(params.stateDir, snapshot)
   return { lease, leases: snapshot }
+  })
 }
 
 export async function refreshBridgeClientLease(
   params: RefreshBridgeClientLeaseParams,
 ): Promise<{ lease?: BridgeClientLease; leases: BridgeLeaseSnapshot }> {
+  return withLeaseWriteLock(params.stateDir, async () => {
   const existing = await loadBridgeLeaseSnapshot(params.stateDir)
   const store = createBridgeLeaseStore(existing?.bridgeInstanceId ?? params.clientId, existing?.clients ?? [])
   const lease = store.refresh(params.clientId, params.observedAt) ?? undefined
   const snapshot = store.snapshot()
   await upsertBridgeLeaseSnapshot(params.stateDir, snapshot)
   return lease ? { lease, leases: snapshot } : { leases: snapshot }
+  })
 }
 
 export async function removeBridgeClientLease(
   params: RemoveBridgeClientLeaseParams,
 ): Promise<RemoveBridgeClientLeaseResult> {
+  return withLeaseWriteLock(params.stateDir, async () => {
   const existing = await loadBridgeLeaseSnapshot(params.stateDir)
   const store = createBridgeLeaseStore(existing?.bridgeInstanceId ?? params.clientId, existing?.clients ?? [])
   const removed = store.remove(params.clientId)
   const snapshot = store.snapshot()
   await upsertBridgeLeaseSnapshot(params.stateDir, snapshot)
   return { removed, leases: snapshot }
+  })
 }

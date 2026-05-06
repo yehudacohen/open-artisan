@@ -32,6 +32,12 @@ export interface ParallelIsolationAssessment {
 
 // Predicates ---------------------------------------------------------------
 
+const BASH_WRITE_OPS = /(?:>>|>[^&]|\btee\b|\bsed\s+-i\b|\bdd\b.*\bof=|<<-?\s*['"]?[A-Za-z_][A-Za-z0-9_]*['"]?|\b(?:python|python3|node|ruby|perl)\b.*\b(?:writeFile|open\s*\(|File\.write|fs\.write|write\s*\())/
+
+function readOnlyBash(command: string): boolean {
+  return !BASH_WRITE_OPS.test(command)
+}
+
 export function isEnvFile(path: string): boolean {
   // Blocks any .env file or .env.* file
   const base = path.replace(/\\/g, "/").split("/").at(-1) ?? ""
@@ -283,6 +289,7 @@ export function getPhaseToolPolicy(
             if (isEnvFile(filePath)) return false
             return isOpenArtisanFile(filePath)
           },
+          bashCommandPredicate: readOnlyBash,
           allowedDescription:
             "Conventions authoring: writes allowed ONLY to .openartisan/ files. No writes to project source. bash blocked. .env writes are always blocked.",
         }
@@ -296,6 +303,7 @@ export function getPhaseToolPolicy(
             if (isEnvFile(filePath)) return false
             return isOpenArtisanFile(filePath)
           },
+          bashCommandPredicate: readOnlyBash,
           allowedDescription:
             "Revision phase: edits allowed ONLY to .openartisan/ convention files. No writes to project source. bash allowed for verification. .env writes are always blocked.",
         }
@@ -374,8 +382,8 @@ export function getPhaseToolPolicy(
       // USER_GATE / ESCAPE_HATCH: no file writes — waiting for user response.
       if (phaseState === "USER_GATE" || phaseState === "ESCAPE_HATCH") {
         return {
-          blocked: ["write", "edit"],
-          allowedDescription: "Planning phase: no file writes or edits. bash allowed for read-only verification.",
+          blocked: ["write", "edit", "bash"],
+          allowedDescription: "Planning phase: no file writes, edits, or shell execution while awaiting user response.",
         }
       }
       // Unknown planning sub-states stay locked down by default.
@@ -394,11 +402,17 @@ export function getPhaseToolPolicy(
             "Structural decision state: no file writes, edits, or bash while skip/cascade evaluation is in progress.",
         }
       }
+      if (phaseState === "USER_GATE" || phaseState === "ESCAPE_HATCH") {
+        return {
+          blocked: ["write", "edit", "bash"],
+          allowedDescription: "Interfaces phase: no file writes, edits, or shell execution while awaiting user response.",
+        }
+      }
       // During DRAFT/CONVENTIONS: bash is blocked (definition-only authoring).
-      // During REVISE/REVIEW/USER_GATE: bash is allowed so the agent can run
+      // During REVISE/REVIEW: bash is allowed so the agent can run
       // read-only commands (rg, wc, find, etc.) to verify acceptance criteria
       // or understand what needs revising from feedback.
-      const interfacesBashBlocked = phaseState === "REVISE" || phaseState === "REVIEW" || phaseState === "USER_GATE" || phaseState === "ESCAPE_HATCH"
+      const interfacesBashBlocked = phaseState === "REVISE" || phaseState === "REVIEW"
         ? []
         : ["bash"] as const
       return {
@@ -407,7 +421,8 @@ export function getPhaseToolPolicy(
           if (isEnvFile(filePath)) return false
           return isInterfaceFile(filePath)
         },
-        allowedDescription: phaseState === "REVISE" || phaseState === "REVIEW" || phaseState === "USER_GATE" || phaseState === "ESCAPE_HATCH"
+        ...(interfacesBashBlocked.length === 0 ? { bashCommandPredicate: readOnlyBash } : {}),
+        allowedDescription: phaseState === "REVISE" || phaseState === "REVIEW"
           ? "Only interface/type/schema files may be written. bash is allowed for read-only verification. .env writes are always blocked."
           : "Only interface/type/schema files may be written (.ts, .d.ts, .py, .go, .rs, .java, .proto, .graphql, .json, .yaml, etc.). bash is blocked. .env writes are always blocked.",
       }
@@ -415,11 +430,17 @@ export function getPhaseToolPolicy(
 
     // -----------------------------------------------------------------------
     case "TESTS": {
+      if (phaseState === "USER_GATE" || phaseState === "ESCAPE_HATCH") {
+        return {
+          blocked: ["write", "edit", "bash"],
+          allowedDescription: "Tests phase: no file writes, edits, or shell execution while awaiting user response.",
+        }
+      }
       // During DRAFT/CONVENTIONS: bash is blocked (test-writing only, no running).
-      // During REVISE/REVIEW/USER_GATE: bash is allowed so the agent can run
+      // During REVISE/REVIEW: bash is allowed so the agent can run
       // read-only commands (rg, wc, find, test runner) to verify acceptance criteria
       // or understand what needs revising from feedback.
-      const testsBashBlocked = phaseState === "REVISE" || phaseState === "REVIEW" || phaseState === "USER_GATE" || phaseState === "ESCAPE_HATCH"
+      const testsBashBlocked = phaseState === "REVISE" || phaseState === "REVIEW"
         ? []
         : ["bash"] as const
       return {
@@ -428,7 +449,8 @@ export function getPhaseToolPolicy(
           if (isEnvFile(filePath)) return false
           return isTestFile(filePath)
         },
-        allowedDescription: phaseState === "REVISE" || phaseState === "REVIEW" || phaseState === "USER_GATE" || phaseState === "ESCAPE_HATCH"
+        ...(testsBashBlocked.length === 0 ? { bashCommandPredicate: readOnlyBash } : {}),
+        allowedDescription: phaseState === "REVISE" || phaseState === "REVIEW"
           ? "Only test files may be written. bash is allowed for read-only verification. .env writes are always blocked."
           : "Only test files may be written (files containing 'test' or 'spec' in name, or in test/tests/__tests__/spec directories). bash is blocked. .env writes are always blocked.",
       }
@@ -475,8 +497,7 @@ export function getPhaseToolPolicy(
             // the common case of `echo > file`, `cat > file`, `sed -i`, `tee`.
             // Also blocks heredoc patterns (`<<EOF`, `<<-EOF`, `<<'EOF'`, `<<"EOF"`)
             // which can be used to write file contents via `cat <<EOF > file`.
-            const WRITE_OPS = /(?:>>|>[^&]|\btee\b|\bsed\s+-i\b|\bdd\b.*\bof=|<<-?\s*['"]?[A-Za-z_][A-Za-z0-9_]*['"]?)/
-            return !WRITE_OPS.test(command)
+            return readOnlyBash(command)
           },
           allowedDescription: taskSet
             ? `INCREMENTAL mode: only current task files may be written (${taskSet.size} files). .env always blocked.`

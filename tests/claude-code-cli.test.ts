@@ -150,14 +150,12 @@ describe("artisan CLI", () => {
     expect(output).toContain("REVIEW")
   })
 
-  it("mark-satisfied with stdin JSON", () => {
+  it("mark-satisfied is reserved for isolated reviewers", () => {
     const criteria = Array.from({ length: 16 }, (_, i) => ({
       criterion: `C${i + 1}`, met: true, evidence: "verified", severity: "blocking",
     }))
     const input = JSON.stringify({ criteria_met: criteria })
-    const output = runCli(["mark-satisfied"], input)
-    // Should advance to USER_GATE (agent-only mode passes with all met)
-    expect(output.toLowerCase()).toContain("user gate")
+    expect(() => runCli(["mark-satisfied"], input)).toThrow()
   })
 
   it("enable creates .enabled file", () => {

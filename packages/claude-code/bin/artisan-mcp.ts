@@ -72,6 +72,10 @@ async function bridgeCall(
 }
 
 async function execTool(name: string, args: Record<string, unknown> = {}): Promise<string> {
+  if (name === "mark_satisfied") {
+    return "Error: mark_satisfied is reserved for isolated reviewers. Use request_review and let the Claude Code hook submit submit_phase_review."
+  }
+
   // Ensure session is registered
   const sessionId = getSessionId()
   await bridgeCall("lifecycle.sessionCreated", { sessionId })

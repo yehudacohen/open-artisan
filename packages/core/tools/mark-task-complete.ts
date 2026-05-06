@@ -59,7 +59,7 @@ export function validateMarkTaskCompletePhase(
   if (state.phase !== "IMPLEMENTATION") {
     return `mark_task_complete can only be called during IMPLEMENTATION (current: ${state.phase}).`
   }
-  const allowed = options.allowScheduling ? ["DRAFT", "REVISE", "SCHEDULING"] : ["DRAFT", "REVISE"]
+  const allowed = options.allowScheduling ? ["DRAFT", "REVISE", "TASK_REVISE", "SCHEDULING"] : ["DRAFT", "REVISE", "TASK_REVISE"]
   if (!allowed.includes(state.phaseState)) {
     const allowedText = allowed.length === 2 ? `${allowed[0]} or ${allowed[1]}` : `${allowed.slice(0, -1).join(", ")}, or ${allowed.at(-1)}`
     return `mark_task_complete can only be called in ${allowedText} state (current: ${state.phase}/${state.phaseState}).`
@@ -121,6 +121,14 @@ export function processMarkTaskComplete(
   if (task.status === "complete") {
     return {
       error: `Task "${args.task_id}" is already marked complete.`,
+    }
+  }
+
+  if (task.status === "pending") {
+    return {
+      error:
+        `Task "${args.task_id}" has not been dispatched by the scheduler. ` +
+        `Wait for the scheduler to mark it in-flight before implementing or completing it.`,
     }
   }
 

@@ -27,7 +27,7 @@ import { writeStatusFile } from "../../core/status-writer"
 import { LifecycleInitParamsSchema, formatZodError } from "../../core/schemas"
 import { checkPidFile, writePidFile, removePidFile } from "../pid-file"
 import { createBridgeLogger, adaptPinoToLogger } from "../structured-log"
-import { loadBridgeLeaseSnapshot, loadBridgeMetadata, upsertBridgeMetadata } from "../bridge-meta"
+import { loadBridgeLeaseSnapshot, loadBridgeMetadata, removeBridgeMetadata, upsertBridgeMetadata } from "../bridge-meta"
 import { detachBridgeClient, evaluateBridgeShutdownEligibility } from "../bridge-clients"
 import { upsertBridgeClientLease } from "../bridge-leases"
 import { DEFAULT_BRIDGE_SOCKET_FILENAME, SHARED_BRIDGE_PROTOCOL_VERSION } from "../bridge-discovery"
@@ -105,6 +105,7 @@ export const handleInit: MethodHandler = async (params, ctx) => {
   const legacyStateFile = join(projectDir, ".opencode", "workflow-state.json")
   const transport = p.transport ?? "unix-socket"
   const registerRuntime = p.registerRuntime ?? true
+  let registeredRuntime = false
 
   if (registerRuntime) {
     // Check for existing bridge process (stale PID detection).
@@ -120,9 +121,15 @@ export const handleInit: MethodHandler = async (params, ctx) => {
 
     // Write PID file and shared bridge metadata only for reusable runtimes.
     await writePidFile(stateDir)
+    registeredRuntime = true
 
     const existingMetadata = await loadBridgeMetadata(stateDir)
     await upsertBridgeMetadata(stateDir, buildBridgeMetadata(projectDir, stateDir, transport, p.socketPath, existingMetadata))
+  }
+
+  if (ctx.runtimeBackendDispose) {
+    await ctx.runtimeBackendDispose()
+    ctx.runtimeBackendDispose = null
   }
 
   // Create backend and store. DB/PGlite is the default; filesystem is an explicit legacy opt-out.
@@ -162,6 +169,11 @@ export const handleInit: MethodHandler = async (params, ctx) => {
   // Load persisted state
   const loadResult = await store.load()
   if (!loadResult.success) {
+    await runtimeBackend.dispose?.()
+    if (registeredRuntime) {
+      await removePidFile(stateDir)
+      await removeBridgeMetadata(stateDir)
+    }
     throw new JSONRPCErrorException(`Failed to load state: ${loadResult.error}`, NOT_INITIALIZED)
   }
 

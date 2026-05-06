@@ -15,7 +15,7 @@ import type { MethodHandler, BridgeContext } from "../server"
 import type { ToolExecuteParams } from "../protocol"
 import { SESSION_NOT_FOUND, INVALID_PARAMS } from "../protocol"
 import type { WorkflowState } from "../../core/workflow-state-types"
-import type { ArtifactKey } from "../../core/workflow-primitives"
+import type { ArtifactKey, WorkflowEvent } from "../../core/workflow-primitives"
 import type { OpenArtisanServices } from "../../core/open-artisan-services"
 import type { ToolContext, ToolHandler } from "./tool-handler-types"
 import { handleRoadmapDeriveExecutionSlice, handleRoadmapQuery, handleRoadmapRead } from "./roadmap-tool-handlers"
@@ -43,7 +43,7 @@ import {
   computeProposeBacktrackTransition,
 } from "../../core/tools/transitions"
 import { PHASE_TO_ARTIFACT } from "../../core/artifacts"
-import { nextSchedulerDecisionForInput, readDecisionInput } from "../../core/scheduler"
+import { applyDispatch, nextSchedulerDecisionForInput, readDecisionInput } from "../../core/scheduler"
 import { buildInvalidPhaseReviewJsonReason, normalizePhaseReviewOutput } from "../../core/phase-review"
 import { buildWorkflowSwitchMessage, parkCurrentWorkflowSession } from "../../core/session-switch"
 import type { DbAgentLease } from "../../core/open-artisan-repository"
@@ -170,6 +170,54 @@ function buildTaskReviewResolvedMessage(
   }
 
   return `**${formatSchedulerDecisionMessage(fallbackDecision)}**`
+}
+
+function transitionOrThrow(
+  state: WorkflowState,
+  event: WorkflowEvent,
+  ctx: BridgeContext,
+): { phase: WorkflowState["phase"]; phaseState: WorkflowState["phaseState"] } {
+  const outcome = ctx.engine!.sm.transition(state.phase, state.phaseState, event, state.mode)
+  if (!outcome.ok) throw new Error(outcome.message)
+  return { phase: outcome.nextPhase, phaseState: outcome.nextPhaseState }
+}
+
+function nextImplementationAuthoringState(
+  state: WorkflowState,
+  plan: ReturnType<typeof buildTaskReviewAcceptancePlan>,
+  ctx: BridgeContext,
+): { phase: WorkflowState["phase"]; phaseState: WorkflowState["phaseState"] } {
+  const afterReview = transitionOrThrow(state, "task_review_pass", ctx)
+  if (plan.schedulerDecision.action === "dispatch" || plan.schedulerDecision.action === "complete") {
+    const schedulingState = { ...state, phase: afterReview.phase, phaseState: afterReview.phaseState }
+    return transitionOrThrow(schedulingState, "scheduling_complete", ctx)
+  }
+  return {
+    phase: afterReview.phase,
+    phaseState: plan.nextPhaseState ?? afterReview.phaseState,
+  }
+}
+
+function applyTaskReviewAcceptance(
+  draft: WorkflowState,
+  plan: ReturnType<typeof buildTaskReviewAcceptancePlan>,
+  nextState: { phase: WorkflowState["phase"]; phaseState: WorkflowState["phaseState"] },
+): void {
+  const existing = new Set(draft.reviewArtifactFiles)
+  for (const f of plan.completedTaskFiles) {
+    if (!existing.has(f)) draft.reviewArtifactFiles.push(f)
+  }
+  draft.phase = nextState.phase
+  draft.phaseState = nextState.phaseState
+  draft.currentTaskId = plan.nextTaskId
+  if (plan.nextTaskId) {
+    draft.implDag = applyDispatch(draft, plan.nextTaskId)
+  }
+  if (plan.resetUserGateMessage) {
+    draft.userGateMessageReceived = false
+  }
+  draft.taskCompletionInProgress = null
+  draft.taskReviewCount = 0
 }
 
 /**
@@ -411,13 +459,13 @@ const handleMarkTaskComplete: ToolHandler = async (args, toolCtx, ctx) => {
   const { store } = ctx.engine!
   const state = requireState(ctx, toolCtx.sessionId)
 
-  const phaseError = validateMarkTaskCompletePhase(state, { allowScheduling: true })
-  if (phaseError) return `Error: ${phaseError}`
-
   // Re-entry guard: prevent concurrent task completions
   if (state.taskCompletionInProgress) {
     return `Error: Task "${state.taskCompletionInProgress}" is already awaiting review. Call submit_task_review first.`
   }
+
+  const phaseError = validateMarkTaskCompletePhase(state)
+  if (phaseError) return `Error: ${phaseError}`
 
   const parsedArgs = parseToolArgs(MarkTaskCompleteToolSchema, args)
   if (!parsedArgs.success) return `Error: ${parsedArgs.error}`
@@ -486,18 +534,9 @@ const handleSubmitTaskReview: ToolHandler = async (args, toolCtx, ctx) => {
   if (hitCap && !review.passed) {
     const acceptancePlan = buildTaskReviewAcceptancePlan({ implDag: state.implDag, concurrency: state.concurrency, taskId })
     const nextMessage = buildTaskReviewResolvedMessage(taskId, state.implDag, state.concurrency)
+    const nextState = nextImplementationAuthoringState(state, acceptancePlan, ctx)
     await store.update(toolCtx.sessionId, (draft) => {
-      const existing = new Set(draft.reviewArtifactFiles)
-      for (const f of acceptancePlan.completedTaskFiles) {
-        if (!existing.has(f)) draft.reviewArtifactFiles.push(f)
-      }
-      draft.currentTaskId = acceptancePlan.nextTaskId
-      if (acceptancePlan.nextPhaseState) draft.phaseState = acceptancePlan.nextPhaseState
-      if (acceptancePlan.resetUserGateMessage) {
-        draft.userGateMessageReceived = false
-      }
-      draft.taskCompletionInProgress = null
-      draft.taskReviewCount = 0
+      applyTaskReviewAcceptance(draft, acceptancePlan, nextState)
     })
     await persistCurrentTaskClaim(ctx.openArtisanServices, store.get(toolCtx.sessionId), toolCtx.sessionId)
     return (
@@ -509,27 +548,21 @@ const handleSubmitTaskReview: ToolHandler = async (args, toolCtx, ctx) => {
   if (review.passed) {
     const acceptancePlan = buildTaskReviewAcceptancePlan({ implDag: state.implDag, concurrency: state.concurrency, taskId })
     const nextMessage = buildTaskReviewResolvedMessage(taskId, state.implDag, state.concurrency)
+    const nextState = nextImplementationAuthoringState(state, acceptancePlan, ctx)
     await store.update(toolCtx.sessionId, (draft) => {
-      const existing = new Set(draft.reviewArtifactFiles)
-      for (const f of acceptancePlan.completedTaskFiles) {
-        if (!existing.has(f)) draft.reviewArtifactFiles.push(f)
-      }
-      draft.currentTaskId = acceptancePlan.nextTaskId
-      if (acceptancePlan.nextPhaseState) draft.phaseState = acceptancePlan.nextPhaseState
-      if (acceptancePlan.resetUserGateMessage) {
-        draft.userGateMessageReceived = false
-      }
-      draft.taskCompletionInProgress = null
-      draft.taskReviewCount = 0
+      applyTaskReviewAcceptance(draft, acceptancePlan, nextState)
     })
     await persistCurrentTaskClaim(ctx.openArtisanServices, store.get(toolCtx.sessionId), toolCtx.sessionId)
     return `Task "${taskId}" review passed.\n\n${nextMessage}`
   }
 
   // Review failed — revert task status and return issues
+  const failedState = transitionOrThrow(state, "task_review_fail", ctx)
   await store.update(toolCtx.sessionId, (draft) => {
     const task = draft.implDag?.find((t) => t.id === taskId)
     if (task) task.status = "pending"
+    draft.phase = failedState.phase
+    draft.phaseState = failedState.phaseState
     draft.currentTaskId = taskId
     draft.taskCompletionInProgress = null
     draft.taskReviewCount = Math.max(draft.taskReviewCount ?? 0, 1)

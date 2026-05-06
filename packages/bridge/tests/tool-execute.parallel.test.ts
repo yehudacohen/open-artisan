@@ -122,11 +122,13 @@ describe("bridge parallel scheduler handling", () => {
       context: { sessionId: "s1", directory: tmpDir },
     }, ctx) as string
 
-    expect(result).toContain("Returning to IMPLEMENTATION/SCHEDULING")
+    expect(result).toContain("Returning to IMPLEMENTATION/DRAFT")
 
     const state = ctx.engine!.store.get("s1")
     expect(state?.phase).toBe("IMPLEMENTATION")
-    expect(state?.phaseState).toBe("SCHEDULING")
+    expect(state?.phaseState).toBe("DRAFT")
     expect(state?.currentTaskId).toBe("T2")
+    expect(state?.implDag?.find((task) => task.id === "T2")?.status).toBe("in-flight")
+    expect(state?.implDag?.find((task) => task.id === "T3")?.status).toBe("pending")
   })
 })

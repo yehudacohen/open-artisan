@@ -71,7 +71,7 @@ import { getAcceptanceCriteria } from "../../../packages/core/hooks/system-trans
 import { runDiscoveryFleet } from "../../../packages/core/discovery/index"
 import { createPluginHooks } from "./plugin-hooks"
 import { createImplDAG, type TaskCategory, type HumanGateInfo } from "../../../packages/core/dag"
-import { nextSchedulerDecision, nextSchedulerDecisionForInput, readDecisionInput } from "../../../packages/core/scheduler"
+import { applyDispatch, nextSchedulerDecision, nextSchedulerDecisionForInput, readDecisionInput } from "../../../packages/core/scheduler"
 import { resolveArtifactPaths } from "../../../packages/core/tools/artifact-paths"
 import { validateFileBasedReviewArtifacts } from "../../../packages/core/tools/file-artifact-validation"
 import { writeArtifact, detectDesignDoc } from "../../../packages/core/artifact-store"
@@ -1893,6 +1893,9 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             await store.update(sessionId, (draft) => {
               draft.implDag = result.updatedNodes
               draft.currentTaskId = result.nextTaskId
+              if (result.nextTaskId) {
+                draft.implDag = applyDispatch(draft, result.nextTaskId)
+              }
               draft.taskCompletionInProgress = null
               if (result.nextTaskId !== args.task_id) {
                 draft.taskReviewCount = 0
@@ -2185,7 +2188,8 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
               }))
               draft.currentTaskId = decision.action === "dispatch" ? decision.task.id : null
               if (decision.action === "dispatch") {
-                draft.phaseState = "SCHEDULING"
+                draft.phaseState = "DRAFT"
+                draft.implDag = applyDispatch(draft, decision.task.id)
                 draft.iterationCount = 0
                 draft.retryCount = 0
               }
@@ -2197,7 +2201,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                 `Human gate activated for task "${args.task_id}". ` +
                 `The user will be asked to resolve it at the next USER_GATE.\n\n` +
                 `**Next task ready:** ${decision.task.id} — ${decision.task.description}\n` +
-                `Continue with the next task from IMPLEMENTATION/SCHEDULING.`
+                `Continue with the next task from IMPLEMENTATION/DRAFT.`
               )
             }
           }
@@ -2562,11 +2566,11 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
 
               if (nextDecision.action === "complete") {
                 if (state.phaseState === "HUMAN_GATE") {
-                  logTransition(state, { phase: "IMPLEMENTATION", phaseState: "SCHEDULING" }, "submit_feedback/human-gate-resolved-all-complete", notify)
+                  logTransition(state, { phase: "IMPLEMENTATION", phaseState: "DRAFT" }, "submit_feedback/human-gate-resolved-all-complete", notify)
                   await store.update(sessionId, (draft) => {
                     draft.implDag = updatedNodes
                     draft.phase = "IMPLEMENTATION"
-                    draft.phaseState = "SCHEDULING"
+                    draft.phaseState = "DRAFT"
                     draft.currentTaskId = null
                     draft.iterationCount = 0
                     draft.retryCount = 0
@@ -2574,7 +2578,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                   })
                   return (
                     `Resolved ${resolvedIds.length} human gate(s): ${resolvedIds.join(", ")}.\n\n` +
-                    "All DAG tasks are now complete. Returning to IMPLEMENTATION/SCHEDULING so the runtime can request final implementation review." +
+                    "All DAG tasks are now complete. Returning to IMPLEMENTATION/DRAFT so the runtime can request final implementation review." +
                     approvalWarning
                   )
                 }
@@ -2584,16 +2588,14 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                 })
                 // Don't return — fall through to normal approval path
               } else if (nextDecision.action === "dispatch") {
-                // There's more implementation work to do — return to the structural
-                // scheduling boundary so the runtime truthfully reflects that the
-                // next task has been selected but authoring has not begun yet.
-                logTransition(state, { phase: "IMPLEMENTATION", phaseState: "SCHEDULING" }, "submit_feedback/human-gate-resolved", notify)
+                logTransition(state, { phase: "IMPLEMENTATION", phaseState: "DRAFT" }, "submit_feedback/human-gate-resolved", notify)
 
                 await store.update(sessionId, (draft) => {
                   draft.implDag = updatedNodes
                   draft.phase = "IMPLEMENTATION"
-                  draft.phaseState = "SCHEDULING"
+                  draft.phaseState = "DRAFT"
                   draft.currentTaskId = nextDecision.task.id
+                  draft.implDag = applyDispatch(draft, nextDecision.task.id)
                   draft.iterationCount = 0
                   draft.retryCount = 0
                   draft.userGateMessageReceived = false
@@ -2605,7 +2607,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
 
                 return (
                   `Resolved ${resolvedIds.length} human gate(s): ${resolvedIds.join(", ")}.\n\n` +
-                  `Returning to IMPLEMENTATION/SCHEDULING — downstream tasks are now unblocked.\n\n` +
+                  `Returning to IMPLEMENTATION/DRAFT — downstream tasks are now unblocked.\n\n` +
                   `**Next task ready:**\n${nextDecision.prompt}\n\n` +
                   `Progress: ${nextDecision.progress.complete}/${nextDecision.progress.total} tasks complete.` +
                   approvalWarning
@@ -2884,6 +2886,10 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                 if (materialized) {
                   draft.implDag = materialized.nodes
                   draft.currentTaskId = materialized.currentTaskId
+                  if (materialized.currentTaskId) {
+                    draft.implDag = applyDispatch(draft, materialized.currentTaskId)
+                    draft.phaseState = "DRAFT"
+                  }
                 } else {
                   draft.implDag = null
                 }

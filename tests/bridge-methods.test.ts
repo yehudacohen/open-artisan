@@ -71,6 +71,15 @@ describe("guard.check", () => {
     expect(result.policyVersion).toBeGreaterThanOrEqual(0)
   })
 
+  it("allows write-like workflow control tools without target paths", async () => {
+    const result = await handleGuardCheck({
+      toolName: "apply_patch_suggestion",
+      args: { patch_suggestion_id: "ps1" },
+      sessionId: "s1",
+    }, ctx) as GuardCheckResult
+    expect(result.allowed).toBe(true)
+  })
+
   it("blocks write tools in MODE_SELECT", async () => {
     const result = await handleGuardCheck({
       toolName: "write_file",

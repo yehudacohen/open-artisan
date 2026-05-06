@@ -43,13 +43,14 @@ const VALID_ARGS = {
 // ---------------------------------------------------------------------------
 
 describe("validateMarkTaskCompletePhase", () => {
-  it("allows IMPLEMENTATION/DRAFT and IMPLEMENTATION/REVISE", () => {
+  it("allows implementation authoring and task revision states", () => {
     expect(validateMarkTaskCompletePhase({ phase: "IMPLEMENTATION", phaseState: "DRAFT" })).toBeNull()
     expect(validateMarkTaskCompletePhase({ phase: "IMPLEMENTATION", phaseState: "REVISE" })).toBeNull()
+    expect(validateMarkTaskCompletePhase({ phase: "IMPLEMENTATION", phaseState: "TASK_REVISE" })).toBeNull()
   })
 
   it("allows SCHEDULING only when requested", () => {
-    expect(validateMarkTaskCompletePhase({ phase: "IMPLEMENTATION", phaseState: "SCHEDULING" })).toContain("DRAFT or REVISE")
+    expect(validateMarkTaskCompletePhase({ phase: "IMPLEMENTATION", phaseState: "SCHEDULING" })).toContain("DRAFT, REVISE, or TASK_REVISE")
     expect(validateMarkTaskCompletePhase({ phase: "IMPLEMENTATION", phaseState: "SCHEDULING" }, { allowScheduling: true })).toBeNull()
   })
 
@@ -158,7 +159,7 @@ describe("processMarkTaskComplete — aborted task", () => {
 describe("processMarkTaskComplete — next task dispatched", () => {
   it("returns updatedNodes with T1 marked complete", () => {
     const nodes = [
-      makeTask({ id: "T1" }),
+      makeTask({ id: "T1", status: "in-flight" }),
       makeTask({ id: "T2", dependencies: ["T1"] }),
     ]
     const result = processMarkTaskComplete(VALID_ARGS, nodes)
@@ -171,7 +172,7 @@ describe("processMarkTaskComplete — next task dispatched", () => {
 
   it("responseMessage includes T1 in confirmation", () => {
     const nodes = [
-      makeTask({ id: "T1" }),
+      makeTask({ id: "T1", status: "in-flight" }),
       makeTask({ id: "T2", dependencies: ["T1"] }),
     ]
     const result = processMarkTaskComplete(VALID_ARGS, nodes)
@@ -181,7 +182,7 @@ describe("processMarkTaskComplete — next task dispatched", () => {
 
   it("responseMessage includes next task T2", () => {
     const nodes = [
-      makeTask({ id: "T1" }),
+      makeTask({ id: "T1", status: "in-flight" }),
       makeTask({ id: "T2", dependencies: ["T1"] }),
     ]
     const result = processMarkTaskComplete(VALID_ARGS, nodes)
@@ -190,7 +191,7 @@ describe("processMarkTaskComplete — next task dispatched", () => {
   })
 
   it("includes implementation_summary in response", () => {
-    const nodes = [makeTask({ id: "T1" }), makeTask({ id: "T2", dependencies: ["T1"] })]
+    const nodes = [makeTask({ id: "T1", status: "in-flight" }), makeTask({ id: "T2", dependencies: ["T1"] })]
     const result = processMarkTaskComplete(
       { ...VALID_ARGS, implementation_summary: "auth service done" },
       nodes,
@@ -201,7 +202,7 @@ describe("processMarkTaskComplete — next task dispatched", () => {
 
   it("T2 status remains pending in updatedNodes (not yet started)", () => {
     const nodes = [
-      makeTask({ id: "T1" }),
+      makeTask({ id: "T1", status: "in-flight" }),
       makeTask({ id: "T2", dependencies: ["T1"] }),
     ]
     const result = processMarkTaskComplete(VALID_ARGS, nodes)
@@ -217,14 +218,14 @@ describe("processMarkTaskComplete — next task dispatched", () => {
 
 describe("processMarkTaskComplete — all tasks done", () => {
   it("responseMessage says all complete when last task is marked done", () => {
-    const nodes = [makeTask({ id: "T1" })]
+    const nodes = [makeTask({ id: "T1", status: "in-flight" })]
     const result = processMarkTaskComplete(VALID_ARGS, nodes)
     if ("error" in result) return
     expect(result.responseMessage.toLowerCase()).toMatch(/all|complete|done/)
   })
 
   it("responseMessage tells agent to call request_review", () => {
-    const nodes = [makeTask({ id: "T1" })]
+    const nodes = [makeTask({ id: "T1", status: "in-flight" })]
     const result = processMarkTaskComplete(VALID_ARGS, nodes)
     if ("error" in result) return
     expect(result.responseMessage).toContain("request_review")
@@ -233,7 +234,7 @@ describe("processMarkTaskComplete — all tasks done", () => {
   it("all nodes in updatedNodes are complete/aborted", () => {
     const nodes = [
       makeTask({ id: "T1", status: "complete" }),
-      makeTask({ id: "T2", dependencies: ["T1"] }),
+      makeTask({ id: "T2", dependencies: ["T1"], status: "in-flight" }),
     ]
     const result = processMarkTaskComplete({ ...VALID_ARGS, task_id: "T2" }, nodes)
     if ("error" in result) return
@@ -289,14 +290,11 @@ describe("processMarkTaskComplete — uses canonical markTaskComplete (M8)", () 
     expect(t1?.status).toBe("complete")
   })
 
-  it("marks a pending task as complete successfully", () => {
-    // The canonical helper accepts "pending" → "complete" transitions.
+  it("rejects pending tasks that were not dispatched", () => {
     const nodes = [makeTask({ id: "T1", status: "pending" })]
     const result = processMarkTaskComplete(VALID_ARGS, nodes)
-    expect("error" in result).toBe(false)
-    if ("error" in result) return
-    const t1 = result.updatedNodes.find((t) => t.id === "T1")
-    expect(t1?.status).toBe("complete")
+    expect("error" in result).toBe(true)
+    if ("error" in result) expect(result.error).toContain("has not been dispatched")
   })
 })
 
@@ -306,7 +304,7 @@ describe("processMarkTaskComplete — uses canonical markTaskComplete (M8)", () 
 
 describe("currentTaskId guard (M9)", () => {
   function nodes(): TaskNode[] {
-    return [makeTask({ id: "T1" }), makeTask({ id: "T2" })]
+    return [makeTask({ id: "T1", status: "in-flight" }), makeTask({ id: "T2" })]
   }
 
   it("rejects completing a task that is not the current dispatched task", () => {
@@ -320,7 +318,7 @@ describe("currentTaskId guard (M9)", () => {
     expect(result.error).toContain("not the currently dispatched task")
   })
 
-  it("allows completing when currentTaskId is null (backward compat)", () => {
+  it("allows completing dispatched work when currentTaskId is null", () => {
     const result = processMarkTaskComplete(
       { task_id: "T1", implementation_summary: "done", tests_passing: true },
       nodes(),
@@ -329,7 +327,7 @@ describe("currentTaskId guard (M9)", () => {
     expect("error" in result).toBe(false)
   })
 
-  it("allows completing when currentTaskId is undefined (backward compat)", () => {
+  it("allows completing dispatched work when currentTaskId is undefined", () => {
     const result = processMarkTaskComplete(
       { task_id: "T1", implementation_summary: "done", tests_passing: true },
       nodes(),
@@ -354,7 +352,7 @@ describe("currentTaskId guard (M9)", () => {
 describe("processMarkTaskComplete — blocked DAG", () => {
   it("responseMessage flags DAG inconsistency when remaining pending tasks wait on aborted dependencies", () => {
     const nodes = [
-      makeTask({ id: "T1" }),
+      makeTask({ id: "T1", status: "in-flight" }),
       makeTask({ id: "T2", dependencies: ["T3"] }),
       makeTask({ id: "T3", status: "aborted" }),
     ]
@@ -376,7 +374,7 @@ describe("processMarkTaskComplete — blocked DAG", () => {
 describe("processMarkTaskComplete — completedTaskFiles", () => {
   it("returns the task's expectedFiles on success", () => {
     const nodes = [
-      makeTask({ id: "T1", expectedFiles: ["src/foo.ts", "src/bar.ts"] }),
+      makeTask({ id: "T1", status: "in-flight", expectedFiles: ["src/foo.ts", "src/bar.ts"] }),
     ]
     const result = processMarkTaskComplete(VALID_ARGS, nodes)
     expect("error" in result).toBe(false)
@@ -386,7 +384,7 @@ describe("processMarkTaskComplete — completedTaskFiles", () => {
   })
 
   it("returns empty array when task has no expectedFiles", () => {
-    const nodes = [makeTask({ id: "T1" })]
+    const nodes = [makeTask({ id: "T1", status: "in-flight" })]
     const result = processMarkTaskComplete(VALID_ARGS, nodes)
     expect("error" in result).toBe(false)
     if (!("error" in result)) {
@@ -395,7 +393,7 @@ describe("processMarkTaskComplete — completedTaskFiles", () => {
   })
 
   it("returns empty array when expectedFiles is undefined (backward compat)", () => {
-    const nodes = [{ ...makeTask({ id: "T1" }), expectedFiles: undefined as any }]
+    const nodes = [{ ...makeTask({ id: "T1", status: "in-flight" }), expectedFiles: undefined as any }]
     const result = processMarkTaskComplete(VALID_ARGS, nodes)
     expect("error" in result).toBe(false)
     if (!("error" in result)) {

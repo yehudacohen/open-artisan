@@ -18,59 +18,17 @@ import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { cascadeAutoSkip, type CascadeAutoSkipDeps } from "#core/cascade-auto-skip"
 import { createStateMachine } from "#core/state-machine"
-import { SCHEMA_VERSION, type SessionStateStore, type WorkflowState } from "#core/workflow-state-types"
+import type { SessionStateStore, WorkflowState } from "#core/workflow-state-types"
 import type { Phase } from "#core/workflow-primitives"
 import type { Logger } from "#core/logger"
+import { makeWorkflowState } from "./helpers/workflow-state"
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
 function freshState(overrides: Partial<WorkflowState> = {}): WorkflowState {
-  return {
-    schemaVersion: SCHEMA_VERSION,
-    sessionId: "test-session",
-    mode: "REFACTOR",
-    phase: "TESTS",
-    phaseState: "REVISE",
-    iterationCount: 0,
-    retryCount: 0,
-    approvedArtifacts: {},
-    conventions: null,
-    fileAllowlist: [],
-    lastCheckpointTag: null,
-    approvalCount: 0,
-    orchestratorSessionId: null,
-    intentBaseline: null,
-    modeDetectionNote: null,
-    discoveryReport: null,
-    currentTaskId: null,
-    feedbackHistory: [],
-    backtrackContext: null,
-    implDag: null,
-    phaseApprovalCounts: {},
-    escapePending: false,
-    pendingRevisionSteps: null,
-    userGateMessageReceived: false,
-    artifactDiskPaths: {},
-    featureName: null,
-    revisionBaseline: { type: "content-hash", hash: "abc123" },
-    activeAgent: "artisan",
-    taskCompletionInProgress: null,
-    taskReviewCount: 0,
-    pendingFeedback: null,
-    userMessages: [],
-    cachedPriorState: null,
-    priorWorkflowChecked: false,
-    sessionModel: null,
-    reviewArtifactHash: null,
-    latestReviewResults: null,
-    parentWorkflow: null,
-    childWorkflows: [],
-    concurrency: { maxParallelTasks: 1 },
-    reviewArtifactFiles: [],
-    ...overrides,
-  }
+  return makeWorkflowState({ mode: "REFACTOR", phase: "TESTS", phaseState: "REVISE", revisionBaseline: { type: "content-hash", hash: "abc123" }, activeAgent: "artisan", ...overrides })
 }
 
 /**

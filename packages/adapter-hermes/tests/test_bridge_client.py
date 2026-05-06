@@ -352,10 +352,13 @@ class TestJsonRpcRoundTrip:
         socket_path = short_dir / "bridge.sock"
         result_holder: dict[str, object] = {}
 
+        ready = threading.Event()
+
         def serve_once() -> None:
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
                 server.bind(str(socket_path))
                 server.listen(1)
+                ready.set()
                 conn, _ = server.accept()
                 with conn:
                     buffer = b""
@@ -444,11 +447,13 @@ class TestJsonRpcRoundTrip:
         short_dir = Path(tempfile.mkdtemp(prefix="oa-bridge-"))
         socket_path = short_dir / "bridge.sock"
         result_holder: dict[str, object] = {}
+        ready = threading.Event()
 
         def serve_once() -> None:
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
                 server.bind(str(socket_path))
                 server.listen(1)
+                ready.set()
                 conn, _ = server.accept()
                 with conn:
                     buffer = b""
@@ -482,10 +487,7 @@ class TestJsonRpcRoundTrip:
         thread = threading.Thread(target=serve_once)
         thread.start()
         try:
-            for _ in range(50):
-                if socket_path.exists():
-                    break
-                time.sleep(0.01)
+            assert ready.wait(timeout=2)
             client._socket_path = str(socket_path)
             result = client.call("tool.execute", {"name": "request_review", "args": {}})
         finally:
@@ -505,10 +507,13 @@ class TestJsonRpcRoundTrip:
         short_dir = Path(tempfile.mkdtemp(prefix="oa-bridge-"))
         socket_path = short_dir / "bridge.sock"
 
+        ready = threading.Event()
+
         def serve_once() -> None:
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
                 server.bind(str(socket_path))
                 server.listen(1)
+                ready.set()
                 conn, _ = server.accept()
                 with conn:
                     conn.recv(4096)
@@ -516,10 +521,7 @@ class TestJsonRpcRoundTrip:
         thread = threading.Thread(target=serve_once)
         thread.start()
         try:
-            for _ in range(50):
-                if socket_path.exists():
-                    break
-                time.sleep(0.01)
+            assert ready.wait(timeout=2)
             client._socket_path = str(socket_path)
             with pytest.raises(
                 BridgeError, match="socket closed before sending a JSON-RPC reply"
@@ -538,10 +540,13 @@ class TestJsonRpcRoundTrip:
         short_dir = Path(tempfile.mkdtemp(prefix="oa-bridge-"))
         socket_path = short_dir / "bridge.sock"
 
+        ready = threading.Event()
+
         def serve_once() -> None:
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
                 server.bind(str(socket_path))
                 server.listen(1)
+                ready.set()
                 conn, _ = server.accept()
                 with conn:
                     while b"\n" not in (buffer := conn.recv(4096)):
@@ -552,10 +557,7 @@ class TestJsonRpcRoundTrip:
         thread = threading.Thread(target=serve_once)
         thread.start()
         try:
-            for _ in range(50):
-                if socket_path.exists():
-                    break
-                time.sleep(0.01)
+            assert ready.wait(timeout=2)
             client._socket_path = str(socket_path)
             with pytest.raises(BridgeError, match="invalid JSON reply"):
                 client.call("tool.execute", {"name": "request_review", "args": {}})

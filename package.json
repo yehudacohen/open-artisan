@@ -10,12 +10,15 @@
   },
   "scripts": {
     "dogfood:discord": "bun run tools/discord-dogfood-harness.ts",
-    "test": "bun run test:root && bun run test:packages && bun run test:pglite",
+    "generate:hermes-tools": "bun run tools/generate-hermes-tool-contracts.ts",
+    "verify:all": "bun run generate:hermes-tools && bun run typecheck && git diff --check && bun run test",
+    "test": "bun run test:root && bun run test:packages && bun run test:pglite && bun run test:hermes",
     "test:root": "bun run tools/run-test-shard.ts root",
     "test:packages": "bun run test:bridge && bun run test:core",
     "test:bridge": "bun run tools/run-test-shard.ts bridge",
     "test:core": "bun run tools/run-test-shard.ts core",
     "test:pglite": "bun run tools/run-test-shard.ts pglite",
+    "test:hermes": "uv run --project packages/adapter-hermes --with pytest pytest packages/adapter-hermes/tests",
     "test:watch": "bun test --watch",
     "typecheck": "tsc --noEmit"
   },

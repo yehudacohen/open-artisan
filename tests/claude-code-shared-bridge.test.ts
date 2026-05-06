@@ -1,9 +1,9 @@
 /**
  * Tests for Claude Code's shared-bridge usage contract.
  */
-import { beforeEach, describe, expect, it } from "bun:test"
+import { afterEach, beforeEach, describe, expect, it } from "bun:test"
 import { join } from "node:path"
-import { mkdtemp, mkdir, writeFile } from "node:fs/promises"
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 
 import {
@@ -22,6 +22,10 @@ let stateDir: string
 beforeEach(async () => {
   projectDir = await mkdtemp(join(tmpdir(), "claude-shared-contract-"))
   stateDir = join(projectDir, ".openartisan")
+})
+
+afterEach(async () => {
+  await rm(projectDir, { recursive: true, force: true })
 })
 
 function makeMetadata(overrides: Partial<BridgeMetadata> = {}): BridgeMetadata {

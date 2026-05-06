@@ -12,9 +12,10 @@
  */
 import { describe, expect, it } from "bun:test"
 import { processSpawnSubWorkflow } from "#core/tools/spawn-sub-workflow"
-import { SCHEMA_VERSION, type WorkflowState } from "#core/workflow-state-types"
+import type { WorkflowState } from "#core/workflow-state-types"
 import type { TaskNode } from "#core/dag"
 import { MAX_SUB_WORKFLOWS } from "#core/constants"
+import { makeWorkflowState } from "./helpers/workflow-state"
 
 function makeTask(overrides: Partial<TaskNode> & { id: string }): TaskNode {
   return {
@@ -29,54 +30,19 @@ function makeTask(overrides: Partial<TaskNode> & { id: string }): TaskNode {
 }
 
 function makeState(overrides: Partial<WorkflowState> = {}): WorkflowState {
-  return {
-    schemaVersion: SCHEMA_VERSION,
+  return makeWorkflowState({
     sessionId: "parent-session",
-    mode: "GREENFIELD",
     phase: "IMPLEMENTATION",
-    phaseState: "DRAFT",
-    iterationCount: 0,
-    retryCount: 0,
-    approvedArtifacts: {},
-    conventions: null,
-    fileAllowlist: [],
-    lastCheckpointTag: null,
     approvalCount: 3,
-    orchestratorSessionId: null,
-    intentBaseline: null,
-    modeDetectionNote: null,
-    discoveryReport: null,
     implDag: [
       makeTask({ id: "T1", status: "complete" }),
       makeTask({ id: "T2", status: "pending", dependencies: ["T1"] }),
       makeTask({ id: "T3", status: "pending", dependencies: ["T1"] }),
     ],
-    phaseApprovalCounts: {},
-    escapePending: false,
-    pendingRevisionSteps: null,
-    currentTaskId: null,
-    feedbackHistory: [],
-    backtrackContext: null,
-    userGateMessageReceived: false,
-    reviewArtifactHash: null,
-    latestReviewResults: null,
-    artifactDiskPaths: {},
     featureName: "parent-feature",
-    revisionBaseline: null,
     activeAgent: "artisan",
-    taskCompletionInProgress: null,
-    taskReviewCount: 0,
-    pendingFeedback: null,
-    userMessages: [],
-    cachedPriorState: null,
-    priorWorkflowChecked: false,
-    sessionModel: null,
-    parentWorkflow: null,
-    childWorkflows: [],
-    concurrency: { maxParallelTasks: 1 },
-    reviewArtifactFiles: [],
     ...overrides,
-  }
+  })
 }
 
 // ---------------------------------------------------------------------------

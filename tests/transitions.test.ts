@@ -13,7 +13,6 @@ import {
   computeProposeBacktrackTransition,
 } from "#core/tools/transitions"
 import { createStateMachine } from "#core/state-machine"
-import { SCHEMA_VERSION } from "#core/workflow-state-types"
 import type {
   StructuralTransitionDescriptor,
   StructuralTransitionDescriptorStore,
@@ -25,54 +24,12 @@ import type {
   StructuralWorkflowMetricsSnapshot,
 } from "#core/structural-workflow-types"
 import type { WorkflowState } from "#core/workflow-state-types"
+import { makeWorkflowState } from "./helpers/workflow-state"
 
 const sm = createStateMachine()
 
 function makeState(overrides: Partial<WorkflowState> = {}): WorkflowState {
-  return {
-    schemaVersion: SCHEMA_VERSION,
-    sessionId: "test",
-    mode: "GREENFIELD",
-    phase: "PLANNING",
-    phaseState: "REVIEW",
-    iterationCount: 0,
-    retryCount: 0,
-    approvedArtifacts: {},
-    conventions: null,
-    fileAllowlist: [],
-    lastCheckpointTag: null,
-    approvalCount: 0,
-    orchestratorSessionId: null,
-    intentBaseline: null,
-    modeDetectionNote: null,
-    discoveryReport: null,
-    implDag: null,
-    phaseApprovalCounts: {},
-    escapePending: false,
-    pendingRevisionSteps: null,
-    currentTaskId: null,
-    feedbackHistory: [],
-    backtrackContext: null,
-    userGateMessageReceived: false,
-    reviewArtifactHash: null,
-    latestReviewResults: null,
-    artifactDiskPaths: {},
-    featureName: "test-feature",
-    revisionBaseline: null,
-    activeAgent: null,
-    taskCompletionInProgress: null,
-    taskReviewCount: 0,
-    pendingFeedback: null,
-    userMessages: [],
-    cachedPriorState: null,
-    priorWorkflowChecked: false,
-    sessionModel: null,
-    parentWorkflow: null,
-    childWorkflows: [],
-    concurrency: { maxParallelTasks: 1 },
-    reviewArtifactFiles: [],
-    ...overrides,
-  }
+  return makeWorkflowState({ sessionId: "test", phaseState: "REVIEW", featureName: "test-feature", ...overrides })
 }
 
 // ---------------------------------------------------------------------------

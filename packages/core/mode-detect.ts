@@ -11,7 +11,7 @@
  * intent — it cannot be inferred from file counts or git history alone.
  * The user can always override by calling select_mode with REFACTOR.
  */
-import { execSync } from "node:child_process"
+import { execFileSync } from "node:child_process"
 import { readdirSync, type Dirent } from "node:fs"
 import { join, extname } from "node:path"
 import type { ModeDetectionResult } from "./mode-detection-types"
@@ -20,7 +20,7 @@ import { SOURCE_EXTENSIONS } from "./constants"
 
 function hasGitCommits(cwd: string): boolean {
   try {
-    execSync("git rev-parse HEAD", { cwd, stdio: "pipe" })
+    execFileSync("git", ["rev-parse", "HEAD"], { cwd, stdio: "pipe" })
     return true
   } catch {
     return false
@@ -68,7 +68,7 @@ function countSourceFiles(cwd: string): number {
     // List all non-hidden, non-gitignored files tracked by git
     let stdout: string
     try {
-      stdout = execSync("git ls-files", { cwd, stdio: "pipe", encoding: "utf-8" })
+      stdout = execFileSync("git", ["ls-files"], { cwd, stdio: "pipe", encoding: "utf-8" })
     } catch {
       // Fallback: recursive walk if not a git repo
       return walkSourceFiles(cwd, "").length

@@ -1,5 +1,5 @@
-import { describe, expect, it } from "bun:test"
-import { mkdtemp } from "node:fs/promises"
+import { afterEach, describe, expect, it } from "bun:test"
+import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -12,53 +12,21 @@ import {
 } from "#core/agent-policy"
 import { createSessionStateStore } from "#core/session-state"
 import { createFileSystemStateBackend } from "#core/state-backend-fs"
-import { SCHEMA_VERSION, type WorkflowState } from "#core/workflow-state-types"
+import { makeWorkflowState } from "./helpers/workflow-state"
 
-function makeState(overrides: Partial<WorkflowState> = {}): WorkflowState {
-  return {
-    schemaVersion: SCHEMA_VERSION,
-    sessionId: "s1",
-    mode: null,
-    phase: "MODE_SELECT",
-    phaseState: "DRAFT",
-    iterationCount: 0,
-    retryCount: 0,
-    approvedArtifacts: {},
-    conventions: null,
-    fileAllowlist: [],
-    lastCheckpointTag: null,
-    approvalCount: 0,
-    orchestratorSessionId: null,
-    intentBaseline: null,
-    modeDetectionNote: null,
-    discoveryReport: null,
-    currentTaskId: null,
-    feedbackHistory: [],
-    implDag: null,
-    phaseApprovalCounts: {},
-    escapePending: false,
-    pendingRevisionSteps: null,
-    userGateMessageReceived: false,
-    reviewArtifactHash: null,
-    latestReviewResults: null,
-    artifactDiskPaths: {},
-    featureName: null,
-    revisionBaseline: null,
-    activeAgent: null,
-    taskCompletionInProgress: null,
-    taskReviewCount: 0,
-    pendingFeedback: null,
-    userMessages: [],
-    cachedPriorState: null,
-    priorWorkflowChecked: false,
-    sessionModel: null,
-    parentWorkflow: null,
-    childWorkflows: [],
-    concurrency: { maxParallelTasks: 1 },
-    reviewArtifactFiles: [],
-    ...overrides,
-  }
+const tempDirs: string[] = []
+
+async function makeTempDir(prefix: string): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), prefix))
+  tempDirs.push(dir)
+  return dir
 }
+
+afterEach(async () => {
+  await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })))
+})
+
+const makeState = (overrides = {}) => makeWorkflowState({ sessionId: "s1", mode: null, phase: "MODE_SELECT", ...overrides })
 
 describe("agent-policy", () => {
   it("normalizes agent names", () => {
@@ -95,7 +63,7 @@ describe("agent-policy", () => {
   })
 
   it("persists normalized agent names to session state", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "agent-policy-"))
+    const dir = await makeTempDir("agent-policy-")
     const store = createSessionStateStore(createFileSystemStateBackend(dir))
     await store.create("s1")
 
@@ -106,7 +74,7 @@ describe("agent-policy", () => {
   })
 
   it("does not downgrade an artisan session to build from transient agent metadata", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "agent-policy-lock-"))
+    const dir = await makeTempDir("agent-policy-lock-")
     const store = createSessionStateStore(createFileSystemStateBackend(dir))
     await store.create("s1")
     await store.update("s1", (draft) => {

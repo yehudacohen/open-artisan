@@ -8,10 +8,10 @@ import {
   applyDelegationTimeout,
   syncChildWorkflowsWithDag,
 } from "#core/tools/complete-sub-workflow"
-import { SCHEMA_VERSION } from "#core/workflow-state-types"
 import { SUB_WORKFLOW_TIMEOUT_MS } from "#core/constants"
 import type { WorkflowState } from "#core/workflow-state-types"
 import type { TaskNode } from "#core/dag"
+import { makeWorkflowState } from "./helpers/workflow-state"
 
 function makeTask(overrides: Partial<TaskNode> & { id: string }): TaskNode {
   return {
@@ -26,49 +26,17 @@ function makeTask(overrides: Partial<TaskNode> & { id: string }): TaskNode {
 }
 
 function makeState(overrides: Partial<WorkflowState> = {}): WorkflowState {
-  return {
-    schemaVersion: SCHEMA_VERSION,
+  return makeWorkflowState({
     sessionId: "parent-session",
-    mode: "GREENFIELD",
     phase: "IMPLEMENTATION",
-    phaseState: "DRAFT",
-    iterationCount: 0,
-    retryCount: 0,
-    approvedArtifacts: {},
-    conventions: null,
-    fileAllowlist: [],
-    lastCheckpointTag: null,
     approvalCount: 3,
-    orchestratorSessionId: null,
-    intentBaseline: null,
-    modeDetectionNote: null,
-    discoveryReport: null,
     implDag: [
       makeTask({ id: "T1", status: "complete" }),
       makeTask({ id: "T2", status: "delegated", dependencies: ["T1"] }),
       makeTask({ id: "T3", status: "pending", dependencies: ["T2"] }),
     ],
-    phaseApprovalCounts: {},
-    escapePending: false,
-    pendingRevisionSteps: null,
-    currentTaskId: null,
-    feedbackHistory: [],
-    backtrackContext: null,
-    userGateMessageReceived: false,
-    reviewArtifactHash: null,
-    latestReviewResults: null,
-    artifactDiskPaths: {},
     featureName: "parent-feature",
-    revisionBaseline: null,
     activeAgent: "artisan",
-    taskCompletionInProgress: null,
-    taskReviewCount: 0,
-    pendingFeedback: null,
-    userMessages: [],
-    cachedPriorState: null,
-    priorWorkflowChecked: false,
-    sessionModel: null,
-    parentWorkflow: null,
     childWorkflows: [
       {
         taskId: "T2",
@@ -78,10 +46,8 @@ function makeState(overrides: Partial<WorkflowState> = {}): WorkflowState {
         delegatedAt: "2026-01-01T00:00:00.000Z",
       },
     ],
-    concurrency: { maxParallelTasks: 1 },
-    reviewArtifactFiles: [],
     ...overrides,
-  }
+  })
 }
 
 // ---------------------------------------------------------------------------

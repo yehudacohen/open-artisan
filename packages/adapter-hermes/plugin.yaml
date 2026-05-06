@@ -10,6 +10,8 @@ tools:
   - oa_mark_analyze_complete
   - oa_mark_satisfied
   - oa_mark_task_complete
+  - oa_submit_task_review
+  - oa_submit_auto_approve
   - oa_reset_task
   - oa_request_review
   - oa_submit_feedback

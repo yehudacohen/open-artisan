@@ -60,7 +60,7 @@ export interface RebuttalRequest {
     criterion: string
     met: boolean
     evidence: string
-    score?: number
+    score?: string | number
   }>
   /** Artifact paths for the reviewer to re-check if needed */
   artifactPaths: string[]
@@ -108,7 +108,7 @@ export interface MarkSatisfiedArgs {
      * For [Q] criteria: score >= 9 means met, score < 9 means not met.
      * The `met` field is overridden by the score for [Q] criteria.
      */
-    score?: number
+    score?: string | number
   }>
 }
 
@@ -122,7 +122,7 @@ export interface RequestReviewArgs {
    * Public callers must write artifacts to disk first and submit them by path.
    * Inline artifact content is intentionally not part of the public contract.
    */
-  artifact_files?: string[]
+  artifact_files: string[]
   /**
    * Markdown artifact text for workflow-authored markdown phases only.
    * Tool handlers may materialize this to .openartisan/<feature>/<artifact>.md

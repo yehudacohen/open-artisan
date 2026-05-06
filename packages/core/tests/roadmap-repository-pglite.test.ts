@@ -10,7 +10,7 @@ import { PGliteDialect } from "kysely-pglite-dialect"
 import { createSessionStateStore } from "#core/session-state"
 import { createFileSystemStateBackend } from "#core/state-backend-fs"
 import { createPGliteRoadmapRepository } from "#core/roadmap-repository-pglite"
-import type { PGliteAccessQueue } from "#core/open-artisan-db"
+import type { PGliteAccessQueue } from "#core/pglite-access-queue"
 import type { RoadmapDocument, RoadmapPGliteRepositoryOptions, RoadmapRepository } from "#core/roadmap-types"
 
 const NOW = "2026-04-16T00:00:00.000Z"

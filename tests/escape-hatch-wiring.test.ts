@@ -24,7 +24,8 @@ import type {
   OrchestratorPlanResult,
 } from "#core/orchestrator-types"
 import type { ArtifactKey } from "#core/workflow-primitives"
-import { SCHEMA_VERSION, type WorkflowState } from "#core/workflow-state-types"
+import type { WorkflowState } from "#core/workflow-state-types"
+import { makeWorkflowState } from "./helpers/workflow-state"
 
 // ---------------------------------------------------------------------------
 // Lightweight orchestrator factory driven by mocked assess/diverge
@@ -33,49 +34,7 @@ import { SCHEMA_VERSION, type WorkflowState } from "#core/workflow-state-types"
 const sm = createStateMachine()
 
 function makeState(overrides: Partial<WorkflowState> = {}): WorkflowState {
-  return {
-    schemaVersion: SCHEMA_VERSION,
-    sessionId: "test-session",
-    mode: "GREENFIELD",
-    phase: "PLANNING",
-    phaseState: "USER_GATE",
-    iterationCount: 0,
-    retryCount: 0,
-    approvedArtifacts: {},
-    conventions: null,
-    fileAllowlist: [],
-    lastCheckpointTag: null,
-    approvalCount: 0,
-    orchestratorSessionId: null,
-    intentBaseline: null,
-    modeDetectionNote: null,
-    discoveryReport: null,
-    implDag: null,
-    phaseApprovalCounts: {},
-    escapePending: false,
-    pendingRevisionSteps: null,
-    currentTaskId: null,
-    feedbackHistory: [],
-    userGateMessageReceived: false,
-    artifactDiskPaths: {},
-    featureName: null,
-    revisionBaseline: null,
-    activeAgent: null,
-    taskCompletionInProgress: null,
-    taskReviewCount: 0,
-    pendingFeedback: null,
-    userMessages: [],
-    cachedPriorState: null,
-    priorWorkflowChecked: false,
-    sessionModel: null,
-    reviewArtifactHash: null,
-    latestReviewResults: null,
-    parentWorkflow: null,
-    childWorkflows: [],
-    concurrency: { maxParallelTasks: 1 },
-    reviewArtifactFiles: [],
-    ...overrides,
-  }
+  return makeWorkflowState({ phaseState: "USER_GATE", ...overrides })
 }
 
 function makeOrchestrator(

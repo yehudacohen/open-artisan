@@ -34,13 +34,14 @@ export interface ParallelIsolationAssessment {
 
 export function isEnvFile(path: string): boolean {
   // Blocks any .env file or .env.* file
-  const base = path.split("/").at(-1) ?? ""
+  const base = path.replace(/\\/g, "/").split("/").at(-1) ?? ""
   return base === ".env" || base.startsWith(".env.")
 }
 
 /** Returns true if the file is under the .openartisan/ artifact directory. */
 export function isOpenArtisanFile(path: string): boolean {
   const normalized = path.replace(/\\/g, "/")
+  if (normalized.startsWith("../") || normalized.includes("/../")) return false
   return normalized === ".openartisan" || normalized.startsWith(".openartisan/") || normalized.includes("/.openartisan/")
 }
 

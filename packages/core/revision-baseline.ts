@@ -18,7 +18,7 @@
 
 import { createHash } from "node:crypto"
 import { readFileSync, existsSync } from "node:fs"
-import { execSync } from "node:child_process"
+import { execFileSync } from "node:child_process"
 import type { WorkflowState } from "./workflow-state-types"
 import type { ArtifactKey, Phase } from "./workflow-primitives"
 import { PHASE_TO_ARTIFACT } from "./artifacts"
@@ -91,7 +91,7 @@ export async function captureRevisionBaseline(
       // At check time, we hash `git diff` again and compare. If the hashes
       // match, the agent made no new changes during this REVISE step.
       try {
-        const diffOutput = execSync("git diff", { cwd, stdio: "pipe", encoding: "utf-8" })
+        const diffOutput = execFileSync("git", ["diff"], { cwd, stdio: "pipe", encoding: "utf-8" })
         return { type: "git-sha", sha: contentHash(diffOutput) }
       } catch {
         return null // git not available — graceful degradation
@@ -143,7 +143,7 @@ export async function hasArtifactChanged(
       // baseline.sha holds a content hash of the diff output at REVISE entry,
       // NOT a commit SHA. If the hashes match, the working tree is unchanged.
       try {
-        const diffOutput = execSync("git diff", { cwd, stdio: "pipe", encoding: "utf-8" })
+        const diffOutput = execFileSync("git", ["diff"], { cwd, stdio: "pipe", encoding: "utf-8" })
         return contentHash(diffOutput) !== baseline.sha
       } catch {
         return true // git error — allow through

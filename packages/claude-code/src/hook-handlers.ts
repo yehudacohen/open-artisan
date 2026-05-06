@@ -9,7 +9,7 @@
  */
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs"
-import { execSync } from "node:child_process"
+import { execFileSync } from "node:child_process"
 import { buildRobotArtisanAutoApproveFailureFeedback } from "#core/autonomous-user-gate"
 import { sendSocketRequest } from "./socket-transport"
 import {
@@ -225,10 +225,11 @@ export async function handleStop(input: HookInput): Promise<HookOutput> {
       try {
         // Spawn isolated reviewer — fresh Claude session with no conversation history.
         // Omit --model so it inherits the user's default (parent) model.
-        const reviewOutput = execSync(
-          `claude --print --max-turns 1 -p ${JSON.stringify(reviewPrompt)}`,
-          { timeout: 180_000, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] },
-        )
+        const reviewOutput = execFileSync("claude", ["--print", "--max-turns", "1", "-p", reviewPrompt], {
+          timeout: 180_000,
+          encoding: "utf-8",
+          stdio: ["pipe", "pipe", "pipe"],
+        })
         // Submit review results to bridge
         await bridgeCall(stateDir, "tool.execute", {
           name: "submit_task_review",
@@ -292,10 +293,11 @@ export async function handleStop(input: HookInput): Promise<HookOutput> {
           sessionId,
           parts: [{ type: "text", text: "(robot-artisan auto-approval)" }],
         })
-        const approveOutput = execSync(
-          `claude --print --max-turns 1 -p ${JSON.stringify(approvePrompt)}`,
-          { timeout: 120_000, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] },
-        )
+        const approveOutput = execFileSync("claude", ["--print", "--max-turns", "1", "-p", approvePrompt], {
+          timeout: 120_000,
+          encoding: "utf-8",
+          stdio: ["pipe", "pipe", "pipe"],
+        })
         await bridgeCall(stateDir, "tool.execute", {
           name: "submit_auto_approve",
           args: { review_output: approveOutput },

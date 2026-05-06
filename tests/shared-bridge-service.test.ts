@@ -2,9 +2,9 @@
  * shared-bridge-service.test.ts - T1 tests for shared local bridge metadata
  * and discovery behavior.
  */
-import { beforeEach, describe, expect, it } from "bun:test"
+import { afterEach, beforeEach, describe, expect, it } from "bun:test"
 import { join } from "node:path"
-import { mkdtemp, mkdir, writeFile } from "node:fs/promises"
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 
 import {
@@ -30,6 +30,10 @@ let stateDir: string
 beforeEach(async () => {
   projectDir = await mkdtemp(join(tmpdir(), "shared-bridge-project-"))
   stateDir = join(projectDir, ".openartisan")
+})
+
+afterEach(async () => {
+  await rm(projectDir, { recursive: true, force: true })
 })
 
 function makeMetadata(overrides: Partial<BridgeMetadata> = {}): BridgeMetadata {

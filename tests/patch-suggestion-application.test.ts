@@ -3,10 +3,13 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
-import { createOpenArtisanServices, createPGliteOpenArtisanRepository, type DbPatchSuggestion, type OpenArtisanRepository } from "#core/open-artisan-db"
+import { createOpenArtisanServices } from "#core/open-artisan-services"
+import { createPGliteOpenArtisanRepository } from "#core/open-artisan-repository-pglite"
+import type { DbPatchSuggestion, OpenArtisanRepository } from "#core/open-artisan-repository"
 import { applyPatchSuggestionToWorktree, extractPatchTouchedPaths } from "#core/patch-suggestion-application"
 import { workflowDbId } from "#core/runtime-persistence"
-import { SCHEMA_VERSION, type WorkflowState } from "#core/workflow-state-types"
+import type { WorkflowState } from "#core/workflow-state-types"
+import { makeWorkflowState } from "./helpers/workflow-state"
 
 const tempDirs: string[] = []
 const sharedTempDirs: string[] = []
@@ -49,26 +52,12 @@ function nextSchemaName(): string {
 }
 
 function makeState(overrides: Partial<WorkflowState> = {}): WorkflowState {
-  return {
-    schemaVersion: SCHEMA_VERSION,
+  return makeWorkflowState({
     sessionId: "patch-session",
     mode: "INCREMENTAL",
     phase: "IMPLEMENTATION",
-    phaseState: "DRAFT",
-    iterationCount: 0,
-    retryCount: 0,
-    approvedArtifacts: {},
-    conventions: null,
     fileAllowlist: ["src/message.txt"],
-    lastCheckpointTag: null,
-    approvalCount: 0,
-    orchestratorSessionId: null,
-    intentBaseline: null,
-    modeDetectionNote: null,
-    discoveryReport: null,
     currentTaskId: "T1",
-    feedbackHistory: [],
-    backtrackContext: null,
     implDag: [
       {
         id: "T1",
@@ -80,29 +69,9 @@ function makeState(overrides: Partial<WorkflowState> = {}): WorkflowState {
         status: "in-flight",
       },
     ],
-    phaseApprovalCounts: {},
-    escapePending: false,
-    pendingRevisionSteps: null,
-    userGateMessageReceived: false,
-    reviewArtifactHash: null,
-    latestReviewResults: null,
-    artifactDiskPaths: {},
     featureName: "patch-application",
-    revisionBaseline: null,
-    activeAgent: null,
-    taskCompletionInProgress: null,
-    taskReviewCount: 0,
-    pendingFeedback: null,
-    userMessages: [],
-    cachedPriorState: null,
-    priorWorkflowChecked: false,
-    sessionModel: null,
-    parentWorkflow: null,
-    childWorkflows: [],
-    concurrency: { maxParallelTasks: 1 },
-    reviewArtifactFiles: [],
     ...overrides,
-  }
+  })
 }
 
 async function servicesFor(state: WorkflowState) {

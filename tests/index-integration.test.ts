@@ -433,6 +433,12 @@ describe("Plugin shape — returned object has all required keys", () => {
     expect(Object.keys(tools).sort()).toEqual(OPENCODE_TOOL_CONTRACTS.map((contract) => contract.name).sort())
   })
 
+  it("exposes file-based request_review args without legacy artifact_content", () => {
+    const args = plugin.tool.request_review.args
+    expect(Object.keys(args).sort()).toEqual(["artifact_description", "artifact_files", "artifact_markdown", "summary"])
+    expect(args.artifact_content).toBeUndefined()
+  })
+
   it("WORKFLOW_TOOL_NAMES contains every callable workflow tool", () => {
     expect([...WORKFLOW_TOOL_NAMES].sort()).toEqual(WORKFLOW_TOOL_CONTRACTS.map((contract) => contract.name).sort())
   })

@@ -10,7 +10,7 @@ import type { MethodHandler } from "../server"
 import type { GuardCheckParams, GuardPolicyParams, GuardCheckResult, GuardPolicyResult } from "../protocol"
 import { SESSION_NOT_FOUND, INVALID_PARAMS } from "../protocol"
 import { extractWriteToolPaths, getPhaseToolPolicy, getTaskWriteFiles } from "../../core/hooks/tool-guard"
-import { WORKFLOW_TOOL_NAMES } from "../../core/constants"
+import { WORKFLOW_TOOL_NAMES } from "../../core/workflow-tool-names"
 import type { Phase, PhaseState, WorkflowMode } from "../../core/workflow-primitives"
 
 export const handleGuardCheck: MethodHandler = async (params, ctx) => {

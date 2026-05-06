@@ -23,8 +23,9 @@ import {
 } from "#core/scheduler"
 import { parseImplPlan } from "#core/impl-plan-parser"
 import { buildTaskReviewPrompt } from "#core/task-review"
-import { SCHEMA_VERSION, validateWorkflowState, type WorkflowState } from "#core/workflow-state-types"
+import { validateWorkflowState, type WorkflowState } from "#core/workflow-state-types"
 import { processMarkTaskComplete } from "#core/tools/mark-task-complete"
+import { makeWorkflowState } from "./helpers/workflow-state"
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -43,49 +44,7 @@ function makeTask(overrides: Partial<TaskNode> & { id: string }): TaskNode {
 }
 
 function makeState(overrides: Partial<WorkflowState> = {}): WorkflowState {
-  return {
-    schemaVersion: SCHEMA_VERSION,
-    sessionId: "test-session",
-    mode: "GREENFIELD",
-    phase: "IMPLEMENTATION",
-    phaseState: "DRAFT",
-    iterationCount: 0,
-    retryCount: 0,
-    approvedArtifacts: {},
-    conventions: null,
-    fileAllowlist: [],
-    lastCheckpointTag: null,
-    approvalCount: 0,
-    orchestratorSessionId: null,
-    intentBaseline: null,
-    modeDetectionNote: null,
-    discoveryReport: null,
-    currentTaskId: null,
-    feedbackHistory: [],
-    implDag: null,
-    phaseApprovalCounts: {},
-    escapePending: false,
-    pendingRevisionSteps: null,
-    userGateMessageReceived: false,
-    artifactDiskPaths: {},
-    featureName: null,
-    revisionBaseline: null,
-    activeAgent: null,
-    taskCompletionInProgress: null,
-    taskReviewCount: 0,
-    pendingFeedback: null,
-    userMessages: [],
-    cachedPriorState: null,
-    priorWorkflowChecked: false,
-    sessionModel: null,
-    reviewArtifactHash: null,
-    latestReviewResults: null,
-    parentWorkflow: null,
-    childWorkflows: [],
-    concurrency: { maxParallelTasks: 1 },
-    reviewArtifactFiles: [],
-    ...overrides,
-  }
+  return makeWorkflowState({ phase: "IMPLEMENTATION", ...overrides })
 }
 
 // ===========================================================================

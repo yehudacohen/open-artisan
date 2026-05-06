@@ -5,8 +5,6 @@
  * Modules import from here to ensure consistency and single-source-of-truth.
  */
 
-import { WORKFLOW_TOOL_NAME_LIST } from "./tool-contracts"
-
 // ---------------------------------------------------------------------------
 // Text truncation limits
 // ---------------------------------------------------------------------------
@@ -284,19 +282,5 @@ export const PHASE_ORDER: import("./workflow-primitives").Phase[] = [
   "MODE_SELECT", "DISCOVERY", "PLANNING", "INTERFACES",
   "TESTS", "IMPL_PLAN", "IMPLEMENTATION", "DONE",
 ]
-
-// ---------------------------------------------------------------------------
-// Workflow tool names — single source of truth
-// ---------------------------------------------------------------------------
-
-/**
- * Names of all custom workflow control tools.
- * The tool guard must never block these regardless of phase — they are the
- * mechanism by which the agent signals state transitions.
- *
- * Both the adapter and the bridge import this set. Adding a tool here
- * ensures it's recognized in both contexts.
- */
-export const WORKFLOW_TOOL_NAMES = new Set(WORKFLOW_TOOL_NAME_LIST)
 
 export const DB_TASK_LEASE_TTL_MS = 60 * 60 * 1000

@@ -578,6 +578,12 @@ describe("Tool policy — IMPLEMENTATION/INCREMENTAL bashCommandPredicate", () =
     expect(policy.bashCommandPredicate!('cat <<"MARKER"\ncontent\nMARKER')).toBe(false)
   })
 
+  it("blocks common write utility forms beyond shell redirects", () => {
+    const policy = getPhaseToolPolicy("IMPLEMENTATION", "DRAFT", "INCREMENTAL", ["/a.ts"])
+    expect(policy.bashCommandPredicate!("dd if=/tmp/a of=/tmp/b")).toBe(false)
+    expect(policy.bashCommandPredicate!("printf hello | tee -a file.txt")).toBe(false)
+  })
+
   it("does NOT block << in non-heredoc context (shift operator)", () => {
     const policy = getPhaseToolPolicy("IMPLEMENTATION", "DRAFT", "INCREMENTAL", ["/a.ts"])
     // Note: our regex will match <<- with a word after it. The shift operator
@@ -593,6 +599,26 @@ describe("Tool policy — IMPLEMENTATION/INCREMENTAL bashCommandPredicate", () =
   it("GREENFIELD mode does NOT have bashCommandPredicate", () => {
     const policy = getPhaseToolPolicy("IMPLEMENTATION", "DRAFT", "GREENFIELD", [])
     expect(policy.bashCommandPredicate).toBeUndefined()
+  })
+})
+
+describe("Tool policy — adversarial path handling", () => {
+  it("rejects traversal attempts that contain .openartisan after ..", () => {
+    const policy = getPhaseToolPolicy("PLANNING", "DRAFT", "GREENFIELD", [])
+    expect(policy.writePathPredicate?.("../.openartisan/plan.md")).toBe(false)
+    expect(policy.writePathPredicate?.(".openartisan/../src/escape.ts")).toBe(false)
+  })
+
+  it("still allows normal relative and absolute .openartisan artifact paths", () => {
+    const policy = getPhaseToolPolicy("PLANNING", "DRAFT", "GREENFIELD", [])
+    expect(policy.writePathPredicate?.(".openartisan/feature/plan.md")).toBe(true)
+    expect(policy.writePathPredicate?.("/project/.openartisan/feature/plan.md")).toBe(true)
+  })
+
+  it("blocks .env files when paths use Windows separators", () => {
+    const policy = getPhaseToolPolicy("IMPLEMENTATION", "DRAFT", "GREENFIELD", [])
+    expect(policy.writePathPredicate?.("C:\\project\\.env")).toBe(false)
+    expect(policy.writePathPredicate?.("C:\\project\\.env.local")).toBe(false)
   })
 })
 

@@ -3,52 +3,11 @@
  */
 import { describe, expect, it } from "bun:test"
 import { generateStatusMarkdown } from "#core/status-writer"
-import { SCHEMA_VERSION, type WorkflowState } from "#core/workflow-state-types"
+import type { WorkflowState } from "#core/workflow-state-types"
+import { makeWorkflowState } from "./helpers/workflow-state"
 
 function makeState(overrides: Partial<WorkflowState> = {}): WorkflowState {
-  return {
-    schemaVersion: SCHEMA_VERSION,
-    sessionId: "status-test",
-    mode: "INCREMENTAL",
-    phase: "IMPLEMENTATION",
-    phaseState: "USER_GATE",
-    iterationCount: 0,
-    retryCount: 0,
-    approvedArtifacts: {},
-    conventions: null,
-    fileAllowlist: [],
-    lastCheckpointTag: null,
-    approvalCount: 0,
-    orchestratorSessionId: null,
-    intentBaseline: null,
-    modeDetectionNote: null,
-    discoveryReport: null,
-    currentTaskId: null,
-    feedbackHistory: [],
-    implDag: null,
-    phaseApprovalCounts: {},
-    escapePending: false,
-    pendingRevisionSteps: null,
-    userGateMessageReceived: false,
-    reviewArtifactHash: null,
-    latestReviewResults: null,
-    artifactDiskPaths: {},
-    featureName: "status-feature",
-    revisionBaseline: null,
-    activeAgent: null,
-    taskCompletionInProgress: null,
-    taskReviewCount: 0,
-    pendingFeedback: null,
-    userMessages: [],
-    cachedPriorState: null,
-    priorWorkflowChecked: false,
-    sessionModel: null,
-    parentWorkflow: null,
-    childWorkflows: [],
-    concurrency: { maxParallelTasks: 1 },
-    reviewArtifactFiles: [],
-    ...overrides,
-  }
+  return makeWorkflowState({ sessionId: "status-test", mode: "INCREMENTAL", phase: "IMPLEMENTATION", phaseState: "USER_GATE", featureName: "status-feature", ...overrides })
 }
 
 describe("generateStatusMarkdown", () => {

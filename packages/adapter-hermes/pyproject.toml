@@ -16,6 +16,9 @@ Repository = "https://github.com/open-artisan/open-artisan"
 [tool.setuptools.packages.find]
 include = ["hermes_adapter*"]
 
+[tool.setuptools.package-data]
+hermes_adapter = ["tool_contracts.json"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"

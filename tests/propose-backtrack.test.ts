@@ -8,56 +8,21 @@ import { describe, expect, it, mock } from "bun:test"
 import { handleProposeBacktrack } from "#core/tools/propose-backtrack"
 import type { WorkflowState } from "#core/workflow-state-types"
 import type { Orchestrator, OrchestratorPlanResult, RevisionStep } from "#core/orchestrator-types"
-import { SCHEMA_VERSION } from "#core/workflow-state-types"
+import { makeWorkflowState } from "./helpers/workflow-state"
 
 // ---------------------------------------------------------------------------
 // Fixtures
 // ---------------------------------------------------------------------------
 
 function makeState(overrides: Partial<WorkflowState> = {}): WorkflowState {
-  return {
-    schemaVersion: SCHEMA_VERSION,
-    sessionId: "test-session",
-    mode: "GREENFIELD",
+  return makeWorkflowState({
     phase: "TESTS",
-    phaseState: "DRAFT",
-    iterationCount: 0,
-    retryCount: 0,
     approvedArtifacts: { plan: "abc123", interfaces: "def456" },
-    conventions: null,
-    fileAllowlist: [],
     lastCheckpointTag: "workflow/interfaces-v1",
     approvalCount: 3,
-    orchestratorSessionId: null,
     intentBaseline: "Build a REST API",
-    modeDetectionNote: null,
-    discoveryReport: null,
-    implDag: null,
-    phaseApprovalCounts: {},
-    escapePending: false,
-    pendingRevisionSteps: null,
-    currentTaskId: null,
-    feedbackHistory: [],
-    userGateMessageReceived: false,
-    artifactDiskPaths: {},
-    featureName: null,
-    revisionBaseline: null,
-    activeAgent: null,
-    taskCompletionInProgress: null,
-    taskReviewCount: 0,
-    pendingFeedback: null,
-    userMessages: [],
-    cachedPriorState: null,
-    priorWorkflowChecked: false,
-    sessionModel: null,
-    reviewArtifactHash: null,
-    latestReviewResults: null,
-    parentWorkflow: null,
-    childWorkflows: [],
-    concurrency: { maxParallelTasks: 1 },
-    reviewArtifactFiles: [],
     ...overrides,
-  }
+  })
 }
 
 function makeOrchestrator(overrides?: {

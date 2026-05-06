@@ -5,8 +5,8 @@ import {
   IDLE_COOLDOWN_MS,
   MAX_IDLE_RETRIES,
   MAX_INTENT_BASELINE_CHARS,
-  WORKFLOW_TOOL_NAMES,
 } from "#core/constants"
+import { WORKFLOW_TOOL_NAMES } from "#core/workflow-tool-names"
 import { buildCompactionContext } from "#core/hooks/compaction"
 import { buildUserGateHint, processUserMessage } from "#core/hooks/chat-message"
 import { handleIdle } from "#core/hooks/idle-handler"

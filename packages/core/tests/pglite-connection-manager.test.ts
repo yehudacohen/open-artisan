@@ -5,7 +5,8 @@ import { join } from "node:path"
 
 import { sql } from "kysely"
 
-import { createPGliteDatabaseHandle, type PGliteAccessQueue } from "#core/open-artisan-db"
+import { createPGliteDatabaseHandle } from "#core/pglite-connection-manager"
+import type { PGliteAccessQueue } from "#core/pglite-access-queue"
 
 interface TestDatabase {
   items: {

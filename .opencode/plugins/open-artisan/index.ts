@@ -46,8 +46,8 @@ import type { EngineContext } from "../../../packages/core/engine-context"
 import {
   MAX_INTENT_DISPLAY_CHARS,
   MIN_COMPLETE_ARTIFACTS,
-  WORKFLOW_TOOL_NAMES,
 } from "../../../packages/core/constants"
+import { WORKFLOW_TOOL_NAMES } from "../../../packages/core/workflow-tool-names"
 
 // Tool handlers
 import { parseSelectModeArgs, buildSelectModeResponse } from "../../../packages/core/tools/select-mode"
@@ -340,8 +340,8 @@ function logTransition(
 // Re-export for consumers who import from index.ts (G19)
 export { resolveSessionId }
 
-// WORKFLOW_TOOL_NAMES imported from packages/core/constants.ts (single source of truth)
-export { WORKFLOW_TOOL_NAMES } from "../../../packages/core/constants"
+// WORKFLOW_TOOL_NAMES imported from core registry (single source of truth)
+export { WORKFLOW_TOOL_NAMES } from "../../../packages/core/workflow-tool-names"
 
 /**
  * OpenCode-internal infrastructure tools that should never be blocked by the

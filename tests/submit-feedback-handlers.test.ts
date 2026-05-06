@@ -27,8 +27,8 @@ import {
 } from "#core/tools/submit-feedback-handlers"
 import type { WorkflowState } from "#core/workflow-state-types"
 import type { RevisionStep } from "#core/orchestrator-types"
-import { SCHEMA_VERSION } from "#core/workflow-state-types"
 import { createStateMachine } from "#core/state-machine"
+import { makeWorkflowState } from "./helpers/workflow-state"
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -37,49 +37,7 @@ import { createStateMachine } from "#core/state-machine"
 const sm = createStateMachine()
 
 function makeState(overrides: Partial<WorkflowState> = {}): WorkflowState {
-  return {
-    schemaVersion: SCHEMA_VERSION,
-    sessionId: "test-session",
-    mode: "GREENFIELD",
-    phase: "PLANNING",
-    phaseState: "USER_GATE",
-    iterationCount: 0,
-    retryCount: 0,
-    approvedArtifacts: {},
-    conventions: null,
-    fileAllowlist: [],
-    lastCheckpointTag: "workflow/discovery-v1",
-    approvalCount: 1,
-    orchestratorSessionId: null,
-    intentBaseline: "Build an auth service",
-    modeDetectionNote: null,
-    discoveryReport: null,
-    implDag: null,
-    phaseApprovalCounts: {},
-    escapePending: true,
-    pendingRevisionSteps: null,
-    currentTaskId: null,
-    feedbackHistory: [],
-    userGateMessageReceived: false,
-    artifactDiskPaths: {},
-    featureName: null,
-    revisionBaseline: null,
-    activeAgent: null,
-    taskCompletionInProgress: null,
-    taskReviewCount: 0,
-    pendingFeedback: null,
-    userMessages: [],
-    cachedPriorState: null,
-    priorWorkflowChecked: false,
-    sessionModel: null,
-    reviewArtifactHash: null,
-    latestReviewResults: null,
-    parentWorkflow: null,
-    childWorkflows: [],
-    concurrency: { maxParallelTasks: 1 },
-    reviewArtifactFiles: [],
-    ...overrides,
-  }
+  return makeWorkflowState({ phaseState: "USER_GATE", lastCheckpointTag: "workflow/discovery-v1", approvalCount: 1, intentBaseline: "Build an auth service", escapePending: true, ...overrides })
 }
 
 function makeRevisionStep(artifact: string): RevisionStep {

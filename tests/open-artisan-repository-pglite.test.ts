@@ -9,12 +9,8 @@ import { PGliteDialect } from "kysely-pglite-dialect"
 
 import {
   DEFAULT_OPEN_ARTISAN_DB_FILE_NAME,
-  createPGliteOpenArtisanRepository,
-  createOpenArtisanDbRoadmapStateBackend,
-  createOpenArtisanDbStateBackend,
-  createOpenArtisanServices,
-  exportLegacyWorkflowState,
-  importLegacyWorkflowState,
+} from "#core/open-artisan-repository-schema"
+import {
   openArtisanDbError,
   type DbHumanGate,
   type DbPatchApplication,
@@ -23,10 +19,27 @@ import {
   type DbWorkflow,
   type OpenArtisanDbResult,
   type OpenArtisanRepository,
-  type PGliteAccessQueue,
-} from "#core/open-artisan-db"
+} from "#core/open-artisan-repository"
+import {
+  createPGliteOpenArtisanRepository,
+} from "#core/open-artisan-repository-pglite"
+import {
+  createOpenArtisanDbRoadmapStateBackend,
+} from "#core/open-artisan-roadmap-state-backend-db"
+import {
+  createOpenArtisanDbStateBackend,
+} from "#core/open-artisan-state-backend-db"
+import {
+  createOpenArtisanServices,
+} from "#core/open-artisan-services"
+import {
+  exportLegacyWorkflowState,
+  importLegacyWorkflowState,
+} from "#core/open-artisan-json-compat"
+import type { PGliteAccessQueue } from "#core/pglite-access-queue"
 import { createFileSystemStateBackend } from "#core/state-backend-fs"
-import { SCHEMA_VERSION, type WorkflowState } from "#core/workflow-state-types"
+import type { WorkflowState } from "#core/workflow-state-types"
+import { makeWorkflowState } from "./helpers/workflow-state"
 
 let tempDirs: string[] = []
 let sharedTempDirs: string[] = []
@@ -137,26 +150,12 @@ function taskGraph(workflowId = "workflow-1"): DbTaskGraph {
 }
 
 function legacyState(): WorkflowState {
-  return {
-    schemaVersion: SCHEMA_VERSION,
+  return makeWorkflowState({
     sessionId: "legacy-session",
     mode: "INCREMENTAL",
     phase: "IMPLEMENTATION",
     phaseState: "HUMAN_GATE",
-    iterationCount: 0,
-    retryCount: 0,
-    approvedArtifacts: {},
-    conventions: null,
     fileAllowlist: ["/tmp/project/src/service.ts"],
-    lastCheckpointTag: null,
-    approvalCount: 0,
-    orchestratorSessionId: null,
-    intentBaseline: null,
-    modeDetectionNote: null,
-    discoveryReport: null,
-    currentTaskId: null,
-    feedbackHistory: [],
-    backtrackContext: null,
     implDag: [
       {
         id: "T1",
@@ -175,28 +174,8 @@ function legacyState(): WorkflowState {
         },
       },
     ],
-    phaseApprovalCounts: {},
-    escapePending: false,
-    pendingRevisionSteps: null,
-    userGateMessageReceived: false,
-    reviewArtifactHash: null,
-    latestReviewResults: null,
-    artifactDiskPaths: {},
     featureName: "legacy-feature",
-    revisionBaseline: null,
-    activeAgent: null,
-    taskCompletionInProgress: null,
-    taskReviewCount: 0,
-    pendingFeedback: null,
-    userMessages: [],
-    cachedPriorState: null,
-    priorWorkflowChecked: false,
-    sessionModel: null,
-    parentWorkflow: null,
-    childWorkflows: [],
-    concurrency: { maxParallelTasks: 1 },
-    reviewArtifactFiles: [],
-  }
+  })
 }
 
 describe("PGlite Open Artisan repository", () => {
@@ -271,6 +250,41 @@ describe("PGlite Open Artisan repository", () => {
     expect(results.every((result) => result.ok)).toBe(true)
     const listed = valueOf(await trackRepo(createPGliteOpenArtisanRepository({ connection: { dataDir: dir }, schemaName })).listWorkflows())
     expect(listed).toHaveLength(8)
+  })
+
+  it("preserves data across repository dispose and reopen", async () => {
+    const dir = sharedPGliteDir()
+    const schemaName = nextSchemaName()
+    const repo = trackRepo(createPGliteOpenArtisanRepository({ connection: { dataDir: dir }, schemaName }))
+    expect((await repo.createWorkflow(workflow({ id: "restart-workflow", featureName: "restart-feature" }))).ok).toBe(true)
+    await repo.dispose()
+    tempRepos.splice(tempRepos.indexOf(repo), 1)
+
+    const reopened = trackRepo(createPGliteOpenArtisanRepository({ connection: { dataDir: dir }, schemaName }))
+    const projection = valueOf(await reopened.getWorkflowByFeature("restart-feature"))
+    expect(projection?.workflow.id).toBe("restart-workflow")
+  })
+
+  it("handles concurrent writes from reopened repository instances", async () => {
+    const dir = sharedPGliteDir()
+    const schemaName = nextSchemaName()
+    const bootstrap = trackRepo(createPGliteOpenArtisanRepository({ connection: { dataDir: dir }, schemaName }))
+    expect((await bootstrap.initialize()).ok).toBe(true)
+    await bootstrap.dispose()
+    tempRepos.splice(tempRepos.indexOf(bootstrap), 1)
+
+    const results = await Promise.all(Array.from({ length: 12 }, async (_, index) => {
+      const repo = trackRepo(createPGliteOpenArtisanRepository({ connection: { dataDir: dir }, schemaName }))
+      return repo.createWorkflow(workflow({
+        id: `restart-concurrent-${index}`,
+        featureName: `restart-concurrent-${index}`,
+      }))
+    }))
+
+    expect(results.every((result) => result.ok)).toBe(true)
+    const reopened = trackRepo(createPGliteOpenArtisanRepository({ connection: { dataDir: dir }, schemaName }))
+    const listed = valueOf(await reopened.listWorkflows())
+    expect(listed.filter((item) => item.featureName.startsWith("restart-concurrent-")).length).toBe(12)
   })
 
   it("persists workflows and task graph projections", async () => {

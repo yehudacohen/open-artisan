@@ -62,6 +62,13 @@ class TestToolRegistration:
         assert "- oa_select_project" in content
         assert "- oa_recover_bridge" in content
 
+    def test_manifest_declares_all_registered_workflow_tools(self):
+        manifest = Path(__file__).parents[1] / "plugin.yaml"
+        content = manifest.read_text()
+        for hermes_name, _, _, _ in WORKFLOW_TOOLS:
+            assert f"- {hermes_name}" in content
+        assert "- oa_state" in content
+
     def test_total_tool_count_matches_workflow_tools_plus_state(
         self, mock_ctx, mock_bridge
     ):

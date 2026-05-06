@@ -12,7 +12,7 @@ import {
   type DriftReport,
   type DriftRepairAction,
 } from "#core/drift"
-import { WORKFLOW_TOOL_NAMES } from "#core/constants"
+import { WORKFLOW_TOOL_NAMES } from "#core/workflow-tool-names"
 import { ApplyDriftRepairToolSchema, PlanDriftRepairToolSchema, ReportDriftToolSchema, toJsonSchema } from "#core/schemas"
 import type { WorkflowState } from "#core/workflow-state-types"
 import type { ArtifactKey, Phase } from "#core/workflow-primitives"

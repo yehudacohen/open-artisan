@@ -9,7 +9,7 @@
  */
 import { describe, expect, it, beforeEach, afterEach } from "bun:test"
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs"
-import { execSync } from "node:child_process"
+import { execFileSync } from "node:child_process"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { createHash } from "node:crypto"
@@ -71,15 +71,20 @@ function contentHash(text: string): string {
   return createHash("sha256").update(text).digest("hex").slice(0, 32)
 }
 
+function git(args: string[], cwd: string): string {
+  return execFileSync("git", args, { cwd, stdio: "pipe", encoding: "utf-8" }).trim()
+}
+
 let tmpDir: string
 
 /** Initialize a git repo in the given directory with an initial commit. */
 function initGitRepo(dir: string): void {
-  execSync("git init", { cwd: dir, stdio: "pipe" })
-  execSync("git config user.email test@test.com", { cwd: dir, stdio: "pipe" })
-  execSync("git config user.name Test", { cwd: dir, stdio: "pipe" })
+  git(["init"], dir)
+  git(["config", "user.email", "test@test.com"], dir)
+  git(["config", "user.name", "Test"], dir)
   writeFileSync(join(dir, ".gitkeep"), "")
-  execSync("git add -A && git commit -m init", { cwd: dir, stdio: "pipe", shell: "/bin/sh" })
+  git(["add", "-A"], dir)
+  git(["commit", "-m", "init"], dir)
 }
 
 beforeEach(() => {
@@ -180,7 +185,8 @@ describe("captureRevisionBaseline — file-based phases", () => {
     // Create a tracked file, commit it, then modify it (uncommitted change)
     const filePath = join(tmpDir, "types.ts")
     writeFileSync(filePath, "old")
-    execSync("git add -A && git commit -m add-file", { cwd: tmpDir, stdio: "pipe", shell: "/bin/sh" })
+    git(["add", "-A"], tmpDir)
+    git(["commit", "-m", "add-file"], tmpDir)
     writeFileSync(filePath, "new")
     const state = makeState({ phase: "INTERFACES" })
     const baseline = await captureRevisionBaseline("INTERFACES", state, tmpDir)
@@ -188,7 +194,7 @@ describe("captureRevisionBaseline — file-based phases", () => {
     expect(baseline!.type).toBe("git-sha")
     if (baseline!.type === "git-sha") {
       // Hash should match what git diff would produce
-      const expectedDiff = execSync("git diff", { cwd: tmpDir, stdio: "pipe", encoding: "utf-8" })
+      const expectedDiff = execFileSync("git", ["diff"], { cwd: tmpDir, stdio: "pipe", encoding: "utf-8" })
       expect(baseline!.sha).toBe(contentHash(expectedDiff))
     }
   })
@@ -324,7 +330,8 @@ describe("hasArtifactChanged — git-sha (worktree hash)", () => {
     initGitRepo(tmpDir)
     const filePath = join(tmpDir, "interfaces.ts")
     writeFileSync(filePath, "old")
-    execSync("git add -A && git commit -m add", { cwd: tmpDir, stdio: "pipe", shell: "/bin/sh" })
+    git(["add", "-A"], tmpDir)
+    git(["commit", "-m", "add"], tmpDir)
     writeFileSync(filePath, "new")  // uncommitted change (earlier cascade)
     const state = makeState({ phase: "TESTS" })
     const baseline = await captureRevisionBaseline("TESTS", state, tmpDir)
@@ -339,7 +346,8 @@ describe("hasArtifactChanged — git-sha (worktree hash)", () => {
     initGitRepo(tmpDir)
     const filePath = join(tmpDir, "types.ts")
     writeFileSync(filePath, "old content")
-    execSync("git add -A && git commit -m track", { cwd: tmpDir, stdio: "pipe", shell: "/bin/sh" })
+    git(["add", "-A"], tmpDir)
+    git(["commit", "-m", "track"], tmpDir)
     const state = makeState({ phase: "INTERFACES" })
     const baseline = await captureRevisionBaseline("INTERFACES", state, tmpDir)
     expect(baseline).not.toBeNull()
@@ -354,7 +362,8 @@ describe("hasArtifactChanged — git-sha (worktree hash)", () => {
     initGitRepo(tmpDir)
     const file1 = join(tmpDir, "interfaces.ts")
     writeFileSync(file1, "old")
-    execSync("git add -A && git commit -m add", { cwd: tmpDir, stdio: "pipe", shell: "/bin/sh" })
+    git(["add", "-A"], tmpDir)
+    git(["commit", "-m", "add"], tmpDir)
     writeFileSync(file1, "new")  // earlier cascade change (unstaged)
     const state = makeState({ phase: "TESTS" })
     const baseline = await captureRevisionBaseline("TESTS", state, tmpDir)

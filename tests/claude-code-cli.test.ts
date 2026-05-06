@@ -9,7 +9,7 @@ import { join } from "node:path"
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { existsSync } from "node:fs"
-import { spawn, execSync, type ChildProcess } from "node:child_process"
+import { spawn, execFileSync, type ChildProcess } from "node:child_process"
 
 import { sendSocketRequest } from "#claude-code/src/socket-transport"
 import { getSocketPath, getEnabledPath, getActiveSessionPath, DEFAULT_STATE_DIR_NAME } from "#claude-code/src/constants"
@@ -30,16 +30,13 @@ function runCli(args: string[], stdin?: string): string {
     ...process.env,
     CLAUDE_PROJECT_DIR: tmpDir,
   }
-  const result = execSync(
-    `bun run ${CLI_SCRIPT} ${args.join(" ")}`,
-    {
-      env,
-      encoding: "utf-8",
-      input: stdin,
-      timeout: 15_000,
-      stdio: ["pipe", "pipe", "pipe"],
-    },
-  )
+  const result = execFileSync("bun", ["run", CLI_SCRIPT, ...args], {
+    env,
+    encoding: "utf-8",
+    input: stdin,
+    timeout: 15_000,
+    stdio: ["pipe", "pipe", "pipe"],
+  })
   return result.trim()
 }
 
@@ -47,7 +44,7 @@ function runCli(args: string[], stdin?: string): string {
 function runCliError(args: string[], stdin?: string): string {
   const env = { ...process.env, CLAUDE_PROJECT_DIR: tmpDir }
   try {
-    execSync(`bun run ${CLI_SCRIPT} ${args.join(" ")}`, {
+    execFileSync("bun", ["run", CLI_SCRIPT, ...args], {
       env, encoding: "utf-8", input: stdin, timeout: 15_000, stdio: ["pipe", "pipe", "pipe"],
     })
     throw new Error("Expected CLI to fail but it succeeded")

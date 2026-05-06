@@ -90,7 +90,7 @@ import {
 } from "../../../packages/core/runtime-persistence"
 import { routePatchSuggestions } from "../../../packages/core/patch-suggestion-routing"
 import { applyPatchSuggestionToWorktree } from "../../../packages/core/patch-suggestion-application"
-import { ApplyDriftRepairToolSchema, ApplyPatchSuggestionSchema, PlanDriftRepairToolSchema, ReportDriftToolSchema, ResolvePatchSuggestionSchema, formatZodError } from "../../../packages/core/schemas"
+import { AnalyzeTaskBoundaryChangeSchema, ApplyDriftRepairToolSchema, ApplyPatchSuggestionSchema, ApplyTaskBoundaryChangeSchema, PlanDriftRepairToolSchema, ReportDriftToolSchema, ResolvePatchSuggestionSchema, formatZodError } from "../../../packages/core/schemas"
 import { buildDriftRepairPlan, buildRepairToolCall, buildWorkflowDriftReport, type DriftRepairPlan, type DriftReport, type DriftToolCallPlan } from "../../../packages/core/drift"
 import { captureRevisionBaseline, hasArtifactChanged } from "../../../packages/core/revision-baseline"
 import { writeStatusFile } from "../../../packages/core/status-writer"
@@ -112,6 +112,7 @@ import type { SessionStateStore, WorkflowState } from "../../../packages/core/wo
 import type { WorkflowMode, ArtifactKey, Phase } from "../../../packages/core/workflow-primitives"
 import type { RevisionStep } from "../../../packages/core/orchestrator-types"
 import type { CriterionResult, MarkSatisfiedArgs } from "../../../packages/core/review-types"
+import type { AnalyzeTaskBoundaryChangeArgs, ApplyTaskBoundaryChangeArgs } from "../../../packages/core/tool-types"
 import { VALID_PHASE_STATES } from "../../../packages/core/workflow-primitives"
 import type { PluginClient } from "./client-types"
 import { resolveSessionId } from "../../../packages/core/utils"
@@ -120,6 +121,7 @@ import {
   MAX_TASK_REVIEW_ITERATIONS,
   MAX_FEEDBACK_CHARS,
 } from "../../../packages/core/constants"
+import { DEFAULT_OPEN_ARTISAN_DB_FILE_NAME, DEFAULT_OPEN_ARTISAN_DB_SCHEMA } from "../../../packages/core/open-artisan-repository-schema"
 
 /** Returns a 16-char SHA-256 hex fingerprint of the given text. */
 function artifactHash(text: string): string {
@@ -534,6 +536,13 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
       projectDir: projectRoot,
       capabilities: { selfReview: "agent-only" as const, orchestrator: true, discoveryFleet: true },
       runtimeBackendKind: runtimeBackend.kind,
+      runtimeBackendInfo: {
+        backendKind: runtimeBackend.kind,
+        stateDir,
+        pgliteDataDir: runtimeBackend.kind === "db" ? join(stateDir, "workflow-db") : null,
+        pgliteDatabaseFileName: runtimeBackend.kind === "db" ? DEFAULT_OPEN_ARTISAN_DB_FILE_NAME : null,
+        pgliteSchemaName: runtimeBackend.kind === "db" ? DEFAULT_OPEN_ARTISAN_DB_SCHEMA : null,
+      },
       roadmapBackend: runtimeBackend.roadmapBackend ?? null,
       roadmapService: null,
       openArtisanServices: runtimeBackend.services ?? null,
@@ -3459,7 +3468,9 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
           const sessionId = resolveSessionId(context)
           if (!sessionId) return "Error: Could not determine session ID from tool context."
           const state = await ensureState(store, sessionId, notify)
-          const result = analyzeTaskBoundaryChange(args as any, state)
+          const parsedArgs = AnalyzeTaskBoundaryChangeSchema.safeParse(args)
+          if (!parsedArgs.success) return `Error: ${formatZodError(parsedArgs.error)}`
+          const result = analyzeTaskBoundaryChange(parsedArgs.data as AnalyzeTaskBoundaryChangeArgs, state)
           if (!result.success) return `Error: ${result.error}`
           const { analysis } = result
           return (
@@ -3498,7 +3509,9 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
           const sessionId = resolveSessionId(context)
           if (!sessionId) return "Error: Could not determine session ID from tool context."
           const state = await ensureState(store, sessionId, notify)
-          const result = applyTaskBoundaryChange(args as any, state)
+          const parsedArgs = ApplyTaskBoundaryChangeSchema.safeParse(args)
+          if (!parsedArgs.success) return `Error: ${formatZodError(parsedArgs.error)}`
+          const result = applyTaskBoundaryChange(parsedArgs.data as ApplyTaskBoundaryChangeArgs, state)
           if (!result.success) return `Error: ${result.error}`
 
           await store.update(sessionId, (draft) => {

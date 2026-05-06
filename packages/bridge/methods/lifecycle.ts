@@ -33,6 +33,7 @@ import { upsertBridgeClientLease } from "../bridge-leases"
 import { DEFAULT_BRIDGE_SOCKET_FILENAME, SHARED_BRIDGE_PROTOCOL_VERSION } from "../bridge-discovery"
 import { createRoadmapSliceService } from "../../core/roadmap-slice-service"
 import { matchesRoadmapQuery, roadmapError, roadmapOk } from "../../core/roadmap-types"
+import { DEFAULT_OPEN_ARTISAN_DB_FILE_NAME, DEFAULT_OPEN_ARTISAN_DB_SCHEMA } from "../../core/open-artisan-repository-schema"
 import type { EngineContext } from "../../core/engine-context"
 import type { SubagentDispatcher } from "../../core/subagent-dispatcher"
 import type { NotificationSink } from "../../core/logger"
@@ -218,6 +219,19 @@ export const handleInit: MethodHandler = async (params, ctx) => {
   }
   ctx.pinoLogger = pinoLogger
   ctx.runtimeBackendKind = runtimeBackend.kind
+  ctx.runtimeBackendInfo = {
+    backendKind: runtimeBackend.kind,
+    stateDir,
+    pgliteDataDir: runtimeBackend.kind === "db"
+      ? runtimeOptions.pglite?.connection?.dataDir ?? join(stateDir, "workflow-db")
+      : null,
+    pgliteDatabaseFileName: runtimeBackend.kind === "db"
+      ? runtimeOptions.pglite?.connection?.databaseFileName ?? DEFAULT_OPEN_ARTISAN_DB_FILE_NAME
+      : null,
+    pgliteSchemaName: runtimeBackend.kind === "db"
+      ? runtimeOptions.pglite?.schemaName ?? DEFAULT_OPEN_ARTISAN_DB_SCHEMA
+      : null,
+  }
   ctx.roadmapBackend = runtimeBackend.roadmapBackend ?? null
   ctx.openArtisanServices = runtimeBackend.services ?? null
   ctx.runtimeBackendDispose = runtimeBackend.dispose

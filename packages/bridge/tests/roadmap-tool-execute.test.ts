@@ -4,6 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 import { handleInit, handleSessionCreated } from "#bridge/methods/lifecycle"
+import { handleStateHealth } from "#bridge/methods/state"
 import { handleToolExecute } from "#bridge/methods/tool-execute"
 import type { BridgeContext } from "#bridge/server"
 import type { EngineContext } from "#core/engine-context"
@@ -26,6 +27,7 @@ function makeBridgeContext(): BridgeContext {
     projectDir: null,
     capabilities: { selfReview: "agent-only", orchestrator: false, discoveryFleet: false },
     runtimeBackendKind: "filesystem",
+    runtimeBackendInfo: { backendKind: "filesystem", stateDir: null, pgliteDataDir: null, pgliteDatabaseFileName: null, pgliteSchemaName: null },
     roadmapBackend: null,
     roadmapService: null,
     openArtisanServices: null,
@@ -107,6 +109,12 @@ describe("bridge roadmap tool execution", () => {
 
       expect(dbCtx.runtimeBackendKind).toBe("db")
       expect(dbCtx.roadmapBackend).not.toBeNull()
+      const health = await handleStateHealth({ sessionId: "s-db" }, dbCtx) as any
+      expect(health.backendKind).toBe("db")
+      expect(health.stateDir).toBe(dbStateDir)
+      expect(health.pgliteDataDir).toBe(join(dbStateDir, "runtime-db"))
+      expect(health.pgliteDatabaseFileName).toBe("open-artisan.pg")
+      expect(health.pgliteSchemaName).toBe("open_artisan")
       await dbCtx.roadmapBackend!.createRoadmap(makeRoadmapDocument())
 
       const response = await handleToolExecute({

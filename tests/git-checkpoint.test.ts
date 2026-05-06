@@ -13,26 +13,26 @@
 import { describe, expect, it, beforeEach, afterEach } from "bun:test"
 import { join } from "node:path"
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises"
-import { execSync } from "node:child_process"
+import { execFileSync } from "node:child_process"
 import { tmpdir } from "node:os"
 
 import { createGitCheckpoint } from "#core/hooks/git-checkpoint"
 
 let tmpDir: string
 
-function git(args: string, cwd: string): string {
-  return execSync(`git ${args}`, { cwd, stdio: "pipe", encoding: "utf-8" }).trim()
+function git(args: string[], cwd: string): string {
+  return execFileSync("git", args, { cwd, stdio: "pipe", encoding: "utf-8" }).trim()
 }
 
 beforeEach(async () => {
   tmpDir = await mkdtemp(join(tmpdir(), "sw-git-"))
-  git("init", tmpDir)
-  git("config user.email test@test.com", tmpDir)
-  git("config user.name Test", tmpDir)
+  git(["init"], tmpDir)
+  git(["config", "user.email", "test@test.com"], tmpDir)
+  git(["config", "user.name", "Test"], tmpDir)
   // Initial commit needed so HEAD exists
   await writeFile(join(tmpDir, "README.md"), "# Test")
-  git("add -A", tmpDir)
-  git('commit -m "initial"', tmpDir)
+  git(["add", "-A"], tmpDir)
+  git(["commit", "-m", "initial"], tmpDir)
 })
 
 afterEach(async () => {
@@ -76,7 +76,7 @@ describe("createGitCheckpoint — success cases", () => {
       { cwd: tmpDir },
       { phase: "IMPLEMENTATION", approvalCount: 5 },
     )
-    const tags = git('tag -l "workflow/*"', tmpDir)
+    const tags = git(["tag", "-l", "workflow/*"], tmpDir)
     expect(tags).toContain("workflow/implementation-v5")
   })
 
@@ -118,8 +118,8 @@ describe("createGitCheckpoint — INCREMENTAL mode allowlist warnings", () => {
   it("no warning when all staged files are in the allowlist", async () => {
     const allowedFile = join(tmpDir, "allowed.ts")
     await writeFile(allowedFile, "export const x = 0")
-    git("add allowed.ts", tmpDir)
-    git('commit -m "add allowed"', tmpDir)
+    git(["add", "allowed.ts"], tmpDir)
+    git(["commit", "-m", "add allowed"], tmpDir)
     await writeFile(allowedFile, "export const x = 1")
     const result = await createGitCheckpoint(
       { cwd: tmpDir },
@@ -135,8 +135,8 @@ describe("createGitCheckpoint — INCREMENTAL mode allowlist warnings", () => {
     const unexpectedFile = join(tmpDir, "unexpected.ts")
     await writeFile(allowedFile, "export const x = 0")
     await writeFile(unexpectedFile, "export const y = 0")
-    git("add allowed.ts unexpected.ts", tmpDir)
-    git('commit -m "add files"', tmpDir)
+    git(["add", "allowed.ts", "unexpected.ts"], tmpDir)
+    git(["commit", "-m", "add files"], tmpDir)
     await writeFile(allowedFile, "export const x = 1")
     await writeFile(unexpectedFile, "export const y = 2")
     const result = await createGitCheckpoint(
@@ -188,9 +188,9 @@ describe("createGitCheckpoint — no-changes tag behavior (H4 fix)", () => {
     expect(result.success).toBe(true)
     if (!result.success) return
     expect(result.tag).toBe("workflow/tests-v1")
-    const tags = git('tag -l "workflow/tests-v1"', tmpDir)
+    const tags = git(["tag", "-l", "workflow/tests-v1"], tmpDir)
     expect(tags.trim()).toBe("workflow/tests-v1")
-    const tagType = git("cat-file -t refs/tags/workflow/tests-v1", tmpDir)
+    const tagType = git(["cat-file", "-t", "refs/tags/workflow/tests-v1"], tmpDir)
     expect(tagType.trim()).toBe("tag")
   })
 })
@@ -215,7 +215,7 @@ describe("createGitCheckpoint — featureName scoping", () => {
     if (!result.success) return
 
     // Verify my-feature artifact was committed
-    const log = git("log --oneline -1 --name-only", tmpDir)
+    const log = git(["log", "--oneline", "-1", "--name-only"], tmpDir)
     expect(log).toContain(".openartisan/my-feature/plan.md")
     // other-feature should NOT be in the commit (it's unstaged)
     expect(log).not.toContain("other-feature")
@@ -234,7 +234,7 @@ describe("createGitCheckpoint — featureName scoping", () => {
     expect(result.success).toBe(true)
     if (!result.success) return
 
-    const log = git("log --oneline -1 --name-only", tmpDir)
+    const log = git(["log", "--oneline", "-1", "--name-only"], tmpDir)
     expect(log).toContain("feature-a")
     expect(log).toContain("feature-b")
   })
@@ -251,8 +251,8 @@ describe("createGitCheckpoint — expectedFiles selective staging", () => {
     const otherFile = join(tmpDir, "other.ts")
     await writeFile(expectedFile, "v1")
     await writeFile(otherFile, "v1")
-    git("add expected.ts other.ts", tmpDir)
-    git('commit -m "track files"', tmpDir)
+    git(["add", "expected.ts", "other.ts"], tmpDir)
+    git(["commit", "-m", "track files"], tmpDir)
     await writeFile(expectedFile, "v2")
     await writeFile(otherFile, "v2")
 
@@ -264,7 +264,7 @@ describe("createGitCheckpoint — expectedFiles selective staging", () => {
     if (!result.success) return
 
     // Verify only expected.ts was committed
-    const log = git("log --oneline -1 --name-only", tmpDir)
+    const log = git(["log", "--oneline", "-1", "--name-only"], tmpDir)
     expect(log).toContain("expected.ts")
     expect(log).not.toContain("other.ts")
   })
@@ -274,8 +274,8 @@ describe("createGitCheckpoint — expectedFiles selective staging", () => {
     const dirtyFile = join(tmpDir, "dirty.ts")
     await writeFile(expectedFile, "v1")
     await writeFile(dirtyFile, "v1")
-    git("add expected.ts dirty.ts", tmpDir)
-    git('commit -m "track files"', tmpDir)
+    git(["add", "expected.ts", "dirty.ts"], tmpDir)
+    git(["commit", "-m", "track files"], tmpDir)
     await writeFile(expectedFile, "v2")
     await writeFile(dirtyFile, "v2")
 
@@ -297,8 +297,8 @@ describe("createGitCheckpoint — expectedFiles selective staging", () => {
     const fileB = join(tmpDir, "b.ts")
     await writeFile(fileA, "v1")
     await writeFile(fileB, "v1")
-    git("add a.ts b.ts", tmpDir)
-    git('commit -m "track"', tmpDir)
+    git(["add", "a.ts", "b.ts"], tmpDir)
+    git(["commit", "-m", "track"], tmpDir)
     await writeFile(fileA, "v2")
     await writeFile(fileB, "v2")
 
@@ -318,8 +318,8 @@ describe("createGitCheckpoint — expectedFiles selective staging", () => {
     await writeFile(join(tmpDir, ".openartisan", "my-feat", "plan.md"), "# Plan")
     const sourceFile = join(tmpDir, "src.ts")
     await writeFile(sourceFile, "v1")
-    git("add .", tmpDir)
-    git('commit -m "track"', tmpDir)
+    git(["add", "."], tmpDir)
+    git(["commit", "-m", "track"], tmpDir)
     await writeFile(sourceFile, "v2") // dirty source file
 
     const result = await createGitCheckpoint(
@@ -331,7 +331,7 @@ describe("createGitCheckpoint — expectedFiles selective staging", () => {
     expect(result.success).toBe(true)
     if (!result.success) return
 
-    const log = git("log --oneline -1 --name-only", tmpDir)
+    const log = git(["log", "--oneline", "-1", "--name-only"], tmpDir)
     expect(log).toContain("src.ts") // Legacy fallback staged everything
   })
 })

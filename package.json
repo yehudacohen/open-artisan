@@ -11,7 +11,8 @@
   "scripts": {
     "dogfood:discord": "bun run tools/discord-dogfood-harness.ts",
     "generate:hermes-tools": "bun run tools/generate-hermes-tool-contracts.ts",
-    "verify:all": "bun run generate:hermes-tools && bun run typecheck && git diff --check && bun run test",
+    "check:generated": "bun run tools/check-generated-artifacts.ts",
+    "verify:all": "bun run generate:hermes-tools && bun run check:generated && bun run typecheck && git diff --check && bun run test",
     "test": "bun run test:root && bun run test:packages && bun run test:pglite && bun run test:hermes",
     "test:root": "bun run tools/run-test-shard.ts root",
     "test:packages": "bun run test:bridge && bun run test:core",

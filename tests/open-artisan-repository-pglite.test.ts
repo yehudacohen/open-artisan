@@ -236,6 +236,33 @@ describe("PGlite Open Artisan repository", () => {
     expect(lockRows).toEqual([])
   })
 
+  it("reopens after a stale operation lock and clears it during the next write", async () => {
+    const dir = sharedPGliteDir()
+    const schemaName = nextSchemaName()
+    const bootstrap = trackRepo(createPGliteOpenArtisanRepository({ connection: { dataDir: dir }, schemaName }))
+    expect((await bootstrap.initialize()).ok).toBe(true)
+    await bootstrap.dispose()
+    tempRepos.splice(tempRepos.indexOf(bootstrap), 1)
+
+    const rawDb = new Kysely<any>({ dialect: new PGliteDialect(new PGlite(join(dir, DEFAULT_OPEN_ARTISAN_DB_FILE_NAME))) })
+    await rawDb.withSchema(schemaName).insertInto("database_operation_locks").values({
+      lock_key: "open-artisan:repository-operation",
+      owner_id: "stale-before-restart",
+      lease_expires_at: "2000-01-01T00:00:00.000Z",
+      created_at: "2000-01-01T00:00:00.000Z",
+      updated_at: "2000-01-01T00:00:00.000Z",
+    }).execute()
+    await rawDb.destroy()
+
+    const reopened = trackRepo(createPGliteOpenArtisanRepository({ connection: { dataDir: dir }, schemaName }))
+    expect((await reopened.createWorkflow(workflow({ id: "restart-after-stale-lock", featureName: "restart-after-stale-lock" }))).ok).toBe(true)
+
+    const readDb = new Kysely<any>({ dialect: new PGliteDialect(new PGlite(join(dir, DEFAULT_OPEN_ARTISAN_DB_FILE_NAME))) })
+    const lockRows = await readDb.withSchema(schemaName).selectFrom("database_operation_locks").selectAll().execute()
+    await readDb.destroy()
+    expect(lockRows).toEqual([])
+  })
+
   it("serializes concurrent repository instances that share one PGlite database", async () => {
     const dir = sharedPGliteDir()
     const schemaName = nextSchemaName()

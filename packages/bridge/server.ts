@@ -42,6 +42,14 @@ export interface BridgeContext {
   }
   /** Workflow state backend selected at lifecycle.init. */
   runtimeBackendKind: OpenArtisanStateBackendKind
+  /** Runtime storage/debug metadata selected at lifecycle.init. */
+  runtimeBackendInfo: {
+    backendKind: OpenArtisanStateBackendKind
+    stateDir: string | null
+    pgliteDataDir: string | null
+    pgliteDatabaseFileName: string | null
+    pgliteSchemaName: string | null
+  }
   /** Roadmap backend selected at lifecycle.init when unified DB runtime is enabled. */
   roadmapBackend: RoadmapStateBackend | null
   /** Roadmap query/slice service selected at lifecycle.init when unified DB runtime is enabled. */
@@ -103,6 +111,13 @@ export function createBridgeEngine(
   let projectDir: string | null = null
   let capabilities = { selfReview: "isolated" as const, orchestrator: true, discoveryFleet: true }
   let runtimeBackendKind: OpenArtisanStateBackendKind = "filesystem"
+  let runtimeBackendInfo: BridgeContext["runtimeBackendInfo"] = {
+    backendKind: "filesystem",
+    stateDir: null,
+    pgliteDataDir: null,
+    pgliteDatabaseFileName: null,
+    pgliteSchemaName: null,
+  }
   let roadmapBackend: RoadmapStateBackend | null = null
   let roadmapService: RoadmapSliceService | null = null
   let openArtisanServices: OpenArtisanServices | null = null
@@ -122,6 +137,8 @@ export function createBridgeEngine(
     set capabilities(v: typeof capabilities) { capabilities = v },
     get runtimeBackendKind() { return runtimeBackendKind },
     set runtimeBackendKind(v: OpenArtisanStateBackendKind) { runtimeBackendKind = v },
+    get runtimeBackendInfo() { return runtimeBackendInfo },
+    set runtimeBackendInfo(v: BridgeContext["runtimeBackendInfo"]) { runtimeBackendInfo = v },
     get roadmapBackend() { return roadmapBackend },
     set roadmapBackend(v: RoadmapStateBackend | null) { roadmapBackend = v },
     get roadmapService() { return roadmapService },

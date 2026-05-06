@@ -3,7 +3,7 @@
  */
 import { describe, expect, it } from "bun:test"
 
-import { extractWriteToolPaths, getPhaseToolPolicy } from "#core/hooks/tool-guard"
+import { extractWriteToolPaths, getPhaseToolPolicy, isOpenArtisanFile } from "#core/hooks/tool-guard"
 import type { PhaseToolPolicy } from "#core/phase-tool-policy-types"
 
 describe("Tool policy — DISCOVERY/SCAN and DISCOVERY/ANALYZE are strictly read-only", () => {
@@ -607,18 +607,28 @@ describe("Tool policy — adversarial path handling", () => {
     const policy = getPhaseToolPolicy("PLANNING", "DRAFT", "GREENFIELD", [])
     expect(policy.writePathPredicate?.("../.openartisan/plan.md")).toBe(false)
     expect(policy.writePathPredicate?.(".openartisan/../src/escape.ts")).toBe(false)
+    expect(policy.writePathPredicate?.(".openartisan\\..\\src\\escape.ts")).toBe(false)
+    expect(policy.writePathPredicate?.("/project/.openartisan/feature/../../src/escape.ts")).toBe(false)
+  })
+
+  it("rejects .openartisan prefix spoofing", () => {
+    expect(isOpenArtisanFile(".openartisan-sneaky/plan.md")).toBe(false)
+    expect(isOpenArtisanFile("/project/.openartisan-sneaky/plan.md")).toBe(false)
+    expect(isOpenArtisanFile("/project/src/.openartisan-sneaky/plan.md")).toBe(false)
   })
 
   it("still allows normal relative and absolute .openartisan artifact paths", () => {
     const policy = getPhaseToolPolicy("PLANNING", "DRAFT", "GREENFIELD", [])
     expect(policy.writePathPredicate?.(".openartisan/feature/plan.md")).toBe(true)
     expect(policy.writePathPredicate?.("/project/.openartisan/feature/plan.md")).toBe(true)
+    expect(policy.writePathPredicate?.("C:\\project\\.openartisan\\feature\\plan.md")).toBe(true)
   })
 
   it("blocks .env files when paths use Windows separators", () => {
     const policy = getPhaseToolPolicy("IMPLEMENTATION", "DRAFT", "GREENFIELD", [])
     expect(policy.writePathPredicate?.("C:\\project\\.env")).toBe(false)
     expect(policy.writePathPredicate?.("C:\\project\\.env.local")).toBe(false)
+    expect(policy.writePathPredicate?.("C:\\project\\nested\\..\\.env.production")).toBe(false)
   })
 })
 

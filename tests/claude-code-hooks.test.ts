@@ -9,7 +9,7 @@ import { join } from "node:path"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { existsSync, mkdirSync, writeFileSync } from "node:fs"
-import { spawn, type ChildProcess } from "node:child_process"
+import { execFileSync, spawn, type ChildProcess } from "node:child_process"
 
 import { sendSocketRequest } from "#claude-code/src/socket-transport"
 import { getSocketPath, getEnabledPath, getActiveSessionPath, DEFAULT_STATE_DIR_NAME } from "#claude-code/src/constants"
@@ -393,9 +393,8 @@ describe("artisan-hook CLI binary", () => {
   const HOOK_SCRIPT = join(REPO_ROOT, "packages", "claude-code", "bin", "artisan-hook.ts")
 
   function runHook(command: string, stdin: object): string[] {
-    const { execSync } = require("node:child_process")
     try {
-      const stdout = execSync(`bun run ${HOOK_SCRIPT} ${command}`, {
+      const stdout = execFileSync("bun", ["run", HOOK_SCRIPT, command], {
         input: JSON.stringify(stdin),
         encoding: "utf-8",
         env: { ...process.env, CLAUDE_PROJECT_DIR: tmpDir },
@@ -442,9 +441,9 @@ describe("artisan-hook CLI binary", () => {
   })
 
   it("malformed stdin exits 0 (fail-open)", () => {
-    const { execSync } = require("node:child_process")
     try {
-      const stdout = execSync(`echo "not json" | bun run ${HOOK_SCRIPT} pre-tool-use`, {
+      execFileSync("bun", ["run", HOOK_SCRIPT, "pre-tool-use"], {
+        input: "not json",
         encoding: "utf-8",
         env: { ...process.env, CLAUDE_PROJECT_DIR: tmpDir },
         timeout: 15_000,

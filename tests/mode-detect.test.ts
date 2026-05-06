@@ -4,19 +4,19 @@
 import { describe, expect, it, beforeEach, afterEach } from "bun:test"
 import { join } from "node:path"
 import { mkdtemp, rm, mkdir, writeFile } from "node:fs/promises"
-import { execSync } from "node:child_process"
+import { execFileSync } from "node:child_process"
 import { tmpdir } from "node:os"
 
 import { detectMode } from "#core/mode-detect"
 
-function git(args: string, cwd: string): void {
-  execSync(`git ${args}`, { cwd, stdio: "pipe" })
+function git(args: string[], cwd: string): void {
+  execFileSync("git", args, { cwd, stdio: "pipe" })
 }
 
 function initGitRepo(dir: string): void {
-  git("init", dir)
-  git("config user.email test@test.com", dir)
-  git("config user.name Test", dir)
+  git(["init"], dir)
+  git(["config", "user.email", "test@test.com"], dir)
+  git(["config", "user.name", "Test"], dir)
 }
 
 let tmpDir: string
@@ -40,7 +40,7 @@ describe("detectMode — empty directory", () => {
 
 describe("detectMode — git repo with no commits", () => {
   it("suggests GREENFIELD for git init but no commits", () => {
-    git("init", tmpDir)
+    git(["init"], tmpDir)
     const result = detectMode(tmpDir)
     expect(result.suggestedMode).toBe("GREENFIELD")
     expect(result.hasGitHistory).toBe(false)
@@ -58,8 +58,8 @@ describe("detectMode — existing codebase", () => {
     for (let i = 0; i < 15; i++) {
       await writeFile(join(srcDir, `file${i}.ts`), `export const x${i} = ${i}`)
     }
-    git("add -A", tmpDir)
-    git('commit -m "initial"', tmpDir)
+    git(["add", "-A"], tmpDir)
+    git(["commit", "-m", "initial"], tmpDir)
 
     const result = detectMode(tmpDir)
     expect(result.suggestedMode).toBe("INCREMENTAL")
@@ -78,8 +78,8 @@ describe("detectMode — existing codebase", () => {
     for (let i = 0; i < 3; i++) {
       await writeFile(join(srcDir, `file${i}.ts`), `export const x${i} = ${i}`)
     }
-    git("add -A", tmpDir)
-    git('commit -m "initial"', tmpDir)
+    git(["add", "-A"], tmpDir)
+    git(["commit", "-m", "initial"], tmpDir)
 
     const result = detectMode(tmpDir)
     expect(result.suggestedMode).toBe("INCREMENTAL")
@@ -92,8 +92,8 @@ describe("detectMode — existing codebase", () => {
 
     // Only a README, no source files
     await writeFile(join(tmpDir, "README.md"), "# Project")
-    git("add -A", tmpDir)
-    git('commit -m "initial"', tmpDir)
+    git(["add", "-A"], tmpDir)
+    git(["commit", "-m", "initial"], tmpDir)
 
     const result = detectMode(tmpDir)
     expect(result.suggestedMode).toBe("GREENFIELD")
@@ -120,8 +120,8 @@ describe("detectMode — result shape", () => {
     for (let i = 0; i < 50; i++) {
       await writeFile(join(srcDir, `module${i}.ts`), `export const m = ${i}`)
     }
-    git("add -A", tmpDir)
-    git('commit -m "big project"', tmpDir)
+    git(["add", "-A"], tmpDir)
+    git(["commit", "-m", "big project"], tmpDir)
 
     const result = detectMode(tmpDir)
     expect(result.suggestedMode).not.toBe("REFACTOR")

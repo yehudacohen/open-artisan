@@ -102,10 +102,16 @@ export interface StateHealthParams {
 }
 
 export interface BridgeRuntimeHealthSummary {
+  backendKind: "filesystem" | "db"
+  stateDir: string | null
+  pgliteDataDir: string | null
+  pgliteDatabaseFileName: string | null
+  pgliteSchemaName: string | null
   featureName: string | null
   phase: string
   phaseState: string
   bridgeTransport: "stdio" | "unix-socket"
+  bridgeSocketPath: string | null
   bridgeAttachedClients: number
   bridgeActiveClientKinds: string[]
   pendingTaskReview: boolean

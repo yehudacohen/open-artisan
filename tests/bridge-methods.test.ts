@@ -34,6 +34,7 @@ function makeBridgeContext(): BridgeContext {
     projectDir: null,
     capabilities: { selfReview: "isolated" as const, orchestrator: true, discoveryFleet: true },
     runtimeBackendKind: "filesystem",
+    runtimeBackendInfo: { backendKind: "filesystem", stateDir: null, pgliteDataDir: null, pgliteDatabaseFileName: null, pgliteSchemaName: null },
     roadmapBackend: null,
     roadmapService: null,
     openArtisanServices: null,
@@ -344,6 +345,9 @@ describe("state.get / state.health", () => {
     expect(result.state.phaseState).toBe("HUMAN_GATE")
     expect(result.runtimeHealth.phase).toBe("IMPLEMENTATION")
     expect(result.runtimeHealth.phaseState).toBe("HUMAN_GATE")
+    expect(result.runtimeHealth.backendKind).toBe("filesystem")
+    expect(result.runtimeHealth.stateDir).toBe(join(tmpDir, ".openartisan"))
+    expect(result.runtimeHealth.pgliteDataDir).toBeNull()
     expect(result.runtimeHealth.awaitingUserGate).toBe(false)
   })
 

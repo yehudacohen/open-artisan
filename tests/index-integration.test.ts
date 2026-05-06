@@ -19,6 +19,7 @@ import { tmpdir } from "node:os"
 import { OpenArtisanPlugin, WORKFLOW_TOOL_NAMES } from "#plugin/index"
 import { resolveSessionId } from "#core/utils"
 import { OPENCODE_TOOL_CONTRACTS, WORKFLOW_TOOL_CONTRACTS } from "#core/tool-contracts"
+import { toJsonSchema } from "#core/schemas"
 
 // ---------------------------------------------------------------------------
 // Mock client factory
@@ -126,6 +127,11 @@ function planningPassCriteria() {
     { criterion: "[Q] Security standards", met: true, evidence: "Auth and validation covered", severity: "blocking", score: "9" },
     { criterion: "[Q] Operational excellence", met: true, evidence: "Monitoring and logging covered", severity: "blocking", score: "9" },
   ]
+}
+
+function schemaPropertyNames(schema: unknown): string[] {
+  const jsonSchema = toJsonSchema(schema as Parameters<typeof toJsonSchema>[0]) as { properties?: Record<string, unknown> }
+  return Object.keys(jsonSchema.properties ?? {}).sort()
 }
 
 function planArtifactPath(featureName: string) {
@@ -431,6 +437,33 @@ describe("Plugin shape — returned object has all required keys", () => {
   it("returns all expected tools", () => {
     const tools = plugin.tool
     expect(Object.keys(tools).sort()).toEqual(OPENCODE_TOOL_CONTRACTS.map((contract) => contract.name).sort())
+  })
+
+  it("keeps OpenCode tool arg names aligned with core contracts", () => {
+    for (const contract of OPENCODE_TOOL_CONTRACTS) {
+      expect(Object.keys(plugin.tool[contract.name].args ?? {}).sort()).toEqual(schemaPropertyNames(contract.schema))
+    }
+  })
+
+  it("keeps task-boundary OpenCode args aligned with core schemas", () => {
+    expect(Object.keys(plugin.tool.analyze_task_boundary_change.args).sort()).toEqual([
+      "add_expected_tests",
+      "add_files",
+      "reason",
+      "remove_expected_tests",
+      "remove_files",
+      "task_id",
+    ])
+    expect(Object.keys(plugin.tool.apply_task_boundary_change.args).sort()).toEqual([
+      "add_expected_tests",
+      "add_files",
+      "expected_impacted_tasks",
+      "expected_reset_tasks",
+      "reason",
+      "remove_expected_tests",
+      "remove_files",
+      "task_id",
+    ])
   })
 
   it("exposes file-based request_review args without legacy artifact_content", () => {

@@ -27,6 +27,7 @@ function makeBridgeContext(): BridgeContext {
     projectDir: null,
     capabilities: { selfReview: "isolated" as const, orchestrator: true, discoveryFleet: true },
     runtimeBackendKind: "filesystem",
+    runtimeBackendInfo: { backendKind: "filesystem", stateDir: null, pgliteDataDir: null, pgliteDatabaseFileName: null, pgliteSchemaName: null },
     roadmapBackend: null,
     roadmapService: null,
     openArtisanServices: null,

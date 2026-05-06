@@ -38,6 +38,7 @@ function makeBridgeContext(): BridgeContext {
     projectDir: null,
     capabilities: { selfReview: "isolated" as const, orchestrator: true, discoveryFleet: true },
     runtimeBackendKind: "filesystem",
+    runtimeBackendInfo: { backendKind: "filesystem", stateDir: null, pgliteDataDir: null, pgliteDatabaseFileName: null, pgliteSchemaName: null },
     roadmapBackend: null,
     roadmapService: null,
     openArtisanServices: null,
@@ -221,7 +222,10 @@ describe("state.get", () => {
     expect(result.state).not.toBeNull()
     expect(result.state.sessionId).toBe("s1")
     expect(result.runtimeHealth.phase).toBe("MODE_SELECT")
+    expect(result.runtimeHealth.backendKind).toBe("filesystem")
+    expect(result.runtimeHealth.stateDir).toBe(join(tmpDir, ".openartisan"))
     expect(result.runtimeHealth.bridgeTransport).toBe("unix-socket")
+    expect(result.runtimeHealth.bridgeSocketPath).toBe(ctx.stateDir ? join(ctx.stateDir, ".bridge.sock") : null)
     expect(result.runtimeHealth.bridgeAttachedClients).toBeGreaterThan(0)
     expect(result.runtimeHealth.bridgeActiveClientKinds).toContain("hermes")
     expect(result.runtimeHealth.pendingTaskReview).toBe(false)
@@ -240,7 +244,9 @@ describe("state.get", () => {
     await handleSessionCreated({ sessionId: "s1", agent: "hermes" }, ctx)
     const result = await handleStateHealth({ sessionId: "s1" }, ctx) as any
     expect(result.phase).toBe("MODE_SELECT")
+    expect(result.backendKind).toBe("filesystem")
     expect(result.bridgeTransport).toBe("unix-socket")
+    expect(result.bridgeSocketPath).toBe(ctx.stateDir ? join(ctx.stateDir, ".bridge.sock") : null)
     expect(result.bridgeActiveClientKinds).toContain("hermes")
   })
 })

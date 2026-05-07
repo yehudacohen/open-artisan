@@ -33,9 +33,9 @@ export const handleMessageProcess: MethodHandler = async (params, ctx) => {
     })
   }
 
-  // If the message was intercepted (user at USER_GATE), mark that a real
-  // user message was received (prevents agent from self-approving).
-  if (result.intercepted) {
+  // If a real user message was intercepted at USER_GATE, mark that human input
+  // was received. Synthetic adapter messages must not satisfy this guard.
+  if (result.intercepted && p.source !== "synthetic") {
     await store.update(p.sessionId, (draft) => {
       draft.userGateMessageReceived = true
     })

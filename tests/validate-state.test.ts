@@ -387,7 +387,7 @@ describe("validateWorkflowState — v6 fields", () => {
 
   it("rejects implDag task with invalid status", () => {
     const state = makeValidState({
-      implDag: [{ id: "T1", description: "bad", dependencies: [], status: "invalid" } as any],
+      implDag: [{ id: "T1", description: "bad", dependencies: [], expectedTests: [], status: "invalid" } as any],
     })
     const err = validateWorkflowState(state)
     expect(err).not.toBeNull()
@@ -404,6 +404,29 @@ describe("validateWorkflowState — v6 fields", () => {
       ],
     })
     expect(validateWorkflowState(state)).toBeNull()
+  })
+
+  it("rejects implDag tasks with unknown dependencies", () => {
+    const state = makeValidState({
+      implDag: [
+        { id: "T1", description: "a", dependencies: ["missing"], expectedTests: [], expectedFiles: [], estimatedComplexity: "small" as const, status: "pending" as const },
+      ],
+    })
+    const err = validateWorkflowState(state)
+    expect(err).toContain("implDag graph invalid")
+    expect(err).toContain("unknown dependency")
+  })
+
+  it("rejects implDag cycles", () => {
+    const state = makeValidState({
+      implDag: [
+        { id: "T1", description: "a", dependencies: ["T2"], expectedTests: [], expectedFiles: [], estimatedComplexity: "small" as const, status: "pending" as const },
+        { id: "T2", description: "b", dependencies: ["T1"], expectedTests: [], expectedFiles: [], estimatedComplexity: "small" as const, status: "pending" as const },
+      ],
+    })
+    const err = validateWorkflowState(state)
+    expect(err).toContain("implDag graph invalid")
+    expect(err).toContain("Circular dependency")
   })
 })
 

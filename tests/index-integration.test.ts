@@ -1445,14 +1445,8 @@ describe("userGateMessageReceived — blocks self-approval", () => {
       { feedback_text: "approved", feedback_type: "approve" },
       ctx,
     )
-    // Should be blocked — either because we're not at USER_GATE (self-review redirected)
-    // or because userGateMessageReceived is false
-    if (result.includes("USER_GATE") || result.includes("no user message")) {
-      expect(result).toContain("Error")
-    }
-    // If the subagent self-review changed the state (e.g. review failed),
-    // we might not be at USER_GATE, which is also fine — the test verifies
-    // that the agent can't self-approve in a single turn.
+    expect(result).toContain("Error: Waiting for user response")
+    expect(result).toContain("you cannot self-approve")
   })
 
   it("allows submit_feedback(approve) after user message is received", async () => {
@@ -2490,6 +2484,49 @@ describe("fileAllowlist — relative paths are normalized to absolute", () => {
     const state = store.get(sid)
     expect(state.fileAllowlist).toContain(`${tempDir}/src/allowed.ts`)
     expect(state.fileAllowlist).toContain(`${tempDir}/tests/allowed.test.ts`)
+  })
+
+  it("rejects invalid IMPL_PLAN approval before mutating approval state", async () => {
+    const sid = `int-test-${Date.now()}-impl-prevalidation`
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: sid } } },
+    })
+    const ctx = { directory: tempDir, sessionId: sid }
+
+    await plugin.tool.select_mode.execute(
+      { mode: "INCREMENTAL", feature_name: "impl-prevalidation-test" },
+      ctx,
+    )
+
+    const store = plugin._testStore
+    const implPlanPath = await writeImplPlanArtifact("impl-prevalidation-test", `# Implementation Plan
+
+## Task T1: Out-of-scope work
+**Dependencies:** none
+**Files:** src/outside.ts
+**Expected tests:** tests/outside.test.ts
+**Complexity:** medium
+`)
+    await store.update(sid, (draft: any) => {
+      draft.phase = "IMPL_PLAN"
+      draft.phaseState = "USER_GATE"
+      draft.userGateMessageReceived = true
+      draft.fileAllowlist = [`${tempDir}/src/allowed.ts`]
+      draft.artifactDiskPaths.impl_plan = implPlanPath
+      draft.approvalCount = 3
+    })
+
+    const result = await plugin.tool.submit_feedback.execute(
+      { feedback_type: "approve", feedback_text: "approved" },
+      ctx,
+    )
+
+    expect(result).toContain("IMPL_PLAN approval failed executable-contract validation")
+    const state = store.get(sid)
+    expect(state.phase).toBe("IMPL_PLAN")
+    expect(state.phaseState).toBe("USER_GATE")
+    expect(state.approvalCount).toBe(3)
+    expect(state.implDag).toBeNull()
   })
 
   it("approves IMPL_PLAN when task files and tests are markdown-wrapped but in scope", async () => {

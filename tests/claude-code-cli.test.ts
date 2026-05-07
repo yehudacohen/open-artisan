@@ -158,6 +158,10 @@ describe("artisan CLI", () => {
     expect(() => runCli(["mark-satisfied"], input)).toThrow()
   })
 
+  it("review submission commands are reserved for isolated reviewers", () => {
+    expect(() => runCli(["submit-task-review"], JSON.stringify({ review_output: "{}" }))).toThrow()
+  })
+
   it("enable creates .enabled file", () => {
     const output = runCli(["enable"])
     expect(output).toContain("enabled")

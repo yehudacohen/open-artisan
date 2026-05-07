@@ -180,13 +180,17 @@ class TestArtisanPassthrough:
             _is_artisan_command("bun run packages/cli/artisan.ts select-mode") is True
         )
 
-    def test_detects_piped(self):
-        """'echo ... | artisan ...' should be recognized."""
-        assert _is_artisan_command("echo '{}' | artisan request-review") is True
+    def test_rejects_piped(self):
+        """Compound shell commands must not bypass the guard."""
+        assert _is_artisan_command("echo '{}' | artisan request-review") is False
 
-    def test_detects_chained(self):
-        """'cmd && artisan ...' should be recognized."""
-        assert _is_artisan_command("echo hi && artisan state") is True
+    def test_rejects_chained(self):
+        """Chained shell commands must not bypass the guard."""
+        assert _is_artisan_command("echo hi && artisan state") is False
+
+    def test_rejects_multiline(self):
+        """Multiline shell commands must not bypass the guard."""
+        assert _is_artisan_command("echo bad > file\nartisan state") is False
 
     def test_rejects_artisan_in_string(self):
         """'echo artisan' (no space after, not at command position) should NOT match."""
@@ -217,6 +221,26 @@ class TestArtisanPassthrough:
         # Original should have been called
         original.assert_called_once()
         assert result == "state output"
+
+    @pytest.mark.asyncio
+    async def test_execute_command_uses_guard_for_compound_artisan(self, started_bridge):
+        """execute_command with shell metacharacters should not skip guard.check."""
+        started_bridge.set_response(
+            "guard.check",
+            {"allowed": False, "reason": "bash writes blocked", "phase": "PLANNING", "phaseState": "DRAFT"},
+        )
+        original = AsyncMock(return_value="should not run")
+        result = await _guarded_handler(
+            started_bridge,
+            original,
+            "execute_command",
+            "s1",
+            {"command": "echo bad > file; artisan state"},
+        )
+        parsed = json.loads(result)
+        assert "bash writes blocked" in parsed["error"]
+        assert len(started_bridge.get_calls("guard.check")) == 1
+        original.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

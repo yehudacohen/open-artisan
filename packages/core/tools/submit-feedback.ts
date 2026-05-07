@@ -86,6 +86,14 @@ export function buildSubmitFeedbackClarificationMessage(
   return null
 }
 
+export function buildSelfApprovalBlockedMessage(): string {
+  return (
+    "Error: Waiting for user response. Present your artifact summary and " +
+    "wait for the user to respond before calling submit_feedback. " +
+    "The user must review and decide — you cannot self-approve."
+  )
+}
+
 export function normalizeApprovalFilePaths(paths: string[] | undefined, cwd: string): string[] {
   return (paths ?? []).map((path) => (path.startsWith("/") ? path : resolve(cwd, path)))
 }

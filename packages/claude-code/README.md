@@ -46,9 +46,9 @@ Claude Code doesn't support custom native tools. MCP provides custom tools but t
 Long-lived background process that hosts the bridge engine and Unix socket. Started by `/artisan on` or the SessionStart hook. Daemonizes on startup.
 
 - Creates the core engine (EngineContext with SessionStateStore, StateMachine, SessionRegistry)
-- Loads persisted workflow state from `.openartisan/<featureName>/workflow-state.json`
+- Loads persisted workflow state from the Open Artisan runtime backend (`.openartisan/workflow-db/open-artisan.pg` by default)
 - Opens Unix socket for hook scripts and CLI
-- Uses agent self-review mode (no SubagentDispatcher — the agent evaluates its own criteria, the human reviews at USER_GATE)
+- Uses isolated phase review via hook-dispatched reviewer subprocesses; the human reviews at USER_GATE
 
 ### Shared local bridge behavior
 
@@ -109,7 +109,6 @@ Complex commands accept JSON on stdin (avoids Bash quoting issues):
 ```bash
 echo '{"summary":"Plan ready","artifact_description":"Plan","artifact_files":[".openartisan/cloud-cost/plan.md"]}' | ./artisan request-review
 echo '{"task_id":"T1","implementation_summary":"Built auth module","tests_passing":true}' | ./artisan mark-task-complete
-echo '{"criteria_met":[{"criterion":"All tests pass","met":true,"evidence":"bun test: 42/42"}]}' | ./artisan mark-satisfied
 echo '{"feedback_type":"approve","feedback_text":"Looks good"}' | ./artisan submit-feedback
 ```
 
@@ -172,16 +171,16 @@ On `compact` events: re-injects the current state context so workflow context su
 2. Call `prompt.compaction` to get the preservation context
 3. Return context as hook output
 
-## Self-Review Mode
+## Review Mode
 
-Claude Code adapter mode runs the bridge with agent-owned review capabilities instead of OpenCode's in-process SubagentDispatcher:
+Claude Code adapter mode runs the bridge with isolated review capabilities:
 
-- **mark_satisfied**: Evaluates the agent's submitted criteria directly (no isolated reviewer). If all blocking criteria are met, advances to USER_GATE. The human reviews at USER_GATE.
+- **mark_satisfied**: Reserved for isolated phase reviewer submissions. Author-facing CLI/MCP calls are blocked during REVIEW.
 - **submit_feedback(revise)**: Routes directly to REVISE (no orchestrator classification — treats all revision feedback as tactical).
 - **mark_analyze_complete**: Accepts the agent's scan summary directly.
 - **propose_backtrack**: Accepts the backtrack without orchestrator validation.
 
-This means the review loop works (DRAFT -> REVIEW -> USER_GATE) but the quality check is the agent's self-assessment plus the human at USER_GATE unless the adapter is configured with an external isolated reviewer.
+This means phase review is handled by an isolated reviewer subprocess before USER_GATE, and the human reviews the artifact after the reviewer passes it.
 
 ## Toggle Mechanism
 

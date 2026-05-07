@@ -11,6 +11,7 @@ import type { OpenArtisanDbResult, OpenArtisanRepository } from "./open-artisan-
 import type { WorkflowState } from "./workflow-state-types"
 import type { StateBackend } from "./state-backend-types"
 import { exportLegacyWorkflowState, importLegacyWorkflowState } from "./open-artisan-json-compat"
+import { parseAndMigrateWorkflowStateJson } from "./session-state"
 
 export interface OpenArtisanDbStateBackendOptions {
   lockTimeoutMs?: number
@@ -36,15 +37,13 @@ export function createOpenArtisanDbStateBackend(
     if (!options.legacyFallback) return null
     const raw = await options.legacyFallback.read(featureName)
     if (!raw) return null
-    let parsed: WorkflowState
-    try {
-      parsed = JSON.parse(raw) as WorkflowState
-    } catch {
-      return raw
-    }
-    if (effectiveFeatureName(parsed) !== featureName) return raw
-    assertOk(await importLegacyWorkflowState(repository, parsed, { bestEffort: true }))
-    return raw
+    const { state, changed } = parseAndMigrateWorkflowStateJson(raw)
+    if (!state) return raw
+    if (effectiveFeatureName(state) !== featureName) return raw
+    assertOk(await importLegacyWorkflowState(repository, state, { bestEffort: true }))
+    const migratedRaw = changed ? JSON.stringify(state) : raw
+    if (changed) await options.legacyFallback.write(featureName, migratedRaw)
+    return migratedRaw
   }
 
   return {
@@ -60,14 +59,17 @@ export function createOpenArtisanDbStateBackend(
     },
 
     async write(_featureName: string, data: string) {
-      const parsed = JSON.parse(data) as WorkflowState
-      if (effectiveFeatureName(parsed) !== _featureName) {
+      const { state } = parseAndMigrateWorkflowStateJson(data)
+      if (!state) {
+        throw new Error(`StateBackend write for "${_featureName}" is not a valid workflow state`)
+      }
+      if (effectiveFeatureName(state) !== _featureName) {
         throw new Error(
-          `StateBackend feature mismatch: write key "${_featureName}" does not match state feature "${effectiveFeatureName(parsed)}"`,
+          `StateBackend feature mismatch: write key "${_featureName}" does not match state feature "${effectiveFeatureName(state)}"`,
         )
       }
-      assertOk(await importLegacyWorkflowState(repository, parsed, { bestEffort: true }))
-      if (options.legacyFallback) await options.legacyFallback.write(_featureName, data)
+      assertOk(await importLegacyWorkflowState(repository, state, { bestEffort: true }))
+      if (options.legacyFallback) await options.legacyFallback.write(_featureName, JSON.stringify(state))
     },
 
     async remove(featureName: string) {

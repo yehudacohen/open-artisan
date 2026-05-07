@@ -45,6 +45,9 @@ export function applyChildCompletion(
         ...t,
         ...(t.humanGate ? { humanGate: { ...t.humanGate } } : {}),
       }))
+      if (parentDraft.currentTaskId === childTaskId) {
+        parentDraft.currentTaskId = null
+      }
       return `Child workflow "${childFeatureName}" completed task "${childTaskId}".`
     }
   }

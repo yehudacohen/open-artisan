@@ -175,13 +175,17 @@ export const SpawnSubWorkflowToolSchema = z.object({
 
 export const QueryParentWorkflowToolSchema = z.object({}).strict()
 export const QueryChildWorkflowToolSchema = z.object({ task_id: z.string().min(1) }).strict()
-export const SubmitTaskReviewToolSchema = z.object({ review_output: z.string().min(1) }).strict()
+export const SubmitTaskReviewToolSchema = z.object({
+  review_output: z.string().min(1),
+  review_token: z.string().min(1),
+}).strict()
 export const SubmitPhaseReviewToolSchema = z.object({
   review_output: z.string().optional(),
   review_stdout: z.string().optional(),
   review_stderr: z.string().optional(),
   review_exit_code: z.number().int().nullable().optional(),
   review_error: z.string().nullable().optional(),
+  review_token: z.string().min(1),
 }).strict()
 export const SubmitAutoApproveToolSchema = z.object({ review_output: z.string().min(1) }).strict()
 export const ResetTaskToolSchema = z.object({

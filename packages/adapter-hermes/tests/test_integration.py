@@ -51,6 +51,11 @@ def _socket_request(
         "params": params or {},
         "id": int(time.time() * 1000),
     }
+    token_path = socket_path.parent / ".bridge-token"
+    if token_path.exists():
+        token = token_path.read_text().strip()
+        if token:
+            request["openArtisanAuthToken"] = token
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
         client.settimeout(5)
         client.connect(str(socket_path))

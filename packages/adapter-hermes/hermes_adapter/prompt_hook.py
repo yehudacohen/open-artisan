@@ -5,7 +5,7 @@ Calls prompt.build on the bridge each turn to get phase-specific instructions.
 Returns {"context": text} for Hermes to inject into the system prompt.
 
 Also handles:
-- USER_GATE structural enforcement: calls message.process when at USER_GATE
+- USER_GATE structural enforcement: records real user text when Hermes exposes it
 - Per-task isolated review: detects taskCompletionInProgress and dispatches
   an isolated reviewer subprocess (same structural guarantee as Claude Code)
 - Phase-level isolated review: detects REVIEW state and dispatches the final
@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import subprocess
 from typing import Any
 
@@ -35,6 +36,11 @@ logger = logging.getLogger(__name__)
 # Timeout for isolated reviewer subprocess (3 minutes)
 _DEFAULT_REVIEW_TIMEOUT_S = 180
 _REVIEW_FAILURE_PREFIX = "ISOLATED_REVIEW_FAILED:"
+
+
+def _extract_review_token(review_prompt: str) -> str | None:
+    match = re.search(r"OPEN_ARTISAN_REVIEW_TOKEN:\s*([a-f0-9]+)", review_prompt, re.I)
+    return match.group(1) if match else None
 
 
 def _review_timeout_s() -> int:
@@ -64,6 +70,35 @@ def _format_failed_review_output(reason: str, stdout: str = "", stderr: str = ""
 def _completed_returncode(result: Any) -> int:
     value = getattr(result, "returncode", 0)
     return value if isinstance(value, int) else 0
+
+
+def _extract_user_message(kwargs: dict[str, Any]) -> str | None:
+    """Best-effort extraction of real user text from Hermes hook kwargs."""
+    for key in ("user_message", "message", "prompt", "input"):
+        value = kwargs.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+
+    messages = kwargs.get("messages")
+    if isinstance(messages, list):
+        for item in reversed(messages):
+            if not isinstance(item, dict):
+                continue
+            if item.get("role") not in {"user", "human"}:
+                continue
+            content = item.get("content")
+            if isinstance(content, str) and content.strip():
+                return content.strip()
+            if isinstance(content, list):
+                parts: list[str] = []
+                for part in content:
+                    if isinstance(part, dict):
+                        text = part.get("text")
+                        if isinstance(text, str) and text.strip():
+                            parts.append(text.strip())
+                if parts:
+                    return "\n".join(parts)
+    return None
 
 
 def create_prompt_hook(
@@ -129,15 +164,18 @@ def create_prompt_hook(
             elif state.get("phaseState") == "REVIEW":
                 dispatch_phase_review(bridge, workflow_session_id, state, effective_project_dir)
 
-            # USER_GATE handling: only robot-artisan auto-approval may
-            # synthesize workflow input here. Ordinary Hermes pre-turn hook
-            # execution must remain observational so approval eligibility still
-            # depends on real user-originated input.
-            if (
-                state.get("phaseState") == "USER_GATE"
-                and state.get("activeAgent") == "robot-artisan"
-            ):
-                _dispatch_auto_approve(bridge, workflow_session_id, effective_project_dir)
+            if state.get("phaseState") == "USER_GATE":
+                user_message = _extract_user_message(kwargs)
+                if user_message:
+                    bridge.call(
+                        "message.process",
+                        {
+                            "sessionId": workflow_session_id,
+                            "parts": [{"type": "text", "text": user_message}],
+                        },
+                    )
+                elif state.get("activeAgent") == "robot-artisan":
+                    _dispatch_auto_approve(bridge, workflow_session_id, effective_project_dir)
         except Exception:
             logger.debug("State/gate check failed in pre_llm_call hook", exc_info=True)
 
@@ -171,6 +209,7 @@ def _dispatch_task_review(
         review_prompt = bridge.call("task.getReviewContext", {"sessionId": session_id})
         if not review_prompt or not isinstance(review_prompt, str):
             return
+        review_token = _extract_review_token(review_prompt)
 
         # Spawn isolated reviewer — fresh process, no conversation history.
         # Omit --model so it inherits the user's default (parent) model.
@@ -195,12 +234,12 @@ def _dispatch_task_review(
             )
             # Graceful degradation: auto-accept to clear the gate.
             # Full implementation review at the end catches issues.
-            _auto_accept_review(bridge, session_id, project_dir, str(e))
+            _auto_accept_review(bridge, session_id, project_dir, str(e), review_token)
             return
 
         if not review_output.strip():
             _auto_accept_review(
-                bridge, session_id, project_dir, "Empty reviewer output"
+                bridge, session_id, project_dir, "Empty reviewer output", review_token
             )
             return
 
@@ -209,8 +248,8 @@ def _dispatch_task_review(
             "tool.execute",
             {
                 "name": "submit_task_review",
-                "args": {"review_output": review_output},
-                "context": {"sessionId": session_id, "directory": project_dir},
+                "args": {"review_output": review_output, "review_token": review_token},
+                "context": {"sessionId": session_id, "directory": project_dir, "invocation": "isolated-reviewer"},
             },
         )
         logger.info(
@@ -222,7 +261,7 @@ def _dispatch_task_review(
         logger.warning("Per-task review dispatch failed: %s", e)
         # Graceful degradation: auto-accept to clear the gate
         try:
-            _auto_accept_review(bridge, session_id, project_dir, str(e))
+            _auto_accept_review(bridge, session_id, project_dir, str(e), review_token)
         except Exception as inner_e:
             logger.debug("Auto-accept fallback also failed: %s", inner_e)
 
@@ -238,13 +277,17 @@ def dispatch_phase_review(
     This is the final artifact review path for bridge/Hermes workflows. The
     authoring agent must not self-submit criteria for phase approval.
     """
+    review_token: str | None = None
+
     def submit_review_result(review_args: dict[str, Any]) -> None:
+        if not review_token:
+            raise RuntimeError("Phase review token unavailable; request fresh review context")
         result = bridge.call(
             "tool.execute",
             {
                 "name": "submit_phase_review",
-                "args": review_args,
-                "context": {"sessionId": session_id, "directory": project_dir},
+                "args": {**review_args, "review_token": review_token},
+                "context": {"sessionId": session_id, "directory": project_dir, "invocation": "isolated-reviewer"},
             },
         )
         if isinstance(result, str) and result.startswith("Error:"):
@@ -256,12 +299,15 @@ def dispatch_phase_review(
     try:
         review_prompt = bridge.call("task.getPhaseReviewContext", {"sessionId": session_id})
         if not review_prompt or not isinstance(review_prompt, str):
-            submit_review_failure("Phase review context unavailable")
             logger.warning(
                 "Phase review context unavailable for %s/%s",
                 state.get("phase"),
                 state.get("phaseState"),
             )
+            return
+        review_token = _extract_review_token(review_prompt)
+        if not review_token:
+            logger.warning("Phase review context did not include a review token")
             return
 
         try:
@@ -290,6 +336,9 @@ def dispatch_phase_review(
         )
     except Exception as e:
         logger.warning("Phase review dispatch failed: %s", e)
+        if not review_token:
+            logger.debug("Cannot submit phase review failure without a review token")
+            return
         try:
             submit_review_failure(str(e))
         except Exception as inner_e:
@@ -301,6 +350,7 @@ def _auto_accept_review(
     session_id: str,
     project_dir: str,
     reason: str,
+    review_token: str | None = None,
 ) -> None:
     """Clear a pending task review gate on dispatch failure.
 
@@ -315,6 +365,7 @@ def _auto_accept_review(
         {
             "name": "submit_task_review",
             "args": {
+                **({"review_token": review_token} if review_token else {}),
                 "review_output": json.dumps(
                     {
                         "passed": False,
@@ -325,7 +376,7 @@ def _auto_accept_review(
                     }
                 ),
             },
-            "context": {"sessionId": session_id, "directory": project_dir},
+            "context": {"sessionId": session_id, "directory": project_dir, "invocation": "isolated-reviewer"},
         },
     )
 

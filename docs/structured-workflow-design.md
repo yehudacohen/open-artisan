@@ -1,7 +1,9 @@
 # Structured Coding Workflow — Design Document
 
-**Version:** v19 (reflects implementation as of schema v22, March 2026)
+**Version:** v20 (reflects implementation as of schema v24, May 2026)
 **Status:** This document describes the **current implemented system**, not aspirational design. Section 14 documents structural gaps that have all been resolved. Section 14.6 documents meta-structural improvements that prevent agents from silently downgrading structural guarantees. Section 15 documents deferred features.
+
+For the concise operational reference, see `docs/current-runtime-reference.md`.
 
 ---
 
@@ -33,7 +35,7 @@ This plugin enforces a phased, quality-gated workflow that mirrors how experienc
 
 6. **Escalate strategic decisions.** Tactical corrections proceed autonomously. Strategic pivots — scope expansion, architectural shifts, deep cascading changes — are escalated to the user via the escape hatch.
 
-7. **Isolate reviewers from authors.** Self-review runs in separate hidden subagent sessions that see only the artifact and acceptance criteria, never the conversation that produced it. This eliminates anchoring bias.
+7. **Isolate reviewers from authors.** Artifact review runs in isolated reviewer contexts that see only the artifact and acceptance criteria, never the conversation that produced it. OpenCode uses hidden subagent sessions; bridge adapters use isolated subprocesses with one-time review tokens. This eliminates anchoring bias.
 
 8. **Checkpoint everything.** Every user approval creates a git-tagged commit. Rollback is always possible to the last checkpoint.
 
@@ -158,7 +160,7 @@ All `session.create()` calls pass:
 
 ## 5. State Machine
 
-The workflow uses a simplified state machine encoding states as `(Phase, PhaseState)` tuples. There are 8 phases and 8 possible sub-states, with `VALID_PHASE_STATES` constraining the valid combinations to 34 pairs (MODE_SELECT: 1, DISCOVERY: 7, five standard phases × 5 each: 25, DONE: 1).
+The workflow uses a table-driven state machine encoding states as `(Phase, PhaseState)` tuples. Runtime validity is defined by `VALID_PHASE_STATES` in `workflow-primitives.ts`; the current state set includes structural states such as `REDRAFT`, `SKIP_CHECK`, `CASCADE_CHECK`, `SCHEDULING`, `TASK_REVIEW`, `TASK_REVISE`, `HUMAN_GATE`, and `DELEGATED_WAIT` in addition to the common draft/review/gate states.
 
 ### 5.1 Phases and Sub-States
 
@@ -183,9 +185,9 @@ DONE            DRAFT (sentinel only)
 | `scan_complete` | Discovery scan finished | `mark_scan_complete` tool |
 | `analyze_complete` | Discovery analysis finished | `mark_analyze_complete` tool |
 | `draft_complete` | Phase artifact drafted | `request_review` tool |
-| `self_review_pass` | Isolated reviewer passes | `mark_satisfied` (via self-review) |
-| `self_review_fail` | Isolated reviewer fails | `mark_satisfied` (via self-review) |
-| `escalate_to_user` | Review iteration cap reached | `mark_satisfied` (after MAX_REVIEW_ITERATIONS) |
+| `self_review_pass` | Isolated reviewer passes | OpenCode `mark_satisfied`; bridge `submit_phase_review` |
+| `self_review_fail` | Isolated reviewer fails | OpenCode `mark_satisfied`; bridge `submit_phase_review` |
+| `escalate_to_user` | Review iteration cap reached | OpenCode `mark_satisfied`; bridge `submit_phase_review` |
 | `user_approve` | User approves artifact | `submit_feedback(approve)` |
 | `user_feedback` | User requests changes | `submit_feedback(revise)` → orchestrator |
 | `escape_hatch_triggered` | Strategic pivot detected at USER_GATE | Orchestrator diverge → strategic classification |
@@ -416,18 +418,18 @@ The cascade depth >= 3 criterion is the only deterministic trigger. The other th
 
 ### 10.1 Schema Versioning
 
-Workflow state is persisted as JSON at `.openartisan/<featureName>/workflow-state.json` (see Section 18). The schema version (currently v22) is stamped on every state object. On load, states with mismatched versions are migrated forward using `??=` defaulting for new fields. States with future versions are discarded.
+Workflow state is persisted through the `StateBackend` abstraction. The default runtime backend stores canonical records in the PGlite repository (`.openartisan/open-artisan.db`) and exposes legacy JSON projections for compatibility; the filesystem backend remains an explicit fallback. The schema version (currently v24) is stamped on every state object. On load/import, states with prior versions are migrated forward using safe defaults. States with future versions are discarded.
 
-### 10.2 WorkflowState Fields (Schema v22)
+### 10.2 WorkflowState Fields (Schema v24)
 
 | Field | Type | Added | Purpose |
 |-------|------|-------|---------|
-| `schemaVersion` | `21` | v1 | Forward-compatibility guard |
+| `schemaVersion` | `24` | v1 | Forward-compatibility guard |
 | `sessionId` | `string` | v1 | OpenCode session ID |
 | `mode` | `WorkflowMode \| null` | v1 | GREENFIELD / REFACTOR / INCREMENTAL |
 | `phase` | `Phase` | v1 | Current high-level phase |
 | `phaseState` | `PhaseState` | v1 | Sub-state within the phase |
-| `iterationCount` | `number` | v1 | Self-review iterations in current phase |
+| `iterationCount` | `number` | v1 | Review iterations in current phase |
 | `retryCount` | `number` | v1 | Idle re-prompt retries |
 | `approvedArtifacts` | `Partial<Record<ArtifactKey, string>>` | v1 | SHA-256 hashes of approved artifact content |
 | `conventions` | `string \| null` | v1 | Full conventions document text |
@@ -452,17 +454,19 @@ Workflow state is persisted as JSON at `.openartisan/<featureName>/workflow-stat
 | `taskCompletionInProgress` | `string \| null` | v14 | Re-entry guard for `mark_task_complete` |
 | `taskReviewCount` | `number` | v15 | Per-task review iteration counter |
 | `pendingFeedback` | `string \| null` | v15 | Crash-safe feedback persistence |
-| `userMessages` | `string[]` | v16 | Full user message history for self-review alignment |
+| `userMessages` | `string[]` | v16 | Full user message history for review/orchestrator alignment |
 | `cachedPriorState` | `{intentBaseline, phase, artifactDiskPaths, approvedArtifacts?} \| null` | v17 | Cached result from `check_prior_workflow` for `select_mode` |
 | `priorWorkflowChecked` | `boolean` | v18 | Whether `check_prior_workflow` was called in this session |
 | `sessionModel` | `string \| {modelID, providerID?} \| null` | v18 | Active model for parent session, propagated to subagents |
-| `reviewArtifactHash` | `string \| null` | v19 | SHA-256 hash (16 hex chars) of artifact at `request_review` time; stale-artifact detection in `mark_satisfied` |
-| `latestReviewResults` | `Array<{criterion, met, evidence, score?}> \| null` | v19 | Latest self-review results for status file rendering |
-| *(v20: storage format change)* | — | v20 | Per-feature files (`.openartisan/<featureName>/workflow-state.json`) instead of single-file. No new fields. Legacy single-file migrated on load. |
+| `reviewArtifactHash` | `string \| null` | v19 | SHA-256 hash (16 hex chars) of artifact at `request_review` time; stale-artifact detection before accepting phase-review results |
+| `latestReviewResults` | `Array<{criterion, met, evidence, score?}> \| null` | v19 | Latest phase-review results for status file rendering |
+| *(v20: storage format change)* | — | v20 | Per-feature JSON projections replaced the legacy single-file format; current default persistence is DB-backed. |
 | `parentWorkflow` | `{sessionId, featureName, taskId} \| null` | v21 | Link to parent workflow that spawned this sub-workflow |
 | `childWorkflows` | `Array<{taskId, featureName, sessionId, status, delegatedAt}>` | v21 | Child workflows spawned from this workflow's DAG tasks |
 | `concurrency` | `{maxParallelTasks: number}` | v21 | Concurrency configuration (defaults to sequential: 1) |
 | `reviewArtifactFiles` | `string[]` | v22 | Orchestrator-driven file paths for reviewer. Accumulated from DAG task `expectedFiles` at `mark_task_complete`, supplemented by agent's `artifact_files` in `request_review`. Reset on phase approval. |
+| `backtrackContext` | `{fromPhase, targetPhase, reason, ...} \| null` | v23 | Provenance for structural backtracking decisions. |
+| `approvedArtifactFiles` | `Partial<Record<ArtifactKey, string[]>>` | v24 | Source-file artifacts approved via `request_review artifact_files`; used as downstream source of truth. |
 
 ### 10.3 Orchestrator-Driven Artifact Tracking (v22)
 
@@ -568,7 +572,7 @@ In INCREMENTAL mode, the reviewer must validate that the file allowlist covers a
 | `mark_scan_complete` | DISCOVERY/SCAN | Signal scan phase complete |
 | `mark_analyze_complete` | DISCOVERY/ANALYZE | Signal analysis complete |
 | `request_review` | */DRAFT, */CONVENTIONS, */REVISE, */REVIEW | Submit artifacts for review. `artifact_files` is the review source of truth; markdown phases may use `artifact_markdown` with `artifact_files: []` to materialize `.openartisan/<feature>/{conventions.md,plan.md,impl-plan.md}`. Source phases use real project files. IMPLEMENTATION files are accumulated automatically from DAG and can be supplemented with `artifact_files`. At REVIEW: re-submits updated files and resets iteration count when content changed. |
-| `mark_satisfied` | */REVIEW | Submit criteria assessment (triggers isolated reviewer). Uses `state.reviewArtifactFiles` for reviewer paths (v22). |
+| `mark_satisfied` | */REVIEW | OpenCode/self-review compatibility path for submitting criteria assessment. Bridge adapters use isolated reviewer subprocesses and `submit_phase_review`. Uses `state.reviewArtifactFiles` for reviewer paths (v22). |
 | `submit_feedback` | */USER_GATE, */ESCAPE_HATCH | Route user feedback (approve or revise). At ESCAPE_HATCH: accept drift, provide alternative direction, start new direction, or abort. |
 | `mark_task_complete` | IMPLEMENTATION/DRAFT, IMPLEMENTATION/REVISE | Complete a DAG task (triggers per-task review). Accumulates the task's `expectedFiles` into `state.reviewArtifactFiles` for the final implementation reviewer. |
 | `resolve_human_gate` | IMPLEMENTATION/* | Activate a human gate for a DAG task |
@@ -581,7 +585,7 @@ In INCREMENTAL mode, the reviewer must validate that the file allowlist covers a
 
 Sub-workflows allow a parent workflow to delegate complex DAG tasks to independent child sessions that run their own full workflow cycle (MODE_SELECT through DONE).
 
-**`spawn_sub_workflow`** takes a `task_id` (must be "pending" or "in-flight" in the parent's DAG) and a `feature_name` (kebab-case) for the child. Constraints: maximum `MAX_SUB_WORKFLOWS` (2) active children per parent, maximum nesting depth `MAX_SUB_WORKFLOW_DEPTH` (3). The parent's DAG task is marked `"delegated"` and downstream tasks block until the child completes. The child's state is stored at `.openartisan/<parentFeature>/<childFeature>/workflow-state.json`.
+**`spawn_sub_workflow`** takes a `task_id` (must be "pending" or "in-flight" in the parent's DAG) and a `feature_name` (kebab-case) for the child. Constraints: maximum `MAX_SUB_WORKFLOWS` (2) active children per parent, maximum nesting depth `MAX_SUB_WORKFLOW_DEPTH` (3). The parent's DAG task is marked `"delegated"` and downstream tasks block until the child completes. The child's state is stored at `.openartisan/<parentFeature>/sub/<childFeature>/workflow-state.json`.
 
 **`query_parent_workflow`** is callable only from a sub-workflow session (one with `parentWorkflow` set). Returns the parent's current phase, mode, conventions, approved artifacts, and artifact file paths. No arguments required.
 
@@ -944,10 +948,11 @@ tests/
 └── utils.test.ts
 ```
 
-**Test count:** 1456 tests across 58 files (schema v22).
+**Verification:** `bun run verify:all` runs generated contract checks, TypeScript, whitespace checks, root/package/PGlite tests, and Hermes Python tests.
 
 **Runtime artifacts** (in target project directory):
-- `.openartisan/<featureName>/workflow-state.json` — per-feature persisted session state (JSON object keyed by session ID). Sub-workflows nest further: `.openartisan/<parentFeature>/<childFeature>/workflow-state.json`. Legacy single-file format (`.opencode/workflow-state.json`) is auto-migrated on load (schema v20).
+- `.openartisan/open-artisan.db` — default PGlite runtime database for workflow state, task graph, artifacts, leases, reviews, and roadmap projections.
+- `.openartisan/<featureName>/workflow-state.json` — filesystem fallback / legacy compatibility projection. Sub-workflow projections nest further under `.openartisan/<parentFeature>/sub/<childFeature>/`.
 - `.opencode/openartisan-errors.log` — persistent error/warning log (JSON lines, append-only)
 
 ---
@@ -957,8 +962,8 @@ tests/
 | Dimension | Ralph Wiggum | Oh My OpenCode | Weave | Open Artisan |
 |-----------|-------------|----------------|-------|-------------|
 | Core pattern | `while(true)` loop | Multi-agent orchestration | Plan → Review → Execute | Phased state machine with dependency DAG |
-| State tracking | None (infers from git) | Session-level | Plan file with checkboxes | 34-state machine persisted to JSON (schema v22) |
-| Quality control | None structural | Approval-biased review | Single review pass | Iterative isolated self-review per phase with 7-dimension quality scoring (9/10 threshold) + per-task review |
+| State tracking | None (infers from git) | Session-level | Plan file with checkboxes | 34-state machine persisted to JSON/DB runtime projection (schema v24) |
+| Quality control | None structural | Approval-biased review | Single review pass | Iterative isolated artifact review per phase with 7-dimension quality scoring (9/10 threshold) + per-task review |
 | User involvement | Fire-and-forget | Interview mode at start | Plan approval | Up to 6 phase gates + escape hatch. Robot-artisan mode: fully autonomous with AI gates |
 | Dependency tracking | None | None | None | Full artifact dependency graph with cascade |
 | Backtracking | None (forward only) | None | None | Orchestrator routes to any upstream REVISE state |

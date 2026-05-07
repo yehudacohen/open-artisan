@@ -112,6 +112,12 @@ export const SELF_REVIEW_TIMEOUT_MS = 300_000
  */
 export const TASK_REVIEW_TIMEOUT_MS = 180_000
 
+/** Number of random bytes in one-time bridge reviewer submission tokens. */
+export const REVIEW_SUBMISSION_TOKEN_BYTES = 32
+
+/** Maximum lifetime for an issued bridge reviewer submission token (ms). */
+export const REVIEW_SUBMISSION_TOKEN_TTL_MS = 15 * 60 * 1000
+
 /**
  * Maximum number of times the agent can call mark_task_complete for the same
  * task before per-task review is bypassed. Prevents infinite review loops when

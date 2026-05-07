@@ -63,11 +63,11 @@ export interface LifecycleInitParams {
    * Adapter capabilities — declares which engine features are available.
    * Defaults: bridge adapters use agent-managed review/orchestration unless a capability is declared.
    *
-   * - selfReview: "isolated" (SubagentDispatcher) | "agent-only" (agent self-evaluates)
+   * - selfReview: "isolated" (reviewer subprocess/subagent) | "agent-only" (agent self-evaluates)
    * - orchestrator: true (feedback classification via LLM) | false (direct route to REVISE)
    * - discoveryFleet: true (parallel scanner subagents) | false (agent provides summary directly)
    *
-   * Example: Claude Code adapter sets { selfReview: "agent-only", orchestrator: false, discoveryFleet: false }
+   * Example: Claude Code adapter sets { selfReview: "isolated", orchestrator: false, discoveryFleet: false }
    */
   capabilities?: {
     selfReview?: "isolated" | "agent-only"
@@ -161,6 +161,7 @@ export interface IdleCheckParams {
 export interface MessageProcessParams {
   sessionId: string
   parts: Array<{ type: string; text?: string }>
+  source?: "user" | "synthetic"
   traceId?: string
 }
 
@@ -169,8 +170,9 @@ export interface ToolExecuteParams {
   args: Record<string, unknown>
   context: {
     sessionId: string
-    directory: string
+    directory?: string
     agent?: string
+    invocation?: "author" | "isolated-reviewer" | "system"
   }
   traceId?: string
 }

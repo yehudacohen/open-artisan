@@ -88,7 +88,14 @@ function passingPlanningCriteria() {
     met: true,
     evidence: "ok",
     severity: "blocking",
+    score: 9,
   }))
+}
+
+function extractReviewToken(prompt: string): string {
+  const match = prompt.match(/OPEN_ARTISAN_REVIEW_TOKEN:\s*([a-f0-9]+)/i)
+  if (!match?.[1]) throw new Error("review token missing")
+  return match[1]
 }
 
 async function moveSessionToPlanningRedraft(sessionId: string): Promise<void> {
@@ -123,13 +130,21 @@ async function moveSessionToPlanningRedraft(sessionId: string): Promise<void> {
     },
     id: Date.now() + 2,
   })
+  const reviewContext = await sendSocketRequest(socketPath, {
+    jsonrpc: "2.0",
+    method: "task.getPhaseReviewContext",
+    params: { sessionId },
+    id: Date.now() + 3,
+  })
+  const reviewPrompt = String((reviewContext as { result?: unknown }).result ?? "")
+  const reviewToken = extractReviewToken(reviewPrompt)
   await sendSocketRequest(socketPath, {
     jsonrpc: "2.0",
     method: "tool.execute",
     params: {
-      name: "mark_satisfied",
-      args: { criteria_met: passingPlanningCriteria() },
-      context: { sessionId, directory: tmpDir },
+      name: "submit_phase_review",
+      args: { review_stdout: JSON.stringify({ satisfied: true, criteria_results: passingPlanningCriteria() }), review_stderr: "", review_exit_code: 0, review_token: reviewToken },
+      context: { sessionId, directory: tmpDir, invocation: "isolated-reviewer" },
     },
     id: Date.now() + 3,
   })
@@ -195,12 +210,22 @@ describe("hook: PreToolUse", () => {
     expect(result.exitCode).toBe(0)
   })
 
-  it("allows artisan commands with pipes", async () => {
+  it("does not bypass guard for compound artisan commands", async () => {
     const result = await handlePreToolUse(makeInput({
       tool_name: "Bash",
       tool_input: { command: "echo '{\"summary\":\"test\"}' | artisan request-review" },
     }))
-    expect(result.exitCode).toBe(0)
+    expect(result.exitCode).toBe(2)
+    expect(result.stderr).toContain("blocked")
+  })
+
+  it("does not bypass guard for multiline artisan commands", async () => {
+    const result = await handlePreToolUse(makeInput({
+      tool_name: "Bash",
+      tool_input: { command: "echo bad > /tmp/hidden.txt\nartisan state" },
+    }))
+    expect(result.exitCode).toBe(2)
+    expect(result.stderr).toContain("blocked")
   })
 
   it("blocks write tools during PLANNING/DRAFT", async () => {
@@ -221,6 +246,25 @@ describe("hook: PreToolUse", () => {
     }))
     expect(result.exitCode).toBe(2)
     expect(result.stderr).toContain("blocked")
+  })
+
+  it("fails closed for write-like tools when enabled bridge is unavailable", async () => {
+    const isolatedDir = await mkdtemp(join(tmpdir(), "artisan-hook-no-bridge-"))
+    try {
+      const isolatedStateDir = join(isolatedDir, DEFAULT_STATE_DIR_NAME)
+      mkdirSync(isolatedStateDir, { recursive: true })
+      writeFileSync(getEnabledPath(isolatedStateDir), "1")
+      const result = await handlePreToolUse({
+        session_id: "missing-bridge-session",
+        cwd: isolatedDir,
+        tool_name: "Write",
+        tool_input: { file_path: join(isolatedDir, "x.ts"), content: "x" },
+      })
+      expect(result.exitCode).toBe(2)
+      expect(result.stderr).toContain("bridge guard is unavailable")
+    } finally {
+      await rm(isolatedDir, { recursive: true, force: true })
+    }
   })
 
   it("includes phase context when allowing", async () => {

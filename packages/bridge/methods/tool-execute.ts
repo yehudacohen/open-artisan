@@ -25,17 +25,17 @@ import { handleQueryChildWorkflow, handleQueryParentWorkflow } from "./query-wor
 import { handleAnalyzeTaskBoundaryChange, handleApplyTaskBoundaryChange } from "./task-boundary-tool-handlers"
 import { handleCheckPriorWorkflow, handleResetTask, handleResolveHumanGate, handleSpawnSubWorkflow } from "./implementation-control-tool-handlers"
 import { createAutoApproveToolHandlers } from "./auto-approve-tool-handlers"
-import { handleMarkSatisfied, handleRequestReview } from "./review-feedback-tool-handlers"
+import { artifactFilesHash, handleMarkSatisfied, handleRequestReview } from "./review-feedback-tool-handlers"
 import { handleSubmitFeedback } from "./feedback-tool-handlers"
 
-import { createHash } from "node:crypto"
+import { createHash, randomBytes } from "node:crypto"
 import { resolve } from "node:path"
 import { readFileSync } from "node:fs"
 import { parseSelectModeArgs } from "../../core/tools/select-mode"
 import { processMarkTaskComplete, validateMarkTaskCompletePhase } from "../../core/tools/mark-task-complete"
 import { buildAdjacentTasksForTask, buildTaskReviewAcceptancePlan, buildTaskReviewPrompt, parseTaskReviewResult } from "../../core/task-review"
 import { buildReviewPrompt, parseReviewResult } from "../../core/self-review"
-import { MAX_TASK_REVIEW_ITERATIONS } from "../../core/constants"
+import { MAX_TASK_REVIEW_ITERATIONS, REVIEW_SUBMISSION_TOKEN_BYTES, REVIEW_SUBMISSION_TOKEN_TTL_MS } from "../../core/constants"
 import {
   computeMarkScanCompleteTransition,
   computeMarkSatisfiedTransition,
@@ -218,6 +218,64 @@ function applyTaskReviewAcceptance(
   }
   draft.taskCompletionInProgress = null
   draft.taskReviewCount = 0
+}
+
+function cleanupExpiredReviewTokens(ctx: BridgeContext): void {
+  const tokens = ctx.reviewSubmissionTokens
+  if (!tokens) return
+  const now = Date.now()
+  for (const [token, record] of tokens.entries()) {
+    if (record.expiresAt <= now) tokens.delete(token)
+  }
+}
+
+function issueReviewSubmissionToken(
+  ctx: BridgeContext,
+  sessionId: string,
+  kind: "task" | "phase",
+  subject: string,
+  artifactHash?: string | null,
+): string {
+  cleanupExpiredReviewTokens(ctx)
+  const token = randomBytes(REVIEW_SUBMISSION_TOKEN_BYTES).toString("hex")
+  const tokens = ctx.reviewSubmissionTokens ?? new Map()
+  tokens.set(token, {
+    sessionId,
+    kind,
+    subject,
+    expiresAt: Date.now() + REVIEW_SUBMISSION_TOKEN_TTL_MS,
+    ...(artifactHash ? { artifactHash } : {}),
+  })
+  ctx.reviewSubmissionTokens = tokens
+  return token
+}
+
+function consumeReviewSubmissionToken(
+  ctx: BridgeContext,
+  token: string,
+  sessionId: string,
+  kind: "task" | "phase",
+  subject: string,
+): { error: string | null; artifactHash: string | null } {
+  cleanupExpiredReviewTokens(ctx)
+  const record = ctx.reviewSubmissionTokens?.get(token)
+  if (!record) return { error: "Invalid or expired isolated reviewer token. Request a fresh review context and retry.", artifactHash: null }
+  if (record.sessionId !== sessionId || record.kind !== kind || record.subject !== subject) {
+    return { error: "Isolated reviewer token does not match the pending review. Request a fresh review context and retry.", artifactHash: null }
+  }
+  ctx.reviewSubmissionTokens?.delete(token)
+  return { error: null, artifactHash: record.artifactHash ?? null }
+}
+
+function taskReviewArtifactHash(state: WorkflowState, taskId: string, directory: string): string | null {
+  const task = state.implDag?.find((candidate) => candidate.id === taskId)
+  if (!task) return null
+  const files = [...(task.expectedFiles ?? []), ...(task.expectedTests ?? [])]
+  return artifactFilesHash(files, directory)
+}
+
+function appendReviewerTokenInstruction(prompt: string, token: string): string {
+  return `${prompt}\n\n---\n\nOPEN_ARTISAN_REVIEW_TOKEN: ${token}\nAdapters must include this one-time token as \`review_token\` when submitting the isolated reviewer result.`
 }
 
 /**
@@ -495,14 +553,10 @@ const handleMarkTaskComplete: ToolHandler = async (args, toolCtx, ctx) => {
     })
     return result.responseMessage
   }
-
   return (
     buildTaskReviewPendingMessage(taskId, implSummary) +
-    "\n\n**Per-task review required.** Spawn an isolated reviewer (e.g. `claude --print`) with the prompt below. " +
-    "The reviewer must have NO access to this conversation — only the prompt and project files. " +
-    "Then call `submit_task_review` with the reviewer's output.\n\n" +
-    "---\n\n" +
-    reviewPrompt
+    "\n\n**Per-task review required.** The adapter hook must request isolated review context and submit the reviewer result. " +
+    "Do not call `submit_task_review` from the authoring conversation."
   )
 }
 
@@ -526,6 +580,15 @@ const handleSubmitTaskReview: ToolHandler = async (args, toolCtx, ctx) => {
   // Parse failure — don't accept, ask agent to retry
   if (!review.success) {
     return `Error: Failed to parse review output: ${review.error}. Re-run the isolated reviewer and submit again.`
+  }
+  const tokenResult = consumeReviewSubmissionToken(ctx, parsedArgs.data.review_token, toolCtx.sessionId, "task", taskId)
+  if (tokenResult.error) return `Error: ${tokenResult.error}`
+  const currentTaskHash = taskReviewArtifactHash(state, taskId, toolCtx.directory)
+  if (tokenResult.artifactHash && (!currentTaskHash || tokenResult.artifactHash !== currentTaskHash)) {
+    return (
+      "Error: The task files changed after isolated task review context was issued. " +
+      "Request a fresh task review context and retry."
+    )
   }
   await persistTaskReviewResult(ctx.openArtisanServices, state, taskId, review, reviewOutput)
 
@@ -599,7 +662,13 @@ const handleSubmitPhaseReview: ToolHandler = async (args, toolCtx, ctx) => {
   if (!reviewOutput) {
     return "Error: review_output is required. Pass the raw output from the isolated phase reviewer."
   }
-
+  const currentArtifactHash = artifactFilesHash(state.reviewArtifactFiles, toolCtx.directory)
+  if (state.reviewArtifactHash && (!currentArtifactHash || state.reviewArtifactHash !== currentArtifactHash)) {
+    return (
+      "Error: The artifact changed after it was submitted for review. " +
+      "Call `request_review` again so the reviewer evaluates the current artifact instead of stale content."
+    )
+  }
   let rawCriteria: Array<{
     criterion: string; met: boolean; evidence: string;
     severity?: "blocking" | "suggestion" | "design-invariant"; score?: string | number
@@ -625,6 +694,8 @@ const handleSubmitPhaseReview: ToolHandler = async (args, toolCtx, ctx) => {
 
   const result = computeMarkSatisfiedTransition(rawCriteria, state, ctx.engine!.sm)
   if (!result.success) return `Error: ${result.error}`
+  const tokenResult = consumeReviewSubmissionToken(ctx, parsedArgs.data.review_token, toolCtx.sessionId, "phase", state.phase)
+  if (tokenResult.error) return `Error: ${tokenResult.error}`
   await persistPhaseReviewResult(ctx.openArtisanServices, state, rawCriteria.map((criterion) => ({
     criterion: criterion.criterion,
     met: criterion.met,
@@ -738,6 +809,8 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
   roadmap_derive_execution_slice: handleRoadmapDeriveExecutionSlice,
 }
 
+const REVIEW_SUBMISSION_TOOLS = new Set(["submit_task_review", "submit_phase_review"])
+
 // ---------------------------------------------------------------------------
 // task.getReviewContext — returns review prompt for pending task review
 // ---------------------------------------------------------------------------
@@ -750,7 +823,10 @@ export const handleTaskGetReviewContext: MethodHandler = async (params, ctx) => 
   const state = ctx.engine!.store.get(p.sessionId)
   if (!state || !state.taskCompletionInProgress) return null
 
-  return buildReviewContextForTask(state, state.taskCompletionInProgress, ctx.projectDir ?? process.cwd(), ctx.openArtisanServices)
+  const prompt = await buildReviewContextForTask(state, state.taskCompletionInProgress, ctx.projectDir ?? process.cwd(), ctx.openArtisanServices)
+  if (!prompt) return null
+  const token = issueReviewSubmissionToken(ctx, p.sessionId, "task", state.taskCompletionInProgress, taskReviewArtifactHash(state, state.taskCompletionInProgress, ctx.projectDir ?? process.cwd()))
+  return appendReviewerTokenInstruction(prompt, token)
 }
 
 // ---------------------------------------------------------------------------
@@ -765,7 +841,10 @@ export const handlePhaseGetReviewContext: MethodHandler = async (params, ctx) =>
   const state = ctx.engine!.store.get(p.sessionId)
   if (!state || state.phaseState !== "REVIEW") return null
 
-  return buildPhaseReviewContext(state, ctx.projectDir ?? process.cwd())
+  const prompt = buildPhaseReviewContext(state, ctx.projectDir ?? process.cwd())
+  if (!prompt) return null
+  const token = issueReviewSubmissionToken(ctx, p.sessionId, "phase", state.phase)
+  return appendReviewerTokenInstruction(prompt, token)
 }
 
 // ---------------------------------------------------------------------------
@@ -792,10 +871,15 @@ export const handleToolExecute: MethodHandler = async (params, ctx) => {
     return `Error: Unknown tool "${p.name}". Available: ${Object.keys(TOOL_HANDLERS).join(", ")}`
   }
 
+  if (REVIEW_SUBMISSION_TOOLS.has(p.name) && p.context.invocation !== "isolated-reviewer") {
+    return `Error: ${p.name} is reserved for isolated reviewer submissions.`
+  }
+
   const toolCtx: ToolContext = {
     sessionId: p.context.sessionId,
     directory: ctx.projectDir ?? p.context.directory ?? process.cwd(),
     ...(p.context.agent ? { agent: p.context.agent } : {}),
+    ...(p.context.invocation ? { invocation: p.context.invocation } : {}),
   }
 
   return handler(p.args ?? {}, toolCtx, ctx)

@@ -47,11 +47,12 @@ TOOLSET_NAME = "open-artisan"
 
 DEFAULT_STATE_DIR_NAME = ".openartisan"
 DEFAULT_SOCKET_FILENAME = ".bridge.sock"
+DEFAULT_SOCKET_TOKEN_FILENAME = ".bridge-token"
 BRIDGE_METADATA_FILENAME = ".bridge-meta.json"
 BRIDGE_LEASES_FILENAME = ".bridge-clients.json"
 
 DEFAULT_CAPABILITIES: dict = {
-    "selfReview": "agent-only",
+    "selfReview": "isolated",
     "orchestrator": False,
     "discoveryFleet": False,
 }
@@ -91,8 +92,7 @@ GUARDED_TOOLS: list[str] = [
     "execute_command",
 ]
 
-# Regex to detect artisan commands — bypass bash guard for execute_command.
+# Regex to detect pure artisan commands — compound shell commands must use guard.check.
 ARTISAN_COMMAND_RE = re.compile(
-    r"(?:^|[|;&]\s*)(?:(?:bun\s+run\s+\S*(?:artisan(?:\.ts)?)?)|\.\/artisan|artisan)\s",
-    re.MULTILINE,
+    r"^(?:(?:bun\s+run\s+\S*artisan(?:\.ts)?)|\.\/artisan|artisan)(?:\s|$)[^|;&<>]*$",
 )

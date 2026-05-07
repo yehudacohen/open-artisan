@@ -85,7 +85,7 @@
   {
     "hermes_name": "oa_mark_satisfied",
     "bridge_name": "mark_satisfied",
-    "description": "Submit self-review criteria assessment for the current artifact.",
+    "description": "Submit isolated phase-review criteria assessment for the current artifact.",
     "schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "type": "object",
@@ -232,25 +232,6 @@
         "task_id",
         "implementation_summary",
         "tests_passing"
-      ],
-      "additionalProperties": false
-    }
-  },
-  {
-    "hermes_name": "oa_submit_task_review",
-    "bridge_name": "submit_task_review",
-    "description": "Submit per-task isolated review results.",
-    "schema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "type": "object",
-      "properties": {
-        "review_output": {
-          "type": "string",
-          "minLength": 1
-        }
-      },
-      "required": [
-        "review_output"
       ],
       "additionalProperties": false
     }

@@ -98,6 +98,27 @@ async function bridgeCall(
 /** Permissive default — allow everything when disabled or server unavailable. */
 const ALLOW: HookOutput = { stdout: null, stderr: null, exitCode: 0 }
 
+function isWriteLikeTool(toolName: string, toolInput: Record<string, unknown>): boolean {
+  const normalized = toolName.toLowerCase()
+  if (["write", "edit", "multiedit", "notebookedit"].includes(normalized)) return true
+  if (normalized !== "bash") return false
+  const command = String(toolInput.command ?? toolInput.cmd ?? "")
+  return /(?:>>|>[^&]|\btee\b|\bsed\s+-i\b|\bdd\b.*\bof=|<<-?\s*['"]?[A-Za-z_][A-Za-z0-9_]*['"]?|\b(?:python|python3|node|ruby|perl)\b.*\b(?:writeFile|open\s*\(|File\.write|fs\.write|write\s*\())/.test(command)
+}
+
+function bridgeUnavailableDecision(toolName: string, toolInput: Record<string, unknown>): HookOutput {
+  if (!isWriteLikeTool(toolName, toolInput)) return ALLOW
+  return {
+    stdout: null,
+    stderr: "Open Artisan is enabled but the bridge guard is unavailable. Blocking write-like tool call to preserve workflow safety.",
+    exitCode: 2,
+  }
+}
+
+function extractReviewToken(reviewPrompt: string): string | null {
+  return reviewPrompt.match(/OPEN_ARTISAN_REVIEW_TOKEN:\s*([a-f0-9]+)/i)?.[1] ?? null
+}
+
 // ---------------------------------------------------------------------------
 // PreToolUse handler
 // ---------------------------------------------------------------------------
@@ -105,7 +126,8 @@ const ALLOW: HookOutput = { stdout: null, stderr: null, exitCode: 0 }
 /**
  * PreToolUse: Enforces the tool guard on every tool call.
  *
- * - If disabled or server unavailable: allow all (exit 0)
+ * - If disabled: allow all (exit 0)
+ * - If server unavailable: fail closed for write-like tools, allow read-only tools
  * - If Bash tool with `artisan` command: always allow (workflow commands bypass guard)
  * - Otherwise: call guard.check, block if not allowed
  */
@@ -117,12 +139,13 @@ export async function handlePreToolUse(input: HookInput): Promise<HookOutput> {
   const toolName = input.tool_name ?? ""
   const toolInput = input.tool_input ?? {}
 
-  // Bash commands invoking the artisan CLI are workflow commands — always allow.
-  // Match: artisan at command position (start of line, after pipe, semicolon, &&, ||)
-  // Also matches: echo '...' | artisan ..., bun run .../artisan.ts ...
+  // Pure artisan CLI invocations are workflow commands — always allow.
+  // Compound shell commands must go through guard.check so they cannot hide
+  // writes before or around an artisan invocation.
   if (toolName.toLowerCase() === "bash") {
     const command = (toolInput.command ?? toolInput.cmd ?? "") as string
-    if (/(?:^|[|;&]\s*)(?:bun\s+run\s+\S*|\.\/)?artisan\s/m.test(command.trimStart())) {
+    const trimmed = command.trim()
+    if (!/[\r\n]/.test(trimmed) && /^(?:(?:bun\s+run\s+\S*artisan(?:\.ts)?)|\.\/artisan|artisan)(?:\s|$)[^|;&<>]*$/.test(trimmed)) {
       return ALLOW
     }
   }
@@ -139,7 +162,7 @@ export async function handlePreToolUse(input: HookInput): Promise<HookOutput> {
     sessionId,
   })
 
-  if (!result) return ALLOW // Server unavailable — graceful fallback
+  if (!result) return bridgeUnavailableDecision(toolName, toolInput) // Server unavailable — fail closed for writes
 
   const guard = result as { allowed: boolean; reason?: string; phase?: string; phaseState?: string }
   if (guard.allowed) {
@@ -191,6 +214,7 @@ export async function handleStop(input: HookInput): Promise<HookOutput> {
   // (No-op if not at USER_GATE — processUserMessage only intercepts at gates.)
   await bridgeCall(stateDir, "message.process", {
     sessionId,
+    source: "synthetic",
     parts: [{ type: "text", text: "(agent stopped — next message is from user)" }],
   })
 
@@ -221,6 +245,7 @@ export async function handleStop(input: HookInput): Promise<HookOutput> {
 
     const reviewPrompt = await bridgeCall(stateDir, "task.getReviewContext", { sessionId })
     if (reviewPrompt && typeof reviewPrompt === "string") {
+      const reviewToken = extractReviewToken(reviewPrompt)
       const projectDir = input.cwd ?? process.env["CLAUDE_PROJECT_DIR"] ?? process.cwd()
       try {
         // Spawn isolated reviewer — fresh Claude session with no conversation history.
@@ -233,16 +258,16 @@ export async function handleStop(input: HookInput): Promise<HookOutput> {
         // Submit review results to bridge
         await bridgeCall(stateDir, "tool.execute", {
           name: "submit_task_review",
-          args: { review_output: reviewOutput },
-          context: { sessionId, directory: projectDir },
+          args: { review_output: reviewOutput, review_token: reviewToken },
+          context: { sessionId, directory: projectDir, invocation: "isolated-reviewer" },
         })
         // Re-check state to see if review passed or failed
         const newState = await bridgeCall(stateDir, "state.get", { sessionId }) as Record<string, unknown> | null
         if (newState?.taskCompletionInProgress) {
-          // Still pending — review parse failed, ask agent to handle manually
+          // Still pending — review parse failed or requested revisions.
           return {
             stdout: null,
-            stderr: "Per-task review could not be completed automatically. Call submit_task_review manually.",
+            stderr: "Per-task review is still pending. Stop and let the adapter request a fresh isolated review context.",
             exitCode: 2,
           }
         }
@@ -260,6 +285,7 @@ export async function handleStop(input: HookInput): Promise<HookOutput> {
         await bridgeCall(stateDir, "tool.execute", {
           name: "submit_task_review",
           args: {
+            review_token: reviewToken,
             review_output: JSON.stringify({
               passed: false,
               issues: [`Review dispatch failed: ${errMsg}`],
@@ -267,7 +293,7 @@ export async function handleStop(input: HookInput): Promise<HookOutput> {
               reasoning: "Graceful degradation: reviewer subprocess failed. Task reverted to pending — full implementation review will catch issues.",
             }),
           },
-          context: { sessionId, directory: projectDir },
+          context: { sessionId, directory: projectDir, invocation: "isolated-reviewer" },
         })
         return {
           stdout: null,
@@ -284,6 +310,7 @@ export async function handleStop(input: HookInput): Promise<HookOutput> {
   if (state?.phaseState === "REVIEW") {
     const reviewPrompt = await bridgeCall(stateDir, "task.getPhaseReviewContext", { sessionId })
     if (reviewPrompt && typeof reviewPrompt === "string") {
+      const reviewToken = extractReviewToken(reviewPrompt)
       const projectDir = input.cwd ?? process.env["CLAUDE_PROJECT_DIR"] ?? process.cwd()
       try {
         const reviewOutput = execFileSync("claude", ["--print", "--max-turns", "1", "-p", reviewPrompt], {
@@ -291,11 +318,18 @@ export async function handleStop(input: HookInput): Promise<HookOutput> {
           encoding: "utf-8",
           stdio: ["pipe", "pipe", "pipe"],
         })
-        await bridgeCall(stateDir, "tool.execute", {
+        const submitResult = await bridgeCall(stateDir, "tool.execute", {
           name: "submit_phase_review",
-          args: { review_output: reviewOutput },
-          context: { sessionId, directory: projectDir },
+          args: { review_output: reviewOutput, review_token: reviewToken },
+          context: { sessionId, directory: projectDir, invocation: "isolated-reviewer" },
         })
+        if (typeof submitResult === "string" && submitResult.startsWith("Error:")) {
+          throw new Error(submitResult)
+        }
+        const nextState = await bridgeCall(stateDir, "state.get", { sessionId }) as Record<string, unknown> | null
+        if (nextState?.phaseState === "REVIEW") {
+          throw new Error("Phase review submission did not advance the workflow out of REVIEW")
+        }
         return {
           stdout: null,
           stderr: "Phase review completed. Continue with the workflow.",
@@ -303,14 +337,22 @@ export async function handleStop(input: HookInput): Promise<HookOutput> {
         }
       } catch (err) {
         const errMsg = err instanceof Error ? err.message : String(err)
-        await bridgeCall(stateDir, "tool.execute", {
+        const failureResult = await bridgeCall(stateDir, "tool.execute", {
           name: "submit_phase_review",
           args: {
+            review_token: reviewToken,
             review_error: errMsg,
             review_exit_code: 1,
           },
-          context: { sessionId, directory: projectDir },
+          context: { sessionId, directory: projectDir, invocation: "isolated-reviewer" },
         })
+        if (typeof failureResult === "string" && failureResult.startsWith("Error:")) {
+          return {
+            stdout: null,
+            stderr: `Phase review dispatch failed and could not be recorded: ${failureResult}`,
+            exitCode: 2,
+          }
+        }
         return {
           stdout: null,
           stderr: "Phase review dispatch failed and was recorded as a blocking review failure. Revise the artifact or retry review.",

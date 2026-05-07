@@ -37,7 +37,7 @@ const TOOLS = [
   { cli: "select-mode", tool: "select_mode", desc: "Choose GREENFIELD, REFACTOR, or INCREMENTAL + set feature name" },
   { cli: "mark-scan-complete", tool: "mark_scan_complete", desc: "Complete discovery scan (REFACTOR/INCREMENTAL)" },
   { cli: "mark-analyze-complete", tool: "mark_analyze_complete", desc: "Complete discovery analysis" },
-  { cli: "mark-satisfied", tool: "mark_satisfied", desc: "Submit self-review criteria assessment" },
+  { cli: "mark-satisfied", tool: "mark_satisfied", desc: "OpenCode/self-review compatibility only; bridge adapters use isolated review submission" },
   { cli: "request-review", tool: "request_review", desc: "Submit review artifacts (`artifact_files`, or markdown via `artifact_markdown`)" },
   { cli: "submit-feedback", tool: "submit_feedback", desc: "Approve or request revision at USER_GATE" },
   { cli: "mark-task-complete", tool: "mark_task_complete", desc: "Complete a DAG task during IMPLEMENTATION" },
@@ -104,7 +104,7 @@ export function generateWorkflowTemplate(config: TemplateConfig): string {
   lines.push(`Do the work for this phase. When done, call ${tn("request_review")}.`)
   lines.push("")
   lines.push("### REVIEW")
-  lines.push(`Self-evaluate against the acceptance criteria shown in the per-turn prompt injection. Evaluate each criterion independently — do NOT assume quality, verify it. Call ${tn("mark_satisfied")} with your per-criterion assessment. Be honest — the user reviews at USER_GATE.`)
+  lines.push(`Stop authoring and let the adapter dispatch an isolated reviewer. Do NOT call ${tn("mark_satisfied")}; bridge adapters submit isolated reviews through adapter-only review submission.`)
   lines.push("")
   lines.push("### USER_GATE")
   lines.push(`Present a clear artifact summary to the user. **STOP and wait for their response.** Do NOT call ${tn("submit_feedback")} until the user responds. Not every user message is artifact feedback — casual conversation is fine.`)
@@ -161,9 +161,9 @@ export function generateWorkflowTemplate(config: TemplateConfig): string {
   lines.push("")
 
   // Self-review
-  lines.push("## Self-Review Responsibility")
+  lines.push("## Review Responsibility")
   lines.push("")
-  lines.push(`${tn("mark_satisfied")} evaluates YOUR criteria. There is no isolated reviewer in agent-only mode — you are responsible for honest self-assessment. The user reviews at USER_GATE.`)
+  lines.push(`Phase review is handled by an isolated reviewer subprocess with no access to the authoring conversation. Wait for the adapter hook to submit the review result, then continue according to the next prompt.`)
 
   return lines.join("\n")
 }

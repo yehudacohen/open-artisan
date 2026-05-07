@@ -37,9 +37,9 @@ There is no build step — the plugin loads TypeScript directly via Bun.
 
 Pure, side-effect-free table-driven FSM. 34 valid (Phase, PhaseState) combinations, 12 named transition events. All phase progression goes through `transition()` which validates current state before advancing. The transition table is built in `buildTable()`.
 
-### Session State (`session-state.ts`, `state-backend-fs.ts`)
+### Session State (`session-state.ts`, `state-backend-fs.ts`, `open-artisan-state-backend-db.ts`)
 
-Pluggable persistence via `StateBackend` interface (read/write/remove/list/lock). Built-in `FileSystemStateBackend` stores per-feature state at `.openartisan/<featureName>/workflow-state.json` (schema version 22, with migrations for all prior versions). Sub-workflow state nests under parent: `.openartisan/<parent>/sub/<child>/workflow-state.json`. Sessions without a featureName (pre-MODE_SELECT) are memory-only. Legacy single-file `.opencode/workflow-state.json` is migrated at startup via `migrateLegacyStateFile()`. Two-layer locking: per-feature promise chains for in-process serialization, plus backend locks (lockfiles with O_CREAT|O_EXCL for the FS backend) for cross-process safety. `validateWorkflowState()` runs before every persist.
+Pluggable persistence via `StateBackend` interface (read/write/remove/list/lock). The default runtime backend is the PGlite-backed repository (`.openartisan/open-artisan.db`) exposed through `open-artisan-state-backend-db.ts`; `FileSystemStateBackend` remains the explicit legacy/fallback backend and stores per-feature state at `.openartisan/<featureName>/workflow-state.json`. Current workflow-state schema is v24, with migrations for prior versions. Sub-workflow state nests under parent feature state. Sessions without a featureName (pre-MODE_SELECT) are memory-only. Two-layer locking combines per-feature promise chains with backend locks; persisted updates re-read the latest backend snapshot while holding the backend lock before mutating. `validateWorkflowState()` runs before every persist.
 
 ### Session Registry (`session-registry.ts`)
 
@@ -82,11 +82,11 @@ The IMPL_PLAN artifact is parsed from Markdown into a task DAG. Each task declar
 
 JSON-RPC 2.0 server over stdio using the `json-rpc-2.0` library. Wraps the core engine for out-of-process adapters (Claude Code, Hermes). 13 methods: lifecycle (init/ping/shutdown/sessionCreated/sessionDeleted), state.get, guard (check/policy), prompt (build/compaction), message.process, idle.check, tool.execute. PID file at `.openartisan/.bridge-pid` with stale detection. Structured logging via pino with traceId correlation. Entry point: `packages/bridge/cli.ts`.
 
-### Self-Review (`self-review.ts`)
+### Review (`self-review.ts`, bridge isolated reviewers)
 
-Dispatches an ephemeral `workflow-reviewer` subagent in a fresh session that sees only the artifact and acceptance criteria — never the authoring conversation. 5-minute timeout, escalates to USER_GATE after 10 iterations.
+OpenCode dispatches an ephemeral `workflow-reviewer` subagent in a fresh session that sees only the artifact and acceptance criteria — never the authoring conversation. Bridge adapters (Claude Code, Hermes) dispatch isolated reviewer subprocesses and require one-time bridge-local review tokens for `submit_task_review` and `submit_phase_review`. 5-minute timeout, escalates to USER_GATE after 10 iterations.
 
-**Artifact tracking (v22):** The reviewer receives explicit file paths from the orchestrator, not heuristic directory scans. For IMPLEMENTATION, file paths accumulate automatically from each DAG task's `expectedFiles` at `mark_task_complete` time. For INTERFACES/TESTS, the agent passes `artifact_files` in `request_review`. The reviewer also always sees `artifactDiskPaths` (plan, conventions, impl_plan locations) for cross-reference.
+**Artifact tracking (v24):** The reviewer receives explicit file paths from the orchestrator, not heuristic directory scans. For IMPLEMENTATION, file paths accumulate automatically from each DAG task's `expectedFiles` at `mark_task_complete` time. For INTERFACES/TESTS, the agent passes `artifact_files` in `request_review`. The reviewer also always sees `artifactDiskPaths` (plan, conventions, impl_plan locations) for cross-reference.
 
 ### Three Modes
 

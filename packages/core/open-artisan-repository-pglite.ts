@@ -20,6 +20,7 @@ import {
   OPEN_ARTISAN_ROADMAP_DOCUMENT_SCHEMA_VERSION,
   type OpenArtisanDatabase,
 } from "./open-artisan-repository-schema"
+import { DB_OPERATION_LEASE_MS, DB_OPERATION_LEASE_POLL_MS, DB_OPERATION_LEASE_TIMEOUT_MS } from "./constants"
 import {
   openArtisanDbError,
   openArtisanDbOk,
@@ -62,8 +63,8 @@ import {
   type WorkflowProjection,
 } from "./open-artisan-repository"
 import type { TaskStatus } from "./dag"
-import { SCHEMA_VERSION, type WorkflowState } from "./workflow-state-types"
-import type { ArtifactKey, Phase, PhaseState } from "./workflow-primitives"
+import { SCHEMA_VERSION, validateWorkflowState, type WorkflowState } from "./workflow-state-types"
+import { VALID_PHASE_STATES, type ArtifactKey, type Phase, type PhaseState } from "./workflow-primitives"
 import type { RoadmapDocument } from "./roadmap-types"
 
 export { OPEN_ARTISAN_DB_SCHEMA_VERSION } from "./open-artisan-repository-migrations"
@@ -86,12 +87,26 @@ export interface OpenArtisanPGliteRepositoryOptions {
 
 type DbExecutor = Kysely<OpenArtisanDatabase>
 
+class TransactionRollback<T> extends Error {
+  readonly result: OpenArtisanDbResult<T>
+
+  constructor(result: OpenArtisanDbResult<T>) {
+    super("Open Artisan transaction rolled back")
+    this.name = "TransactionRollback"
+    this.result = result
+  }
+}
+
 function nowIso(): string {
   return new Date().toISOString()
 }
 
 function clone<T>(value: T): T {
   return structuredClone(value)
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 function edgeKey(edge: DbRoadmapEdge): string {
@@ -116,6 +131,18 @@ function invalidInput<T>(message: string): OpenArtisanDbResult<T> {
 
 function invalidState<T>(message: string): OpenArtisanDbResult<T> {
   return openArtisanDbError("invalid-state", message, false)
+}
+
+function validateDbWorkflowInput<T>(workflow: DbWorkflow): OpenArtisanDbResult<T> | null {
+  if (!workflow.id.trim()) return invalidInput("Workflow id is required")
+  if (!workflow.featureName.trim()) return invalidInput("Workflow featureName is required")
+  if (!workflow.createdAt.trim() || !workflow.updatedAt.trim()) return invalidInput("Workflow timestamps are required")
+  if (!["GREENFIELD", "REFACTOR", "INCREMENTAL"].includes(workflow.mode)) return invalidInput(`Invalid workflow mode ${workflow.mode}`)
+  if (!(workflow.phase in VALID_PHASE_STATES)) return invalidInput(`Invalid workflow phase ${workflow.phase}`)
+  if (!VALID_PHASE_STATES[workflow.phase].includes(workflow.phaseState)) {
+    return invalidInput(`Invalid workflow phase state ${workflow.phase}/${workflow.phaseState}`)
+  }
+  return null
 }
 
 function rowRecord<T>(row: { record: unknown }): T {
@@ -238,6 +265,36 @@ function buildImportedTaskGraph(state: WorkflowState, workflowId: string): DbTas
   }
 }
 
+function findTaskGraphCycle(graph: DbTaskGraph): string | null {
+  const taskIds = new Set(graph.tasks.map((task) => task.id))
+  const indegree = new Map<string, number>()
+  const outgoing = new Map<string, string[]>()
+  for (const taskId of taskIds) {
+    indegree.set(taskId, 0)
+    outgoing.set(taskId, [])
+  }
+  for (const dependency of graph.dependencies) {
+    if (!taskIds.has(dependency.fromTaskId) || !taskIds.has(dependency.toTaskId)) continue
+    outgoing.get(dependency.fromTaskId)?.push(dependency.toTaskId)
+    indegree.set(dependency.toTaskId, (indegree.get(dependency.toTaskId) ?? 0) + 1)
+  }
+
+  const ready = [...indegree.entries()].filter(([, count]) => count === 0).map(([taskId]) => taskId)
+  let visited = 0
+  while (ready.length > 0) {
+    const taskId = ready.shift()!
+    visited++
+    for (const next of outgoing.get(taskId) ?? []) {
+      const nextCount = (indegree.get(next) ?? 0) - 1
+      indegree.set(next, nextCount)
+      if (nextCount === 0) ready.push(next)
+    }
+  }
+
+  if (visited === taskIds.size) return null
+  return [...indegree.entries()].filter(([, count]) => count > 0).map(([taskId]) => taskId).join(", ")
+}
+
 export function createPGliteOpenArtisanRepository(
   options: OpenArtisanPGliteRepositoryOptions,
 ): OpenArtisanRepository {
@@ -261,29 +318,91 @@ export function createPGliteOpenArtisanRepository(
     await ensureOpenArtisanSchema({ db, databasePath: dbPath, schemaName })
   }
 
+  async function ensureInitialized(db: DbExecutor): Promise<void> {
+    if (!initializedPromise) {
+      initializedPromise = initializeSchema(db).catch((error) => {
+        initializedPromise = null
+        throw error
+      })
+    }
+    await initializedPromise
+  }
+
+  async function withTransaction<T>(db: DbExecutor, run: (tx: DbExecutor) => Promise<OpenArtisanDbResult<T>>): Promise<OpenArtisanDbResult<T>> {
+    const activeTransaction = transactionStorage.getStore()
+    if (activeTransaction) return run(activeTransaction)
+    try {
+      return await db.transaction().execute(async (tx) => {
+        const result = await transactionStorage.run(tx as unknown as DbExecutor, () => run(tx as unknown as DbExecutor))
+        if (!result.ok) throw new TransactionRollback(result)
+        return result
+      })
+    } catch (error) {
+      if (error instanceof TransactionRollback) return error.result as OpenArtisanDbResult<T>
+      throw error
+    }
+  }
+
+  function startQueuedLeaseRenewal(input: { leaseKey: string; ownerId: string; leaseMs: number; intervalMs: number }): () => void {
+    const timer = setInterval(() => {
+      const now = new Date().toISOString()
+      const leaseExpiresAt = new Date(Date.now() + input.leaseMs).toISOString()
+      void withDb("openartisan.renewRepositoryLock", async (db) => {
+        await db.withSchema(schemaName)
+          .updateTable("database_operation_locks")
+          .set({ lease_expires_at: leaseExpiresAt, updated_at: now })
+          .where("lock_key", "=", input.leaseKey)
+          .where("owner_id", "=", input.ownerId)
+          .execute()
+      }).catch(() => {
+        // Best-effort renewal. Release or expiry will let another owner proceed.
+      })
+    }, input.intervalMs)
+    timer.unref?.()
+    return () => clearInterval(timer)
+  }
+
   async function acquireRepositoryLock(
     leaseKey: string,
     options: OpenArtisanRepositoryLockOptions = {},
   ): Promise<OpenArtisanDbResult<OpenArtisanRepositoryLock>> {
-    try {
-      return await withDb("openartisan.acquireRepositoryLock", async (db) => {
-        initializedPromise ??= initializeSchema(db)
-        await initializedPromise
-        const lease = await acquireDatabaseOperationLease(asDatabaseOperationLeaseDb(db), schemaName, {
-          leaseKey,
-          ownerId: leaseOwnerId,
-          ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
-          ...(options.pollMs === undefined ? {} : { pollMs: options.pollMs }),
-          ...(options.leaseMs === undefined ? {} : { leaseMs: options.leaseMs }),
+    const timeoutMs = options.timeoutMs ?? DB_OPERATION_LEASE_TIMEOUT_MS
+    const pollMs = options.pollMs ?? DB_OPERATION_LEASE_POLL_MS
+    const leaseMs = options.leaseMs ?? DB_OPERATION_LEASE_MS
+    const deadline = Date.now() + timeoutMs
+    let lastError: unknown = null
+
+    while (true) {
+      try {
+        return await withDb("openartisan.acquireRepositoryLock", async (db) => {
+          await ensureInitialized(db)
+          const lease = await acquireDatabaseOperationLease(asDatabaseOperationLeaseDb(db), schemaName, {
+            leaseKey,
+            ownerId: leaseOwnerId,
+            timeoutMs: 0,
+            pollMs: 0,
+            leaseMs,
+            renew: startQueuedLeaseRenewal,
+          })
+          return openArtisanDbOk({
+            release: () => withDb("openartisan.releaseRepositoryLock", async () => {
+              await lease.release()
+            }),
+          })
         })
-        return openArtisanDbOk({
-          release: () => withDb("openartisan.releaseRepositoryLock", async () => {
-            await lease.release()
-          }),
-        })
-      })
-    } catch (error) {
-      return dbFailure(`Open Artisan DB lock acquisition failed for ${leaseKey}`, error)
+      } catch (error) {
+        lastError = error
+        const message = error instanceof Error ? error.message : String(error)
+        if (!message.includes("Timed out acquiring DB operation lease")) {
+          return dbFailure(`Open Artisan DB lock acquisition failed for ${leaseKey}`, error)
+        }
+      }
+
+      if (Date.now() >= deadline) {
+        const suffix = lastError instanceof Error ? ` ${lastError.message}` : ""
+        return openArtisanDbError("lock-timeout", `Timed out acquiring DB operation lease ${leaseKey}.${suffix}`, true)
+      }
+      await sleep(pollMs)
     }
   }
 
@@ -298,12 +417,12 @@ export function createPGliteOpenArtisanRepository(
     }
 
     try {
-        return await withDb("openartisan.withInitializedDb", async (db) => {
-        initializedPromise ??= initializeSchema(db)
-        await initializedPromise
+      return await withDb("openartisan.withInitializedDb", async (db) => {
+        await ensureInitialized(db)
         const lease = await acquireDatabaseOperationLease(asDatabaseOperationLeaseDb(db), schemaName, {
           leaseKey: "open-artisan:repository-operation",
           ownerId: leaseOwnerId,
+          renew: startQueuedLeaseRenewal,
         })
         try {
           return await run(db)
@@ -366,6 +485,39 @@ export function createPGliteOpenArtisanRepository(
 
   async function replaceTaskGraphInDb(db: DbExecutor, workflowId: string, graph: DbTaskGraph): Promise<OpenArtisanDbResult<DbTaskGraph>> {
     const schemaDb = db.withSchema(schemaName)
+    const workflow = await schemaDb.selectFrom("workflows").select("id").where("id", "=", workflowId).executeTakeFirst()
+    if (!workflow) return notFound(`Workflow ${workflowId} was not found`)
+
+    const taskIds = new Set<string>()
+    for (const task of graph.tasks) {
+      if (task.workflowId !== workflowId) return invalidInput(`Task ${task.id} belongs to workflow ${task.workflowId}, not ${workflowId}`)
+      if (taskIds.has(task.id)) return invalidInput(`Task graph contains duplicate task id ${task.id}`)
+      taskIds.add(task.id)
+    }
+    for (const dependency of graph.dependencies) {
+      if (dependency.workflowId !== workflowId) return invalidInput(`Task dependency belongs to workflow ${dependency.workflowId}, not ${workflowId}`)
+      if (!taskIds.has(dependency.fromTaskId)) return invalidInput(`Task dependency references missing task ${dependency.fromTaskId}`)
+      if (!taskIds.has(dependency.toTaskId)) return invalidInput(`Task dependency references missing task ${dependency.toTaskId}`)
+    }
+    for (const file of graph.ownedFiles) {
+      if (!taskIds.has(file.taskId)) return invalidInput(`Task owned file references missing task ${file.taskId}`)
+    }
+    for (const test of graph.expectedTests) {
+      if (!taskIds.has(test.taskId)) return invalidInput(`Task expected test references missing task ${test.taskId}`)
+    }
+    for (const link of graph.roadmapLinks) {
+      if (!taskIds.has(link.taskId)) return invalidInput(`Task roadmap link references missing task ${link.taskId}`)
+    }
+    const cycleTaskIds = findTaskGraphCycle(graph)
+    if (cycleTaskIds) return invalidInput(`Task graph contains a cycle involving: ${cycleTaskIds}`)
+    const roadmapItemIds = unique(graph.roadmapLinks.map((link) => link.roadmapItemId))
+    if (roadmapItemIds.length > 0) {
+      const roadmapRows = await schemaDb.selectFrom("roadmap_items").select("id").where("id", "in", roadmapItemIds).execute()
+      const existingRoadmapItemIds = new Set(roadmapRows.map((row) => row.id))
+      const missingRoadmapItemId = roadmapItemIds.find((id) => !existingRoadmapItemIds.has(id))
+      if (missingRoadmapItemId) return notFound(`Roadmap item ${missingRoadmapItemId} was not found`)
+    }
+
     await schemaDb.deleteFrom("task_roadmap_links").where("task_id", "in", (eb) => eb.selectFrom("tasks").select("id").where("workflow_id", "=", workflowId)).execute()
     await schemaDb.deleteFrom("task_expected_tests").where("task_id", "in", (eb) => eb.selectFrom("tasks").select("id").where("workflow_id", "=", workflowId)).execute()
     await schemaDb.deleteFrom("task_owned_files").where("task_id", "in", (eb) => eb.selectFrom("tasks").select("id").where("workflow_id", "=", workflowId)).execute()
@@ -439,7 +591,9 @@ export function createPGliteOpenArtisanRepository(
 
   async function declareHumanGateInDb(db: DbExecutor, gate: DbHumanGate): Promise<OpenArtisanDbResult<DbHumanGate>> {
     const schemaDb = db.withSchema(schemaName)
-    const taskRow = await schemaDb.selectFrom("tasks").selectAll().where("id", "=", gate.taskId).executeTakeFirst()
+    const workflow = await schemaDb.selectFrom("workflows").select("id").where("id", "=", gate.workflowId).executeTakeFirst()
+    if (!workflow) return notFound(`Workflow ${gate.workflowId} was not found`)
+    const taskRow = await schemaDb.selectFrom("tasks").selectAll().where("id", "=", gate.taskId).where("workflow_id", "=", gate.workflowId).executeTakeFirst()
     if (!taskRow) return notFound(`Task ${gate.taskId} was not found`)
     const currentTask = rowRecord<DbTask>(taskRow)
     if (currentTask.category !== "human-gate") {
@@ -454,8 +608,10 @@ export function createPGliteOpenArtisanRepository(
       created_at: gate.createdAt,
       resolved_at: gate.resolvedAt ?? null,
     }).execute()
-    const task = { ...currentTask, status: "human-gated" as const, updatedAt: nowIso() }
-    await schemaDb.updateTable("tasks").set({ status: task.status, record: clone(task), updated_at: task.updatedAt }).where("id", "=", task.id).execute()
+    if (!gate.resolved) {
+      const task = { ...currentTask, status: "human-gated" as const, updatedAt: nowIso() }
+      await schemaDb.updateTable("tasks").set({ status: task.status, record: clone(task), updated_at: task.updatedAt }).where("id", "=", task.id).execute()
+    }
     return openArtisanDbOk(clone(gate))
   }
 
@@ -517,7 +673,17 @@ export function createPGliteOpenArtisanRepository(
 
     replaceRoadmap(document: RoadmapDocument) {
       return withInitializedDb(async (db) => {
+        return withTransaction(db, async (db) => {
         const schemaDb = db.withSchema(schemaName)
+        const itemIds = new Set(document.items.map((item) => item.id))
+        for (const edge of document.edges) {
+          if (!itemIds.has(edge.from)) return invalidInput(`Roadmap edge references missing item ${edge.from}`)
+          if (!itemIds.has(edge.to)) return invalidInput(`Roadmap edge references missing item ${edge.to}`)
+        }
+        await schemaDb.deleteFrom("workflow_roadmap_links").execute()
+        await schemaDb.deleteFrom("artifact_roadmap_links").execute()
+        await schemaDb.deleteFrom("task_roadmap_links").execute()
+        await schemaDb.deleteFrom("execution_slice_items").execute()
         await schemaDb.deleteFrom("roadmap_edges").execute()
         await schemaDb.deleteFrom("roadmap_items").execute()
         if (document.items.length > 0) {
@@ -541,6 +707,7 @@ export function createPGliteOpenArtisanRepository(
           }))).execute()
         }
         return openArtisanDbOk(clone(document))
+        })
       })
     },
 
@@ -575,10 +742,16 @@ export function createPGliteOpenArtisanRepository(
 
     deleteRoadmap() {
       return withInitializedDb(async (db) => {
+        return withTransaction(db, async (db) => {
         const schemaDb = db.withSchema(schemaName)
+        await schemaDb.deleteFrom("workflow_roadmap_links").execute()
+        await schemaDb.deleteFrom("artifact_roadmap_links").execute()
+        await schemaDb.deleteFrom("task_roadmap_links").execute()
+        await schemaDb.deleteFrom("execution_slice_items").execute()
         await schemaDb.deleteFrom("roadmap_edges").execute()
         await schemaDb.deleteFrom("roadmap_items").execute()
         return openArtisanDbOk(null)
+        })
       })
     },
 
@@ -599,9 +772,15 @@ export function createPGliteOpenArtisanRepository(
 
     upsertRoadmapEdge(edge: DbRoadmapEdge) {
       return withInitializedDb(async (db) => {
+        return withTransaction(db, async (db) => {
+        const schemaDb = db.withSchema(schemaName)
+        const itemRows = await schemaDb.selectFrom("roadmap_items").select("id").where("id", "in", [edge.fromItemId, edge.toItemId]).execute()
+        const itemIds = new Set(itemRows.map((row) => row.id))
+        if (!itemIds.has(edge.fromItemId)) return notFound(`Roadmap item ${edge.fromItemId} was not found`)
+        if (!itemIds.has(edge.toItemId)) return notFound(`Roadmap item ${edge.toItemId} was not found`)
         const key = edgeKey(edge)
-        await db.withSchema(schemaName).deleteFrom("roadmap_edges").where("edge_key", "=", key).execute()
-        await db.withSchema(schemaName).insertInto("roadmap_edges").values({
+        await schemaDb.deleteFrom("roadmap_edges").where("edge_key", "=", key).execute()
+        await schemaDb.insertInto("roadmap_edges").values({
           edge_key: key,
           from_item_id: edge.fromItemId,
           to_item_id: edge.toItemId,
@@ -609,6 +788,7 @@ export function createPGliteOpenArtisanRepository(
           record: clone(edge),
         }).execute()
         return openArtisanDbOk(clone(edge))
+        })
       })
     },
 
@@ -629,7 +809,15 @@ export function createPGliteOpenArtisanRepository(
 
     createExecutionSlice(slice: DbExecutionSlice, itemIds: DbRecordId[]) {
       return withInitializedDb(async (db) => {
+        return withTransaction(db, async (db) => {
         const schemaDb = db.withSchema(schemaName)
+        const uniqueItemIds = unique(itemIds)
+        if (uniqueItemIds.length > 0) {
+          const itemRows = await schemaDb.selectFrom("roadmap_items").select("id").where("id", "in", uniqueItemIds).execute()
+          const existingItemIds = new Set(itemRows.map((row) => row.id))
+          const missingItemId = uniqueItemIds.find((id) => !existingItemIds.has(id))
+          if (missingItemId) return notFound(`Roadmap item ${missingItemId} was not found`)
+        }
         await schemaDb.insertInto("execution_slices").values({
           id: slice.id,
           feature_name: slice.featureName ?? null,
@@ -638,13 +826,14 @@ export function createPGliteOpenArtisanRepository(
           created_at: slice.createdAt,
           updated_at: slice.updatedAt,
         }).execute()
-        if (itemIds.length > 0) {
-          await schemaDb.insertInto("execution_slice_items").values(itemIds.map((itemId) => ({
+        if (uniqueItemIds.length > 0) {
+          await schemaDb.insertInto("execution_slice_items").values(uniqueItemIds.map((itemId) => ({
             slice_id: slice.id,
             roadmap_item_id: itemId,
           }))).execute()
         }
         return openArtisanDbOk(clone(slice))
+        })
       })
     },
 
@@ -659,6 +848,8 @@ export function createPGliteOpenArtisanRepository(
     },
 
     createWorkflow(workflow: DbWorkflow) {
+      const validationError = validateDbWorkflowInput<DbWorkflow>(workflow)
+      if (validationError) return Promise.resolve(validationError)
       return withInitializedDb(async (db) => {
         await db.withSchema(schemaName).insertInto("workflows").values({
           id: workflow.id,
@@ -697,7 +888,11 @@ export function createPGliteOpenArtisanRepository(
     },
 
     setWorkflowPhase(workflowId: DbRecordId, phase: Phase, phaseState: PhaseState) {
+      if (!(phase in VALID_PHASE_STATES) || !VALID_PHASE_STATES[phase].includes(phaseState)) {
+        return Promise.resolve(invalidInput<DbWorkflow>(`Invalid workflow phase state ${phase}/${phaseState}`))
+      }
       return withInitializedDb(async (db) => {
+        return withTransaction(db, async (db) => {
         const schemaDb = db.withSchema(schemaName)
         const row = await schemaDb.selectFrom("workflows").selectAll().where("id", "=", workflowId).executeTakeFirst()
         if (!row) return notFound(`Workflow ${workflowId} was not found`)
@@ -728,11 +923,13 @@ export function createPGliteOpenArtisanRepository(
           }).execute()
         }
         return openArtisanDbOk(workflow)
+        })
       })
     },
 
     deleteWorkflow(workflowId: DbRecordId) {
       return withInitializedDb(async (db) => {
+        return withTransaction(db, async (db) => {
         const schemaDb = db.withSchema(schemaName)
         const taskRows = await schemaDb.selectFrom("tasks").select("id").where("workflow_id", "=", workflowId).execute()
         const taskIds = taskRows.map((task) => task.id)
@@ -774,12 +971,16 @@ export function createPGliteOpenArtisanRepository(
         await schemaDb.deleteFrom("fast_forward_records").where("workflow_id", "=", workflowId).execute()
         await schemaDb.deleteFrom("workflows").where("id", "=", workflowId).execute()
         return openArtisanDbOk(null)
+        })
       })
     },
 
     appendWorkflowEvent(event: DbWorkflowEvent) {
       return withInitializedDb(async (db) => {
-        await db.withSchema(schemaName).insertInto("workflow_events").values({
+        const schemaDb = db.withSchema(schemaName)
+        const workflow = await schemaDb.selectFrom("workflows").select("id").where("id", "=", event.workflowId).executeTakeFirst()
+        if (!workflow) return notFound(`Workflow ${event.workflowId} was not found`)
+        await schemaDb.insertInto("workflow_events").values({
           id: event.id,
           workflow_id: event.workflowId,
           created_at: event.createdAt,
@@ -798,7 +999,12 @@ export function createPGliteOpenArtisanRepository(
 
     linkWorkflowToRoadmap(workflowId: DbRecordId, roadmapItemId: DbRecordId) {
       return withInitializedDb(async (db) => {
-        await db.withSchema(schemaName).insertInto("workflow_roadmap_links").values({
+        const schemaDb = db.withSchema(schemaName)
+        const workflow = await schemaDb.selectFrom("workflows").select("id").where("id", "=", workflowId).executeTakeFirst()
+        if (!workflow) return notFound(`Workflow ${workflowId} was not found`)
+        const roadmapItem = await schemaDb.selectFrom("roadmap_items").select("id").where("id", "=", roadmapItemId).executeTakeFirst()
+        if (!roadmapItem) return notFound(`Roadmap item ${roadmapItemId} was not found`)
+        await schemaDb.insertInto("workflow_roadmap_links").values({
           workflow_id: workflowId,
           roadmap_item_id: roadmapItemId,
         }).onConflict((oc) => oc.columns(["workflow_id", "roadmap_item_id"]).doNothing()).execute()
@@ -808,7 +1014,10 @@ export function createPGliteOpenArtisanRepository(
 
     upsertArtifact(artifact: DbArtifact) {
       return withInitializedDb(async (db) => {
-        await db.withSchema(schemaName).insertInto("artifacts").values({
+        const schemaDb = db.withSchema(schemaName)
+        const workflow = await schemaDb.selectFrom("workflows").select("id").where("id", "=", artifact.workflowId).executeTakeFirst()
+        if (!workflow) return notFound(`Workflow ${artifact.workflowId} was not found`)
+        await schemaDb.insertInto("artifacts").values({
           id: artifact.id,
           workflow_id: artifact.workflowId,
           artifact_key: artifact.artifactKey,
@@ -829,6 +1038,7 @@ export function createPGliteOpenArtisanRepository(
 
     recordArtifactVersion(version: DbArtifactVersion) {
       return withInitializedDb(async (db) => {
+        return withTransaction(db, async (db) => {
         const schemaDb = db.withSchema(schemaName)
         const artifact = await schemaDb.selectFrom("artifacts").selectAll().where("id", "=", version.artifactId).executeTakeFirst()
         if (!artifact) return notFound(`Artifact ${version.artifactId} was not found`)
@@ -846,6 +1056,7 @@ export function createPGliteOpenArtisanRepository(
           updated_at: updatedArtifact.updatedAt,
         }).where("id", "=", version.artifactId).execute()
         return openArtisanDbOk(clone(version))
+        })
       })
     },
 
@@ -865,7 +1076,12 @@ export function createPGliteOpenArtisanRepository(
 
     linkArtifactToRoadmap(artifactId: DbRecordId, roadmapItemId: DbRecordId) {
       return withInitializedDb(async (db) => {
-        await db.withSchema(schemaName).insertInto("artifact_roadmap_links").values({
+        const schemaDb = db.withSchema(schemaName)
+        const artifact = await schemaDb.selectFrom("artifacts").select("id").where("id", "=", artifactId).executeTakeFirst()
+        if (!artifact) return notFound(`Artifact ${artifactId} was not found`)
+        const roadmapItem = await schemaDb.selectFrom("roadmap_items").select("id").where("id", "=", roadmapItemId).executeTakeFirst()
+        if (!roadmapItem) return notFound(`Roadmap item ${roadmapItemId} was not found`)
+        await schemaDb.insertInto("artifact_roadmap_links").values({
           artifact_id: artifactId,
           roadmap_item_id: roadmapItemId,
         }).onConflict((oc) => oc.columns(["artifact_id", "roadmap_item_id"]).doNothing()).execute()
@@ -875,7 +1091,10 @@ export function createPGliteOpenArtisanRepository(
 
     approveArtifact(approval: DbArtifactApproval) {
       return withInitializedDb(async (db) => {
-        await db.withSchema(schemaName).insertInto("artifact_approvals").values({
+        const schemaDb = db.withSchema(schemaName)
+        const version = await schemaDb.selectFrom("artifact_versions").select("id").where("id", "=", approval.artifactVersionId).executeTakeFirst()
+        if (!version) return notFound(`Artifact version ${approval.artifactVersionId} was not found`)
+        await schemaDb.insertInto("artifact_approvals").values({
           id: approval.id,
           artifact_version_id: approval.artifactVersionId,
           record: clone(approval),
@@ -887,9 +1106,7 @@ export function createPGliteOpenArtisanRepository(
 
     replaceTaskGraph(workflowId: DbRecordId, graph: DbTaskGraph) {
       return withInitializedDb(async (db) => {
-        return db.transaction().execute(async (tx) => {
-          return transactionStorage.run(tx as unknown as DbExecutor, () => replaceTaskGraphInDb(tx as unknown as DbExecutor, workflowId, graph))
-        })
+        return withTransaction(db, (db) => replaceTaskGraphInDb(db, workflowId, graph))
       })
     },
 
@@ -899,7 +1116,14 @@ export function createPGliteOpenArtisanRepository(
 
     claimTask(workflowId: DbRecordId, taskId: DbRecordId, lease: DbAgentLease) {
       return withInitializedDb(async (db) => {
+        return withTransaction(db, async (db) => {
         const schemaDb = db.withSchema(schemaName)
+        if (lease.workflowId !== workflowId) return invalidInput(`Lease workflow ${lease.workflowId} does not match claimed workflow ${workflowId}`)
+        if (lease.taskId && lease.taskId !== taskId) return invalidInput(`Lease task ${lease.taskId} does not match claimed task ${taskId}`)
+        const workflow = await schemaDb.selectFrom("workflows").select("id").where("id", "=", workflowId).executeTakeFirst()
+        if (!workflow) return notFound(`Workflow ${workflowId} was not found`)
+        const taskRow = await schemaDb.selectFrom("tasks").selectAll().where("id", "=", taskId).where("workflow_id", "=", workflowId).executeTakeFirst()
+        if (!taskRow) return notFound(`Task ${taskId} was not found`)
         await schemaDb.insertInto("agent_leases").values({
           id: lease.id,
           workflow_id: workflowId,
@@ -909,12 +1133,10 @@ export function createPGliteOpenArtisanRepository(
           record: clone(lease),
           created_at: lease.createdAt,
         }).execute()
-        const taskRow = await schemaDb.selectFrom("tasks").selectAll().where("id", "=", taskId).executeTakeFirst()
-        if (taskRow) {
-          const task = { ...rowRecord<DbTask>(taskRow), currentAgentLeaseId: lease.id, status: "in-flight" as const, updatedAt: nowIso() }
-          await schemaDb.updateTable("tasks").set({ status: task.status, record: clone(task), updated_at: task.updatedAt }).where("id", "=", taskId).execute()
-        }
+        const task = { ...rowRecord<DbTask>(taskRow), currentAgentLeaseId: lease.id, status: "in-flight" as const, updatedAt: nowIso() }
+        await schemaDb.updateTable("tasks").set({ status: task.status, record: clone(task), updated_at: task.updatedAt }).where("id", "=", taskId).where("workflow_id", "=", workflowId).execute()
         return openArtisanDbOk(clone(lease))
+        })
       })
     },
 
@@ -935,6 +1157,7 @@ export function createPGliteOpenArtisanRepository(
 
     applyBoundaryChange(input: BoundaryChangeInput) {
       return withInitializedDb(async (db) => {
+        return withTransaction(db, async (db) => {
         const analysis = await analyzeBoundaryChangeInDb(db, input)
         if (!analysis.ok) return analysis
         const graph = await loadTaskGraph(db, input.workflowId)
@@ -967,12 +1190,20 @@ export function createPGliteOpenArtisanRepository(
           expectedTests: nextExpectedTests,
         }
         return replaceTaskGraphInDb(db, input.workflowId, nextGraph).then((result) => result.ok ? analysis : result)
+        })
       })
     },
 
     recordTaskReview(review: DbTaskReview, observations: DbReviewObservation[]) {
       return withInitializedDb(async (db) => {
+        return withTransaction(db, async (db) => {
         const schemaDb = db.withSchema(schemaName)
+        const workflow = await schemaDb.selectFrom("workflows").select("id").where("id", "=", review.workflowId).executeTakeFirst()
+        if (!workflow) return notFound(`Workflow ${review.workflowId} was not found`)
+        const task = await schemaDb.selectFrom("tasks").select("id").where("id", "=", review.taskId).where("workflow_id", "=", review.workflowId).executeTakeFirst()
+        if (!task) return notFound(`Task ${review.taskId} was not found`)
+        const mismatchedObservation = observations.find((observation) => observation.reviewId !== review.id)
+        if (mismatchedObservation) return invalidInput(`Review observation ${mismatchedObservation.id} references ${mismatchedObservation.reviewId}, not ${review.id}`)
         await schemaDb.insertInto("task_reviews").values({
           id: review.id,
           workflow_id: review.workflowId,
@@ -989,6 +1220,7 @@ export function createPGliteOpenArtisanRepository(
           }))).execute()
         }
         return openArtisanDbOk(clone(review))
+        })
       })
     },
 
@@ -1002,7 +1234,18 @@ export function createPGliteOpenArtisanRepository(
 
     recordPhaseReview(review: DbPhaseReview, observations: DbReviewObservation[]) {
       return withInitializedDb(async (db) => {
+        return withTransaction(db, async (db) => {
         const schemaDb = db.withSchema(schemaName)
+        const workflow = await schemaDb.selectFrom("workflows").select("id").where("id", "=", review.workflowId).executeTakeFirst()
+        if (!workflow) return notFound(`Workflow ${review.workflowId} was not found`)
+        if (review.artifactVersionId) {
+          const version = await schemaDb.selectFrom("artifact_versions").select(["id", "artifact_id"]).where("id", "=", review.artifactVersionId).executeTakeFirst()
+          if (!version) return notFound(`Artifact version ${review.artifactVersionId} was not found`)
+          const artifact = await schemaDb.selectFrom("artifacts").select("id").where("id", "=", version.artifact_id).where("workflow_id", "=", review.workflowId).executeTakeFirst()
+          if (!artifact) return invalidInput(`Artifact version ${review.artifactVersionId} does not belong to workflow ${review.workflowId}`)
+        }
+        const mismatchedObservation = observations.find((observation) => observation.reviewId !== review.id)
+        if (mismatchedObservation) return invalidInput(`Review observation ${mismatchedObservation.id} references ${mismatchedObservation.reviewId}, not ${review.id}`)
         await schemaDb.insertInto("phase_reviews").values({
           id: review.id,
           workflow_id: review.workflowId,
@@ -1019,6 +1262,7 @@ export function createPGliteOpenArtisanRepository(
           }))).execute()
         }
         return openArtisanDbOk(clone(review))
+        })
       })
     },
 
@@ -1039,7 +1283,21 @@ export function createPGliteOpenArtisanRepository(
 
     recordPatchSuggestion(suggestion: DbPatchSuggestion) {
       return withInitializedDb(async (db) => {
-        await db.withSchema(schemaName).insertInto("patch_suggestions").values({
+        const schemaDb = db.withSchema(schemaName)
+        const workflow = await schemaDb.selectFrom("workflows").select("id").where("id", "=", suggestion.workflowId).executeTakeFirst()
+        if (!workflow) return notFound(`Workflow ${suggestion.workflowId} was not found`)
+        if (suggestion.taskId) {
+          const task = await schemaDb.selectFrom("tasks").select("id").where("id", "=", suggestion.taskId).where("workflow_id", "=", suggestion.workflowId).executeTakeFirst()
+          if (!task) return notFound(`Task ${suggestion.taskId} was not found`)
+        }
+        if (suggestion.reviewObservationId) {
+          const observation = await schemaDb.selectFrom("review_observations").select(["id", "review_id"]).where("id", "=", suggestion.reviewObservationId).executeTakeFirst()
+          if (!observation) return notFound(`Review observation ${suggestion.reviewObservationId} was not found`)
+          const taskReview = await schemaDb.selectFrom("task_reviews").select("id").where("id", "=", observation.review_id).where("workflow_id", "=", suggestion.workflowId).executeTakeFirst()
+          const phaseReview = await schemaDb.selectFrom("phase_reviews").select("id").where("id", "=", observation.review_id).where("workflow_id", "=", suggestion.workflowId).executeTakeFirst()
+          if (!taskReview && !phaseReview) return invalidInput(`Review observation ${suggestion.reviewObservationId} does not belong to workflow ${suggestion.workflowId}`)
+        }
+        await schemaDb.insertInto("patch_suggestions").values({
           id: suggestion.id,
           workflow_id: suggestion.workflowId,
           status: suggestion.status,
@@ -1072,6 +1330,7 @@ export function createPGliteOpenArtisanRepository(
 
     applyPatchSuggestion(application: DbPatchApplication) {
       return withInitializedDb(async (db) => {
+        return withTransaction(db, async (db) => {
         const schemaDb = db.withSchema(schemaName)
         const row = await schemaDb.selectFrom("patch_suggestions").selectAll().where("id", "=", application.patchSuggestionId).executeTakeFirst()
         if (!row) return notFound(`Patch suggestion ${application.patchSuggestionId} was not found`)
@@ -1086,6 +1345,7 @@ export function createPGliteOpenArtisanRepository(
           await schemaDb.updateTable("patch_suggestions").set({ status: suggestion.status, record: clone(suggestion), updated_at: suggestion.updatedAt }).where("id", "=", suggestion.id).execute()
         }
         return openArtisanDbOk(clone(application))
+        })
       })
     },
 
@@ -1097,11 +1357,12 @@ export function createPGliteOpenArtisanRepository(
     },
 
     declareHumanGate(gate: DbHumanGate) {
-      return withInitializedDb((db) => declareHumanGateInDb(db, gate))
+      return withInitializedDb((db) => withTransaction(db, (db) => declareHumanGateInDb(db, gate)))
     },
 
     resolveHumanGate(gateId: DbRecordId, resolvedAt: string) {
       return withInitializedDb(async (db) => {
+        return withTransaction(db, async (db) => {
         const schemaDb = db.withSchema(schemaName)
         const row = await schemaDb.selectFrom("human_gates").selectAll().where("id", "=", gateId).executeTakeFirst()
         if (!row) return notFound(`Human gate ${gateId} was not found`)
@@ -1113,6 +1374,7 @@ export function createPGliteOpenArtisanRepository(
           await schemaDb.updateTable("tasks").set({ status: task.status, record: clone(task), updated_at: task.updatedAt }).where("id", "=", task.id).execute()
         }
         return openArtisanDbOk(gate)
+        })
       })
     },
 
@@ -1126,7 +1388,18 @@ export function createPGliteOpenArtisanRepository(
 
     recordAgentLease(lease: DbAgentLease) {
       return withInitializedDb(async (db) => {
-        await db.withSchema(schemaName).insertInto("agent_leases").values({
+        const schemaDb = db.withSchema(schemaName)
+        const workflow = await schemaDb.selectFrom("workflows").select("id").where("id", "=", lease.workflowId).executeTakeFirst()
+        if (!workflow) return notFound(`Workflow ${lease.workflowId} was not found`)
+        const existingLease = await schemaDb.selectFrom("agent_leases").select(["id", "workflow_id"]).where("id", "=", lease.id).executeTakeFirst()
+        if (existingLease && existingLease.workflow_id !== lease.workflowId) {
+          return invalidState(`Agent lease ${lease.id} already belongs to workflow ${existingLease.workflow_id}`)
+        }
+        if (lease.taskId) {
+          const task = await schemaDb.selectFrom("tasks").select("id").where("id", "=", lease.taskId).where("workflow_id", "=", lease.workflowId).executeTakeFirst()
+          if (!task) return notFound(`Task ${lease.taskId} was not found`)
+        }
+        await schemaDb.insertInto("agent_leases").values({
           id: lease.id,
           workflow_id: lease.workflowId,
           session_id: lease.sessionId,
@@ -1154,7 +1427,14 @@ export function createPGliteOpenArtisanRepository(
 
     recordFileClaim(claim: DbFileClaim) {
       return withInitializedDb(async (db) => {
-        await db.withSchema(schemaName).insertInto("file_claims").values({
+        const schemaDb = db.withSchema(schemaName)
+        const lease = await schemaDb.selectFrom("agent_leases").select("id").where("id", "=", claim.agentLeaseId).executeTakeFirst()
+        if (!lease) return notFound(`Agent lease ${claim.agentLeaseId} was not found`)
+        const existingClaim = await schemaDb.selectFrom("file_claims").select(["id", "agent_lease_id"]).where("id", "=", claim.id).executeTakeFirst()
+        if (existingClaim && existingClaim.agent_lease_id !== claim.agentLeaseId) {
+          return invalidState(`File claim ${claim.id} already belongs to agent lease ${existingClaim.agent_lease_id}`)
+        }
+        await schemaDb.insertInto("file_claims").values({
           id: claim.id,
           agent_lease_id: claim.agentLeaseId,
           path: claim.path,
@@ -1180,7 +1460,18 @@ export function createPGliteOpenArtisanRepository(
 
     recordWorktreeObservation(observation: DbWorktreeObservation) {
       return withInitializedDb(async (db) => {
-        await db.withSchema(schemaName).insertInto("worktree_observations").values({
+        const schemaDb = db.withSchema(schemaName)
+        const workflow = await schemaDb.selectFrom("workflows").select("id").where("id", "=", observation.workflowId).executeTakeFirst()
+        if (!workflow) return notFound(`Workflow ${observation.workflowId} was not found`)
+        if (observation.taskId) {
+          const task = await schemaDb.selectFrom("tasks").select("id").where("id", "=", observation.taskId).where("workflow_id", "=", observation.workflowId).executeTakeFirst()
+          if (!task) return notFound(`Task ${observation.taskId} was not found`)
+        }
+        if (observation.agentLeaseId) {
+          const lease = await schemaDb.selectFrom("agent_leases").select("id").where("id", "=", observation.agentLeaseId).where("workflow_id", "=", observation.workflowId).executeTakeFirst()
+          if (!lease) return notFound(`Agent lease ${observation.agentLeaseId} was not found`)
+        }
+        await schemaDb.insertInto("worktree_observations").values({
           id: observation.id,
           workflow_id: observation.workflowId,
           path: observation.path,
@@ -1202,7 +1493,17 @@ export function createPGliteOpenArtisanRepository(
 
     recordFastForward(record: DbFastForwardRecord) {
       return withInitializedDb(async (db) => {
-        await db.withSchema(schemaName).insertInto("fast_forward_records").values({
+        const schemaDb = db.withSchema(schemaName)
+        const workflow = await schemaDb.selectFrom("workflows").select("id").where("id", "=", record.workflowId).executeTakeFirst()
+        if (!workflow) return notFound(`Workflow ${record.workflowId} was not found`)
+        const patchSuggestionIds = unique(record.patchSuggestionIds)
+        if (patchSuggestionIds.length > 0) {
+          const patchRows = await schemaDb.selectFrom("patch_suggestions").select("id").where("id", "in", patchSuggestionIds).where("workflow_id", "=", record.workflowId).execute()
+          const existingPatchIds = new Set(patchRows.map((row) => row.id))
+          const missingPatchId = patchSuggestionIds.find((id) => !existingPatchIds.has(id))
+          if (missingPatchId) return notFound(`Patch suggestion ${missingPatchId} was not found`)
+        }
+        await schemaDb.insertInto("fast_forward_records").values({
           id: record.id,
           workflow_id: record.workflowId,
           record: clone(record),
@@ -1220,9 +1521,10 @@ export function createPGliteOpenArtisanRepository(
     },
 
     importWorkflowState(state: WorkflowState) {
+      const validationError = validateWorkflowState(state)
+      if (validationError) return Promise.resolve(invalidInput<JsonWorkflowImportResult>(String(validationError)))
       return withInitializedDb(async (db) => {
-        return db.transaction().execute(async (tx) => transactionStorage.run(tx as unknown as DbExecutor, async () => {
-        const db = tx as unknown as DbExecutor
+        return withTransaction(db, async (db) => {
         const featureName = state.featureName ?? state.sessionId
         const workflowId = `workflow:${featureName}`
         const schemaDb = db.withSchema(schemaName)
@@ -1307,7 +1609,7 @@ export function createPGliteOpenArtisanRepository(
           }
         }
         return openArtisanDbOk({ workflowId, featureName, warnings: [] })
-        }))
+        })
       })
     },
 

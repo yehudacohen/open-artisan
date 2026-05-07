@@ -224,8 +224,13 @@ export interface SystemTransformInput {
  * Returns the string to prepend to the system prompt.
  * Pure function — does NOT mutate anything.
  */
-export function buildWorkflowSystemPrompt(state: WorkflowState): string {
+export interface WorkflowSystemPromptOptions {
+  reviewMode?: "agent" | "isolated"
+}
+
+export function buildWorkflowSystemPrompt(state: WorkflowState, options: WorkflowSystemPromptOptions = {}): string {
   const blocks: string[] = []
+  const reviewMode = options.reviewMode ?? "agent"
 
   // 1. State header (phase, mode, constraints)
   blocks.push(buildStateHeader(state))
@@ -266,7 +271,7 @@ export function buildWorkflowSystemPrompt(state: WorkflowState): string {
   }
 
   // 3. Current sub-state context (with MODE_SELECT and DONE special cases)
-  blocks.push(buildSubStateContext(state))
+  blocks.push(buildSubStateContext(state, reviewMode))
 
   // 4. Blocked tools list (M10 — impl plan §4.6)
   if (state.phase !== "MODE_SELECT" && state.phase !== "DONE") {
@@ -289,11 +294,9 @@ export function buildWorkflowSystemPrompt(state: WorkflowState): string {
     // wasting review iterations.
     const expectedCount = countExpectedBlockingCriteria(criteria)
     if (expectedCount > 0) {
-      blocks.push(
-        `**Required:** You must provide exactly **${expectedCount}** blocking criteria assessments ` +
-        `when calling \`mark_satisfied\`. Each must have \`criterion\`, \`met\` (boolean), ` +
-        `\`evidence\` (specific quote or file reference), and \`severity: "blocking"\`.`
-      )
+      blocks.push(reviewMode === "isolated"
+        ? `**Reviewer requirement:** The isolated reviewer must provide exactly **${expectedCount}** blocking criteria assessments with \`criterion\`, \`met\` (boolean), \`evidence\` (specific quote or file reference), and \`severity: "blocking"\`.`
+        : `**Required:** You must provide exactly **${expectedCount}** blocking criteria assessments when calling \`mark_satisfied\`. Each must have \`criterion\`, \`met\` (boolean), \`evidence\` (specific quote or file reference), and \`severity: "blocking"\`.`)
     }
   }
   const criteriaPreview = getAcceptanceCriteriaPreview(state.phase, state.phaseState, state.mode, designDocPath)
@@ -455,7 +458,7 @@ export function buildSubagentContext(parentState: WorkflowState): string {
   return lines.join("\n")
 }
 
-function buildSubStateContext(state: WorkflowState): string {
+function buildSubStateContext(state: WorkflowState, reviewMode: "agent" | "isolated"): string {
   const lines: string[] = ["### Current Action"]
 
   // Special-case terminal and entry phases before checking phaseState
@@ -592,7 +595,11 @@ function buildSubStateContext(state: WorkflowState): string {
       break
     case "TASK_REVIEW":
       lines.push("You are in IMPLEMENTATION/TASK_REVIEW. The completed task is awaiting isolated review.")
-      lines.push("Call `submit_task_review` with the isolated review result to advance the lifecycle.")
+      if (reviewMode === "isolated") {
+        lines.push("Do not call `submit_task_review` from the authoring conversation. The adapter/reviewer runtime will request isolated review context and submit the result.")
+      } else {
+        lines.push("Call `submit_task_review` with the isolated review result to advance the lifecycle.")
+      }
       break
     case "TASK_REVISE":
       lines.push("You are in IMPLEMENTATION/TASK_REVISE. Apply targeted repair for the current task only.")
@@ -607,13 +614,19 @@ function buildSubStateContext(state: WorkflowState): string {
       lines.push("Resume only after `delegated_task_completed` returns control to scheduling.")
       break
     case "REVIEW":
-      lines.push("Self-review is in progress.")
-      lines.push("Read the acceptance criteria for this phase (listed below) and evaluate each one independently.")
-      lines.push("Do NOT assume quality — read the actual files you produced and verify each criterion.")
-      lines.push("When evaluation is complete, call `mark_satisfied` with your per-criterion assessment.")
-      lines.push("If any blocking criterion is not met, address it first, then call `mark_satisfied` again.")
-      lines.push("If a blocking issue is caused by an upstream artifact (e.g. plan, interfaces, conventions),")
-      lines.push("note it in the evidence and mark it unmet — it will escalate to the user after repeated failures.")
+      if (reviewMode === "isolated") {
+        lines.push("Isolated phase review is in progress.")
+        lines.push("Do not call `mark_satisfied` from the authoring conversation. The isolated reviewer evaluates the criteria and submits the review result.")
+        lines.push("Wait for the reviewer/adapter runtime to advance the workflow. If review returns revisions, address them in REVISE.")
+      } else {
+        lines.push("Self-review is in progress.")
+        lines.push("Read the acceptance criteria for this phase (listed below) and evaluate each one independently.")
+        lines.push("Do NOT assume quality — read the actual files you produced and verify each criterion.")
+        lines.push("When evaluation is complete, call `mark_satisfied` with your per-criterion assessment.")
+        lines.push("If any blocking criterion is not met, address it first, then call `mark_satisfied` again.")
+        lines.push("If a blocking issue is caused by an upstream artifact (e.g. plan, interfaces, conventions),")
+        lines.push("note it in the evidence and mark it unmet — it will escalate to the user after repeated failures.")
+      }
       // Remind the agent where the artifact lives so it can verify claims
       {
         const artifactKey = state.phase === "DISCOVERY" ? "conventions"
@@ -623,8 +636,12 @@ function buildSubStateContext(state: WorkflowState): string {
         const diskPath = artifactKey ? state.artifactDiskPaths?.[artifactKey as keyof typeof state.artifactDiskPaths] : null
         if (diskPath && existsSync(diskPath as string)) {
           lines.push("")
-          lines.push(`**Artifact location:** \`${diskPath}\` — read this file to verify your criteria assessments.`)
-          lines.push("Do NOT pass artifact text to `mark_satisfied` — the reviewer reads the file directly.")
+          if (reviewMode === "isolated") {
+            lines.push(`**Artifact location:** \`${diskPath}\` — the isolated reviewer reads this file directly.`)
+          } else {
+            lines.push(`**Artifact location:** \`${diskPath}\` — read this file to verify your criteria assessments.`)
+            lines.push("Do NOT pass artifact text to `mark_satisfied` — the reviewer reads the file directly.")
+          }
         }
       }
       break

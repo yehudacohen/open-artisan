@@ -39,7 +39,7 @@ import { handleIdleCheck } from "#bridge/methods/idle"
 import { handleToolExecute, handleTaskGetReviewContext, handlePhaseGetReviewContext, handleAutoApproveContext } from "#bridge/methods/tool-execute"
 
 import { createSocketTransport } from "#claude-code/src/socket-transport"
-import { DEFAULT_STATE_DIR_NAME, getSocketPath, PID_FILENAME } from "#claude-code/src/constants"
+import { DEFAULT_STATE_DIR_NAME, getSocketPath, getSocketTokenPath, PID_FILENAME } from "#claude-code/src/constants"
 
 // ---------------------------------------------------------------------------
 // Parse CLI args (using node:util parseArgs — handles --flag=value and --flag value)
@@ -174,7 +174,7 @@ async function main() {
     "task.getAutoApproveContext": handleAutoApproveContext,
   })
 
-  // Initialize the engine with agent-only capabilities
+  // Initialize the engine with isolated reviewer capabilities.
   await handleInit({
     projectDir,
     stateDir,
@@ -183,7 +183,7 @@ async function main() {
     registerRuntime: true,
     ...(persistence ? { persistence } : {}),
     capabilities: {
-      selfReview: "agent-only",
+      selfReview: "isolated",
       orchestrator: false,
       discoveryFleet: false,
     },
@@ -192,7 +192,7 @@ async function main() {
   // Start the socket transport
   const transport = createSocketTransport(
     engine.receiveJSON,
-    { socketPath, pidFilePath: join(stateDir, PID_FILENAME) },
+    { socketPath, pidFilePath: join(stateDir, PID_FILENAME), authTokenPath: getSocketTokenPath(stateDir) },
   )
 
   await transport.start()

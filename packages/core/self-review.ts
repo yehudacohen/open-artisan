@@ -91,8 +91,8 @@ export function buildReviewPrompt(req: SelfReviewRequest): string {
   if (req.artifactPaths.length > 0) {
     lines.push(
       "Read each of the following files before evaluating. " +
-      "These are the actual artifact files in the project directory (NOT in .openartisan/ — " +
-      ".openartisan/ is only for plan documents). Do NOT search .openartisan/ for these files.",
+      "These are the exact artifact files selected by the workflow. Markdown planning artifacts may live under .openartisan/; " +
+      "source/interface/test/implementation artifacts must be real project files according to the current phase.",
     )
     lines.push(
       "Evaluate ONLY these listed files as the reviewed artifact set. Imported modules, augmented modules, " +

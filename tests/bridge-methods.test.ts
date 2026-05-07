@@ -203,6 +203,65 @@ describe("guard.check", () => {
     expect(result.reason).toContain("INCREMENTAL")
   })
 
+  it("blocks bash write operators in structural task review state", async () => {
+    await ctx.engine!.store.update("s1", (d) => {
+      d.mode = "GREENFIELD"
+      d.phase = "IMPLEMENTATION"
+      d.phaseState = "TASK_REVIEW"
+      d.featureName = "review-feat"
+    })
+    const result = await handleGuardCheck({
+      toolName: "bash",
+      args: { command: "echo 'bad' > src/file.ts" },
+      sessionId: "s1",
+    }, ctx) as GuardCheckResult
+    expect(result.allowed).toBe(false)
+    expect(result.reason).toContain("Bash command blocked")
+  })
+
+  it("blocks bash write operators in MODE_SELECT", async () => {
+    const result = await handleGuardCheck({
+      toolName: "bash",
+      args: { command: "echo 'bad' > file.txt" },
+      sessionId: "s1",
+    }, ctx) as GuardCheckResult
+    expect(result.allowed).toBe(false)
+    expect(result.reason).toContain("Bash command blocked")
+  })
+
+  it("treats Hermes execute_command as bash for write-operator blocking", async () => {
+    await ctx.engine!.store.update("s1", (d) => {
+      d.mode = "INCREMENTAL"
+      d.phase = "IMPLEMENTATION"
+      d.phaseState = "DRAFT"
+      d.featureName = "inc-feat"
+      d.fileAllowlist = ["/project/src/foo.ts"]
+    })
+    const result = await handleGuardCheck({
+      toolName: "execute_command",
+      args: { command: "echo 'hello' > /tmp/out.txt" },
+      sessionId: "s1",
+    }, ctx) as GuardCheckResult
+    expect(result.allowed).toBe(false)
+    expect(result.reason).toContain("INCREMENTAL")
+  })
+
+  it("treats Hermes execute_command as bash for phase blocks", async () => {
+    await ctx.engine!.store.update("s1", (d) => {
+      d.mode = "GREENFIELD"
+      d.phase = "PLANNING"
+      d.phaseState = "DRAFT"
+      d.featureName = "plan-feat"
+    })
+    const result = await handleGuardCheck({
+      toolName: "execute_command",
+      args: { command: "bun test" },
+      sessionId: "s1",
+    }, ctx) as GuardCheckResult
+    expect(result.allowed).toBe(false)
+    expect(result.reason).toContain("blocked")
+  })
+
   it("allows apply_patch when extracted patch targets satisfy INTERFACES policy", async () => {
     await ctx.engine!.store.update("s1", (d) => {
       d.mode = "GREENFIELD"
@@ -404,6 +463,23 @@ describe("message.process", () => {
       parts: [{ type: "text", text: "looks good, approved" }],
     }, ctx) as MessageProcessResult
     expect(result.intercepted).toBe(true)
+    expect(ctx.engine!.store.get("s1")?.userGateMessageReceived).toBe(true)
+  })
+
+  it("does not treat synthetic intercepted messages as user gate input", async () => {
+    await ctx.engine!.store.update("s1", (d) => {
+      d.mode = "GREENFIELD"
+      d.phase = "PLANNING"
+      d.phaseState = "USER_GATE"
+      d.userGateMessageReceived = false
+    })
+    const result = await handleMessageProcess({
+      sessionId: "s1",
+      source: "synthetic",
+      parts: [{ type: "text", text: "adapter lifecycle marker" }],
+    }, ctx) as MessageProcessResult
+    expect(result.intercepted).toBe(true)
+    expect(ctx.engine!.store.get("s1")?.userGateMessageReceived).toBe(false)
   })
 
   it("resets retry count after user guidance following stalled escalation", async () => {

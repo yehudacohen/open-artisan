@@ -62,19 +62,19 @@ Delegation of DAG tasks to independent child workflow sessions.
 - State nesting: `.openartisan/<parent>/sub/<child>/workflow-state.json`
 - Timeout detection (`SUB_WORKFLOW_TIMEOUT_MS` = 30 min)
 - Cascade abort sync when parent plan changes
-- Schema v21
+- Schema v21 at delivery; current runtime schema is v24.
 
 ### Phase 4: Bridge Server ✅
 
 JSON-RPC 2.0 server for out-of-process adapters.
 
-- `packages/bridge/` — 13 methods over stdio
-- `createBridgeEngine` (transport-agnostic) + `createBridgeServer` (stdio transport)
+- `packages/bridge/` — JSON-RPC methods over stdio or authenticated local Unix socket
+- `createBridgeEngine` (transport-agnostic) + `createBridgeServer` / socket transport adapters
 - Capabilities model: `{ selfReview, orchestrator, discoveryFleet }`
-- Agent-only mode: `mark_satisfied`, `submit_feedback(revise)`, `mark_analyze_complete`, `propose_backtrack` work without SubagentDispatcher
+- OpenCode agent-review mode remains available; bridge adapters use isolated reviewer subprocesses for task and phase review submissions.
 - Shared transition functions in `packages/core/tools/transitions.ts`
 - PID file lifecycle, structured logging (pino), policy version tracking
-- Schema v22: orchestrator-driven artifact tracking (`reviewArtifactFiles`, `expectedFiles` on DAG tasks)
+- Schema v24: orchestrator-driven artifact tracking (`reviewArtifactFiles`, `expectedFiles` on DAG tasks) plus approved artifact-file provenance
 
 ### Phase 5a: Claude Code Adapter ✅
 
@@ -92,7 +92,7 @@ JSON-RPC 2.0 server for out-of-process adapters.
 
 `packages/adapter-hermes/` — Python plugin + stdio subprocess.
 
-- **Transport:** Bridge subprocess over stdin/stdout (no socket)
+- **Transport:** Bridge subprocess over stdin/stdout, with shared socket-token support when attaching to a Claude-hosted bridge
 - **Guard enforcement:** Wrapper tools replacing built-in file-write handlers (hooks can't block in Hermes)
 - **Workflow tools:** Native Hermes tools via `registry.register()` with `oa_` prefix
 - **Prompt injection:** `pre_llm_call` hook returns `{"context": text}` — per-turn injection (better than Claude Code's one-shot)
@@ -124,10 +124,10 @@ Each adapter is idiomatic to its platform (Claude Code uses hooks+CLI, Hermes us
 ### Structural enforcement over advisory
 Gates are enforced in code (tool guard, state machine transitions), not prompts. The agent cannot bypass the workflow through rationalization. Hooks block tool calls (Claude Code) or wrapper tools reject them (Hermes).
 
-### Agent-only mode for adapters without SubagentDispatcher
-Adapters that lack LLM subagent capabilities (Claude Code, Hermes) use `capabilities: { selfReview: "agent-only", orchestrator: false, discoveryFleet: false }`. The agent self-reviews, the human reviews at USER_GATE. Shared transition functions in `packages/core/tools/transitions.ts` handle this without duplicating logic per adapter.
+### Isolated review for bridge adapters
+Claude Code and Hermes use `capabilities: { selfReview: "isolated", orchestrator: false, discoveryFleet: false }`. The bridge exposes tokenized review-context methods; adapter hooks spawn isolated reviewer subprocesses and submit `submit_task_review` / `submit_phase_review` with one-time review tokens. OpenCode keeps its native in-process subagent reviewer path.
 
-### Per-task file enforcement (v22)
+### Per-task file enforcement (v24)
 DAG tasks declare `expectedFiles` in the IMPL_PLAN. The tool guard restricts writes to the current task's files. `mark_task_complete` accumulates files into `reviewArtifactFiles` for the reviewer. No directory scanning heuristics.
 
 ### self_review_fail → REVISE (not REVIEW loop)
@@ -135,19 +135,19 @@ When the reviewer rejects, the agent goes to REVISE (not back to REVIEW). The ag
 
 ## Current Test Count
 
-1,543 tests across 63 files. 0 failures.
+`bun run verify:all` runs generated-artifact checks, TypeScript typecheck, whitespace diff checks, Bun tests, core package tests, bridge package tests, PGlite repository tests, and Hermes pytest coverage.
 
 ## File Structure
 
 ```
 packages/
   core/                     Platform-agnostic engine
-    types.ts                Schema v22, WorkflowState, interfaces
+    workflow-state-types.ts Schema v24, WorkflowState, interfaces
     state-machine.ts        34-state FSM, 12 transition events
     session-state.ts        Pluggable persistence, migrations
     state-backend-fs.ts     FileSystem backend
     hooks/                  system-transform, tool-guard, idle, compaction, chat-message
-    tools/                  Tool handlers, transitions.ts (shared agent-only logic)
+    tools/                  Tool handlers and shared transition logic
     scheduler.ts            Sequential DAG scheduler
     dag.ts                  TaskNode with expectedFiles
     self-review.ts          Isolated reviewer dispatch
@@ -177,7 +177,7 @@ packages/
   index.ts                        3900+ lines, all hooks + tools
 
 docs/
-  structured-workflow-design.md   Engine design doc (v19, schema v22)
+  structured-workflow-design.md   Engine design doc (current schema v24)
   structured-workflow-implementation-plan.md   Original implementation roadmap
   platform-plan.md                This file
 ```

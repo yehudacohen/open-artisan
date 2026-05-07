@@ -130,6 +130,8 @@ describe("buildReviewPrompt — intent baseline context", () => {
     expect(prompt).toContain("## User's Original Request")
     expect(prompt).toContain("Build a Discord supervisor harness")
     expect(prompt).not.toContain("ok approve")
+    expect(prompt).toContain("Markdown planning artifacts may live under .openartisan/")
+    expect(prompt).not.toContain("NOT in .openartisan")
   })
 
   it("includes the bespoke self-review structural gate", () => {

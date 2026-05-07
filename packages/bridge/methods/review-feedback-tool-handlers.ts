@@ -15,6 +15,7 @@ import { validateFileBasedReviewArtifacts } from "../../core/tools/file-artifact
 import { parseToolArgs } from "../../core/tool-args"
 import { MarkSatisfiedToolSchema, RequestReviewToolSchema } from "../../core/schemas"
 import { computeMarkSatisfiedTransition, computeRequestReviewTransition } from "../../core/tools/transitions"
+import { createImplDAG } from "../../core/dag"
 
 function requireState(ctx: BridgeContext, sessionId: string): WorkflowState {
   const state = ctx.engine!.store.get(sessionId)
@@ -35,7 +36,7 @@ function artifactHash(text: string): string {
   return createHash("sha256").update(text).digest("hex").slice(0, 16)
 }
 
-function artifactFilesHash(files: string[], cwd: string): string | null {
+export function artifactFilesHash(files: string[], cwd: string): string | null {
   if (files.length === 0) return null
   try {
     const payload = files
@@ -50,9 +51,9 @@ function artifactFilesHash(files: string[], cwd: string): string | null {
   }
 }
 
-async function readCurrentArtifactHash(state: WorkflowState): Promise<string | null> {
+async function readCurrentArtifactHash(state: WorkflowState, cwd: string): Promise<string | null> {
   if (state.reviewArtifactFiles.length > 0) {
-    return artifactFilesHash(state.reviewArtifactFiles, process.cwd())
+    return artifactFilesHash(state.reviewArtifactFiles, cwd)
   }
   const artifactKey = PHASE_TO_ARTIFACT[state.phase]
   if (!artifactKey) return null
@@ -66,13 +67,18 @@ async function readCurrentArtifactHash(state: WorkflowState): Promise<string | n
   }
 }
 
+function classifyReviewResubmission(previousHash: string | null, nextHash: string | null): "changed" | "unchanged" | "unknown" {
+  if (!previousHash || !nextHash) return "unknown"
+  return previousHash === nextHash ? "unchanged" : "changed"
+}
+
 export const handleMarkSatisfied: ToolHandler = async (args, toolCtx, ctx) => {
   if (ctx.capabilities.selfReview !== "agent-only") {
     return subagentError("mark_satisfied", "the self-review subagent (SubagentDispatcher)")
   }
   const state = requireState(ctx, toolCtx.sessionId)
-  const currentArtifactHash = await readCurrentArtifactHash(state)
-  if (state.reviewArtifactHash && currentArtifactHash && state.reviewArtifactHash !== currentArtifactHash) {
+  const currentArtifactHash = await readCurrentArtifactHash(state, toolCtx.directory)
+  if (state.reviewArtifactHash && (!currentArtifactHash || state.reviewArtifactHash !== currentArtifactHash)) {
     return (
       "Error: The artifact changed after it was submitted for review. " +
       "Call `request_review` again so the reviewer evaluates the current artifact instead of stale content."
@@ -143,10 +149,12 @@ export const handleRequestReview: ToolHandler = async (args, toolCtx, ctx) => {
 
     const artifactDiskPath = artifactKey && artifactKey !== "implementation" ? artifactFiles[0] ?? null : null
     const reviewHash = artifactFilesHash(artifactFiles, toolCtx.directory)
+    const resubmissionKind = classifyReviewResubmission(state.reviewArtifactHash, reviewHash)
 
     await store.update(toolCtx.sessionId, (draft) => {
       draft.retryCount = 0
       draft.latestReviewResults = null
+      if (resubmissionKind === "changed") draft.iterationCount = 0
       if (reviewHash) draft.reviewArtifactHash = reviewHash
       if (artifactDiskPath && artifactKey) {
         draft.artifactDiskPaths[artifactKey] = artifactDiskPath
@@ -156,7 +164,28 @@ export const handleRequestReview: ToolHandler = async (args, toolCtx, ctx) => {
 
     const diskMsg = artifactDiskPath ? ` Artifact updated at ${artifactDiskPath}.` : ""
     const filesMsg = artifactFiles.length ? ` Registered ${artifactFiles.length} review file(s).` : ""
-    return `Artifact re-submitted for ${state.phase} review.${diskMsg}${filesMsg}`
+    const kindMsg = resubmissionKind === "changed" ? " Content changed; review iteration count reset." : ""
+    return `Artifact re-submitted for ${state.phase} review.${diskMsg}${filesMsg}${kindMsg}`
+  }
+
+  if (state.phase === "IMPLEMENTATION" && state.implDag && state.implDag.length > 0) {
+    const dag = createImplDAG(Array.from(state.implDag))
+    if (!dag.isComplete()) {
+      const tasks = Array.from(dag.tasks)
+      const agentIncomplete = tasks.filter((task) =>
+        task.status !== "complete" && task.status !== "aborted" && task.status !== "human-gated",
+      )
+      if (agentIncomplete.length > 0) {
+        const complete = tasks.filter((task) => task.status === "complete").length
+        const pendingList = agentIncomplete.map((task) => `  - ${task.id}: ${task.description} (${task.status})`).join("\n")
+        return (
+          `Error: Cannot request review — ${complete}/${tasks.length} DAG tasks are complete. ` +
+          "All agent tasks must be completed via `mark_task_complete` before requesting review.\n\n" +
+          `**Remaining agent tasks:**\n${pendingList}\n\n` +
+          "Complete the current task and call `mark_task_complete`, then continue with the remaining tasks."
+        )
+      }
+    }
   }
 
   const transition = computeRequestReviewTransition(state, ctx.engine!.sm)

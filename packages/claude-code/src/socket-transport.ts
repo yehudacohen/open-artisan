@@ -16,7 +16,9 @@
  */
 
 import { createServer, type Server } from "node:net"
-import { existsSync, unlinkSync, readFileSync } from "node:fs"
+import { existsSync, unlinkSync, readFileSync, writeFileSync, chmodSync } from "node:fs"
+import { dirname, join } from "node:path"
+import { randomBytes } from "node:crypto"
 
 import { attachOrStartBridgeClient, detachBridgeClient, evaluateBridgeShutdownEligibility } from "#bridge/bridge-clients"
 import { discoverBridge } from "#bridge/bridge-discovery"
@@ -31,6 +33,7 @@ import type {
   BridgeShutdownEligibilityParams,
   BridgeShutdownEligibilityResult,
 } from "#bridge/protocol"
+import { SOCKET_TOKEN_FILENAME } from "./constants"
 
 // ---------------------------------------------------------------------------
 // Types
@@ -46,6 +49,8 @@ export interface SocketTransportOptions {
   pidFilePath?: string
   /** Connection timeout in milliseconds (default: 30000). */
   connectionTimeout?: number
+  /** Optional token path. When set, socket requests must include this token. */
+  authTokenPath?: string
 }
 
 // ---------------------------------------------------------------------------
@@ -63,8 +68,48 @@ export function createSocketTransport(
   dispatch: JsonRpcDispatcher,
   opts: SocketTransportOptions,
 ) {
-  const { socketPath, pidFilePath, connectionTimeout = 30_000 } = opts
+  const { socketPath, pidFilePath, connectionTimeout = 30_000, authTokenPath } = opts
   let server: Server | null = null
+  let authToken: string | null = null
+
+  function ensureAuthToken(): string | null {
+    if (!authTokenPath) return null
+    if (authToken) return authToken
+    if (existsSync(authTokenPath)) {
+      authToken = readFileSync(authTokenPath, "utf-8").trim()
+    }
+    if (!authToken) {
+      authToken = randomBytes(32).toString("hex")
+      writeFileSync(authTokenPath, authToken, { encoding: "utf-8", mode: 0o600 })
+    }
+    try {
+      chmodSync(authTokenPath, 0o600)
+    } catch {
+      // Non-fatal on filesystems that do not support POSIX modes.
+    }
+    return authToken
+  }
+
+  function validateAuthenticatedLine(line: string, token: string | null): { ok: true; line: string } | { ok: false; response: string } {
+    if (!token) return { ok: true, line }
+    let parsed: { id?: unknown; openArtisanAuthToken?: unknown }
+    try {
+      parsed = JSON.parse(line) as { id?: unknown; openArtisanAuthToken?: unknown }
+    } catch {
+      return {
+        ok: false,
+        response: JSON.stringify({ jsonrpc: "2.0", error: { code: -32700, message: "Parse error" }, id: null }),
+      }
+    }
+    if (parsed.openArtisanAuthToken !== token) {
+      return {
+        ok: false,
+        response: JSON.stringify({ jsonrpc: "2.0", error: { code: -32001, message: "Unauthorized socket request" }, id: parsed.id ?? null }),
+      }
+    }
+    delete parsed.openArtisanAuthToken
+    return { ok: true, line: JSON.stringify(parsed) }
+  }
 
   function cleanupStaleSocket(): void {
     if (!existsSync(socketPath)) return
@@ -104,6 +149,7 @@ export function createSocketTransport(
   function start(): Promise<void> {
     return new Promise((resolve, reject) => {
       cleanupStaleSocket()
+      const token = ensureAuthToken()
 
       server = createServer((connection) => {
         let buffer = ""
@@ -138,7 +184,14 @@ export function createSocketTransport(
             return
           }
 
-          dispatch(line)
+          const auth = validateAuthenticatedLine(line, token)
+          if (!auth.ok) {
+            clearTimeout(timeout)
+            connection.end(auth.response + "\n")
+            return
+          }
+
+          dispatch(auth.line)
             .then((response) => {
               clearTimeout(timeout)
               if (response) {
@@ -169,6 +222,11 @@ export function createSocketTransport(
       })
 
       server.listen({ path: socketPath }, () => {
+        try {
+          chmodSync(socketPath, 0o600)
+        } catch {
+          // Non-fatal on filesystems that do not support POSIX modes.
+        }
         resolve()
       })
     })
@@ -236,7 +294,10 @@ export async function sendSocketRequest(
     }, timeout)
 
     socket.on("connect", () => {
-      socket.write(JSON.stringify(request) + "\n")
+      const tokenPath = join(dirname(socketPath), SOCKET_TOKEN_FILENAME)
+      const token = existsSync(tokenPath) ? readFileSync(tokenPath, "utf-8").trim() : ""
+      const payload = token ? { ...request, openArtisanAuthToken: token } : request
+      socket.write(JSON.stringify(payload) + "\n")
     })
 
     socket.on("data", (chunk) => {

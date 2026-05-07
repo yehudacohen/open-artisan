@@ -328,6 +328,31 @@ describe("PGlite Open Artisan repository", () => {
     expect(projection.ok && projection.value?.taskGraph?.tasks.map((task) => task.taskKey)).toEqual(["T1", "T2"])
   })
 
+  it("rejects invalid workflow phase states at repository boundary", async () => {
+    const repo = tempRepo()
+    const result = await repo.createWorkflow({
+      ...workflow(),
+      phase: "PLANNING",
+      phaseState: "SCHEDULING" as any,
+    })
+
+    expect(result.ok).toBe(false)
+    expect(!result.ok && result.error.code).toBe("invalid-input")
+  })
+
+  it("validates WorkflowState before compatibility import", async () => {
+    const repo = tempRepo()
+    const state = legacyState()
+    state.phase = "PLANNING"
+    state.phaseState = "SCHEDULING" as any
+
+    const result = await repo.importWorkflowState(state)
+
+    expect(result.ok).toBe(false)
+    expect(!result.ok && result.error.code).toBe("invalid-input")
+    expect(valueOf(await repo.getWorkflowByFeature("legacy-feature"))).toBeNull()
+  })
+
   it("rolls back transactions when an operation returns an error result", async () => {
     const repo = tempRepo()
     const result = await repo.transaction(async (tx) => {
@@ -410,6 +435,7 @@ describe("PGlite Open Artisan repository", () => {
   it("persists artifact, roadmap, event, review, lease, worktree, and fast-forward query surfaces", async () => {
     const repo = tempRepo()
     await repo.createWorkflow(workflow())
+    await repo.replaceTaskGraph("workflow-1", taskGraph())
 
     const roadmapItem = {
       id: "roadmap-1",
@@ -471,6 +497,137 @@ describe("PGlite Open Artisan repository", () => {
 
     expect((await repo.recordFastForward({ id: "ff-1", workflowId: "workflow-1", fromPhase: "TESTS", fromPhaseState: "USER_GATE", toPhase: "IMPL_PLAN", toPhaseState: "DRAFT", reason: "patch only", patchSuggestionIds: [], createdAt: now() })).ok).toBe(true)
     expect(valueOf(await repo.listFastForwards("workflow-1")).map((item) => item.id)).toEqual(["ff-1"])
+  })
+
+  it("rejects relationship writes when parent records are missing", async () => {
+    const repo = tempRepo()
+    await repo.createWorkflow(workflow())
+
+    expect((await repo.appendWorkflowEvent({ id: "event-missing", workflowId: "missing-workflow", event: "repository_import" as const, createdAt: now(), reason: "test" })).ok).toBe(false)
+    expect((await repo.linkWorkflowToRoadmap("workflow-1", "missing-roadmap")).ok).toBe(false)
+    expect((await repo.upsertRoadmapEdge({ fromItemId: "missing-from", toItemId: "missing-to", kind: "depends-on" as const })).ok).toBe(false)
+    expect((await repo.createExecutionSlice({ id: "slice-missing-roadmap", title: "Missing", status: "draft" as const, createdAt: now(), updatedAt: now() }, ["missing-roadmap"])).ok).toBe(false)
+    expect((await repo.upsertArtifact({ id: "artifact-missing-workflow", workflowId: "missing-workflow", artifactKey: "plan" as const, createdAt: now(), updatedAt: now() })).ok).toBe(false)
+    expect((await repo.linkArtifactToRoadmap("missing-artifact", "missing-roadmap")).ok).toBe(false)
+    expect((await repo.approveArtifact({ id: "approval-missing-version", artifactVersionId: "missing-version", approvedBy: "user" as const, createdAt: now() })).ok).toBe(false)
+    expect((await repo.recordTaskReview({ id: "review-missing-task", workflowId: "workflow-1", taskId: "missing-task", recommendation: "pass" as const, passed: true, createdAt: now() }, [])).ok).toBe(false)
+    expect((await repo.recordPhaseReview({ id: "phase-review-missing-version", workflowId: "workflow-1", phase: "PLANNING" as const, artifactVersionId: "missing-version", recommendation: "pass" as const, passed: true, createdAt: now() }, [])).ok).toBe(false)
+    expect((await repo.recordPatchSuggestion({ id: "patch-missing-task", workflowId: "workflow-1", taskId: "missing-task", targetPath: "src/service.ts", summary: "Patch", suggestedPatch: "diff", status: "pending" as const, createdAt: now(), updatedAt: now() })).ok).toBe(false)
+    expect((await repo.recordAgentLease({ id: "lease-missing-workflow", workflowId: "missing-workflow", agentKind: "opencode" as const, sessionId: "s1", heartbeatAt: now(), expiresAt: now(), createdAt: now() })).ok).toBe(false)
+    expect((await repo.recordAgentLease({ id: "lease-missing-task", workflowId: "workflow-1", agentKind: "opencode" as const, sessionId: "s1", taskId: "missing-task", heartbeatAt: now(), expiresAt: now(), createdAt: now() })).ok).toBe(false)
+    expect((await repo.recordFileClaim({ id: "claim-missing-lease", agentLeaseId: "missing-lease", path: "src/service.ts", mode: "write" as const, createdAt: now() })).ok).toBe(false)
+    expect((await repo.recordWorktreeObservation({ id: "wt-missing-task", workflowId: "workflow-1", path: "src/service.ts", status: "modified" as const, classification: "task-owned" as const, taskId: "missing-task", createdAt: now() })).ok).toBe(false)
+    expect((await repo.recordFastForward({ id: "ff-missing-patch", workflowId: "workflow-1", fromPhase: "PLANNING", fromPhaseState: "USER_GATE", toPhase: "INTERFACES", toPhaseState: "DRAFT", reason: "patch", patchSuggestionIds: ["missing-patch"], createdAt: now() })).ok).toBe(false)
+  })
+
+  it("rejects invalid task graph relationships without replacing the prior graph", async () => {
+    const repo = tempRepo()
+    await repo.createWorkflow(workflow())
+    expect((await repo.replaceTaskGraph("workflow-1", taskGraph())).ok).toBe(true)
+
+    const invalidGraph: DbTaskGraph = {
+      ...taskGraph(),
+      dependencies: [{ workflowId: "workflow-1", fromTaskId: "missing-task", toTaskId: "task-2" }],
+    }
+    const result = await repo.replaceTaskGraph("workflow-1", invalidGraph)
+    expect(result.ok).toBe(false)
+
+    const persisted = valueOf(await repo.getTaskGraph("workflow-1"))
+    expect(persisted?.dependencies).toEqual(taskGraph().dependencies)
+    expect(persisted?.tasks.map((task) => task.id)).toEqual(["task-1", "task-2"])
+  })
+
+  it("rejects cyclic task graphs without replacing the prior graph", async () => {
+    const repo = tempRepo()
+    await repo.createWorkflow(workflow())
+    expect((await repo.replaceTaskGraph("workflow-1", taskGraph())).ok).toBe(true)
+
+    const cyclicGraph: DbTaskGraph = {
+      ...taskGraph(),
+      dependencies: [
+        { workflowId: "workflow-1", fromTaskId: "task-1", toTaskId: "task-2" },
+        { workflowId: "workflow-1", fromTaskId: "task-2", toTaskId: "task-1" },
+      ],
+    }
+    const result = await repo.replaceTaskGraph("workflow-1", cyclicGraph)
+    expect(result.ok).toBe(false)
+
+    const persisted = valueOf(await repo.getTaskGraph("workflow-1"))
+    expect(persisted?.dependencies).toEqual(taskGraph().dependencies)
+  })
+
+  it("rejects invalid roadmap replacement edges before mutating existing roadmap", async () => {
+    const repo = tempRepo()
+    const document = {
+      schemaVersion: 1,
+      items: [{ id: "roadmap-1", kind: "feature" as const, title: "DB", status: "todo" as const, priority: 5, createdAt: now(), updatedAt: now() }],
+      edges: [],
+    }
+    expect((await repo.replaceRoadmap(document)).ok).toBe(true)
+
+    const result = await repo.replaceRoadmap({
+      schemaVersion: 1,
+      items: document.items,
+      edges: [{ from: "roadmap-1", to: "missing-roadmap", kind: "depends-on" as const }],
+    })
+    expect(result.ok).toBe(false)
+    expect(valueOf(await repo.readRoadmap())?.items.map((item) => item.id)).toEqual(["roadmap-1"])
+  })
+
+  it("deleteRoadmap clears roadmap relationship projections", async () => {
+    const repo = tempRepo()
+    await repo.createWorkflow(workflow())
+    await repo.createRoadmapItem({ id: "roadmap-1", kind: "feature" as const, title: "DB", status: "todo" as const, priority: 5, createdAt: now(), updatedAt: now() })
+    expect((await repo.linkWorkflowToRoadmap("workflow-1", "roadmap-1")).ok).toBe(true)
+    expect(valueOf(await repo.getWorkflow("workflow-1"))?.roadmapItemIds).toEqual(["roadmap-1"])
+
+    expect((await repo.deleteRoadmap()).ok).toBe(true)
+    expect(valueOf(await repo.getWorkflow("workflow-1"))?.roadmapItemIds).toEqual([])
+  })
+
+  it("rejects missing task claims without creating orphan leases", async () => {
+    const repo = tempRepo()
+    await repo.createWorkflow(workflow())
+    await repo.replaceTaskGraph("workflow-1", taskGraph())
+
+    const result = await repo.claimTask("workflow-1", "missing-task", { id: "claim-lease-1", workflowId: "workflow-1", agentKind: "opencode", sessionId: "s1", taskId: "missing-task", heartbeatAt: now(), expiresAt: now(), createdAt: now() })
+    expect(result.ok).toBe(false)
+    expect(valueOf(await repo.listAgentLeases("workflow-1"))).toEqual([])
+  })
+
+  it("rolls back failed compatibility imports", async () => {
+    const repo = tempRepo()
+    const validState = legacyState()
+    expect((await repo.importWorkflowState(validState)).ok).toBe(true)
+
+    const invalidState = makeWorkflowState({
+      ...validState,
+      implDag: [
+        {
+          id: "T1",
+          description: "Invalid human gate",
+          dependencies: [],
+          expectedTests: [],
+          expectedFiles: ["invalid.md"],
+          estimatedComplexity: "small",
+          status: "human-gated",
+          category: "integration",
+          humanGate: {
+            whatIsNeeded: "Do something manual",
+            why: "External prerequisite",
+            verificationSteps: "Verify manually",
+            resolved: false,
+          },
+        },
+      ],
+    })
+
+    const result = await repo.importWorkflowState(invalidState)
+    expect(result.ok).toBe(false)
+
+    const projection = valueOf(await repo.getWorkflow("workflow:legacy-feature"))
+    expect(projection?.taskGraph?.ownedFiles).toEqual([{ taskId: "workflow:legacy-feature:T1", path: "infra/setup.md" }])
+    expect(projection?.unresolvedHumanGates).toHaveLength(1)
   })
 
   it("analyzes boundary changes and tracks pending patch suggestions", async () => {
@@ -544,6 +701,29 @@ describe("PGlite Open Artisan repository", () => {
     expect(exported.ok).toBe(true)
     expect(exported.ok && exported.value.featureName).toBe("legacy-feature")
     expect(exported.ok && exported.value.implDag?.[0]?.humanGate?.whatIsNeeded).toBe("Provision service")
+  })
+
+  it("preserves resolved human gate task status during compatibility imports", async () => {
+    const repo = tempRepo()
+    const state = legacyState()
+    state.phaseState = "SCHEDULING"
+    state.implDag![0]!.status = "complete"
+    state.implDag![0]!.humanGate = {
+      ...state.implDag![0]!.humanGate!,
+      resolved: true,
+      resolvedAt: "2026-05-01T00:00:00.000Z",
+    }
+
+    const imported = await repo.importWorkflowState(state)
+    expect(imported.ok).toBe(true)
+    const workflowId = imported.ok ? imported.value.workflowId : ""
+    const projection = valueOf(await repo.getWorkflow(workflowId))
+    expect(projection?.unresolvedHumanGates).toEqual([])
+    expect(projection?.taskGraph?.tasks[0]?.status).toBe("complete")
+
+    const exported = valueOf(await repo.exportWorkflowState(workflowId))
+    expect(exported.implDag?.[0]?.status).toBe("complete")
+    expect(exported.implDag?.[0]?.humanGate?.resolved).toBe(true)
   })
 
   it("records workflow transition events from compatibility state imports", async () => {
@@ -669,6 +849,20 @@ describe("PGlite Open Artisan repository", () => {
     await retryLock.release()
   })
 
+  it("allows a waiting workflow lock to acquire after the holder releases", async () => {
+    const schemaName = nextSchemaName()
+    const repoA = trackRepo(createPGliteOpenArtisanRepository({ connection: { dataDir: sharedPGliteDir() }, schemaName }))
+    const repoB = trackRepo(createPGliteOpenArtisanRepository({ connection: { dataDir: sharedPGliteDir() }, schemaName }))
+
+    const heldLock = valueOf(await repoA.lockWorkflowState("legacy-feature", { timeoutMs: 500, pollMs: 10 }))
+    const waiting = repoB.lockWorkflowState("legacy-feature", { timeoutMs: 500, pollMs: 10 })
+    await sleep(50)
+    await heldLock.release()
+
+    const acquired = valueOf(await waiting)
+    await acquired.release()
+  })
+
   it("renews repository workflow locks before short leases expire", async () => {
     const schemaName = nextSchemaName()
     const repoA = trackRepo(createPGliteOpenArtisanRepository({ connection: { dataDir: sharedPGliteDir() }, schemaName }))
@@ -690,8 +884,10 @@ describe("PGlite Open Artisan repository", () => {
     const filesystemBackend = createFileSystemStateBackend(dir)
     const state = legacyState()
     state.phaseState = "REVIEW"
+    ;(state as unknown as Record<string, unknown>)["schemaVersion"] = 21
     state.implDag![0]!.status = "complete"
     state.implDag![0]!.category = "integration"
+    delete (state.implDag![0]! as unknown as Record<string, unknown>)["expectedFiles"]
     delete state.implDag![0]!.humanGate
     await filesystemBackend.write("legacy-feature", JSON.stringify(state, null, 2))
 
@@ -700,6 +896,8 @@ describe("PGlite Open Artisan repository", () => {
     expect(await backend.list()).toEqual(["legacy-feature"])
     const raw = await backend.read("legacy-feature")
     expect(raw).toBeString()
+    expect(raw ? JSON.parse(raw).schemaVersion : null).toBeGreaterThan(21)
+    expect(raw ? JSON.parse(raw).implDag[0].expectedFiles : null).toEqual([])
     const imported = valueOf(await repo.exportWorkflowState("workflow:legacy-feature"))
     expect(imported.phaseState).toBe("REVIEW")
     expect(imported.implDag?.[0]?.id).toBe("T1")
@@ -714,6 +912,9 @@ describe("PGlite Open Artisan repository", () => {
     const backend = createOpenArtisanDbStateBackend(repo, dir, { legacyFallback: filesystemBackend })
     const state = legacyState()
     state.phaseState = "REVIEW"
+    state.implDag![0]!.status = "complete"
+    state.implDag![0]!.category = "integration"
+    delete state.implDag![0]!.humanGate
 
     await backend.write("legacy-feature", JSON.stringify(state, null, 2))
 
@@ -769,11 +970,11 @@ describe("PGlite Open Artisan repository", () => {
     expect((await services.workflow.createWorkflow(workflow())).ok).toBe(true)
     expect(valueOf(await services.workflow.listWorkflows()).map((item) => item.id)).toEqual(["workflow-1"])
     expect((await services.workflow.setPhase("workflow-1", "TESTS", "DRAFT")).ok).toBe(true)
+    expect((await services.roadmap.createItem({ id: "roadmap-1", kind: "feature", title: "DB", status: "todo", priority: 1, createdAt: now(), updatedAt: now() })).ok).toBe(true)
     expect((await services.executionSlices.createSlice({ id: "slice-1", title: "Slice", status: "active", createdAt: now(), updatedAt: now() }, ["roadmap-1"])).ok).toBe(true)
     expect(valueOf(await services.executionSlices.getSlice("slice-1"))?.itemIds).toEqual(["roadmap-1"])
     expect((await services.taskGraph.replaceTaskGraph("workflow-1", taskGraph())).ok).toBe(true)
     expect(valueOf(await services.taskGraph.getTaskGraph("workflow-1"))?.tasks.map((task) => task.id)).toEqual(["task-1", "task-2"])
-    expect((await services.roadmap.createItem({ id: "roadmap-1", kind: "feature", title: "DB", status: "todo", priority: 1, createdAt: now(), updatedAt: now() })).ok).toBe(true)
     expect((await services.roadmap.upsertEdge({ fromItemId: "roadmap-1", toItemId: "roadmap-1", kind: "depends-on" })).ok).toBe(true)
     expect(valueOf(await services.roadmap.listEdges("roadmap-1")).length).toBe(1)
     expect(valueOf(await services.roadmap.listItems()).map((item) => item.id)).toEqual(["roadmap-1"])

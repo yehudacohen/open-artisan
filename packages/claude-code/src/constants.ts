@@ -12,6 +12,9 @@ export const DEFAULT_STATE_DIR_NAME = ".openartisan"
 /** Socket filename within the state directory. */
 export const SOCKET_FILENAME = ".bridge.sock"
 
+/** Local auth token filename used by the Unix socket transport. */
+export const SOCKET_TOKEN_FILENAME = ".bridge-token"
+
 /** Active session file within the state directory. */
 export const ACTIVE_SESSION_FILENAME = ".active-session"
 
@@ -21,6 +24,11 @@ export const ENABLED_FILENAME = ".enabled"
 /** Resolve the socket path from a state directory. */
 export function getSocketPath(stateDir: string): string {
   return join(stateDir, SOCKET_FILENAME)
+}
+
+/** Resolve the socket auth token path from a state directory. */
+export function getSocketTokenPath(stateDir: string): string {
+  return join(stateDir, SOCKET_TOKEN_FILENAME)
 }
 
 /** Resolve the active session file path from a state directory. */

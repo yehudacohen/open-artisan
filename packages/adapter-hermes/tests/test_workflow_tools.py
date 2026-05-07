@@ -252,9 +252,8 @@ class TestBridgeDelegation:
         assert params["name"] == "reset_task"
         assert params["args"]["task_ids"] == ["T3"]
 
-    def test_submit_task_review_delegates_review_output(self, started_bridge):
-        """oa_submit_task_review should relay review_output to bridge tool.execute."""
-        started_bridge.set_response("tool.execute", 'Task "T1" review passed.')
+    def test_submit_task_review_is_reviewer_reserved(self, started_bridge):
+        """oa_submit_task_review is not author-callable; the hook submits reviewer output."""
         result = _handle_workflow_tool(
             started_bridge,
             "submit_task_review",
@@ -262,12 +261,9 @@ class TestBridgeDelegation:
             "/tmp/project",
             {"review_output": '{"passed": true, "issues": []}'},
         )
-        assert "review passed" in result
-        calls = started_bridge.get_calls("tool.execute")
-        assert len(calls) == 1
-        params = calls[0][1]
-        assert params["name"] == "submit_task_review"
-        assert params["args"]["review_output"] == '{"passed": true, "issues": []}'
+        parsed = json.loads(result)
+        assert "reserved for isolated reviewers" in parsed["error"]
+        assert started_bridge.get_calls("tool.execute") == []
 
     def test_mark_satisfied_blocked_during_review(self, started_bridge):
         """Hermes final phase review must be submitted by the isolated reviewer."""
@@ -281,14 +277,11 @@ class TestBridgeDelegation:
         )
 
         parsed = json.loads(result)
-        assert "isolated phase reviewer" in parsed["error"]
+        assert "reserved for isolated reviewers" in parsed["error"]
         assert started_bridge.get_calls("tool.execute") == []
 
-    def test_submit_feedback_relays_user_message_first(self, started_bridge):
-        """submit_feedback should relay the actual user text through message.process first."""
-        started_bridge.set_response(
-            "message.process", {"intercepted": True, "parts": []}
-        )
+    def test_submit_feedback_does_not_mark_user_message(self, started_bridge):
+        """Model-callable submit_feedback must not satisfy USER_GATE itself."""
         started_bridge.set_response(
             "tool.execute", "Approved. Transitioning to PLANNING/DRAFT."
         )
@@ -302,18 +295,12 @@ class TestBridgeDelegation:
         )
 
         assert "Approved" in result
-        message_calls = started_bridge.get_calls("message.process")
-        assert len(message_calls) == 1
-        assert message_calls[0][1]["sessionId"] == "test-session"
-        assert message_calls[0][1]["parts"][0]["text"] == "approved"
+        assert started_bridge.get_calls("message.process") == []
 
-    def test_submit_feedback_without_feedback_text_still_marks_user_message(
+    def test_submit_feedback_without_feedback_text_does_not_mark_user_message(
         self, started_bridge
     ):
-        """submit_feedback should still call message.process when Hermes omits feedback_text."""
-        started_bridge.set_response(
-            "message.process", {"intercepted": True, "parts": []}
-        )
+        """Hermes tool calls are model-callable and cannot prove user input."""
         started_bridge.set_response(
             "tool.execute", "Approval recorded. Transitioning to PLANNING/DRAFT."
         )
@@ -327,17 +314,9 @@ class TestBridgeDelegation:
         )
 
         assert "Approval recorded" in result
-        message_calls = started_bridge.get_calls("message.process")
-        assert len(message_calls) == 1
-        assert (
-            message_calls[0][1]["parts"][0]["text"]
-            == "(user invoked submit_feedback via Hermes)"
-        )
+        assert started_bridge.get_calls("message.process") == []
 
     def test_submit_feedback_passes_resolved_human_gates(self, started_bridge):
-        started_bridge.set_response(
-            "message.process", {"intercepted": True, "parts": []}
-        )
         started_bridge.set_response(
             "tool.execute", "Resolved 1 human gate(s): T1."
         )
@@ -355,6 +334,7 @@ class TestBridgeDelegation:
         )
 
         assert "Resolved 1 human gate" in result
+        assert started_bridge.get_calls("message.process") == []
         tool_calls = started_bridge.get_calls("tool.execute")
         assert len(tool_calls) == 1
         assert tool_calls[0][1]["args"]["resolved_human_gates"] == ["T1"]

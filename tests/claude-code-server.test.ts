@@ -89,7 +89,7 @@ describe("artisan-server", () => {
     expect(response.result).toBe("pong")
   }, 15000)
 
-  it("initializes with agent-only capabilities", async () => {
+  it("initializes with isolated review capabilities", async () => {
     await startServer()
     // Create a session
     await rpc("lifecycle.sessionCreated", { sessionId: "test-session" })

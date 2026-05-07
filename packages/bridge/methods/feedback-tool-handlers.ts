@@ -20,6 +20,7 @@ import { SubmitFeedbackToolSchema } from "../../core/schemas"
 import { computeSubmitFeedbackApproveTransition, computeSubmitFeedbackReviseTransition } from "../../core/tools/transitions"
 import {
   buildSubmitFeedbackClarificationMessage,
+  buildSelfApprovalBlockedMessage,
   findReviewedArtifactFilesOutsideAllowlist,
   findUnresolvedHumanGates,
   materializeImplPlanDag,
@@ -483,11 +484,7 @@ export const handleSubmitFeedback: ToolHandler = async (args, toolCtx, ctx) => {
   if (gateError) return `Error: ${gateError}`
 
   if (!state.userGateMessageReceived) {
-    return (
-      "Error: Waiting for user response. Present your artifact summary and " +
-      "wait for the user to respond before calling submit_feedback. " +
-      "The user must review and decide — you cannot self-approve."
-    )
+    return buildSelfApprovalBlockedMessage()
   }
 
   const feedbackType = parsedArgs.data.feedback_type

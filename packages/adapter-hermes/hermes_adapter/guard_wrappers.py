@@ -141,4 +141,7 @@ def _is_artisan_command(command: str) -> bool:
     Returns:
         True if the command matches the ARTISAN_COMMAND_RE pattern.
     """
-    return ARTISAN_COMMAND_RE.search(command) is not None
+    stripped = command.strip()
+    if "\n" in stripped or "\r" in stripped:
+        return False
+    return ARTISAN_COMMAND_RE.fullmatch(stripped) is not None

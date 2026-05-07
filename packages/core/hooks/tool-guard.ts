@@ -270,11 +270,13 @@ export function getPhaseToolPolicy(
     case "MODE_SELECT":
       return {
         blocked: ["write", "edit"],
+        bashCommandPredicate: readOnlyBash,
         allowedDescription: "No file writes or edits until a workflow mode is selected. Bash is allowed for read-only exploration. Call select_mode to begin.",
       }
     case "DONE":
       return {
         blocked: ["write", "edit"],
+        bashCommandPredicate: readOnlyBash,
         allowedDescription: "Workflow complete — no file writes or edits. Bash is allowed for read-only tasks (git log, test runs, etc.). Send a new message to start a fresh workflow cycle.",
       }
 
@@ -317,6 +319,7 @@ export function getPhaseToolPolicy(
             if (isEnvFile(filePath)) return false
             return isOpenArtisanFile(filePath)
           },
+          bashCommandPredicate: readOnlyBash,
           allowedDescription:
             "Discovery review: writes allowed ONLY to .openartisan/ files (to fix review issues). bash allowed for verification. .env writes are always blocked.",
         }
@@ -325,6 +328,7 @@ export function getPhaseToolPolicy(
       if (phaseState === "USER_GATE" || phaseState === "ESCAPE_HATCH") {
         return {
           blocked: ["write", "edit"],
+          bashCommandPredicate: readOnlyBash,
           allowedDescription: "Discovery user gate: no file writes or edits. bash allowed for read-only verification.",
         }
       }
@@ -362,6 +366,7 @@ export function getPhaseToolPolicy(
             if (isEnvFile(filePath)) return false
             return isOpenArtisanFile(filePath)
           },
+          bashCommandPredicate: readOnlyBash,
           allowedDescription:
             "Revision phase: edits allowed ONLY to .openartisan/ plan files. No writes to project source. bash allowed for verification. .env writes are always blocked.",
         }
@@ -375,6 +380,7 @@ export function getPhaseToolPolicy(
             if (isEnvFile(filePath)) return false
             return isOpenArtisanFile(filePath)
           },
+          bashCommandPredicate: readOnlyBash,
           allowedDescription:
             "Planning review: writes allowed ONLY to .openartisan/ files (to fix review issues). bash allowed for verification. .env writes are always blocked.",
         }
@@ -461,6 +467,7 @@ export function getPhaseToolPolicy(
       if (phaseState === "SCHEDULING" || phaseState === "TASK_REVIEW" || phaseState === "HUMAN_GATE" || phaseState === "DELEGATED_WAIT") {
         return {
           blocked: ["write", "edit"],
+          bashCommandPredicate: readOnlyBash,
           allowedDescription:
             "Structural implementation wait/decision state: no source writes or edits while the workflow is scheduling, awaiting task review, blocked on manual action, or waiting on delegated work.",
         }
@@ -472,6 +479,7 @@ export function getPhaseToolPolicy(
         if (fileAllowlist.length === 0) {
           return {
             blocked: ["write", "edit"],
+            bashCommandPredicate: readOnlyBash,
             allowedDescription: "INCREMENTAL mode: no approved file allowlist is available for the current implementation scope — all writes are blocked until the scope is repaired through the workflow.",
           }
         }
@@ -519,6 +527,7 @@ export function getPhaseToolPolicy(
             if (isOpenArtisanFile(filePath)) return true // always allow artifact writes
             return taskSet.has(filePath)
           },
+          bashCommandPredicate: readOnlyBash,
           allowedDescription: `Implementation phase: only current task files may be written (${taskSet.size} files). .openartisan/ always allowed. .env always blocked.`,
         }
       }

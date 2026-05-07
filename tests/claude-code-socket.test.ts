@@ -131,6 +131,36 @@ describe("socket transport — request/response", () => {
     }
   })
 
+  it("requires auth token when configured", async () => {
+    const { connect } = await import("node:net")
+    const transport = createSocketTransport(echoDispatcher, { socketPath, authTokenPath: join(tmpDir, ".bridge-token") })
+    await transport.start()
+    try {
+      const response = await sendSocketRequest(socketPath, {
+        jsonrpc: "2.0",
+        method: "echo",
+        params: { ok: true },
+        id: 1,
+      }) as any
+      expect(response.result.echo).toEqual({ ok: true })
+
+      const unauthorized = await new Promise<any>((resolve) => {
+        const socket = connect({ path: socketPath })
+        let buffer = ""
+        socket.on("connect", () => {
+          socket.write(JSON.stringify({ jsonrpc: "2.0", method: "echo", id: 2 }) + "\n")
+        })
+        socket.on("data", (chunk) => {
+          buffer += chunk.toString()
+        })
+        socket.on("end", () => resolve(JSON.parse(buffer.trim())))
+      })
+      expect(unauthorized.error.message).toContain("Unauthorized")
+    } finally {
+      await transport.stop()
+    }
+  })
+
   it("handles concurrent connections", async () => {
     const transport = createSocketTransport(echoDispatcher, { socketPath })
     await transport.start()

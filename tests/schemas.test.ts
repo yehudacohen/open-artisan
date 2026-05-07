@@ -57,6 +57,7 @@ describe("shared tool schemas", () => {
 
   it("accepts isolated phase review process-output fields", () => {
     const parsed = SubmitPhaseReviewToolSchema.safeParse({
+      review_token: "review-token",
       review_stdout: '{"criteriaResults":[]}',
       review_stderr: "",
       review_exit_code: 0,

@@ -448,6 +448,12 @@ describe("Tool policy — IMPLEMENTATION structural sub-states", () => {
       expect(policy.blocked).toContain("write")
       expect(policy.blocked).toContain("edit")
     })
+
+    it(`IMPLEMENTATION/${phaseState} blocks bash write operators`, () => {
+      const policy = getPhaseToolPolicy("IMPLEMENTATION", phaseState, "INCREMENTAL", allowlist, taskFiles)
+      expect(policy.bashCommandPredicate?.("echo bad > src/file.ts")).toBe(false)
+      expect(policy.bashCommandPredicate?.("bun test")).toBe(true)
+    })
   }
 
   it("IMPLEMENTATION/TASK_REVISE preserves current-task file restrictions for targeted repair", () => {
@@ -644,6 +650,8 @@ describe("Tool policy — MODE_SELECT blocks write and edit but allows bash", ()
   it("MODE_SELECT allows bash (read-only exploration for mode selection)", () => {
     const policy = getPhaseToolPolicy("MODE_SELECT", "DRAFT", null, [])
     expect(policy.blocked).not.toContain("bash")
+    expect(policy.bashCommandPredicate?.("echo bad > file.txt")).toBe(false)
+    expect(policy.bashCommandPredicate?.("git status")).toBe(true)
   })
 })
 
@@ -657,6 +665,8 @@ describe("Tool policy — DONE blocks write and edit but allows bash", () => {
   it("DONE allows bash for read-only post-completion tasks", () => {
     const policy = getPhaseToolPolicy("DONE", "DRAFT", "GREENFIELD", [])
     expect(policy.blocked).not.toContain("bash")
+    expect(policy.bashCommandPredicate?.("echo bad > file.txt")).toBe(false)
+    expect(policy.bashCommandPredicate?.("git log --oneline")).toBe(true)
   })
 })
 

@@ -10,7 +10,7 @@
  * Structural guarantees:
  * - File write guards remain in the PreToolUse hook (intercepts built-in tools)
  * - Workflow tools go through bridge tool.execute (validates state transitions)
- * - submit_feedback calls message.process first (USER_GATE enforcement)
+ * - USER_GATE input is recorded only by adapter-observed user messages, not model-callable tools
  * - The MCP server is a thin relay — all logic is in the bridge
  *
  * Usage:
@@ -72,21 +72,13 @@ async function bridgeCall(
 }
 
 async function execTool(name: string, args: Record<string, unknown> = {}): Promise<string> {
-  if (name === "mark_satisfied") {
-    return "Error: mark_satisfied is reserved for isolated reviewers. Use request_review and let the Claude Code hook submit submit_phase_review."
+  if (name === "mark_satisfied" || name === "submit_task_review" || name === "submit_phase_review") {
+    return `Error: ${name} is reserved for isolated reviewers. Use request_review/mark_task_complete and let the Claude Code hook submit reviewer results.`
   }
 
   // Ensure session is registered
   const sessionId = getSessionId()
   await bridgeCall("lifecycle.sessionCreated", { sessionId })
-
-  // For submit_feedback: call message.process first (USER_GATE structural enforcement)
-  if (name === "submit_feedback") {
-    await bridgeCall("message.process", {
-      sessionId,
-      parts: [{ type: "text", text: "(user invoked submit_feedback via MCP tool)" }],
-    })
-  }
 
   const result = await bridgeCall("tool.execute", {
     name,

@@ -24,6 +24,9 @@ export const handleGuardCheck: MethodHandler = async (params, ctx) => {
 
   const { store, sessions } = ctx.engine!
   const toolName = p.toolName.toLowerCase()
+  const policyToolName = toolName === "execute_command" || toolName === "shell" || toolName === "run_command"
+    ? "bash"
+    : toolName
 
   // Resolve effective state: for child sessions, use parent's state
   // (unless child has its own state — sub-workflow)
@@ -69,7 +72,7 @@ export const handleGuardCheck: MethodHandler = async (params, ctx) => {
   const policy = getPhaseToolPolicy(state.phase, state.phaseState, state.mode, state.fileAllowlist, taskExpectedFiles)
 
   // Check blocked list
-  if (policy.blocked.some((blocked) => toolName.includes(blocked))) {
+  if (policy.blocked.some((blocked) => policyToolName.includes(blocked))) {
     return {
       allowed: false,
       reason: `Tool "${p.toolName}" is blocked in ${state.phase}/${state.phaseState}. ${policy.allowedDescription}`,
@@ -78,7 +81,7 @@ export const handleGuardCheck: MethodHandler = async (params, ctx) => {
   }
 
   // Check bash command predicate
-  if (policy.bashCommandPredicate && toolName.includes("bash")) {
+  if (policy.bashCommandPredicate && policyToolName.includes("bash")) {
     const command = (p.args?.["command"] ?? p.args?.["cmd"] ?? p.args?.["script"] ?? "") as string
     if (command && !policy.bashCommandPredicate(command)) {
       return {
@@ -92,7 +95,7 @@ export const handleGuardCheck: MethodHandler = async (params, ctx) => {
   // Check write path predicate
   if (policy.writePathPredicate) {
     const writeTokens = ["write", "edit", "patch", "create", "overwrite"]
-    if (writeTokens.some((t) => toolName.includes(t))) {
+    if (writeTokens.some((t) => policyToolName.includes(t))) {
       const filePaths = extractWriteToolPaths(p.args)
       if (filePaths.length === 0) {
         return {

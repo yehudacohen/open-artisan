@@ -18,12 +18,20 @@ import {
   DB_OPERATION_LEASE_TIMEOUT_MS,
 } from "./constants"
 
+export type DatabaseOperationLeaseRenewal = (input: {
+  leaseKey: string
+  ownerId: string
+  leaseMs: number
+  intervalMs: number
+}) => () => void
+
 export interface DatabaseOperationLeaseOptions {
   leaseKey: string
   ownerId?: string
   timeoutMs?: number
   pollMs?: number
   leaseMs?: number
+  renew?: DatabaseOperationLeaseRenewal
 }
 
 export interface DatabaseOperationLease {
@@ -58,40 +66,12 @@ function isExpectedLeaseContention(error: unknown): boolean {
   return /duplicate|unique|constraint|primary key/i.test(message)
 }
 
-function startLeaseRenewal(
-  schemaDb: Kysely<DatabaseOperationLeaseDatabase>,
-  leaseKey: string,
-  ownerId: string,
-  leaseMs: number,
-): () => void {
-  const intervalMs = Math.max(Math.floor(leaseMs / DB_OPERATION_LEASE_RENEWAL_DIVISOR), DB_OPERATION_LEASE_MIN_RENEWAL_MS)
-  const timer = setInterval(() => {
-    const now = new Date().toISOString()
-    const leaseExpiresAt = new Date(Date.now() + leaseMs).toISOString()
-    void schemaDb
-      .updateTable("database_operation_locks")
-      .set({
-        lease_expires_at: leaseExpiresAt,
-        updated_at: now,
-      })
-      .where("lock_key", "=", leaseKey)
-      .where("owner_id", "=", ownerId)
-      .execute()
-      .catch(() => {
-        // Best-effort renewal. Release or expiry will let another owner proceed.
-      })
-  }, intervalMs)
-  timer.unref?.()
-  return () => clearInterval(timer)
-}
-
 function buildLease(
   schemaDb: Kysely<DatabaseOperationLeaseDatabase>,
   leaseKey: string,
   ownerId: string,
-  leaseMs: number,
+  stopRenewal: () => void,
 ): DatabaseOperationLease {
-  const stopRenewal = startLeaseRenewal(schemaDb, leaseKey, ownerId, leaseMs)
   let released = false
   return {
     ownerId,
@@ -121,6 +101,7 @@ export async function acquireDatabaseOperationLease(
   const timeoutMs = options.timeoutMs ?? DB_OPERATION_LEASE_TIMEOUT_MS
   const pollMs = options.pollMs ?? DB_OPERATION_LEASE_POLL_MS
   const leaseMs = options.leaseMs ?? DB_OPERATION_LEASE_MS
+  const intervalMs = Math.max(Math.floor(leaseMs / DB_OPERATION_LEASE_RENEWAL_DIVISOR), DB_OPERATION_LEASE_MIN_RENEWAL_MS)
   const deadline = Date.now() + timeoutMs
   const schemaDb = db.withSchema(schemaName)
   let lastContentionMessage: string | null = null
@@ -141,7 +122,8 @@ export async function acquireDatabaseOperationLease(
       .executeTakeFirst()
 
     if (hasUpdatedRow(updateResult)) {
-      return buildLease(schemaDb, options.leaseKey, ownerId, leaseMs)
+      const stopRenewal = options.renew?.({ leaseKey: options.leaseKey, ownerId, leaseMs, intervalMs }) ?? (() => {})
+      return buildLease(schemaDb, options.leaseKey, ownerId, stopRenewal)
     }
 
     try {
@@ -155,7 +137,8 @@ export async function acquireDatabaseOperationLease(
           updated_at: now,
         })
         .execute()
-      return buildLease(schemaDb, options.leaseKey, ownerId, leaseMs)
+      const stopRenewal = options.renew?.({ leaseKey: options.leaseKey, ownerId, leaseMs, intervalMs }) ?? (() => {})
+      return buildLease(schemaDb, options.leaseKey, ownerId, stopRenewal)
     } catch (error) {
       if (!isExpectedLeaseContention(error)) throw error
       lastContentionMessage = error instanceof Error ? error.message : String(error)

@@ -6,6 +6,7 @@ import { sql, type Kysely } from "kysely"
 
 import { tracePGlite } from "./pglite-trace"
 import type { OpenArtisanDatabase } from "./open-artisan-repository-schema"
+import { acquireDatabaseOperationLease, asDatabaseOperationLeaseDb, createDatabaseOperationLeaseOwner } from "./database-operation-lease"
 
 export const OPEN_ARTISAN_DB_SCHEMA_VERSION = 2
 
@@ -57,19 +58,27 @@ export async function ensureOpenArtisanSchema(input: {
       applied_at text not null
     )
   `).execute(input.db)
-  const appliedMigrationRows = await input.db.withSchema(input.schemaName).selectFrom("schema_migrations").select("version").execute()
-  const appliedMigrations = new Set(appliedMigrationRows.map((row) => row.version))
+  const lease = await acquireDatabaseOperationLease(asDatabaseOperationLeaseDb(input.db), input.schemaName, {
+    leaseKey: `open-artisan:schema-migration:${input.schemaName}`,
+    ownerId: createDatabaseOperationLeaseOwner("open-artisan-migration"),
+  })
+  try {
+    const appliedMigrationRows = await input.db.withSchema(input.schemaName).selectFrom("schema_migrations").select("version").execute()
+    const appliedMigrations = new Set(appliedMigrationRows.map((row) => row.version))
 
-  if (!appliedMigrations.has(1)) {
-    tracePGlite("schema.openartisan.migration.start", { databasePath: input.databasePath, schemaName: input.schemaName, migration: 1 })
-    await applyMigration(input.db, input.schemaName, 1, (tx) => applyOpenArtisanTables(tx, input.schemaName))
-    tracePGlite("schema.openartisan.migration.done", { databasePath: input.databasePath, schemaName: input.schemaName, migration: 1 })
-  }
+    if (!appliedMigrations.has(1)) {
+      tracePGlite("schema.openartisan.migration.start", { databasePath: input.databasePath, schemaName: input.schemaName, migration: 1 })
+      await applyMigration(input.db, input.schemaName, 1, (tx) => applyOpenArtisanTables(tx, input.schemaName))
+      tracePGlite("schema.openartisan.migration.done", { databasePath: input.databasePath, schemaName: input.schemaName, migration: 1 })
+    }
 
-  if (!appliedMigrations.has(2)) {
-    tracePGlite("schema.openartisan.migration.start", { databasePath: input.databasePath, schemaName: input.schemaName, migration: 2 })
-    await applyMigration(input.db, input.schemaName, 2, (tx) => applyOpenArtisanIndexes(tx, input.schemaName))
-    tracePGlite("schema.openartisan.migration.done", { databasePath: input.databasePath, schemaName: input.schemaName, migration: 2 })
+    if (!appliedMigrations.has(2)) {
+      tracePGlite("schema.openartisan.migration.start", { databasePath: input.databasePath, schemaName: input.schemaName, migration: 2 })
+      await applyMigration(input.db, input.schemaName, 2, (tx) => applyOpenArtisanIndexes(tx, input.schemaName))
+      tracePGlite("schema.openartisan.migration.done", { databasePath: input.databasePath, schemaName: input.schemaName, migration: 2 })
+    }
+  } finally {
+    await lease.release()
   }
   tracePGlite("schema.openartisan.done", { databasePath: input.databasePath, schemaName: input.schemaName, durationMs: Date.now() - startedAt })
 }

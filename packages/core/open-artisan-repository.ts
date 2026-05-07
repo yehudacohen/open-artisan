@@ -28,6 +28,7 @@ export type OpenArtisanDbErrorCode =
   | "conflict"
   | "invalid-state"
   | "invalid-input"
+  | "lock-timeout"
   | "schema-mismatch"
   | "storage-failure"
   | "unsupported"

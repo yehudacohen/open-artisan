@@ -1,112 +1,91 @@
 # Open Artisan — Workflow Instructions
 
-You are operating under the Open Artisan phased workflow. This enforces a structured engineering discipline: plan before code, review before approval, one task at a time.
+You are operating under the **Open Artisan** phased workflow. Every coding task goes through sequential phases with structural enforcement. The tool guard blocks operations that don't belong in the current phase — this is not advisory, it is enforced.
 
-## How the workflow works
+## Phases
 
-The workflow has 8 sequential phases. You advance by calling `artisan` commands via Bash. The tool guard blocks file operations that don't belong in the current phase.
+8 sequential phases, each with sub-states:
 
-**Phases:**
-1. **MODE_SELECT** — Choose GREENFIELD, REFACTOR, or INCREMENTAL
-2. **DISCOVERY** — (REFACTOR/INCREMENTAL only) Analyze the existing codebase, produce conventions document
-3. **PLANNING** — Produce a detailed plan document
-4. **INTERFACES** — Define all types, interfaces, and data models (no implementation)
-5. **TESTS** — Write a comprehensive failing test suite
-6. **IMPL_PLAN** — Produce a DAG of implementation tasks with expected files per task
-7. **IMPLEMENTATION** — Implement one task at a time from the DAG
-8. **DONE** — All phases approved
+```
+MODE_SELECT → DISCOVERY → PLANNING → INTERFACES → TESTS → IMPL_PLAN → IMPLEMENTATION → DONE
+```
 
 Each phase follows: **DRAFT → REVIEW → USER_GATE → (optional REVISE)**
 
-- **DRAFT**: Do the work, then call `./artisan request-review`
-- **REVIEW**: Self-evaluate against acceptance criteria, then call `./artisan mark-satisfied`
-- **USER_GATE**: Present the artifact to the user. Wait for their response.
-- **REVISE**: Address feedback, then call `./artisan request-review` again
+## Available Workflow Tools
 
-## Commands
+| Tool | Purpose |
+|------|---------|
+| `./artisan select-mode` | Choose GREENFIELD, REFACTOR, or INCREMENTAL + set feature name |
+| `./artisan mark-scan-complete` | Complete discovery scan (REFACTOR/INCREMENTAL) |
+| `./artisan mark-analyze-complete` | Complete discovery analysis |
+| `./artisan mark-satisfied` | OpenCode/self-review compatibility only; bridge adapters use isolated review submission |
+| `./artisan request-review` | Submit review artifacts (`artifact_files`, or markdown via `artifact_markdown`) |
+| `./artisan submit-feedback` | Approve or request revision at USER_GATE |
+| `./artisan mark-task-complete` | Complete a DAG task during IMPLEMENTATION |
+| `./artisan check-prior-workflow` | Check for existing workflow state |
+| `./artisan resolve-human-gate` | Flag a task requiring manual action |
+| `./artisan propose-backtrack` | Go back to an earlier phase |
+| `./artisan spawn-sub-workflow` | Delegate a DAG task to a child workflow |
+| `./artisan query-parent-workflow` | Read parent workflow state (sub-workflows) |
+| `./artisan query-child-workflow` | Read child workflow state (sub-workflows) |
+| `./artisan state` | Show current workflow state |
 
-All workflow commands go through the `artisan` CLI via Bash. Simple commands use flags; complex commands accept JSON on stdin.
+## Expected Behavior Per Sub-State
 
-### Phase progression
-```bash
-# Select mode and feature name
-./artisan select-mode --mode GREENFIELD --feature-name my-feature
+### DRAFT
+Do the work for this phase. When done, call `./artisan request-review`.
 
-# Submit artifact for review (artifact must already exist on disk)
-echo '{"summary":"Plan ready","artifact_description":"The plan","artifact_files":[".openartisan/my-feature/plan.md"]}' | ./artisan request-review
+### REVIEW
+Stop authoring and let the adapter dispatch an isolated reviewer. Do NOT call `./artisan mark-satisfied`; bridge adapters submit isolated reviews through adapter-only review submission.
 
-# Submit artifact for review (file artifacts — list the files you created)
-echo '{"summary":"Interfaces done","artifact_description":"Type definitions","artifact_files":["src/types.ts","src/api.ts"]}' | ./artisan request-review
+### USER_GATE
+Present a clear artifact summary to the user. **STOP and wait for their response.** Do NOT call `./artisan submit-feedback` until the user responds. Not every user message is artifact feedback — casual conversation is fine.
 
-# Self-review against acceptance criteria
-echo '{"criteria_met":[{"criterion":"All requirements addressed","met":true,"evidence":"Verified each requirement","severity":"blocking"}]}' | ./artisan mark-satisfied
+### REVISE
+Address ALL feedback points. Call `./artisan request-review` when done. No check-ins, no partial revisions.
 
-# User approval/revision (after the user responds at USER_GATE)
-echo '{"feedback_type":"approve","feedback_text":"Looks good"}' | ./artisan submit-feedback
-echo '{"feedback_type":"revise","feedback_text":"Add error handling for the API calls"}' | ./artisan submit-feedback
-```
+## What's Blocked Per Phase
 
-### IMPLEMENTATION phase (DAG tasks)
-```bash
-# Complete a task (after implementing and running tests)
-echo '{"task_id":"T1","implementation_summary":"Built auth module","tests_passing":true}' | ./artisan mark-task-complete
+| Phase / Sub-State | Allowed | Blocked |
+|-------------------|---------|---------|
+| MODE_SELECT | Workflow tools, read-only shell | File writes (edit_file, write_file, create_file) |
+| DISCOVERY/SCAN | Read-only tools, workflow tools | File writes, shell execution |
+| DISCOVERY/ANALYZE | Read-only tools, workflow tools | File writes, shell execution |
+| DISCOVERY/CONVENTIONS | `.openartisan/` writes only | Project source writes, shell execution |
+| PLANNING/DRAFT | `.openartisan/` artifact writes only | Project source writes, shell execution |
+| PLANNING/REVIEW | `.openartisan/` writes, read-only shell | Project source writes |
+| PLANNING/USER_GATE | Read-only shell, workflow tools | File writes |
+| PLANNING/REVISE | `.openartisan/` writes, read-only shell | Project source writes |
+| INTERFACES | Interface/type files only (.py, .ts, .d.ts, .proto, etc.) | Implementation files |
+| TESTS | Test files only | Implementation files |
+| IMPL_PLAN/DRAFT | `.openartisan/` artifact writes only | Project source writes, shell execution |
+| IMPL_PLAN/REVIEW | `.openartisan/` writes, read-only shell | Project source writes |
+| IMPL_PLAN/USER_GATE | Read-only shell, workflow tools | File writes |
+| IMPL_PLAN/REVISE | `.openartisan/` writes, read-only shell | Project source writes |
+| IMPLEMENTATION | Files listed in current task's `**Files:**` | Files belonging to other tasks |
+| DONE | Read-only tools, workflow tools | File writes |
 
-# Propose going back to an earlier phase
-echo '{"target_phase":"PLANNING","reason":"The plan is missing critical requirements discovered during implementation"}' | ./artisan propose-backtrack
-```
+`.env` writes are **always blocked** regardless of phase.
 
-### Discovery (REFACTOR/INCREMENTAL only)
-```bash
-./artisan mark-scan-complete --scan-summary "Found 42 source files, 3 test frameworks"
-echo '{"analysis_summary":"Architecture follows MVC pattern with clean separation"}' | ./artisan mark-analyze-complete
-```
+## IMPLEMENTATION Phase Rules
 
-### Status and control
-```bash
-./artisan state         # Show current phase, mode, task, approved artifacts
-./artisan ping          # Check if server is running
-./artisan enable        # Enable workflow enforcement
-./artisan disable       # Disable workflow enforcement
-```
+- One task at a time from the DAG. The current task is shown in the per-turn prompt injection.
+- Call `./artisan mark-task-complete` after each task.
+- The IMPL_PLAN must include `**Files:**` per task — these are enforced by the guard.
+- You cannot write to files belonging to a different task.
 
-## Rules
+## Mode-Specific Rules
 
-1. **You must use `artisan` commands to advance through phases.** There is no shortcut. The tool guard blocks file operations that don't belong in the current phase.
+### GREENFIELD
+No constraints beyond the standard phases. Discovery is skipped.
 
-2. **One task at a time during IMPLEMENTATION.** The DAG scheduler assigns you one task. Complete it, call `./artisan mark-task-complete`, get the next task. You cannot write to files that belong to a different task.
+### REFACTOR
+Full discovery. Existing tests must pass after each implementation task.
 
-3. **IMPL_PLAN must include a `Files:` field per task.** This tells the workflow which files each task will create. Example:
-   ```markdown
-   ## Task T1: Build auth module
-   **Dependencies:** none
-   **Expected tests:** tests/auth.test.ts
-   **Files:** src/auth.ts, src/auth-types.ts
-   **Complexity:** medium
-   ```
+### INCREMENTAL
+Full discovery. File allowlist enforced — you can only modify files explicitly approved during PLANNING. Do-no-harm policy: bash write operators (>, >>, tee, sed -i) are blocked.
 
-4. **For INTERFACES and TESTS phases**, pass `artifact_files` in `request-review` listing every file you created. The reviewer needs to know which files to evaluate.
+## Review Responsibility
 
-5. **At USER_GATE, wait for the user.** Present a clear summary of what was built. Do not call `submit-feedback` until the user responds. You can have casual conversation with the user at USER_GATE — not every message needs to be routed through `submit-feedback`.
-
-6. **If the reviewer rejects your work**, you'll enter REVISE state. Address the feedback, then call `./artisan request-review` again. If you discover a fundamental problem with an earlier phase, call `./artisan propose-backtrack`.
-
-7. **Self-review is your responsibility.** In this mode, `mark-satisfied` evaluates YOUR criteria assessment. Be honest and thorough — the user reviews at USER_GATE.
-
-## What's blocked per phase
-
-| Phase | Sub-state | Blocked | Allowed writes |
-|-------|-----------|---------|---------------|
-| MODE_SELECT | * | write, edit | nothing |
-| DISCOVERY | SCAN, ANALYZE | write, edit, bash | nothing |
-| DISCOVERY | CONVENTIONS | bash | .openartisan/ only |
-| DISCOVERY | REVIEW, REVISE | — | .openartisan/ only |
-| PLANNING, IMPL_PLAN | DRAFT | write, edit, bash | nothing (text-only) |
-| PLANNING, IMPL_PLAN | REVIEW, REVISE | — | .openartisan/ only |
-| INTERFACES | DRAFT | bash | interface/type/schema files only |
-| INTERFACES | REVIEW, REVISE | — | interface/type/schema files only |
-| TESTS | DRAFT | bash | test files only |
-| TESTS | REVIEW, REVISE | — | test files only |
-| IMPLEMENTATION | * | — | current task's files only (per DAG) |
-| DONE | * | write, edit | nothing |
-
-**.env files are always blocked** in all phases. The `./artisan` command is always allowed, even when bash is blocked. During REVIEW/REVISE/USER_GATE, writes are allowed to .openartisan/ for artifact fixes.
+Phase review is handled by an isolated reviewer subprocess with no access to the authoring conversation. Wait for the adapter hook to submit the review result, then continue according to the next prompt.

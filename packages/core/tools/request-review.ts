@@ -1,17 +1,14 @@
 /**
  * request-review.ts — The `request_review` tool definition.
  *
- * The agent calls this when a DRAFT is complete and ready for self-review.
+ * The agent calls this when a DRAFT is complete and ready for review.
  * This signals the state machine to advance to REVIEW state, and kicks off
- * the self-review process (which in Layer 3 uses an isolated subagent).
- *
- * In Layer 1 (current scope), the same session transitions to REVIEW and
- * the agent self-reviews inline using the acceptance criteria.
+ * the review process.
  */
 import type { RequestReviewArgs } from "../review-types"
 
 export const REQUEST_REVIEW_DESCRIPTION = `
-Call this tool when you have completed the current draft and are ready for self-review.
+Call this tool when you have completed the current draft and are ready for review.
 
 Provide:
 - summary: a brief description of what was built in this phase
@@ -60,16 +57,16 @@ export function processRequestReview(args: RequestReviewArgs): RequestReviewResu
   const artifactDesc = (args.artifact_description ?? "").trim()
   if (!summary) {
     return {
-      responseMessage:
-        "Warning: Empty summary provided. Provide a brief summary of what was built. " +
+        responseMessage:
+          "Warning: Empty summary provided. Provide a brief summary of what was built. " +
         "Proceeding to REVIEW state — call `mark_satisfied` when self-review is complete.",
       phaseInstructions: buildReviewInstructions(),
     }
   }
   if (!artifactDesc) {
     return {
-      responseMessage:
-        "Warning: Empty artifact_description provided. Describe the artifact(s) produced. " +
+        responseMessage:
+          "Warning: Empty artifact_description provided. Describe the artifact(s) produced. " +
         "Proceeding to REVIEW state — call `mark_satisfied` when self-review is complete.",
       phaseInstructions: buildReviewInstructions(),
     }

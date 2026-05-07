@@ -36,7 +36,7 @@ export const handlePromptBuild: MethodHandler = async (params, ctx) => {
   const state = store.get(p.sessionId)
   if (!state) return null
 
-  return buildWorkflowSystemPrompt(state)
+  return buildWorkflowSystemPrompt(state, { reviewMode: "isolated" })
 }
 
 export const handlePromptCompaction: MethodHandler = async (params, ctx) => {
@@ -59,7 +59,7 @@ export const handlePromptCompaction: MethodHandler = async (params, ctx) => {
   const state = store.get(p.sessionId)
   if (!state) return null
 
-  const base = buildCompactionContext(state)
+  const base = buildCompactionContext(state, { reviewMode: "isolated" })
   if (state.phaseState === "REDRAFT" && state.backtrackContext) {
     return `${base}\n\n### Backtrack Provenance\n- Source phase: ${state.backtrackContext.sourcePhase}\n- Target phase: ${state.backtrackContext.targetPhase}\n- Reason: ${state.backtrackContext.reason}`
   }

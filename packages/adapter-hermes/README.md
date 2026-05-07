@@ -59,7 +59,7 @@ bridge.shutdown()
 - Thread-safe (lock on stdin/stdout access)
 - Auto-reconnect on subprocess death
 - Eager init in `on_session_start` (not lazy — every session uses the bridge)
-- Capabilities: `selfReview="agent-only"`, `orchestrator=False`, `discoveryFleet=False`
+- Capabilities: `selfReview="isolated"`, `orchestrator=False`, `discoveryFleet=False`
 
 ### Shared local bridge behavior
 
@@ -114,7 +114,7 @@ Workflow tools registered in the `open-artisan` toolset via `ctx.register_tool()
 | `oa_select_mode` | `select_mode` | Choose GREENFIELD/REFACTOR/INCREMENTAL |
 | `oa_mark_scan_complete` | `mark_scan_complete` | Complete discovery scan |
 | `oa_mark_analyze_complete` | `mark_analyze_complete` | Complete discovery analysis |
-| `oa_mark_satisfied` | `mark_satisfied` | Submit self-review criteria |
+| `oa_mark_satisfied` | `mark_satisfied` | Reserved for isolated phase reviewers |
 | `oa_mark_task_complete` | `mark_task_complete` | Complete a DAG task |
 | `oa_reset_task` | `reset_task` | Reset one or more DAG tasks back to pending |
 | `oa_request_review` | `request_review` | Submit artifact for review |
@@ -190,14 +190,14 @@ The prompt is rebuilt from scratch each turn — no stale state.
 - `pre_llm_call` remains observational/per-turn context injection; it is not the continuation trigger
 - Session ID comes from Hermes's `session_id` kwarg on hook callbacks
 
-## Self-Review Mode
+## Review Mode
 
-The bridge runs with agent-only capabilities:
-- `selfReview: "agent-only"` — `oa_mark_satisfied` evaluates the agent's own criteria (no isolated reviewer)
+The bridge runs with isolated review capabilities:
+- `selfReview: "isolated"` — phase reviews are dispatched by the adapter hook; author-facing `oa_mark_satisfied` is blocked
 - `orchestrator: false` — `oa_submit_feedback(revise)` routes directly to REVISE (no LLM classification)
 - `discoveryFleet: false` — `oa_mark_analyze_complete` accepts the agent's scan summary directly
 
-The agent self-evaluates, the human reviews at USER_GATE.
+The isolated reviewer evaluates phase criteria, then the human reviews at USER_GATE.
 
 ## Installation
 
@@ -380,7 +380,7 @@ The adapter communicates with the bridge via JSON-RPC 2.0 over stdio. Key method
 # Initialize
 bridge.call("lifecycle.init", {
     "projectDir": "/path/to/project",
-    "capabilities": {"selfReview": "agent-only", "orchestrator": False, "discoveryFleet": False}
+    "capabilities": {"selfReview": "isolated", "orchestrator": False, "discoveryFleet": False}
 })
 
 # Execute workflow tool

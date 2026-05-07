@@ -109,22 +109,11 @@ async function ensureSession(): Promise<void> {
 
 /** Call tool.execute with the given tool name and args. */
 async function execTool(name: string, args: Record<string, unknown> = {}): Promise<string> {
-  if (name === "mark_satisfied") {
-    return "Error: mark_satisfied is reserved for isolated reviewers. Use request_review and let the Claude Code hook submit submit_phase_review."
+  if (name === "mark_satisfied" || name === "submit_task_review" || name === "submit_phase_review") {
+    return `Error: ${name} is reserved for isolated reviewers. Use request_review/mark_task_complete and let the Claude Code hook submit reviewer results.`
   }
 
   await ensureSession()
-
-  // For submit_feedback: the CLI is invoked directly by the user, so we
-  // must call message.process first to set userGateMessageReceived = true.
-  // Without this, submit_feedback is structurally blocked because the bridge
-  // thinks no user message has been received at USER_GATE.
-  if (name === "submit_feedback") {
-    await call("message.process", {
-      sessionId: getSessionId(),
-      parts: [{ type: "text", text: "(user invoked submit_feedback via CLI)" }],
-    })
-  }
 
   const result = await call("tool.execute", {
     name,

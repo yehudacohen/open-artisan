@@ -11,6 +11,7 @@ import {
   INVALID_STATE,
   SUBAGENT_UNAVAILABLE,
 } from "#bridge/protocol"
+import { validateBridgeMethodParams } from "#bridge/protocol-validation"
 
 describe("Bridge error codes", () => {
   it("defines application error codes in the -32000 range", () => {
@@ -18,5 +19,20 @@ describe("Bridge error codes", () => {
     expect(SESSION_NOT_FOUND).toBe(-32001)
     expect(INVALID_STATE).toBe(-32002)
     expect(SUBAGENT_UNAVAILABLE).toBe(-32003)
+  })
+})
+
+describe("Bridge method param validation", () => {
+  it("rejects invalid tool.execute envelopes", () => {
+    expect(() => validateBridgeMethodParams("tool.execute", {
+      name: "select_mode",
+      args: {},
+      context: {},
+    })).toThrow("context.sessionId")
+  })
+
+  it("passes through unknown internal methods", () => {
+    const params = { arbitrary: true }
+    expect(validateBridgeMethodParams("internal.method", params)).toBe(params)
   })
 })

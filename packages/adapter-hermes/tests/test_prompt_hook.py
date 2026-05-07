@@ -18,6 +18,7 @@ from hermes_adapter.prompt_hook import (
     dispatch_phase_review,
     _dispatch_auto_approve,
     _auto_accept_review,
+    _extract_user_message,
     _review_timeout_s,
 )
 from hermes_adapter.types import BridgeError
@@ -251,13 +252,29 @@ class TestUserGateDetection:
     ):
         """When state is USER_GATE, ordinary Hermes turns should not fake user input."""
         started_bridge.set_response(
-            "state.get", {"phaseState": "USER_GATE", "activeAgent": "artisan"}
+            "state.get", {"phase": "PLANNING", "phaseState": "USER_GATE", "activeAgent": "artisan"}
         )
         started_bridge.set_response("prompt.build", "prompt text")
         hook = create_prompt_hook(started_bridge, "s1")
         hook()
         msg_calls = started_bridge.get_calls("message.process")
         assert len(msg_calls) == 0
+
+    def test_calls_message_process_at_user_gate_with_user_message(
+        self, started_bridge
+    ):
+        """Real user text from Hermes hook kwargs satisfies USER_GATE."""
+        started_bridge.set_response(
+            "state.get", {"phase": "PLANNING", "phaseState": "USER_GATE", "activeAgent": "artisan"}
+        )
+        started_bridge.set_response("message.process", {"intercepted": True, "parts": []})
+        started_bridge.set_response("prompt.build", "prompt text")
+        hook = create_prompt_hook(started_bridge, "s1")
+        hook(user_message="approved by human")
+        msg_calls = started_bridge.get_calls("message.process")
+        assert len(msg_calls) == 1
+        assert msg_calls[0][1]["sessionId"] == "s1"
+        assert msg_calls[0][1]["parts"][0]["text"] == "approved by human"
 
     def test_does_not_call_message_process_at_draft(self, started_bridge):
         """When state is DRAFT, hook should NOT call message.process."""
@@ -267,6 +284,16 @@ class TestUserGateDetection:
         hook()
         msg_calls = started_bridge.get_calls("message.process")
         assert len(msg_calls) == 0
+
+    def test_extract_user_message_from_chat_messages(self):
+        assert _extract_user_message(
+            {
+                "messages": [
+                    {"role": "assistant", "content": "hello"},
+                    {"role": "user", "content": [{"type": "text", "text": "please approve"}]},
+                ]
+            }
+        ) == "please approve"
 
     def test_state_get_failure_does_not_crash(self, started_bridge):
         """If state.get fails, hook should still return prompt context."""
@@ -340,7 +367,7 @@ class TestDispatchTaskReviewSubprocess:
 
     def test_successful_dispatch_submits_review(self, started_bridge):
         """On successful subprocess, should call submit_task_review via tool.execute."""
-        started_bridge.set_response("task.getReviewContext", "Review prompt here")
+        started_bridge.set_response("task.getReviewContext", "Review prompt here\nOPEN_ARTISAN_REVIEW_TOKEN: abc123")
         started_bridge.set_response("tool.execute", "Task review passed")
         state = {"taskCompletionInProgress": "T1"}
 
@@ -366,10 +393,11 @@ class TestDispatchTaskReviewSubprocess:
         assert len(tool_calls) == 1
         assert tool_calls[0][1]["name"] == "submit_task_review"
         assert "review_output" in tool_calls[0][1]["args"]
+        assert tool_calls[0][1]["args"]["review_token"] == "abc123"
 
     def test_subprocess_not_found_calls_auto_accept(self, started_bridge):
         """When claude CLI is not found, should call _auto_accept_review."""
-        started_bridge.set_response("task.getReviewContext", "Review prompt")
+        started_bridge.set_response("task.getReviewContext", "Review prompt\nOPEN_ARTISAN_REVIEW_TOKEN: abc123")
         started_bridge.set_response("tool.execute", "ok")
         state = {"taskCompletionInProgress": "T1"}
 
@@ -386,10 +414,45 @@ class TestDispatchTaskReviewSubprocess:
         review = json.loads(args["review_output"])
         assert review["passed"] is False
         assert any("dispatch failed" in i.lower() for i in review["issues"])
+        assert args["review_token"] == "abc123"
+
+    def test_outer_dispatch_failure_auto_accept_preserves_review_token(self, started_bridge):
+        """When initial submit raises, fallback should reuse the extracted token."""
+        started_bridge.set_response("task.getReviewContext", "Review prompt\nOPEN_ARTISAN_REVIEW_TOKEN: abc123")
+        state = {"taskCompletionInProgress": "T1"}
+
+        mock_result = MagicMock()
+        mock_result.stdout = json.dumps(
+            {
+                "passed": True,
+                "issues": [],
+                "scores": {"code_quality": 9, "error_handling": 9},
+                "reasoning": "All good",
+            }
+        )
+        call_count = 0
+
+        def flaky_tool_execute(_params):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise BridgeError("submit failed")
+            return "ok"
+
+        started_bridge.set_response_fn("tool.execute", flaky_tool_execute)
+
+        with patch(
+            "hermes_adapter.prompt_hook.subprocess.run", return_value=mock_result
+        ):
+            _dispatch_task_review(started_bridge, "s1", state, "/tmp/project")
+
+        tool_calls = started_bridge.get_calls("tool.execute")
+        assert len(tool_calls) == 2
+        assert tool_calls[1][1]["args"]["review_token"] == "abc123"
 
     def test_subprocess_timeout_calls_auto_accept(self, started_bridge):
         """When subprocess times out, should call _auto_accept_review."""
-        started_bridge.set_response("task.getReviewContext", "Review prompt")
+        started_bridge.set_response("task.getReviewContext", "Review prompt\nOPEN_ARTISAN_REVIEW_TOKEN: abc123")
         started_bridge.set_response("tool.execute", "ok")
         state = {"taskCompletionInProgress": "T1"}
 
@@ -403,10 +466,11 @@ class TestDispatchTaskReviewSubprocess:
         assert len(tool_calls) == 1
         review = json.loads(tool_calls[0][1]["args"]["review_output"])
         assert review["passed"] is False
+        assert tool_calls[0][1]["args"]["review_token"] == "abc123"
 
     def test_empty_reviewer_output_calls_auto_accept(self, started_bridge):
         """When reviewer returns empty output, should call _auto_accept_review."""
-        started_bridge.set_response("task.getReviewContext", "Review prompt")
+        started_bridge.set_response("task.getReviewContext", "Review prompt\nOPEN_ARTISAN_REVIEW_TOKEN: abc123")
         started_bridge.set_response("tool.execute", "ok")
         state = {"taskCompletionInProgress": "T1"}
 
@@ -419,6 +483,7 @@ class TestDispatchTaskReviewSubprocess:
             _dispatch_task_review(started_bridge, "s1", state, "/tmp/project")
 
         tool_calls = started_bridge.get_calls("tool.execute")
+        assert tool_calls[0][1]["args"]["review_token"] == "abc123"
         assert len(tool_calls) == 1
         review = json.loads(tool_calls[0][1]["args"]["review_output"])
         assert review["passed"] is False
@@ -447,7 +512,7 @@ class TestPhaseReviewDispatch:
         started_bridge.set_response(
             "state.get", {"taskCompletionInProgress": None, "phase": "PLANNING", "phaseState": "REVIEW"}
         )
-        started_bridge.set_response("task.getPhaseReviewContext", "Phase review prompt")
+        started_bridge.set_response("task.getPhaseReviewContext", "Phase review prompt\nOPEN_ARTISAN_REVIEW_TOKEN: def456")
         started_bridge.set_response("tool.execute", "Phase review submitted")
         started_bridge.set_response("prompt.build", "prompt")
 
@@ -471,9 +536,10 @@ class TestPhaseReviewDispatch:
         tool_calls = started_bridge.get_calls("tool.execute")
         assert len(tool_calls) == 1
         assert tool_calls[0][1]["name"] == "submit_phase_review"
+        assert tool_calls[0][1]["args"]["review_token"] == "def456"
 
     def test_phase_review_submits_reviewer_output(self, started_bridge):
-        started_bridge.set_response("task.getPhaseReviewContext", "Phase review prompt")
+        started_bridge.set_response("task.getPhaseReviewContext", "Phase review prompt\nOPEN_ARTISAN_REVIEW_TOKEN: def456")
         started_bridge.set_response("tool.execute", "Phase review submitted")
         state = {"phase": "IMPLEMENTATION", "phaseState": "REVIEW"}
 
@@ -499,9 +565,10 @@ class TestPhaseReviewDispatch:
         assert tool_calls[0][1]["name"] == "submit_phase_review"
         assert "criteria_results" in tool_calls[0][1]["args"]["review_stdout"]
         assert tool_calls[0][1]["args"]["review_exit_code"] == 0
+        assert tool_calls[0][1]["args"]["review_token"] == "def456"
 
     def test_phase_review_timeout_submits_failure_output(self, started_bridge):
-        started_bridge.set_response("task.getPhaseReviewContext", "Phase review prompt")
+        started_bridge.set_response("task.getPhaseReviewContext", "Phase review prompt\nOPEN_ARTISAN_REVIEW_TOKEN: def456")
         started_bridge.set_response("tool.execute", "Phase review submitted")
         state = {"phase": "PLANNING", "phaseState": "REVIEW"}
 
@@ -515,8 +582,9 @@ class TestPhaseReviewDispatch:
         assert len(tool_calls) == 1
         assert tool_calls[0][1]["name"] == "submit_phase_review"
         assert "review_error" in tool_calls[0][1]["args"]
+        assert tool_calls[0][1]["args"]["review_token"] == "def456"
 
-    def test_phase_review_missing_context_submits_failure_output(self, started_bridge):
+    def test_phase_review_missing_context_does_not_submit_without_token(self, started_bridge):
         started_bridge.set_response("task.getPhaseReviewContext", None)
         started_bridge.set_response("tool.execute", "Phase review submitted")
         state = {"phase": "INTERFACES", "phaseState": "REVIEW"}
@@ -524,14 +592,10 @@ class TestPhaseReviewDispatch:
         dispatch_phase_review(started_bridge, "s1", state, "/tmp/project")
 
         tool_calls = started_bridge.get_calls("tool.execute")
-        assert len(tool_calls) == 1
-        assert tool_calls[0][1]["name"] == "submit_phase_review"
-        assert tool_calls[0][1]["args"] == {
-            "review_error": "Phase review context unavailable"
-        }
+        assert len(tool_calls) == 0
 
     def test_phase_review_nonzero_exit_submits_failure_details(self, started_bridge):
-        started_bridge.set_response("task.getPhaseReviewContext", "Phase review prompt")
+        started_bridge.set_response("task.getPhaseReviewContext", "Phase review prompt\nOPEN_ARTISAN_REVIEW_TOKEN: def456")
         started_bridge.set_response("tool.execute", "Phase review submitted")
         state = {"phase": "PLANNING", "phaseState": "REVIEW"}
 
@@ -551,7 +615,7 @@ class TestPhaseReviewDispatch:
         assert review_args["review_stderr"] == "Please run /login"
 
     def test_phase_review_prose_output_submits_failure_details(self, started_bridge):
-        started_bridge.set_response("task.getPhaseReviewContext", "Phase review prompt")
+        started_bridge.set_response("task.getPhaseReviewContext", "Phase review prompt\nOPEN_ARTISAN_REVIEW_TOKEN: def456")
         started_bridge.set_response("tool.execute", "Phase review submitted")
         state = {"phase": "PLANNING", "phaseState": "REVIEW"}
 
@@ -568,9 +632,10 @@ class TestPhaseReviewDispatch:
         review_args = started_bridge.get_calls("tool.execute")[0][1]["args"]
         assert review_args["review_exit_code"] == 0
         assert review_args["review_stdout"] == "I think this artifact looks good."
+        assert review_args["review_token"] == "def456"
 
     def test_phase_review_empty_stdout_preserves_stderr(self, started_bridge):
-        started_bridge.set_response("task.getPhaseReviewContext", "Phase review prompt")
+        started_bridge.set_response("task.getPhaseReviewContext", "Phase review prompt\nOPEN_ARTISAN_REVIEW_TOKEN: def456")
         started_bridge.set_response("tool.execute", "Phase review submitted")
         state = {"phase": "PLANNING", "phaseState": "REVIEW"}
 
@@ -587,6 +652,7 @@ class TestPhaseReviewDispatch:
         review_args = started_bridge.get_calls("tool.execute")[0][1]["args"]
         assert review_args["review_stdout"] == ""
         assert review_args["review_stderr"] == "Reviewer wrote only stderr"
+        assert review_args["review_token"] == "def456"
 
     def test_reviewer_command_env_override(self, monkeypatch):
         monkeypatch.setenv("OPENARTISAN_REVIEWER_COMMAND", "reviewer --flag {prompt}")

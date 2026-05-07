@@ -33,6 +33,7 @@ from .constants import (
     BRIDGE_METADATA_FILENAME,
     DEFAULT_CAPABILITIES,
     DEFAULT_SOCKET_FILENAME,
+    DEFAULT_SOCKET_TOKEN_FILENAME,
     DEFAULT_STATE_DIR_NAME,
     resolve_bridge_command,
 )
@@ -74,6 +75,10 @@ def _leases_path(state_dir: str) -> Path:
 
 def _socket_path(state_dir: str) -> Path:
     return Path(state_dir) / DEFAULT_SOCKET_FILENAME
+
+
+def _socket_token_path_for_socket(socket_path: str) -> Path:
+    return Path(socket_path).parent / DEFAULT_SOCKET_TOKEN_FILENAME
 
 
 def _is_running_pid(pid: int) -> bool:
@@ -708,6 +713,11 @@ class StdioBridgeClient:
                 "params": params,
                 "id": self._request_id,
             }
+            token_path = _socket_token_path_for_socket(self._socket_path)
+            if token_path.exists():
+                token = token_path.read_text().strip()
+                if token:
+                    request["openArtisanAuthToken"] = token
 
             try:
                 with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:

@@ -19,7 +19,7 @@ Each phase follows: **DRAFT → REVIEW → USER_GATE → (optional REVISE)**
 | `./artisan select-mode` | Choose GREENFIELD, REFACTOR, or INCREMENTAL + set feature name |
 | `./artisan mark-scan-complete` | Complete discovery scan (REFACTOR/INCREMENTAL) |
 | `./artisan mark-analyze-complete` | Complete discovery analysis |
-| `./artisan mark-satisfied` | Submit self-review criteria assessment |
+| `./artisan mark-satisfied` | OpenCode/self-review compatibility only; bridge adapters use isolated review submission |
 | `./artisan request-review` | Submit review artifacts (`artifact_files`, or markdown via `artifact_markdown`) |
 | `./artisan submit-feedback` | Approve or request revision at USER_GATE |
 | `./artisan mark-task-complete` | Complete a DAG task during IMPLEMENTATION |
@@ -37,7 +37,7 @@ Each phase follows: **DRAFT → REVIEW → USER_GATE → (optional REVISE)**
 Do the work for this phase. When done, call `./artisan request-review`.
 
 ### REVIEW
-Self-evaluate against the acceptance criteria shown in the per-turn prompt injection. Evaluate each criterion independently — do NOT assume quality, verify it. Call `./artisan mark-satisfied` with your per-criterion assessment. Be honest — the user reviews at USER_GATE.
+Stop authoring and let the adapter dispatch an isolated reviewer. Do NOT call `./artisan mark-satisfied`; bridge adapters submit isolated reviews through adapter-only review submission.
 
 ### USER_GATE
 Present a clear artifact summary to the user. **STOP and wait for their response.** Do NOT call `./artisan submit-feedback` until the user responds. Not every user message is artifact feedback — casual conversation is fine.
@@ -53,13 +53,13 @@ Address ALL feedback points. Call `./artisan request-review` when done. No check
 | DISCOVERY/SCAN | Read-only tools, workflow tools | File writes, shell execution |
 | DISCOVERY/ANALYZE | Read-only tools, workflow tools | File writes, shell execution |
 | DISCOVERY/CONVENTIONS | `.openartisan/` writes only | Project source writes, shell execution |
-| PLANNING/DRAFT | Workflow tools only | File writes, shell execution |
+| PLANNING/DRAFT | `.openartisan/` artifact writes only | Project source writes, shell execution |
 | PLANNING/REVIEW | `.openartisan/` writes, read-only shell | Project source writes |
 | PLANNING/USER_GATE | Read-only shell, workflow tools | File writes |
 | PLANNING/REVISE | `.openartisan/` writes, read-only shell | Project source writes |
 | INTERFACES | Interface/type files only (.py, .ts, .d.ts, .proto, etc.) | Implementation files |
 | TESTS | Test files only | Implementation files |
-| IMPL_PLAN/DRAFT | Workflow tools only | File writes, shell execution |
+| IMPL_PLAN/DRAFT | `.openartisan/` artifact writes only | Project source writes, shell execution |
 | IMPL_PLAN/REVIEW | `.openartisan/` writes, read-only shell | Project source writes |
 | IMPL_PLAN/USER_GATE | Read-only shell, workflow tools | File writes |
 | IMPL_PLAN/REVISE | `.openartisan/` writes, read-only shell | Project source writes |
@@ -86,6 +86,6 @@ Full discovery. Existing tests must pass after each implementation task.
 ### INCREMENTAL
 Full discovery. File allowlist enforced — you can only modify files explicitly approved during PLANNING. Do-no-harm policy: bash write operators (>, >>, tee, sed -i) are blocked.
 
-## Self-Review Responsibility
+## Review Responsibility
 
-`./artisan mark-satisfied` evaluates YOUR criteria. There is no isolated reviewer in agent-only mode — you are responsible for honest self-assessment. The user reviews at USER_GATE.
+Phase review is handled by an isolated reviewer subprocess with no access to the authoring conversation. Wait for the adapter hook to submit the review result, then continue according to the next prompt.

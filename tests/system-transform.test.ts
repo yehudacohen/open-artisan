@@ -105,6 +105,12 @@ describe("buildWorkflowSystemPrompt — REVIEW sub-state", () => {
     const prompt = buildWorkflowSystemPrompt(makeState({ phaseState: "REVIEW" }))
     expect(prompt).toContain("mark_satisfied")
   })
+
+  it("uses isolated review guidance when requested", () => {
+    const prompt = buildWorkflowSystemPrompt(makeState({ phaseState: "REVIEW" }), { reviewMode: "isolated" })
+    expect(prompt).toContain("Do not call `mark_satisfied`")
+    expect(prompt).toContain("isolated reviewer")
+  })
 })
 
 describe("buildWorkflowSystemPrompt — USER_GATE sub-state", () => {

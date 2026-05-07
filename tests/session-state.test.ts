@@ -444,6 +444,73 @@ describe("SessionStateStore — concurrent update serialization (G22)", () => {
     expect(final?.approvalCount).toBeLessThanOrEqual(5)
     expect(typeof final?.approvalCount).toBe("number")
   })
+
+  it("refreshes persisted state before mutating a stale loaded snapshot", async () => {
+    await store.create("session-stale")
+    await store.update("session-stale", (d) => {
+      d.featureName = "session-stale-feature"
+      d.mode = "GREENFIELD"
+      d.phase = "PLANNING"
+      d.phaseState = "DRAFT"
+    })
+
+    const staleStore = createSessionStateStore(createFileSystemStateBackend(tmpDir))
+    await staleStore.load()
+
+    await store.update("session-stale", (d) => {
+      d.approvalCount = 3
+    })
+    await staleStore.update("session-stale", (d) => {
+      d.iterationCount = 2
+    })
+
+    const reloaded = createSessionStateStore(createFileSystemStateBackend(tmpDir))
+    await reloaded.load()
+    expect(reloaded.get("session-stale")?.approvalCount).toBe(3)
+    expect(reloaded.get("session-stale")?.iterationCount).toBe(2)
+  })
+
+  it("does not advance memory when initial feature persistence fails", async () => {
+    const failingBackend = {
+      async read() { return null },
+      async write() { throw new Error("write failed") },
+      async remove() {},
+      async list(): Promise<string[]> { return [] },
+      async lock() { return { async release() {} } },
+    }
+    const failingStore = createSessionStateStore(failingBackend)
+    await failingStore.create("s-fail")
+
+    await expect(failingStore.update("s-fail", (d) => {
+      d.featureName = "failed-feature"
+      d.mode = "GREENFIELD"
+      d.phase = "PLANNING"
+      d.phaseState = "DRAFT"
+    })).rejects.toThrow("write failed")
+
+    expect(failingStore.get("s-fail")?.featureName).toBeNull()
+    expect(failingStore.get("s-fail")?.phase).toBe("MODE_SELECT")
+  })
+
+  it("keeps store persistence policy-neutral for feature reuse", async () => {
+    await store.create("s-one")
+    await store.create("s-two")
+    await store.update("s-one", (d) => {
+      d.featureName = "shared-feature"
+      d.mode = "GREENFIELD"
+      d.phase = "PLANNING"
+      d.phaseState = "DRAFT"
+    })
+
+    await store.update("s-two", (d) => {
+      d.featureName = "shared-feature"
+      d.mode = "GREENFIELD"
+      d.phase = "PLANNING"
+      d.phaseState = "DRAFT"
+    })
+
+    expect(store.get("s-two")?.featureName).toBe("shared-feature")
+  })
 })
 
 describe("SessionStateStore — per-feature write isolation (M4)", () => {
@@ -1504,6 +1571,31 @@ describe("SessionStateStore — legacy migration", () => {
     expect(loaded?.currentTaskId).toBeNull()
     expect(loaded?.feedbackHistory).toEqual([])
     expect(loaded?.featureName).toBe("legacy-feat")
+  })
+
+  it("backfills expectedTests on legacy DAG tasks", async () => {
+    const oldState = makeState("dag-legacy", "dag-legacy-feat") as unknown as Record<string, unknown>
+    oldState["schemaVersion"] = 21
+    oldState["phase"] = "IMPLEMENTATION"
+    oldState["phaseState"] = "DRAFT"
+    oldState["mode"] = "GREENFIELD"
+    oldState["implDag"] = [{
+      id: "T1",
+      description: "Legacy task",
+      dependencies: [],
+      estimatedComplexity: "small",
+      status: "pending",
+    }]
+    writeLegacyState(legacyFile, { "dag-legacy": oldState })
+
+    const backend = createFileSystemStateBackend(baseDir)
+    await migrateLegacyStateFile(backend, legacyFile)
+    const migStore = createSessionStateStore(backend)
+    const result = await migStore.load()
+
+    expect(result.success).toBe(true)
+    expect(migStore.get("dag-legacy")?.implDag?.[0]?.expectedTests).toEqual([])
+    expect(migStore.get("dag-legacy")?.implDag?.[0]?.expectedFiles).toEqual([])
   })
 
   it("does not re-migrate if legacy file already gone", async () => {

@@ -53,7 +53,7 @@ import { WORKFLOW_TOOL_NAMES } from "../../../packages/core/workflow-tool-names"
 import { parseSelectModeArgs, buildSelectModeResponse } from "../../../packages/core/tools/select-mode"
 import { evaluateMarkSatisfied, countExpectedBlockingCriteria } from "../../../packages/core/tools/mark-satisfied"
 import { processRequestReview } from "../../../packages/core/tools/request-review"
-import { buildSubmitFeedbackClarificationMessage, findReviewedArtifactFilesOutsideAllowlist, findUnresolvedHumanGates, materializeImplPlanDag, normalizeApprovalFilePaths, processSubmitFeedback, resolveSubmitFeedbackHumanGates, stripWorkflowRoutingNotes, validateSubmitFeedbackGate, validateSubmitFeedbackImplPlanApproval } from "../../../packages/core/tools/submit-feedback"
+import { buildSelfApprovalBlockedMessage, buildSubmitFeedbackClarificationMessage, findReviewedArtifactFilesOutsideAllowlist, findUnresolvedHumanGates, materializeImplPlanDag, normalizeApprovalFilePaths, processSubmitFeedback, resolveSubmitFeedbackHumanGates, stripWorkflowRoutingNotes, validateSubmitFeedbackGate, validateSubmitFeedbackImplPlanApproval } from "../../../packages/core/tools/submit-feedback"
 import { processMarkTaskComplete, validateMarkTaskCompletePhase } from "../../../packages/core/tools/mark-task-complete"
 import { processSpawnSubWorkflow, SPAWN_SUB_WORKFLOW_DESCRIPTION } from "../../../packages/core/tools/spawn-sub-workflow"
 import { applyChildCompletion, findTimedOutChildren, applyDelegationTimeout, syncChildWorkflowsWithDag } from "../../../packages/core/tools/complete-sub-workflow"
@@ -1754,7 +1754,10 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             )
           }
 
-          // Set the re-entry guard and increment task review counter
+          const result = processMarkTaskComplete(args, state.implDag, state.currentTaskId)
+          if ("error" in result) return `Error: ${result.error}`
+
+          // Set the re-entry guard only after task/current-task validation passes.
           await store.update(sessionId, (draft) => {
             draft.taskCompletionInProgress = args.task_id
             draft.taskReviewCount += 1
@@ -1763,9 +1766,6 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
           // Everything below is wrapped in try/finally to guarantee the
           // re-entry guard is cleared on every exit path (success, failure, error).
           try {
-            const result = processMarkTaskComplete(args, state.implDag, state.currentTaskId)
-
-            if ("error" in result) return `Error: ${result.error}`
 
             // Per-task review: dispatch a lightweight subagent to verify the task
             // was implemented correctly before marking it complete in the DAG.
@@ -2524,16 +2524,10 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                 "Call submit_feedback with feedback_type='revise' and your response."
               )
             }
-            // Block self-approval: the agent cannot approve its own work. A real
-            // Soft check: warn if chat.message hook has not confirmed a user message at this
-            // USER_GATE. This can happen on session resume after restart (the hook doesn't
-            // fire retroactively) or in rare race conditions. We allow approval to proceed
-            // with a warning rather than blocking — a false positive rejection here is worse
-            // than a false negative (the agent can only reach USER_GATE after self-review pass,
-            // and the routing hint tells it to call submit_feedback only on user input).
-            const approvalWarning = !state.userGateMessageReceived
-              ? "\n\n**Note:** Approval recorded without a confirmed user message via chat.message hook (possible session resume). If no real user message was received, the user may need to re-confirm."
-              : ""
+            if (!state.userGateMessageReceived) {
+              return buildSelfApprovalBlockedMessage()
+            }
+            const approvalWarning = ""
 
             // Human gate resolution: when approving at IMPLEMENTATION/USER_GATE and there
             // are human-gated tasks, the user must explicitly list which gates they've resolved.
@@ -2790,6 +2784,42 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             const effectiveNextPhase = forwardSkip?.targetPhase ?? approval.nextPhase
             const effectiveNextPhaseState = forwardSkip?.targetPhaseState ?? approval.nextPhaseState
 
+            const artifactKey = PHASE_TO_ARTIFACT[state.phase]
+            let artifactDiskPath: string | null = (artifactKey ? state.artifactDiskPaths[artifactKey] : undefined) ?? null
+            let implPlanContentForApproval: string | undefined
+            if (state.phase === "IMPL_PLAN" && artifactDiskPath) {
+              try {
+                implPlanContentForApproval = readFileSync(artifactDiskPath, "utf-8")
+              } catch {
+                // handled below with a clear approval error
+              }
+            }
+
+            // Reject invalid implementation plans before checkpoint or state mutation.
+            if (state.phase === "IMPL_PLAN") {
+              if (!implPlanContentForApproval) {
+                const hasJustification = args.feedback_text.trim().length > 20 &&
+                  /justification|no plan needed|per-task|brief scope|not needed|skip impl plan/i.test(args.feedback_text)
+                if (!hasJustification) {
+                  return (
+                    "Error: IMPL_PLAN approval requires an on-disk implementation plan " +
+                    "or a justification in `feedback_text` explaining why per-task review isn't needed. " +
+                    "Re-submit request_review with the on-disk implementation plan, or provide a justification " +
+                    "in `feedback_text` (the reviewer will evaluate whether your reasoning holds up)."
+                  )
+                }
+              } else {
+                const implPlanApprovalError = validateSubmitFeedbackImplPlanApproval({
+                  planContent: implPlanContentForApproval,
+                  mode: state.mode,
+                  effectiveAllowlist,
+                  cwd: context.directory || process.cwd(),
+                  parseFixInstruction: "Fix the plan format and re-submit approval with a corrected on-disk implementation plan.",
+                })
+                if (implPlanApprovalError) return `Error: ${implPlanApprovalError}`
+              }
+            }
+
             // Git checkpoint — use per-phase approval count for tag versioning (M11)
             const phaseCount = approval.phaseCount
             const newApprovalCount = approval.newApprovalCount
@@ -2805,17 +2835,6 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
               { cwd: context.directory || process.cwd() },
               checkpointOpts,
             )
-
-            const artifactKey = PHASE_TO_ARTIFACT[state.phase]
-            let artifactDiskPath: string | null = (artifactKey ? state.artifactDiskPaths[artifactKey] : undefined) ?? null
-            let implPlanContentForApproval: string | undefined
-            if (state.phase === "IMPL_PLAN" && !implPlanContentForApproval && artifactDiskPath) {
-              try {
-                implPlanContentForApproval = readFileSync(artifactDiskPath, "utf-8")
-              } catch {
-                // handled below with a clear approval error
-              }
-            }
 
             const isFinalImplementationApproval = state.phase === "IMPLEMENTATION" && effectiveNextPhase === "DONE"
             await store.update(sessionId, (draft) => {
@@ -2950,37 +2969,6 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
               state.phase === "DISCOVERY" && !artifactDiskPath
                 ? "\n\n**Warning:** No conventions document available on disk. Downstream phases will receive no conventions context. Re-submit request_review with artifact_files before approval."
                 : ""
-
-            // Reject IMPL_PLAN approval without an on-disk implementation plan — without a DAG,
-            // the IMPLEMENTATION phase loses per-task review, dependency checking,
-            // and drift detection. The agent must provide the implementation plan.
-            if (state.phase === "IMPL_PLAN") {
-              if (!implPlanContentForApproval) {
-                // No implementation plan file — check if feedback_text contains a justification.
-                // The agent may justify why per-task review isn't needed (e.g., trivial scope).
-                // The reviewer will evaluate whether the justification holds up.
-                const hasJustification = args.feedback_text.trim().length > 20 &&
-                  /justification|no plan needed|per-task|brief scope|not needed|skip impl plan/i.test(args.feedback_text)
-                if (!hasJustification) {
-                  return (
-                    "Error: IMPL_PLAN approval requires an on-disk implementation plan " +
-                    "or a justification in `feedback_text` explaining why per-task review isn't needed. " +
-                    "Re-submit request_review with the on-disk implementation plan, or provide a justification " +
-                    "in `feedback_text` (the reviewer will evaluate whether your reasoning holds up)."
-                  )
-                }
-                // Justification accepted — skip DAG parsing (no artifact to parse)
-              } else {
-                const implPlanApprovalError = validateSubmitFeedbackImplPlanApproval({
-                  planContent: implPlanContentForApproval,
-                  mode: state.mode,
-                  effectiveAllowlist,
-                  cwd: context.directory || process.cwd(),
-                  parseFixInstruction: "Fix the plan format and re-submit approval with a corrected on-disk implementation plan.",
-                })
-                if (implPlanApprovalError) return `Error: ${implPlanApprovalError}`
-              }
-            }
 
             const forwardSkipMsg = forwardSkip
               ? `\n\n${forwardSkip.message}`

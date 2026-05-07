@@ -16,6 +16,15 @@ import type { OpenArtisanStateBackendKind } from "../core/open-artisan-runtime-b
 import type { OpenArtisanServices } from "../core/open-artisan-services"
 import type pino from "pino"
 import { NOT_INITIALIZED } from "./protocol"
+import { validateBridgeMethodParams } from "./protocol-validation"
+
+export interface ReviewSubmissionTokenRecord {
+  sessionId: string
+  kind: "task" | "phase"
+  subject: string
+  expiresAt: number
+  artifactHash?: string
+}
 
 // ---------------------------------------------------------------------------
 // Bridge context — shared state for all method handlers
@@ -62,6 +71,8 @@ export interface BridgeContext {
   pinoLogger: pino.Logger | null
   /** Flag for shutdown. */
   shuttingDown: boolean
+  /** One-time isolated reviewer submission tokens, scoped to this bridge process. */
+  reviewSubmissionTokens?: Map<string, ReviewSubmissionTokenRecord>
 }
 
 // ---------------------------------------------------------------------------
@@ -123,6 +134,7 @@ export function createBridgeEngine(
   let openArtisanServices: OpenArtisanServices | null = null
   let runtimeBackendDispose: (() => Promise<void>) | null = null
   let pinoLogger: pino.Logger | null = null
+  const reviewSubmissionTokens = new Map<string, ReviewSubmissionTokenRecord>()
 
   const bridgeCtx: BridgeContext = {
     get engine() { return engine },
@@ -151,6 +163,7 @@ export function createBridgeEngine(
     set pinoLogger(v: pino.Logger | null) { pinoLogger = v },
     get shuttingDown() { return shuttingDown },
     set shuttingDown(v: boolean) { shuttingDown = v },
+    reviewSubmissionTokens,
   }
 
   // Methods that don't require initialization
@@ -162,13 +175,14 @@ export function createBridgeEngine(
   // Register each method handler
   for (const [method, handler] of Object.entries(handlers)) {
     rpcServer.addMethod(method, async (params: Record<string, unknown>) => {
+      const validatedParams = validateBridgeMethodParams(method, params ?? {})
       // Check initialization for methods that require it
       if (!INIT_FREE.has(method) && !engine) {
         throw new JSONRPCErrorException("Bridge not initialized. Call lifecycle.init first.", NOT_INITIALIZED)
       }
 
       // Create request-scoped context with traceId-bound logger
-      const traceId = params?.traceId as string | undefined
+      const traceId = validatedParams?.traceId as string | undefined
       let requestCtx = bridgeCtx
 
       if (traceId && engine) {
@@ -185,7 +199,7 @@ export function createBridgeEngine(
         reqLog.debug({ method, component: "bridge" }, "JSON-RPC request")
       }
 
-      return handler(params ?? {}, requestCtx)
+      return handler(validatedParams, requestCtx)
     })
   }
 

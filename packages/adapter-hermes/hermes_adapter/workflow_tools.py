@@ -314,27 +314,13 @@ def _handle_workflow_tool(
             bridge,
             session_id,
         )
-        if bridge_tool_name == "mark_satisfied":
+        if bridge_tool_name in {"mark_satisfied", "submit_task_review", "submit_phase_review"}:
             state = _state_payload(state_result)
-            if isinstance(state, dict) and state.get("phaseState") == "REVIEW":
+            if bridge_tool_name != "mark_satisfied" or (isinstance(state, dict) and state.get("phaseState") == "REVIEW"):
                 return make_error_response(
-                    "oa_mark_satisfied is disabled in Hermes REVIEW state. "
-                    "The isolated phase reviewer is dispatched automatically; wait for it to submit the review result."
+                    f"oa_{bridge_tool_name} is reserved for isolated reviewers. "
+                    "Wait for the adapter hook to submit the review result."
                 )
-        if bridge_tool_name == "submit_feedback":
-            feedback_text = tool_args.get("feedback_text")
-            message_text = (
-                feedback_text.strip() if isinstance(feedback_text, str) else ""
-            )
-            if not message_text:
-                message_text = "(user invoked submit_feedback via Hermes)"
-            bridge.call(
-                "message.process",
-                {
-                    "sessionId": workflow_session_id,
-                    "parts": [{"type": "text", "text": message_text}],
-                },
-            )
         result = bridge.call(
             "tool.execute",
             {

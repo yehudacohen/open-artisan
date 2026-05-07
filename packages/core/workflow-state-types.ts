@@ -5,6 +5,7 @@
 import type { RevisionStep } from "./orchestrator-types"
 import { VALID_PHASE_STATES } from "./workflow-primitives"
 import type { ArtifactKey, Phase, PhaseState, WorkflowMode } from "./workflow-primitives"
+import { createImplDAG } from "./dag"
 
 // ---------------------------------------------------------------------------
 // Core workflow state
@@ -663,6 +664,9 @@ export function validateWorkflowState(state: WorkflowState): WorkflowStateValida
       if (!Array.isArray(node.dependencies)) {
         return workflowStateValidationError(`implDag task "${node.id}" missing required "dependencies" array`)
       }
+      if (!Array.isArray(node.expectedTests)) {
+        return workflowStateValidationError(`implDag task "${node.id}" missing required "expectedTests" array`)
+      }
       const validStatuses = ["pending", "in-flight", "complete", "aborted", "human-gated", "delegated"]
       if (typeof node.status !== "string" || !validStatuses.includes(node.status)) {
         return workflowStateValidationError(`implDag task "${node.id}" has invalid status "${node.status}"`)
@@ -708,6 +712,14 @@ export function validateWorkflowState(state: WorkflowState): WorkflowStateValida
       if (node.status === "human-gated" && (!node.humanGate || typeof node.humanGate !== "object")) {
         return workflowStateValidationError(`implDag task "${node.id}" has status "human-gated" but no humanGate metadata`)
       }
+    }
+    try {
+      const dagValidation = createImplDAG(state.implDag).validate()
+      if (!dagValidation.valid) {
+        return workflowStateValidationError(`implDag graph invalid: ${dagValidation.errors.join("; ")}`)
+      }
+    } catch (error) {
+      return workflowStateValidationError(`implDag graph validation failed: ${error instanceof Error ? error.message : String(error)}`)
     }
   }
   if (state.phaseApprovalCounts !== null && state.phaseApprovalCounts !== undefined) {

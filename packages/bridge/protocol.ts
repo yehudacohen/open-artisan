@@ -173,9 +173,10 @@ export interface StateGetWithRuntimeHealthResult {
 
 export interface GuardCheckParams {
   toolName: string
-  args: Record<string, unknown>
+  args?: unknown
   sessionId: string
   traceId?: string
+  [key: string]: unknown
 }
 
 export interface GuardPolicyParams {

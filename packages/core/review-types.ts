@@ -37,8 +37,13 @@ export interface SelfReviewSuccess {
 
 export interface SelfReviewError {
   success: false
-  code: "SELF_REVIEW_FAILED"
-  message: string
+  /**
+   * Established runtime compatibility field consumed directly by existing callers.
+   * `code`/`message`/`details` are additive typed annotations, not a replacement envelope.
+   */
+  error: string
+  code?: "SELF_REVIEW_FAILED"
+  message?: string
   details?: string
 }
 
@@ -87,9 +92,13 @@ export interface RebuttalSuccess {
 
 export interface RebuttalError {
   success: false
+  /**
+   * Established runtime compatibility field consumed directly by existing callers.
+   * `code`/`message` remain optional typed annotations for newer call sites.
+   */
   error: string
-  code: "REBUTTAL_FAILED"
-  message: string
+  code?: "REBUTTAL_FAILED"
+  message?: string
 }
 
 export type RebuttalResult = RebuttalSuccess | RebuttalError

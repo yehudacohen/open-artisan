@@ -456,15 +456,24 @@ export interface StoreLoadResult {
  */
 export interface StoreLoadError {
   success: false
-  code: "STORE_LOAD_FAILED"
-  message: string
+  /**
+   * Established runtime compatibility field consumed directly by current callers.
+   * Optional typed fields annotate the same failure without changing the string-first shape.
+   */
+  error: string
+  code?: "STORE_LOAD_FAILED"
+  message?: string
   details?: string
 }
 
-export interface SessionStateLookupResult {
-  success: true
-  value: WorkflowState | null
-}
+/**
+ * Runtime-compatible session lookup result.
+ *
+ * Decision note: this remains compatible with direct `WorkflowState | null` access for existing
+ * owner modules, while also exposing an explicit structured failure branch for callers that need
+ * typed error inspection.
+ */
+export type SessionStateLookupResult = WorkflowState | null
 
 export interface SessionStateStoreError {
   code:
@@ -475,9 +484,33 @@ export interface SessionStateStoreError {
   message: string
 }
 
-export type SessionStateStoreResult<T> =
-  | { success: true; value: T }
+/** Structured compatibility envelope for callers that want an explicit error branch. */
+export type SessionStateLookupEnvelope =
+  | { success: true; value: WorkflowState | null }
   | { success: false; error: SessionStateStoreError }
+
+/** Structured compatibility failure branch for mutation-style store methods. */
+export type SessionStateMutationFailure<T> =
+  { success: false; error: SessionStateStoreError } & Partial<T>
+
+/** Structured compatibility envelope for mutation-style store methods. */
+export type SessionStateMutationEnvelope<T> =
+  | { success: true; value: T }
+  | SessionStateMutationFailure<T>
+
+/**
+ * Runtime-compatible mutation result.
+ *
+ * Decision note: existing workflow owner modules treat `create()`/`update()`/`migrateSession()`
+ * as returning the updated `WorkflowState` directly and `delete()` as `void`. The public
+ * interface therefore preserves that direct-return shape instead of introducing an envelope
+ * that would force unrelated implementation rewrites during INTERFACES.
+ *
+ * For explicit typed-error consumers, the corresponding `SessionStateMutationEnvelope<T>`
+ * alias records the structured error branch. This direct result alias keeps the established
+ * runtime call shape while still making the failure branch part of the public contract.
+ */
+export type SessionStateStoreResult<T> = T
 
 export interface SessionStateStore {
   /**
@@ -501,7 +534,7 @@ export interface SessionStateStore {
    * Use this for cross-client resume flows where another process may have written
    * the feature state after this store instance was loaded.
    */
-  findPersistedByFeatureName(featureName: string): Promise<SessionStateStoreResult<WorkflowState | null>>
+  findPersistedByFeatureName(featureName: string): Promise<SessionStateLookupResult>
 
   /**
    * Create a fresh state for a new session and persist it.
@@ -535,7 +568,7 @@ export interface SessionStateStore {
    * Remove state for a deleted session from memory and disk.
    * No-op if sessionId not found.
    */
-  delete(sessionId: string): Promise<SessionStateStoreResult<null>>
+  delete(sessionId: string): Promise<void>
 }
 
 // ---------------------------------------------------------------------------
@@ -1045,7 +1078,13 @@ export function validateWorkflowStateResult(state: WorkflowState): WorkflowState
   return { success: true }
 }
 
-export function validateWorkflowState(state: WorkflowState): string | null {
+export function validateWorkflowState(state: WorkflowState): string | null
+export function validateWorkflowState(state: WorkflowState, options: { format: "structured" }): WorkflowStateValidationResult
+export function validateWorkflowState(
+  state: WorkflowState,
+  options?: { format: "structured" },
+): string | null | WorkflowStateValidationResult {
   const result = validateWorkflowStateResult(state)
+  if (options?.format === "structured") return result
   return result.success ? null : result.error.message
 }

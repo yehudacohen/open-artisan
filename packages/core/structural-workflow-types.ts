@@ -23,7 +23,7 @@ export interface StructuralTransitionDescriptor {
   /** Stable identifier for this descriptor instance. */
   id: string
   /** Optional kind tag for adapters that need to branch by lifecycle meaning. */
-  kind?: "redraft" | "skip" | "cascade" | "scheduling" | "task-review" | "human-gate" | "delegated-wait"
+  kind?: "redraft" | "skip" | "cascade" | "scheduling" | "task-review" | "task-revise" | "human-gate" | "delegated-wait"
   source: { phase: Phase; phaseState: PhaseState }
   target: { phase: Phase; phaseState: PhaseState }
   triggeringEvent: WorkflowEvent
@@ -217,7 +217,10 @@ export type SupportedExecutableSeamKind =
   | "task-boundary-revision-workflow"
   | "workflow-guidance-legality"
 
-export type SupportedExecutableSeamErrorPattern = "structured-success-error-result"
+export type SupportedExecutableSeamErrorPattern =
+  | "structured-success-error-result"
+  | "workflow-state-or-null-legacy-store"
+  | "string-error-with-structured-annotations"
 
 /**
  * TESTS-phase import policy for an approved executable seam.
@@ -293,19 +296,23 @@ export type InterfaceErrorPattern =
   | "success-result-union"
   | "throws-typed-error"
   | "string-null-legacy-validation"
+  | "string-error-with-structured-annotations"
 
 /**
  * Explicitly records the compatibility notes this repository still carries while the
- * public structural workflow interface surface converges on a single result-envelope pattern.
+ * public structural workflow interface surface converges on typed annotations without
+ * breaking established runtime owner-module shapes.
  *
- * Decision note: the public contract for this feature uses structured success/error result
- * unions. Existing implementation seams may still require compatibility adapters internally,
- * but those legacy mechanics are not modeled as first-class public interface patterns here.
+ * Decision note: for this feature, existing runtime-facing seams such as `SessionStateStore`
+ * and self-review/rebuttal dispatch continue to expose their established direct-return or
+ * string-error contracts. The interface artifact therefore documents those seams as approved
+ * compatibility patterns, while still allowing newer structural-only contracts to use fully
+ * structured result envelopes where no existing runtime caller shape must be preserved.
  */
 export interface LegacyInterfaceCompatibilityPolicy {
   policyName: "open-artisan-interface-compatibility"
   featureName: "structural-state-machine-rigor"
-  canonicalPatternForNewStructuralContracts: "success-result-union"
+  canonicalPatternForNewStructuralContracts: "string-error-with-structured-annotations"
   compatibilitySeams: Array<{
     seam: string
     rationale: string
@@ -335,31 +342,39 @@ export interface StructuralWorkflowExecutableTestingPolicy {
 export const LEGACY_INTERFACE_COMPATIBILITY_POLICY: LegacyInterfaceCompatibilityPolicy = {
   policyName: "open-artisan-interface-compatibility",
   featureName: "structural-state-machine-rigor",
-  canonicalPatternForNewStructuralContracts: "success-result-union",
+  canonicalPatternForNewStructuralContracts: "string-error-with-structured-annotations",
   compatibilitySeams: [
+    {
+      seam: "SessionStateStore lookup/mutation contracts",
+      rationale: "Existing runtime owner modules and executable seam tests still depend on direct `WorkflowState | null` lookups and direct state-returning mutation methods, so the public interface must preserve those shapes while documenting the compatibility constraint explicitly.",
+    },
+    {
+      seam: "SelfReviewResult and RebuttalResult failure branches",
+      rationale: "Review dispatch callers still read the established `error: string` field directly, so the public interface keeps that field first-class and treats `code`/`message`/`details` as additive typed annotations rather than a replacement envelope.",
+    },
     {
       seam: "StateMachine and related transition helpers",
       rationale: "Existing transition legality/runtime helper seams still require a compatibility adapter because downstream runtime code depends on their established return shape.",
     },
     {
       seam: "Roadmap validation helpers",
-      rationale: "Roadmap validation is an existing local helper seam whose runtime contract may still be bridged for compatibility while the public interface surface standardizes on structured result unions.",
+      rationale: "Roadmap validation is an existing local helper seam whose runtime contract may still be bridged for compatibility while the public interface surface standardizes on structured result unions for newer structural-only seams.",
     },
     {
       seam: "StateBackend and SessionRegistry mutation-style methods",
-      rationale: "Low-level storage/session graph seams may still need compatibility adapters during migration, but the public workflow interface contract should not expose those mixed patterns as first-class approved surface area.",
+      rationale: "Low-level storage/session graph seams may still need compatibility adapters during migration, but the public workflow interface contract should not expose those mixed patterns as a forced rewrite during this incremental feature.",
     },
   ],
   decision:
-    "Converge the public structural workflow interface surface on structured success/error result unions while documenting where implementation-time compatibility adapters may still exist internally.",
+    "Preserve established runtime owner-module shapes for session-state and review-dispatch seams, and layer typed compatibility annotations on top instead of forcing a repo-wide result-envelope rewrite during the INTERFACES phase.",
   alternativesConsidered: [
-    "force a repo-wide single error pattern in INTERFACES and rewrite all implementations immediately",
-    "leave mixed public error patterns codified in the interface layer",
+    "force a repo-wide single success/error envelope in INTERFACES and rewrite all implementations immediately",
+    "leave compatibility assumptions implicit and let TESTS/IMPLEMENTATION discover them ad hoc",
   ],
   tradeoffs: [
-    "keeps the public interface contract coherent for new work",
-    "documents compatibility seams without blessing them as long-term public API patterns",
-    "still requires later implementation work to align internal adapters with the public contract",
+    "keeps the reviewed public interface aligned with the currently supported runtime owner-module contracts",
+    "documents compatibility seams explicitly instead of pretending a uniform envelope already exists everywhere",
+    "still leaves room for newer structural-only contracts to use fully structured result types where no legacy runtime shape must be preserved",
   ],
 }
 
@@ -483,15 +498,15 @@ export const SUPPORTED_EXECUTABLE_SEAM_DESCRIPTORS: readonly SupportedExecutable
     kind: "session-state-validation",
     ownerModule: "#core/session-state",
     primaryInterface: "SessionStateStore",
-    errorPattern: "structured-success-error-result",
+    errorPattern: "workflow-state-or-null-legacy-store",
     runtimeCoverageExpectedAt: "TESTS",
     importPolicy: "owner-module-public-runtime-contract",
     suiteStyle: "mixed-characterization-and-target-state",
     displacesGenericInterfaceOnlyRule: true,
     displacesExpectedFailureOnlyRule: true,
-    decision: "Resume repair and validation are public structural seams because stale persisted state must recover truthfully.",
-    alternativesConsidered: ["state-machine-only tests"],
-    tradeoffs: ["covers persistence repair directly", "requires runtime fixture setup"],
+    decision: "Resume repair and validation are public structural seams, but their approved runtime contract remains the established direct `WorkflowState | null` lookup shape plus direct mutation-returning store methods.",
+    alternativesConsidered: ["force a result-envelope rewrite before TESTS", "state-machine-only tests"],
+    tradeoffs: ["covers persistence repair directly", "preserves current runtime caller compatibility while documenting the seam explicitly"],
   },
   {
     kind: "scheduler-parallel-contract",

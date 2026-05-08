@@ -62,6 +62,11 @@ function makeDispatcherCreateThrows(): SubagentDispatcher {
 // Fixtures
 // ---------------------------------------------------------------------------
 
+function selfReviewErrorText(result: { error?: string; message?: string }): string {
+  const runtimeError = typeof result.error === "string" ? result.error : undefined
+  return runtimeError ?? result.message ?? ""
+}
+
 const BASE_REQ: SelfReviewRequest = {
   phase: "PLANNING",
   mode: "GREENFIELD",
@@ -304,7 +309,7 @@ describe("dispatchSelfReview — network failure", () => {
 
     expect(result.success).toBe(false)
     if (result.success) return
-    expect(result.error).toContain("Network error")
+    expect(selfReviewErrorText(result)).toContain("Network error")
   })
 
   it("returns SelfReviewError when session.create throws", async () => {
@@ -313,7 +318,7 @@ describe("dispatchSelfReview — network failure", () => {
 
     expect(result.success).toBe(false)
     if (result.success) return
-    expect(result.error).toContain("Cannot create review session")
+    expect(selfReviewErrorText(result)).toContain("Cannot create review session")
   })
 
   it("still calls session.delete even when prompt throws (finally block)", async () => {
@@ -442,7 +447,7 @@ describe("dispatchSelfReview — timeout", () => {
     const result = await dispatchSelfReview(dispatcher, BASE_REQ)
     expect(result.success).toBe(false)
     if (result.success) return
-    expect(result.error).toContain("timeout")
+    expect(selfReviewErrorText(result)).toContain("timeout")
   })
 })
 

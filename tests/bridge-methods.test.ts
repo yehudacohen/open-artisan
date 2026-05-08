@@ -12,6 +12,7 @@ import { handleInit, handleSessionCreated } from "#bridge/methods/lifecycle"
 import { handleGuardCheck, handleGuardPolicy } from "#bridge/methods/guard"
 import { handlePromptBuild, handlePromptCompaction } from "#bridge/methods/prompt"
 import { handleStateGet, handleStateHealth } from "#bridge/methods/state"
+import { handleProgressEmit, handleProgressList } from "#bridge/methods/progress"
 import { handleMessageProcess } from "#bridge/methods/message"
 import { handleIdleCheck } from "#bridge/methods/idle"
 import { MAX_IDLE_RETRIES } from "#core/constants"
@@ -55,6 +56,81 @@ afterEach(async () => {
 })
 
 // ---------------------------------------------------------------------------
+// progress events
+// ---------------------------------------------------------------------------
+
+describe("progress events", () => {
+  it("persists and lists progress events with span linkage", async () => {
+    const root = await handleProgressEmit({
+      sessionId: "s1",
+      kind: "task-review",
+      status: "started",
+      message: "Per-task review started",
+      spanId: "review:T1",
+      taskId: "T1",
+    }, ctx) as any
+
+    const child = await handleProgressEmit({
+      sessionId: "s1",
+      kind: "task-review.subprocess",
+      status: "in-progress",
+      message: "Reviewer subprocess running",
+      spanId: "review:T1:subprocess",
+      parentSpanId: "review:T1",
+      parentEventId: root.event.id,
+      taskId: "T1",
+    }, ctx) as any
+
+    const listed = await handleProgressList({ sessionId: "s1" }, ctx) as any
+    expect(listed.events).toHaveLength(2)
+    expect(listed.events[1].id).toBe(child.event.id)
+    expect(listed.events[1].parentEventId).toBe(root.event.id)
+    expect(listed.events[1].parentSpanId).toBe("review:T1")
+    expect(listed.nextCursor).toBe(child.event.id)
+
+    const afterRoot = await handleProgressList({ sessionId: "s1", sinceEventId: root.event.id }, ctx) as any
+    expect(afterRoot.events.map((event: any) => event.id)).toEqual([child.event.id])
+  })
+
+  it("returns the latest events when listing with a limit and no cursor", async () => {
+    const first = await handleProgressEmit({
+      sessionId: "s1",
+      kind: "phase-review",
+      status: "succeeded",
+      message: "Old phase review completed",
+    }, ctx) as any
+    const second = await handleProgressEmit({
+      sessionId: "s1",
+      kind: "phase-review",
+      status: "started",
+      message: "Current phase review started",
+    }, ctx) as any
+    const third = await handleProgressEmit({
+      sessionId: "s1",
+      kind: "phase-review",
+      status: "failed",
+      message: "Current phase review failed",
+    }, ctx) as any
+
+    const listed = await handleProgressList({ sessionId: "s1", limit: 2 }, ctx) as any
+
+    expect(listed.events.map((event: any) => event.id)).toEqual([second.event.id, third.event.id])
+    expect(listed.events.some((event: any) => event.id === first.event.id)).toBe(false)
+    expect(listed.nextCursor).toBe(third.event.id)
+  })
+
+  it("rejects unknown parent events", async () => {
+    await expect(handleProgressEmit({
+      sessionId: "s1",
+      kind: "task-review.subprocess",
+      status: "started",
+      message: "Reviewer subprocess running",
+      parentEventId: "missing-parent",
+    }, ctx)).rejects.toThrow("parentEventId")
+  })
+})
+
+// ---------------------------------------------------------------------------
 // guard.check
 // ---------------------------------------------------------------------------
 
@@ -77,6 +153,29 @@ describe("guard.check", () => {
       args: { patch_suggestion_id: "ps1" },
       sessionId: "s1",
     }, ctx) as GuardCheckResult
+    expect(result.allowed).toBe(true)
+  })
+
+  it("blocks mark_satisfied from bridge isolated-review author sessions", async () => {
+    ctx.capabilities = { selfReview: "isolated", orchestrator: true, discoveryFleet: true }
+    const result = await handleGuardCheck({
+      toolName: "mark_satisfied",
+      args: { criteria_met: [] },
+      sessionId: "s1",
+    }, ctx) as GuardCheckResult
+    expect(result.allowed).toBe(false)
+    expect(result.reason).toContain("isolated-review")
+  })
+
+  it("allows mark_satisfied only when bridge is explicitly agent-only", async () => {
+    const agentOnlyCtx = makeBridgeContext()
+    await handleInit({ projectDir: tmpDir, persistence: { kind: "filesystem" }, capabilities: { selfReview: "agent-only", orchestrator: false, discoveryFleet: false } }, agentOnlyCtx)
+    await handleSessionCreated({ sessionId: "agent-only" }, agentOnlyCtx)
+    const result = await handleGuardCheck({
+      toolName: "mark_satisfied",
+      args: { criteria_met: [] },
+      sessionId: "agent-only",
+    }, agentOnlyCtx) as GuardCheckResult
     expect(result.allowed).toBe(true)
   })
 
@@ -154,10 +253,25 @@ describe("guard.check", () => {
     })
     const result = await handleGuardCheck({
       toolName: "write_file",
-      args: { filePath: "/project/src/foo.ts" },
+      args: { filePath: join(tmpDir, "src/foo.ts") },
       sessionId: "s1",
     }, ctx) as any
     expect(result.allowed).toBe(true)
+  })
+
+  it("blocks write tools outside the project root", async () => {
+    await ctx.engine!.store.update("s1", (d) => {
+      d.mode = "GREENFIELD"
+      d.phase = "IMPLEMENTATION"
+      d.phaseState = "DRAFT"
+    })
+    const result = await handleGuardCheck({
+      toolName: "write_file",
+      args: { filePath: "/tmp/outside-open-artisan-test.ts" },
+      sessionId: "s1",
+    }, ctx) as any
+    expect(result.allowed).toBe(false)
+    expect(result.reason).toContain("outside the project root")
   })
 
   it("allows expected test files for the current implementation task", async () => {
@@ -274,6 +388,54 @@ describe("guard.check", () => {
       args: { patchText: "*** Begin Patch\n*** Update File: src/core/aspects/types.ts\n@@\n-old\n+new\n*** End Patch" },
       sessionId: "s1",
     }, ctx) as GuardCheckResult
+    expect(result.allowed).toBe(true)
+  })
+
+  it("allows apply_patch when patch text is on the top-level tool payload", async () => {
+    await ctx.engine!.store.update("s1", (d) => {
+      d.mode = "GREENFIELD"
+      d.phase = "INTERFACES"
+      d.phaseState = "REVISE"
+      d.featureName = "interfaces-feat"
+    })
+    const result = await handleGuardCheck({
+      toolName: "apply_patch",
+      sessionId: "s1",
+      patchText: `*** Begin Patch\n*** Add File: ${join(tmpDir, "src/contracts.d.ts")}\n+export interface Contract {}\n*** End Patch`,
+    } as any, ctx) as GuardCheckResult
+    expect(result.allowed).toBe(true)
+  })
+
+  it("allows apply_patch when args is a JSON string containing patchText", async () => {
+    await ctx.engine!.store.update("s1", (d) => {
+      d.mode = "GREENFIELD"
+      d.phase = "INTERFACES"
+      d.phaseState = "REVISE"
+      d.featureName = "interfaces-feat"
+    })
+    const result = await handleGuardCheck({
+      toolName: "apply_patch",
+      sessionId: "s1",
+      args: JSON.stringify({
+        patchText: "*** Begin Patch\n*** Update File: packages/cli/src/contracts.d.ts\n@@\n-old\n+new\n*** End Patch",
+      }),
+    } as any, ctx) as GuardCheckResult
+    expect(result.allowed).toBe(true)
+  })
+
+  it("allows apply_patch when args is empty and patch text is on the top-level tool payload", async () => {
+    await ctx.engine!.store.update("s1", (d) => {
+      d.mode = "GREENFIELD"
+      d.phase = "INTERFACES"
+      d.phaseState = "REVISE"
+      d.featureName = "interfaces-feat"
+    })
+    const result = await handleGuardCheck({
+      toolName: "apply_patch",
+      sessionId: "s1",
+      args: {},
+      patchText: "*** Begin Patch\n*** Add File: src/contracts.d.ts\n+export interface Contract {}\n*** End Patch",
+    } as any, ctx) as GuardCheckResult
     expect(result.allowed).toBe(true)
   })
 
@@ -413,10 +575,17 @@ describe("state.get / state.health", () => {
     expect(result.state.phaseState).toBe("HUMAN_GATE")
     expect(result.runtimeHealth.phase).toBe("IMPLEMENTATION")
     expect(result.runtimeHealth.phaseState).toBe("HUMAN_GATE")
+    expect(result.runtimeHealth.initialized).toBe(true)
     expect(result.runtimeHealth.backendKind).toBe("filesystem")
+    expect(result.runtimeHealth.projectDir).toBe(tmpDir)
     expect(result.runtimeHealth.stateDir).toBe(join(tmpDir, ".openartisan"))
     expect(result.runtimeHealth.pgliteDataDir).toBeNull()
+    expect(result.runtimeHealth.pgliteDatabasePath).toBeNull()
+    expect(result.runtimeHealth.requestedSessionFound).toBe(true)
     expect(result.runtimeHealth.awaitingUserGate).toBe(false)
+    expect(result.runtimeHealth.nextAction).toBe("stop_human_gate")
+    expect(result.runtimeHealth.shouldContinue).toBe(false)
+    expect(result.runtimeHealth.stopReason).toContain("human gate")
   })
 
   it("state.health reports pending task review for TASK_REVIEW state", async () => {
@@ -431,8 +600,37 @@ describe("state.get / state.health", () => {
     const result = await handleStateHealth({ sessionId: "s1" }, ctx) as any
     expect(result.phase).toBe("IMPLEMENTATION")
     expect(result.phaseState).toBe("TASK_REVIEW")
+    expect(result.initialized).toBe(true)
+    expect(result.projectDir).toBe(tmpDir)
     expect(result.pendingTaskReview).toBe(true)
+    expect(result.nextAction).toBe("adapter_drain")
+    expect(result.shouldContinue).toBe(true)
+    expect(result.requiresAdapterAction).toBe(true)
     expect(result.noopReason).toContain("T9")
+  })
+
+  it("state.health reports author continuation for REDRAFT", async () => {
+    await ctx.engine!.store.update("s1", (d) => {
+      d.mode = "INCREMENTAL"
+      d.phase = "PLANNING"
+      d.phaseState = "REDRAFT"
+      d.featureName = "redraft-feat"
+    })
+    const result = await handleStateHealth({ sessionId: "s1" }, ctx) as any
+    expect(result.nextAction).toBe("author_continue")
+    expect(result.shouldContinue).toBe(true)
+    expect(result.requiresAdapterAction).toBe(false)
+    expect(result.continuationMessage).toContain("PLANNING/REDRAFT")
+    expect(result.stopReason).toBeNull()
+  })
+
+  it("state.health reports initialized runtime even when requested session is missing", async () => {
+    const result = await handleStateHealth({ sessionId: "missing" }, ctx) as any
+    expect(result.initialized).toBe(true)
+    expect(result.requestedSessionFound).toBe(false)
+    expect(result.projectDir).toBe(tmpDir)
+    expect(result.phase).toBe("MODE_SELECT")
+    expect(result.nextAction).toBe("stop_error")
   })
 })
 
@@ -463,6 +661,40 @@ describe("message.process", () => {
       parts: [{ type: "text", text: "looks good, approved" }],
     }, ctx) as MessageProcessResult
     expect(result.intercepted).toBe(true)
+    expect(ctx.engine!.store.get("s1")?.userGateMessageReceived).toBe(true)
+  })
+
+  it("intercepts real user messages at HUMAN_GATE so resolved gates can be submitted", async () => {
+    await ctx.engine!.store.update("s1", (d) => {
+      d.mode = "INCREMENTAL"
+      d.phase = "IMPLEMENTATION"
+      d.phaseState = "HUMAN_GATE"
+      d.userGateMessageReceived = false
+      d.implDag = [{
+        id: "T1",
+        description: "Manual maintainer decision",
+        dependencies: [],
+        expectedTests: [],
+        expectedFiles: [],
+        estimatedComplexity: "small",
+        status: "human-gated",
+        humanGate: {
+          whatIsNeeded: "Maintainer confirms out-of-scope artifacts may remain untouched",
+          why: "Avoid reverting unrelated worktree changes",
+          verificationSteps: "User explicitly confirms",
+          resolved: false,
+        },
+      }]
+    })
+
+    const result = await handleMessageProcess({
+      sessionId: "s1",
+      parts: [{ type: "text", text: "T1 is resolved; proceed without cleaning unrelated artifacts" }],
+    }, ctx) as MessageProcessResult
+
+    expect(result.intercepted).toBe(true)
+    expect(result.parts[0]?.text).toContain("WORKFLOW HUMAN GATE")
+    expect(result.parts[0]?.text).toContain("T1")
     expect(ctx.engine!.store.get("s1")?.userGateMessageReceived).toBe(true)
   })
 

@@ -8,7 +8,7 @@
  * the returned tools and hooks to verify end-to-end behavior.
  */
 import { describe, expect, it, beforeEach, afterEach, mock } from "bun:test"
-import { mkdtempSync, rmSync, mkdirSync } from "node:fs"
+import { existsSync, mkdtempSync, readFileSync, rmSync, mkdirSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 
@@ -93,11 +93,9 @@ beforeEach(async () => {
   previousStateBackend = process.env["OPENARTISAN_STATE_BACKEND"]
   process.env["OPENARTISAN_STATE_BACKEND"] = "filesystem"
 
-  // OpenArtisanPlugin reads import.meta.dirname to find the state dir.
-  // In tests, the state file lands in the real plugin dir — we accept that and
-  // work around by using a unique session ID per test. The plugin startup
-  // calls store.load() which is safe even if the file doesn't exist.
-  plugin = await OpenArtisanPlugin({ client } as any)
+  // Use the per-test temp project as the plugin directory so feature-name
+  // collision checks exercise real persistence without leaking across tests.
+  plugin = await OpenArtisanPlugin({ client, directory: tempDir } as any)
 })
 
 afterEach(() => {
@@ -196,7 +194,6 @@ describe("OpenCode integration — structural workflow parity", () => {
       d.phase = "PLANNING"
       d.phaseState = "USER_GATE"
       d.mode = "INCREMENTAL"
-      d.featureName = `skip-check-${Date.now()}`
       d.userGateMessageReceived = true
     })
     await plugin.tool.submit_feedback.execute({ feedback_text: "approved", feedback_type: "approve", approved_files: [] }, ctx)
@@ -296,7 +293,6 @@ describe("OpenCode integration — task boundary revision workflow", () => {
       d.phase = "IMPLEMENTATION"
       d.phaseState = "DRAFT"
       d.mode = "INCREMENTAL"
-      d.featureName = `boundary-${Date.now()}`
       d.fileAllowlist = ["/repo/src/a.ts", "/repo/src/b.ts", "/repo/tests/a.test.ts", "/repo/tests/b.test.ts"]
       d.implDag = [
         { id: "T1", description: "Done task", dependencies: [], expectedFiles: ["/repo/src/a.ts"], expectedTests: ["/repo/tests/a.test.ts"], estimatedComplexity: "small", status: "complete" },
@@ -326,7 +322,6 @@ describe("OpenCode integration — task boundary revision workflow", () => {
       d.phase = "IMPLEMENTATION"
       d.phaseState = "DRAFT"
       d.mode = "INCREMENTAL"
-      d.featureName = `boundary-allowlist-${Date.now()}`
       d.fileAllowlist = ["/repo/src/b.ts", "/repo/tests/b.test.ts"]
       d.implDag = [
         { id: "T2", description: "Target task", dependencies: [], expectedFiles: ["/repo/src/b.ts"], expectedTests: ["/repo/tests/b.test.ts"], estimatedComplexity: "medium", status: "pending" },
@@ -353,7 +348,6 @@ describe("OpenCode integration — task boundary revision workflow", () => {
       d.phase = "IMPLEMENTATION"
       d.phaseState = "DRAFT"
       d.mode = "INCREMENTAL"
-      d.featureName = `boundary-apply-${Date.now()}`
       d.fileAllowlist = ["/repo/src/a.ts", "/repo/src/b.ts", "/repo/tests/a.test.ts", "/repo/tests/b.test.ts"]
       d.implDag = [
         { id: "T1", description: "Done task", dependencies: [], expectedFiles: ["/repo/src/a.ts"], expectedTests: ["/repo/tests/a.test.ts"], estimatedComplexity: "small", status: "complete" },
@@ -540,14 +534,45 @@ describe("Event hook — session lifecycle", () => {
     ;(client.session.prompt as ReturnType<typeof mock>).mockClear()
 
     await plugin.event({
-      event: { type: "session.created", properties: { info: { id: activeSessionId, agent: "Build" } } },
+      event: { type: "session.created", properties: { info: { id: activeSessionId, agent: "artisan" } } },
     })
+    await plugin.tool.select_mode.execute(
+      { mode: "GREENFIELD", feature_name: `active-feature-${Date.now()}` },
+      { directory: tempDir, sessionId: activeSessionId },
+    )
 
     await plugin.event({
       event: { type: "session.idle", properties: { sessionID: staleSessionId } },
     })
 
     expect(client.session.prompt).not.toHaveBeenCalled()
+  })
+
+  it("honors idle events for active workflow sessions when registry active id is stale or inactive", async () => {
+    const workflowSessionId = `int-test-${Date.now()}-workflow-idle`
+    const inactiveSessionId = `int-test-${Date.now()}-inactive`
+
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: workflowSessionId } } },
+    })
+    await plugin.tool.select_mode.execute(
+      { mode: "GREENFIELD", feature_name: `workflow-idle-${Date.now()}` },
+      { directory: tempDir, sessionId: workflowSessionId },
+    )
+
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: inactiveSessionId, agent: "Build" } } },
+    })
+    ;(client.session.prompt as ReturnType<typeof mock>).mockClear()
+
+    await plugin.event({
+      event: { type: "session.idle", properties: { sessionID: workflowSessionId } },
+    })
+
+    expect(client.session.prompt).toHaveBeenCalledTimes(1)
+    const promptArg = (client.session.prompt as ReturnType<typeof mock>).mock.calls[0]?.[0]
+    expect(promptArg?.path?.id).toBe(workflowSessionId)
+    expect(promptArg?.body?.parts?.[0]?.text).toContain("Continue drafting the PLANNING artifact")
   })
 })
 
@@ -729,6 +754,136 @@ describe("tool.execute.before — phase-gated tool restrictions", () => {
     ).rejects.toThrow("no target path")
   })
 
+  it("explains native apply_patch is unguardable when OpenCode omits patch text", async () => {
+    const sid = `int-test-${Date.now()}-guard-native-patch-no-payload`
+    await advanceGreenfieldToInterfaces(sid, `guard-native-patch-no-payload-${Date.now()}`)
+    await plugin._testStore.update(sid, (d: any) => { d.phaseState = "REVISE" })
+
+    await expect(
+      plugin["tool.execute.before"]({
+        sessionID: sid,
+        tool: "apply_patch",
+        callID: "call_real_native_shape",
+      } as any),
+    ).rejects.toThrow("guarded_write")
+  })
+
+  it("allows guarded_edit in INTERFACES/REVISE for interface files", async () => {
+    const sid = `int-test-${Date.now()}-guarded-edit-interface`
+    const ctx = await advanceGreenfieldToInterfaces(sid, `guarded-edit-interface-${Date.now()}`)
+    await plugin._testStore.update(sid, (d: any) => { d.phaseState = "REVISE" })
+    const targetPath = join(tempDir, "packages", "cli", "src", "contracts.d.ts")
+    mkdirSync(join(tempDir, "packages", "cli", "src"), { recursive: true })
+    await Bun.write(targetPath, "export interface C {}")
+
+    const result = await plugin.tool.guarded_edit.execute({
+      file_path: targetPath,
+      old_text: "export interface C {}",
+      new_text: "export interface C {\n  readonly ok: true\n}",
+    }, ctx)
+
+    expect(result).toContain("Edited")
+    expect(result).toContain("Additions: 3")
+    expect(result).toContain("Removals: 1")
+    expect(result).toContain("```diff")
+    expect(result).toContain("-export interface C {}")
+    expect(result).toContain("+export interface C {")
+    expect(readFileSync(targetPath, "utf-8")).toContain("readonly ok: true")
+  })
+
+  it("blocks guarded_edit in INTERFACES/REVISE for implementation files", async () => {
+    const sid = `int-test-${Date.now()}-guarded-edit-implementation`
+    const ctx = await advanceGreenfieldToInterfaces(sid, `guarded-edit-implementation-${Date.now()}`)
+    await plugin._testStore.update(sid, (d: any) => { d.phaseState = "REVISE" })
+    const targetPath = join(tempDir, "src", "runtime", "app.ts")
+
+    const result = await plugin.tool.guarded_edit.execute({
+      file_path: targetPath,
+      old_text: "old",
+      new_text: "new",
+    }, ctx)
+
+    expect(result).toContain("blocked")
+    expect(existsSync(targetPath)).toBe(false)
+  })
+
+  it("allows guarded_write in TESTS/DRAFT to create new test files", async () => {
+    const sid = `int-test-${Date.now()}-guarded-write-test`
+    const ctx = await advanceGreenfieldToInterfaces(sid, `guarded-write-test-${Date.now()}`)
+    await plugin._testStore.update(sid, (d: any) => {
+      d.phase = "TESTS"
+      d.phaseState = "DRAFT"
+    })
+    const targetPath = join(tempDir, "packages", "cli", "src", "contracts.test.ts")
+
+    const result = await plugin.tool.guarded_write.execute({
+      file_path: targetPath,
+      content: "import { describe, it } from 'bun:test'\n\ndescribe('contracts', () => {\n  it('loads', () => {})\n})\n",
+    }, ctx)
+
+    expect(result).toContain("Created")
+    expect(result).toContain("Additions:")
+    expect(result).toContain("--- /dev/null")
+    expect(result).toContain("+++ b/packages/cli/src/contracts.test.ts")
+    expect(readFileSync(targetPath, "utf-8")).toContain("describe('contracts'")
+  })
+
+  it("allows guarded_patch in TESTS/DRAFT to create a new test file with diff output", async () => {
+    const sid = `int-test-${Date.now()}-guarded-patch-test`
+    const ctx = await advanceGreenfieldToInterfaces(sid, `guarded-patch-test-${Date.now()}`)
+    await plugin._testStore.update(sid, (d: any) => {
+      d.phase = "TESTS"
+      d.phaseState = "DRAFT"
+    })
+    const targetPath = join(tempDir, "packages", "cli", "src", "guarded-patch.test.ts")
+
+    const result = await plugin.tool.guarded_patch.execute({
+      patch_text: `*** Begin Patch\n*** Add File: ${targetPath}\n+import { describe, it } from 'bun:test'\n+\n+describe('guarded patch', () => {\n+  it('loads', () => {})\n+})\n*** End Patch`,
+    }, ctx)
+
+    expect(result).toContain("Applied patch to 1 file(s).")
+    expect(result).toContain("Additions:")
+    expect(result).toContain("+++ b/packages/cli/src/guarded-patch.test.ts")
+    expect(readFileSync(targetPath, "utf-8")).toContain("describe('guarded patch'")
+  })
+
+  it("blocks guarded_patch before writing any file when a target violates phase policy", async () => {
+    const sid = `int-test-${Date.now()}-guarded-patch-blocked`
+    const ctx = await advanceGreenfieldToInterfaces(sid, `guarded-patch-blocked-${Date.now()}`)
+    await plugin._testStore.update(sid, (d: any) => {
+      d.phase = "TESTS"
+      d.phaseState = "DRAFT"
+    })
+    const allowedPath = join(tempDir, "packages", "cli", "src", "guarded-patch.test.ts")
+    const blockedPath = join(tempDir, "packages", "cli", "src", "guarded-patch.ts")
+
+    const result = await plugin.tool.guarded_patch.execute({
+      patch_text: `*** Begin Patch\n*** Add File: ${allowedPath}\n+test('ok', () => {})\n*** Add File: ${blockedPath}\n+export const blocked = true\n*** End Patch`,
+    }, ctx)
+
+    expect(result).toContain("blocked")
+    expect(existsSync(allowedPath)).toBe(false)
+    expect(existsSync(blockedPath)).toBe(false)
+  })
+
+  it("blocks guarded_write in TESTS/DRAFT for non-test files", async () => {
+    const sid = `int-test-${Date.now()}-guarded-write-non-test`
+    const ctx = await advanceGreenfieldToInterfaces(sid, `guarded-write-non-test-${Date.now()}`)
+    await plugin._testStore.update(sid, (d: any) => {
+      d.phase = "TESTS"
+      d.phaseState = "DRAFT"
+    })
+    const targetPath = join(tempDir, "packages", "cli", "src", "contracts.ts")
+
+    const result = await plugin.tool.guarded_write.execute({
+      file_path: targetPath,
+      content: "export const notATest = true\n",
+    }, ctx)
+
+    expect(result).toContain("blocked")
+    expect(existsSync(targetPath)).toBe(false)
+  })
+
   it("allows apply_patch when all patch targets satisfy the phase file predicate", async () => {
     const sid = `int-test-${Date.now()}-guard-valid-patch`
     await advanceGreenfieldToInterfaces(sid, `guard-valid-patch-${Date.now()}`)
@@ -739,6 +894,95 @@ describe("tool.execute.before — phase-gated tool restrictions", () => {
         tool: "apply_patch",
         args: {
           patchText: "*** Begin Patch\n*** Update File: src/core/aspects/types.ts\n@@\n-old\n+new\n*** End Patch",
+        },
+      }),
+    ).resolves.toBeUndefined()
+  })
+
+  it("allows apply_patch in INTERFACES/REVISE with args.patchText", async () => {
+    const sid = `int-test-${Date.now()}-guard-revise-args-patch`
+    await advanceGreenfieldToInterfaces(sid, `guard-revise-args-patch-${Date.now()}`)
+    await plugin._testStore.update(sid, (d: any) => { d.phaseState = "REVISE" })
+
+    await expect(
+      plugin["tool.execute.before"]({
+        sessionID: sid,
+        tool: "apply_patch",
+        args: {
+          patchText: "*** Begin Patch\n*** Update File: packages/cli/src/contracts.d.ts\n@@\n-old\n+new\n*** End Patch",
+        },
+      }),
+    ).resolves.toBeUndefined()
+  })
+
+  it("allows apply_patch when OpenCode provides patch text outside args", async () => {
+    const sid = `int-test-${Date.now()}-guard-top-level-patch`
+    await advanceGreenfieldToInterfaces(sid, `guard-top-level-patch-${Date.now()}`)
+
+    await expect(
+      plugin["tool.execute.before"]({
+        sessionID: sid,
+        tool: "apply_patch",
+        patchText: `*** Begin Patch\n*** Add File: ${join(tempDir, "src/contracts.d.ts")}\n+export interface Contract {}\n*** End Patch`,
+      } as any),
+    ).resolves.toBeUndefined()
+  })
+
+  it("allows apply_patch in INTERFACES/REVISE with top-level patch text", async () => {
+    const sid = `int-test-${Date.now()}-guard-revise-top-level-patch`
+    await advanceGreenfieldToInterfaces(sid, `guard-revise-top-level-patch-${Date.now()}`)
+    await plugin._testStore.update(sid, (d: any) => { d.phaseState = "REVISE" })
+
+    await expect(
+      plugin["tool.execute.before"]({
+        sessionID: sid,
+        tool: "apply_patch",
+        args: {},
+        patchText: "*** Begin Patch\n*** Update File: packages/cli/src/contracts.d.ts\n@@\n-old\n+new\n*** End Patch",
+      } as any),
+    ).resolves.toBeUndefined()
+  })
+
+  it("allows apply_patch in INTERFACES/REVISE with JSON-stringified args", async () => {
+    const sid = `int-test-${Date.now()}-guard-revise-string-args-patch`
+    await advanceGreenfieldToInterfaces(sid, `guard-revise-string-args-patch-${Date.now()}`)
+    await plugin._testStore.update(sid, (d: any) => { d.phaseState = "REVISE" })
+
+    await expect(
+      plugin["tool.execute.before"]({
+        sessionID: sid,
+        tool: "apply_patch",
+        args: JSON.stringify({
+          patchText: "*** Begin Patch\n*** Update File: packages/cli/src/contracts.d.ts\n@@\n-old\n+new\n*** End Patch",
+        }),
+      } as any),
+    ).resolves.toBeUndefined()
+  })
+
+  it("allows apply_patch when OpenCode provides empty args and top-level patch text", async () => {
+    const sid = `int-test-${Date.now()}-guard-empty-args-top-level-patch`
+    await advanceGreenfieldToInterfaces(sid, `guard-empty-args-top-level-patch-${Date.now()}`)
+
+    await expect(
+      plugin["tool.execute.before"]({
+        sessionID: sid,
+        tool: "apply_patch",
+        args: {},
+        patchText: "*** Begin Patch\n*** Add File: src/contracts.d.ts\n+export interface Contract {}\n*** End Patch",
+      } as any),
+    ).resolves.toBeUndefined()
+  })
+
+  it("allows multi-file apply_patch when every target satisfies INTERFACES policy", async () => {
+    const sid = `int-test-${Date.now()}-guard-multi-valid-patch`
+    await advanceGreenfieldToInterfaces(sid, `guard-multi-valid-patch-${Date.now()}`)
+
+    await expect(
+      plugin["tool.execute.before"]({
+        sessionID: sid,
+        tool: "apply_patch",
+        args: {
+          patchText: "*** Begin Patch\n*** Add File: src/a.d.ts\n+export interface A {}\n*** Add File: src/b.d.ts\n+export interface B {}\n*** End Patch",
         },
       }),
     ).resolves.toBeUndefined()
@@ -757,6 +1001,24 @@ describe("tool.execute.before — phase-gated tool restrictions", () => {
         },
       }),
     ).rejects.toThrow("src/runtime/app.ts")
+  })
+
+  it("suppresses idle reprompt after nonrecoverable apply_patch target extraction failure", async () => {
+    const sid = `int-test-${Date.now()}-guard-idle-blocker`
+    await advanceGreenfieldToInterfaces(sid, `guard-idle-blocker-${Date.now()}`)
+    ;(client.session.prompt as ReturnType<typeof mock>).mockClear()
+
+    await expect(
+      plugin["tool.execute.before"]({
+        sessionID: sid,
+        tool: "apply_patch",
+        args: { patch: "*** Begin Patch\n*** End Patch" },
+      }),
+    ).rejects.toThrow("no target path")
+
+    await plugin.event({ event: { type: "session.idle", properties: { sessionID: sid } } })
+
+    expect(client.session.prompt).not.toHaveBeenCalled()
   })
 
   it("rejects artifact_content for OpenCode INTERFACES request_review", async () => {

@@ -431,7 +431,7 @@ describe("buildWorkflowSystemPrompt — acceptance criteria at REVIEW", () => {
     const prompt = buildWorkflowSystemPrompt(makeState({ phase: "TESTS", phaseState: "REVIEW" }))
     expect(prompt).toContain("Acceptance Criteria")
     expect(prompt).toContain("real runnable test/spec files")
-    expect(prompt).toContain("At least one test per interface method")
+    expect(prompt).toContain("runtime seam named by the approved artifacts")
   })
 
   it("injects ImplPlan acceptance criteria at IMPL_PLAN/REVIEW", () => {
@@ -563,7 +563,7 @@ describe("buildWorkflowSystemPrompt — acceptance criteria preview at authoring
       {
         name: "TESTS/DRAFT",
         overrides: { phase: "TESTS", phaseState: "DRAFT" },
-        expected: "At least one test per interface method",
+        expected: "runtime seam named by the approved artifacts",
       },
       {
         name: "IMPL_PLAN/DRAFT",
@@ -601,7 +601,7 @@ describe("buildWorkflowSystemPrompt — acceptance criteria preview at authoring
   it("injects criteria preview at TESTS/REVISE", () => {
     const prompt = buildWorkflowSystemPrompt(makeState({ phase: "TESTS", phaseState: "REVISE" }))
     expect(prompt).toContain("Acceptance Criteria Preview")
-    expect(prompt).toContain("At least one test per interface method")
+    expect(prompt).toContain("runtime seam named by the approved artifacts")
   })
 
   it("injects criteria preview at DISCOVERY/CONVENTIONS in REFACTOR mode", () => {

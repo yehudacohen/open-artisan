@@ -7,9 +7,23 @@ import { mkdtemp, rm } from "node:fs/promises"
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 
-import { createSessionStateStore } from "#core/session-state"
+import { createSessionStateStore as createRawSessionStateStore } from "#core/session-state"
 import { createFileSystemStateBackend, migrateLegacyStateFile } from "#core/state-backend-fs"
 import { SCHEMA_VERSION, type SessionStateStore, type WorkflowState } from "#core/workflow-state-types"
+
+type RuntimeSessionStateStore = Omit<SessionStateStore, "get" | "findByFeatureName" | "findPersistedByFeatureName" | "create" | "update" | "migrateSession" | "delete"> & {
+  get(sessionId: string): WorkflowState | null
+  findByFeatureName(featureName: string): WorkflowState | null
+  findPersistedByFeatureName(featureName: string): Promise<WorkflowState | null>
+  create(sessionId: string): Promise<WorkflowState>
+  update(sessionId: string, mutator: (draft: WorkflowState) => void): Promise<WorkflowState>
+  migrateSession(oldSessionId: string, newSessionId: string): Promise<WorkflowState>
+  delete(sessionId: string): Promise<void>
+}
+
+function createSessionStateStore(...args: Parameters<typeof createRawSessionStateStore>): RuntimeSessionStateStore {
+  return createRawSessionStateStore(...args) as unknown as RuntimeSessionStateStore
+}
 
 /** Build a minimal valid WorkflowState for test fixtures. */
 function makeState(sessionId: string, featureName: string | null, overrides?: Partial<WorkflowState>): WorkflowState {
@@ -71,7 +85,7 @@ function writeLegacyState(filePath: string, states: Record<string, unknown>): vo
   writeFileSync(filePath, JSON.stringify(states), "utf-8")
 }
 
-let store: SessionStateStore
+let store: RuntimeSessionStateStore
 let tmpDir: string
 
 beforeEach(async () => {
@@ -492,7 +506,7 @@ describe("SessionStateStore — concurrent update serialization (G22)", () => {
     expect(failingStore.get("s-fail")?.phase).toBe("MODE_SELECT")
   })
 
-  it("keeps store persistence policy-neutral for feature reuse", async () => {
+  it("rejects feature reuse for an existing persisted workflow", async () => {
     await store.create("s-one")
     await store.create("s-two")
     await store.update("s-one", (d) => {
@@ -502,14 +516,14 @@ describe("SessionStateStore — concurrent update serialization (G22)", () => {
       d.phaseState = "DRAFT"
     })
 
-    await store.update("s-two", (d) => {
+    await expect(store.update("s-two", (d) => {
       d.featureName = "shared-feature"
       d.mode = "GREENFIELD"
       d.phase = "PLANNING"
       d.phaseState = "DRAFT"
-    })
+    })).rejects.toThrow('Feature "shared-feature" is already used by session "s-one"')
 
-    expect(store.get("s-two")?.featureName).toBe("shared-feature")
+    expect(store.get("s-two")?.featureName).toBeNull()
   })
 })
 

@@ -77,6 +77,37 @@ describe("Tool policy — apply_patch path extraction", () => {
     })
     expect(paths).toEqual(["src/new.ts"])
   })
+
+  it("extracts patch targets from arbitrary nested OpenCode payload shapes", () => {
+    const paths = extractWriteToolPaths({
+      tool: "apply_patch",
+      arguments: {
+        freeform: {
+          value: "*** Begin Patch\n*** Add File: src/contracts.d.ts\n+export interface Contract {}\n*** End Patch",
+        },
+      },
+    })
+    expect(paths).toEqual(["src/contracts.d.ts"])
+  })
+
+  it("extracts patch targets from JSON-stringified OpenCode args", () => {
+    const paths = extractWriteToolPaths(JSON.stringify({
+      patchText: "*** Begin Patch\n*** Add File: packages/cli/src/contracts.d.ts\n+export interface Contract {}\n*** End Patch",
+    }))
+    expect(paths).toEqual(["packages/cli/src/contracts.d.ts"])
+  })
+
+  it("extracts patch targets from escaped raw freeform patch text", () => {
+    const paths = extractWriteToolPaths("*** Begin Patch\\n*** Add File: packages/cli/src/contracts.d.ts\\n+export interface Contract {}\\n*** End Patch")
+    expect(paths).toEqual(["packages/cli/src/contracts.d.ts"])
+  })
+
+  it("extracts every target from multi-file apply_patch payloads", () => {
+    const paths = extractWriteToolPaths({
+      patchText: "*** Begin Patch\n*** Add File: src/a.d.ts\n+export interface A {}\n*** Update File: src/b.ts\n@@\n-old\n+new\n*** End Patch",
+    })
+    expect(paths).toEqual(["src/a.d.ts", "src/b.ts"])
+  })
 })
 
 describe("Tool policy — DISCOVERY/REVISE allows writes to .openartisan/ only", () => {
@@ -590,6 +621,13 @@ describe("Tool policy — IMPLEMENTATION/INCREMENTAL bashCommandPredicate", () =
     const policy = getPhaseToolPolicy("IMPLEMENTATION", "DRAFT", "INCREMENTAL", ["/a.ts"])
     expect(policy.bashCommandPredicate!("dd if=/tmp/a of=/tmp/b")).toBe(false)
     expect(policy.bashCommandPredicate!("printf hello | tee -a file.txt")).toBe(false)
+    expect(policy.bashCommandPredicate!("curl -o output.txt https://example.com/file")).toBe(false)
+    expect(policy.bashCommandPredicate!("wget --output-document=output.txt https://example.com/file")).toBe(false)
+    expect(policy.bashCommandPredicate!("unzip archive.zip")).toBe(false)
+    expect(policy.bashCommandPredicate!("tar -xf archive.tar")).toBe(false)
+    expect(policy.bashCommandPredicate!("rsync -a src/ dest/")).toBe(false)
+    expect(policy.bashCommandPredicate!("git restore src/file.ts")).toBe(false)
+    expect(policy.bashCommandPredicate!("python -c \"from pathlib import Path; Path('x').write_text('bad')\"")).toBe(false)
   })
 
   it("does NOT block << in non-heredoc context (shift operator)", () => {
@@ -604,9 +642,13 @@ describe("Tool policy — IMPLEMENTATION/INCREMENTAL bashCommandPredicate", () =
     expect(policy.bashCommandPredicate!("node -e 'console.log(value << amount)'")).toBe(false)
   })
 
-  it("GREENFIELD mode does NOT have bashCommandPredicate", () => {
+  it("GREENFIELD unrestricted mode still blocks obvious .env writes through bash", () => {
     const policy = getPhaseToolPolicy("IMPLEMENTATION", "DRAFT", "GREENFIELD", [])
-    expect(policy.bashCommandPredicate).toBeUndefined()
+    expect(policy.bashCommandPredicate).toBeDefined()
+    expect(policy.bashCommandPredicate!("bun install")).toBe(true)
+    expect(policy.bashCommandPredicate!("echo SECRET=1 > .env")).toBe(false)
+    expect(policy.bashCommandPredicate!("python -c \"from pathlib import Path; Path('.env').write_text('SECRET=1')\"")).toBe(false)
+    expect(policy.bashCommandPredicate!("cat .env.example")).toBe(true)
   })
 })
 

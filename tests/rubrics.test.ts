@@ -32,6 +32,16 @@ describe("shared rubrics", () => {
     expect(criteria).toContain("logs, retries, and timeouts are not required")
   })
 
+  it("allows approved runtime seam and characterization tests in TESTS", () => {
+    const criteria = buildPhaseAcceptanceCriteria("TESTS", "INCREMENTAL")
+
+    expect(criteria).toContain("structural state/event, protocol method, or runtime seam")
+    expect(criteria).toContain("Characterization, regression, executable seam")
+    expect(criteria).toContain("may pass before implementation")
+    expect(criteria).toContain("state machines, bridge handlers, adapter hooks, plugin entry points, or workflow tools")
+    expect(criteria).toContain("approved executable seam under test")
+  })
+
   it("keeps canonical phase rubrics available outside REVIEW state", () => {
     expect(getAcceptanceCriteria("IMPLEMENTATION", "DRAFT", "GREENFIELD")).toBeNull()
 
@@ -52,6 +62,13 @@ describe("shared rubrics", () => {
     expect(getPhaseStructuralGate("TESTS")).toContain("runtime seams")
     expect(getPhaseStructuralGate("IMPLEMENTATION")).toContain("Implementation review")
     expect(getPhaseStructuralGate("IMPLEMENTATION")).toContain("wired end-to-end")
+  })
+
+  it("requires PLANNING to classify reviewed INTERFACES artifacts separately from support files", () => {
+    const criteria = buildPhaseAcceptanceCriteria("PLANNING", "INCREMENTAL")
+
+    expect(criteria).toContain("Reviewed INTERFACES artifact path requirement")
+    expect(criteria).toContain("Supporting implementation dependencies may be listed separately")
   })
 
   it("shares structural wiring language between task prompt preview and task reviewer", () => {

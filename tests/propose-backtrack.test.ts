@@ -63,7 +63,7 @@ describe("propose_backtrack — validation guards", () => {
       makeOrchestrator(),
     )
     expect(result.action).toBe("error")
-    expect(result.message).toContain("DRAFT or REVISE")
+    expect(result.message).toContain("DRAFT, REVISE, or IMPLEMENTATION/TASK_REVISE")
   })
 
   it("rejects when phaseState is USER_GATE", async () => {
@@ -74,7 +74,7 @@ describe("propose_backtrack — validation guards", () => {
       makeOrchestrator(),
     )
     expect(result.action).toBe("error")
-    expect(result.message).toContain("DRAFT or REVISE")
+    expect(result.message).toContain("DRAFT, REVISE, or IMPLEMENTATION/TASK_REVISE")
   })
 
   it("rejects when phaseState is ESCAPE_HATCH", async () => {
@@ -85,7 +85,19 @@ describe("propose_backtrack — validation guards", () => {
       makeOrchestrator(),
     )
     expect(result.action).toBe("error")
-    expect(result.message).toContain("DRAFT or REVISE")
+    expect(result.message).toContain("DRAFT, REVISE, or IMPLEMENTATION/TASK_REVISE")
+  })
+
+  it("allows IMPLEMENTATION/TASK_REVISE to backtrack for upstream scope repair", async () => {
+    const state = makeState({ phase: "IMPLEMENTATION", phaseState: "TASK_REVISE" })
+    const result = await handleProposeBacktrack(
+      { target_phase: "PLANNING", reason: "The isolated reviewer found approved scope excludes required files and needs widening" },
+      state,
+      makeOrchestrator({ classification: "backtrack" }),
+    )
+    expect(result.action).toBe("execute")
+    if (result.action !== "execute") return
+    expect(result.targetPhase).toBe("PLANNING")
   })
 
   it("rejects when phase is MODE_SELECT", async () => {

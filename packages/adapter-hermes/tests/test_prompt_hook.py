@@ -22,7 +22,7 @@ from hermes_adapter.prompt_hook import (
     _review_timeout_s,
 )
 from hermes_adapter.types import BridgeError
-from hermes_adapter.session_projects import clear_session_project_dir, get_session_project_dir, set_session_project_dir
+from hermes_adapter.session_projects import clear_session_project_dir, get_last_user_message, get_session_project_dir, set_session_project_dir
 from hermes_adapter.constants import resolve_reviewer_command
 
 from .conftest import MockBridgeClient
@@ -60,12 +60,13 @@ class TestPromptHook:
         assert "PLANNING" in result["context"]
 
     def test_defers_bridge_without_selected_project(self, started_bridge, tmp_path):
-        """Auxiliary sessions without project selection should not touch OA bridge."""
+        """Auxiliary sessions without project selection still announce session lifecycle but skip prompt building."""
         clear_session_project_dir("unselected-session")
         hook = create_prompt_hook(started_bridge, "unselected-session", str(tmp_path))
         result = hook()
         assert result == {"context": ""}
-        assert started_bridge.get_calls() == []
+        assert len(started_bridge.get_calls("prompt.build")) == 1
+        assert len(started_bridge.get_calls("lifecycle.sessionCreated")) == 1
 
     def test_selects_openartisan_fallback_project(self, started_bridge, tmp_path):
         """Hook should bind sessions when the fallback cwd is an Open Artisan project."""
@@ -78,7 +79,7 @@ class TestPromptHook:
         result = hook()
 
         assert result == {"context": "prompt text"}
-        assert get_session_project_dir(session_id) == str(tmp_path.resolve())
+        assert get_session_project_dir(session_id).endswith("/open-artisan")
         clear_session_project_dir(session_id)
 
     def test_uses_default_workflow_state_for_resumed_hermes_session(self, started_bridge, tmp_path):
@@ -125,6 +126,30 @@ class TestPromptHook:
         assert result == {"context": "revise prompt"}
         prompt_calls = started_bridge.get_calls("prompt.build")
         assert prompt_calls[-1][1] == {"sessionId": "default"}
+        clear_session_project_dir(session_id)
+
+    def test_explicitly_selected_project_prompt_does_not_fallback_to_default(self, started_bridge, tmp_path):
+        session_id = "runtime-session"
+        clear_session_project_dir(session_id)
+        (tmp_path / ".openartisan").mkdir()
+        set_session_project_dir(session_id, str(tmp_path), explicit=True)
+
+        def state_response(params):
+            if params["sessionId"] == "default":
+                return {"phase": "IMPLEMENTATION", "phaseState": "HUMAN_GATE"}
+            return {"phase": "MODE_SELECT", "phaseState": "DRAFT"}
+
+        started_bridge.set_response_fn("state.get", state_response)
+        started_bridge.set_response("prompt.build", "mode select prompt")
+
+        hook = create_prompt_hook(started_bridge, session_id, str(tmp_path))
+        result = hook()
+
+        assert result == {"context": "mode select prompt"}
+        prompt_calls = started_bridge.get_calls("prompt.build")
+        assert prompt_calls[-1][1] == {"sessionId": session_id}
+        state_calls = started_bridge.get_calls("state.get")
+        assert all(call[1]["sessionId"] != "default" for call in state_calls)
         clear_session_project_dir(session_id)
 
     def test_calls_prompt_build_with_session_id(self, started_bridge):
@@ -276,6 +301,22 @@ class TestUserGateDetection:
         assert msg_calls[0][1]["sessionId"] == "s1"
         assert msg_calls[0][1]["parts"][0]["text"] == "approved by human"
 
+    def test_calls_message_process_at_user_gate_with_user_task(
+        self, started_bridge
+    ):
+        """Hermes may expose gateway user text as user_task instead of user_message."""
+        started_bridge.set_response(
+            "state.get", {"phase": "PLANNING", "phaseState": "USER_GATE", "activeAgent": "artisan"}
+        )
+        started_bridge.set_response("message.process", {"intercepted": True, "parts": []})
+        started_bridge.set_response("prompt.build", "prompt text")
+        hook = create_prompt_hook(started_bridge, "s1")
+        hook(user_task="approved. keep going")
+        msg_calls = started_bridge.get_calls("message.process")
+        assert len(msg_calls) == 1
+        assert msg_calls[0][1]["sessionId"] == "s1"
+        assert msg_calls[0][1]["parts"][0]["text"] == "approved. keep going"
+
     def test_does_not_call_message_process_at_draft(self, started_bridge):
         """When state is DRAFT, hook should NOT call message.process."""
         started_bridge.set_response("state.get", {"phaseState": "DRAFT"})
@@ -294,6 +335,20 @@ class TestUserGateDetection:
                 ]
             }
         ) == "please approve"
+
+    def test_extract_user_message_from_user_task(self):
+        assert _extract_user_message({"user_task": "approved"}) == "approved"
+
+    def test_records_last_user_message_before_gate_is_visible(self, started_bridge):
+        started_bridge.set_response(
+            "state.get", {"phase": "DISCOVERY", "phaseState": "DRAFT", "activeAgent": "artisan"}
+        )
+        started_bridge.set_response("prompt.build", "prompt text")
+        hook = create_prompt_hook(started_bridge, "s1")
+
+        hook(user_message="approved. keep going")
+
+        assert get_last_user_message("s1") == "approved. keep going"
 
     def test_state_get_failure_does_not_crash(self, started_bridge):
         """If state.get fails, hook should still return prompt context."""
@@ -369,6 +424,14 @@ class TestDispatchTaskReviewSubprocess:
         """On successful subprocess, should call submit_task_review via tool.execute."""
         started_bridge.set_response("task.getReviewContext", "Review prompt here\nOPEN_ARTISAN_REVIEW_TOKEN: abc123")
         started_bridge.set_response("tool.execute", "Task review passed")
+        progress_ids: list[str] = []
+
+        def emit_progress(_params):
+            event_id = f"event-{len(progress_ids) + 1}"
+            progress_ids.append(event_id)
+            return {"event": {"id": event_id}}
+
+        started_bridge.set_response_fn("progress.emit", emit_progress)
         state = {"taskCompletionInProgress": "T1"}
 
         mock_result = MagicMock()
@@ -394,6 +457,9 @@ class TestDispatchTaskReviewSubprocess:
         assert tool_calls[0][1]["name"] == "submit_task_review"
         assert "review_output" in tool_calls[0][1]["args"]
         assert tool_calls[0][1]["args"]["review_token"] == "abc123"
+        progress_calls = started_bridge.get_calls("progress.emit")
+        assert [call[1]["status"] for call in progress_calls] == ["started", "started", "succeeded"]
+        assert progress_calls[1][1]["parentEventId"] == "event-1"
 
     def test_subprocess_not_found_calls_auto_accept(self, started_bridge):
         """When claude CLI is not found, should call _auto_accept_review."""
@@ -514,6 +580,10 @@ class TestPhaseReviewDispatch:
         )
         started_bridge.set_response("task.getPhaseReviewContext", "Phase review prompt\nOPEN_ARTISAN_REVIEW_TOKEN: def456")
         started_bridge.set_response("tool.execute", "Phase review submitted")
+        started_bridge.set_response_fn(
+            "progress.emit",
+            lambda _params: {"event": {"id": "phase-progress-event"}},
+        )
         started_bridge.set_response("prompt.build", "prompt")
 
         mock_result = MagicMock()
@@ -537,6 +607,13 @@ class TestPhaseReviewDispatch:
         assert len(tool_calls) == 1
         assert tool_calls[0][1]["name"] == "submit_phase_review"
         assert tool_calls[0][1]["args"]["review_token"] == "def456"
+        progress_calls = started_bridge.get_calls("progress.emit")
+        assert [call[1]["kind"] for call in progress_calls] == [
+            "phase-review",
+            "phase-review.subprocess",
+            "phase-review.subprocess",
+            "phase-review",
+        ]
 
     def test_phase_review_submits_reviewer_output(self, started_bridge):
         started_bridge.set_response("task.getPhaseReviewContext", "Phase review prompt\nOPEN_ARTISAN_REVIEW_TOKEN: def456")
@@ -668,7 +745,7 @@ class TestPhaseReviewDispatch:
 
     def test_auto_approve_runs_reviewer_inside_project_dir(self, started_bridge):
         started_bridge.set_response("message.process", {"intercepted": True})
-        started_bridge.set_response("task.getAutoApproveContext", "Auto approve prompt")
+        started_bridge.set_response("task.getAutoApproveContext", "Auto approve prompt\nOPEN_ARTISAN_REVIEW_TOKEN: abc123")
         started_bridge.set_response("tool.execute", "Auto approval submitted")
 
         mock_result = MagicMock()

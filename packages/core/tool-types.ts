@@ -3,8 +3,11 @@
  */
 
 import type { TaskNode } from "./dag"
-import type { WorkflowMode } from "./workflow-primitives"
+import type { WorkflowMode } from "./types"
 
+/**
+ * Arguments required to select workflow mode and bind a feature namespace.
+ */
 export interface SelectModeArgs {
   mode: WorkflowMode
   /** Required feature subdirectory name for artifact isolation (kebab-case) */
@@ -98,10 +101,10 @@ export interface AnalyzeTaskBoundaryChangeArgs {
  * Apply-time acknowledgement contract for a previously analyzed task-boundary revision.
  */
 export interface ApplyTaskBoundaryChangeArgs extends AnalyzeTaskBoundaryChangeArgs {
-  /** Explicit acknowledgement of which tasks are expected to be impacted by the change */
-  expected_impacted_tasks?: string[]
-  /** Explicit acknowledgement of which completed tasks are expected to be reset */
-  expected_reset_tasks?: string[]
+  /** Explicit acknowledgement of which tasks are expected to be impacted by the change. Required at apply time. */
+  expected_impacted_tasks: string[]
+  /** Explicit acknowledgement of which completed tasks are expected to be reset. Required at apply time. */
+  expected_reset_tasks: string[]
 }
 
 export type TaskBoundaryChangeConflictKind =
@@ -151,7 +154,7 @@ export interface TaskBoundaryChangeAnalysis {
   rationale: NonEmptyBoundaryChangeReason
 }
 
-export interface TaskBoundaryChangeError extends String {
+export interface TaskBoundaryChangeError {
   code:
     | "TASK_BOUNDARY_CHANGE_NOT_ALLOWED"
     | "TASK_BOUNDARY_CHANGE_INVALID_ARGS"

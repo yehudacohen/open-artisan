@@ -2,8 +2,11 @@
  * review-types.ts — Review, self-review, and review tool argument contracts.
  */
 
-import type { Phase, WorkflowMode } from "./workflow-primitives"
+import type { Phase, WorkflowMode } from "./types"
 
+/**
+ * Review criterion evaluation contract shared by self-review, rebuttal, and reviewer outputs.
+ */
 export interface CriterionResult {
   criterion: string
   met: boolean
@@ -34,9 +37,9 @@ export interface SelfReviewSuccess {
 
 export interface SelfReviewError {
   success: false
-  error: string
-  code?: "SELF_REVIEW_FAILED"
-  message?: string
+  code: "SELF_REVIEW_FAILED"
+  message: string
+  details?: string
 }
 
 export type SelfReviewResult = SelfReviewSuccess | SelfReviewError
@@ -85,8 +88,8 @@ export interface RebuttalSuccess {
 export interface RebuttalError {
   success: false
   error: string
-  code?: "REBUTTAL_FAILED"
-  message?: string
+  code: "REBUTTAL_FAILED"
+  message: string
 }
 
 export type RebuttalResult = RebuttalSuccess | RebuttalError

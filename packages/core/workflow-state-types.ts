@@ -3,8 +3,8 @@
  */
 
 import type { RevisionStep } from "./orchestrator-types"
-import { VALID_PHASE_STATES } from "./workflow-primitives"
-import type { ArtifactKey, Phase, PhaseState, WorkflowMode } from "./workflow-primitives"
+import { VALID_PHASE_STATES } from "./types"
+import type { ArtifactKey, Phase, PhaseState, WorkflowMode } from "./types"
 import { createImplDAG } from "./dag"
 
 // ---------------------------------------------------------------------------
@@ -444,6 +444,7 @@ export * from "./roadmap-types"
 export interface StoreLoadResult {
   success: true
   count: number
+  skipped?: Array<{ featureName: string; reason: string }>
 }
 
 /**
@@ -455,10 +456,28 @@ export interface StoreLoadResult {
  */
 export interface StoreLoadError {
   success: false
-  error: string
-  code?: "STORE_LOAD_FAILED"
-  message?: string
+  code: "STORE_LOAD_FAILED"
+  message: string
+  details?: string
 }
+
+export interface SessionStateLookupResult {
+  success: true
+  value: WorkflowState | null
+}
+
+export interface SessionStateStoreError {
+  code:
+    | "SESSION_STATE_NOT_FOUND"
+    | "SESSION_STATE_ALREADY_EXISTS"
+    | "SESSION_STATE_INVALID"
+    | "SESSION_STATE_PERSIST_FAILED"
+  message: string
+}
+
+export type SessionStateStoreResult<T> =
+  | { success: true; value: T }
+  | { success: false; error: SessionStateStoreError }
 
 export interface SessionStateStore {
   /**
@@ -468,38 +487,36 @@ export interface SessionStateStore {
    * performance (called on every tool call). Do NOT mutate the returned object —
    * use update() for all mutations. Treat the return value as read-only.
    */
-  get(sessionId: string): WorkflowState | null
+  get(sessionId: string): SessionStateLookupResult
 
   /**
    * Find a workflow state by feature name.
    * Searches all sessions for one with matching featureName.
    * Returns a defensive clone of the state if found, null otherwise.
    */
-  findByFeatureName(featureName: string): WorkflowState | null
+  findByFeatureName(featureName: string): SessionStateLookupResult
 
   /**
    * Find a workflow state by feature name, falling back to persisted storage.
    * Use this for cross-client resume flows where another process may have written
    * the feature state after this store instance was loaded.
    */
-  findPersistedByFeatureName(featureName: string): Promise<WorkflowState | null>
+  findPersistedByFeatureName(featureName: string): Promise<SessionStateStoreResult<WorkflowState | null>>
 
   /**
    * Create a fresh state for a new session and persist it.
-   * Errors: throws if sessionId already exists.
    */
-  create(sessionId: string): Promise<WorkflowState>
+  create(sessionId: string): Promise<SessionStateStoreResult<WorkflowState>>
 
   /**
    * Apply a mutation to an existing state and persist it atomically.
    * The mutator receives a draft copy; after it returns, the result is validated
    * and persisted. Returns the new state.
-   * Errors: throws if sessionId not found, or if mutation produces invalid state.
    */
   update(
     sessionId: string,
     mutator: (draft: WorkflowState) => void,
-  ): Promise<WorkflowState>
+  ): Promise<SessionStateStoreResult<WorkflowState>>
 
   /**
    * Load all persisted states from disk on plugin startup.
@@ -511,15 +528,14 @@ export interface SessionStateStore {
    * Migrate state from one sessionId to another (for resume across sessions).
    * Moves the in-memory entry from oldSessionId to newSessionId, updates
    * the sessionId field, and persists. Removes the old session entry.
-   * Errors: throws if oldSessionId not found or newSessionId already has non-fresh state.
    */
-  migrateSession(oldSessionId: string, newSessionId: string): Promise<WorkflowState>
+  migrateSession(oldSessionId: string, newSessionId: string): Promise<SessionStateStoreResult<WorkflowState>>
 
   /**
    * Remove state for a deleted session from memory and disk.
    * No-op if sessionId not found.
    */
-  delete(sessionId: string): Promise<void>
+  delete(sessionId: string): Promise<SessionStateStoreResult<null>>
 }
 
 // ---------------------------------------------------------------------------
@@ -546,139 +562,147 @@ export interface SessionStateStore {
  * and `message` fields so callers have a structured error shape without changing the
  * compatibility contract in this phase.
  */
-export type WorkflowStateValidationError = string & {
+export interface WorkflowStateValidationError {
   code: "INVALID_WORKFLOW_STATE"
   message: string
 }
 
 function workflowStateValidationError(message: string): WorkflowStateValidationError {
-  return message as WorkflowStateValidationError
+  return {
+    code: "INVALID_WORKFLOW_STATE",
+    message,
+  }
 }
 
-export function validateWorkflowState(state: WorkflowState): WorkflowStateValidationError | null {
+export type WorkflowStateValidationResult = { success: true } | { success: false; error: WorkflowStateValidationError }
+
+export function validateWorkflowStateResult(state: WorkflowState): WorkflowStateValidationResult {
   if (state.schemaVersion !== SCHEMA_VERSION) {
-    return workflowStateValidationError(`Invalid schemaVersion: expected ${SCHEMA_VERSION}, got ${state.schemaVersion}`)
+    return { success: false, error: workflowStateValidationError(`Invalid schemaVersion: expected ${SCHEMA_VERSION}, got ${state.schemaVersion}`) }
   }
   if (!state.sessionId || typeof state.sessionId !== "string") {
-    return workflowStateValidationError("Invalid sessionId: must be a non-empty string")
+    return { success: false, error: workflowStateValidationError("Invalid sessionId: must be a non-empty string") }
   }
   const validPhases = Object.keys(VALID_PHASE_STATES) as Phase[]
   if (!validPhases.includes(state.phase)) {
-    return workflowStateValidationError(`Invalid phase: "${state.phase}"`)
+    return { success: false, error: workflowStateValidationError(`Invalid phase: "${state.phase}"`) }
   }
   const validStates = VALID_PHASE_STATES[state.phase]
   if (!validStates.includes(state.phaseState)) {
-    return workflowStateValidationError(`Invalid phaseState "${state.phaseState}" for phase "${state.phase}". Valid: ${validStates.join(", ")}`)
+    return { success: false, error: workflowStateValidationError(`Invalid phaseState "${state.phaseState}" for phase "${state.phase}". Valid: ${validStates.join(", ")}`) }
   }
   if (state.mode !== null && state.mode !== "GREENFIELD" && state.mode !== "REFACTOR" && state.mode !== "INCREMENTAL") {
-    return workflowStateValidationError(`Invalid mode: "${state.mode}". Must be null, "GREENFIELD", "REFACTOR", or "INCREMENTAL".`)
+    return { success: false, error: workflowStateValidationError(`Invalid mode: "${state.mode}". Must be null, "GREENFIELD", "REFACTOR", or "INCREMENTAL".`) }
   }
-  if (state.iterationCount < 0) return workflowStateValidationError("iterationCount must be >= 0")
-  if (state.retryCount < 0) return workflowStateValidationError("retryCount must be >= 0")
-  if (state.approvalCount < 0) return workflowStateValidationError("approvalCount must be >= 0")
+  if (state.featureName !== null && state.phase !== "MODE_SELECT" && state.mode === null) {
+    return { success: false, error: workflowStateValidationError(`mode must be selected before phase ${state.phase}`) }
+  }
+  if (state.iterationCount < 0) return { success: false, error: workflowStateValidationError("iterationCount must be >= 0") }
+  if (state.retryCount < 0) return { success: false, error: workflowStateValidationError("retryCount must be >= 0") }
+  if (state.approvalCount < 0) return { success: false, error: workflowStateValidationError("approvalCount must be >= 0") }
   if (state.mode === "INCREMENTAL") {
     for (const path of state.fileAllowlist) {
       if (!path.startsWith("/")) {
-        return workflowStateValidationError(`fileAllowlist path "${path}" must be an absolute path (start with "/")`)
+        return { success: false, error: workflowStateValidationError(`fileAllowlist path "${path}" must be an absolute path (start with "/")`) }
       }
     }
   }
   if (state.conventions !== null && typeof state.conventions !== "string") {
-    return workflowStateValidationError(`conventions must be null or a string, got ${typeof state.conventions}`)
+    return { success: false, error: workflowStateValidationError(`conventions must be null or a string, got ${typeof state.conventions}`) }
   }
   if (typeof state.priorWorkflowChecked !== "boolean") {
-    return workflowStateValidationError(`priorWorkflowChecked must be a boolean, got ${typeof state.priorWorkflowChecked}`)
+    return { success: false, error: workflowStateValidationError(`priorWorkflowChecked must be a boolean, got ${typeof state.priorWorkflowChecked}`) }
   }
   if (state.sessionModel !== null) {
     if (typeof state.sessionModel === "string") {
       // valid
     } else if (typeof state.sessionModel === "object" && !Array.isArray(state.sessionModel)) {
       if (!("modelID" in state.sessionModel) || typeof state.sessionModel.modelID !== "string") {
-        return workflowStateValidationError(`sessionModel object must have a string modelID field`)
+        return { success: false, error: workflowStateValidationError(`sessionModel object must have a string modelID field`) }
       }
     } else {
-      return workflowStateValidationError(`sessionModel must be null, a string, or an object with modelID, got ${typeof state.sessionModel}`)
+      return { success: false, error: workflowStateValidationError(`sessionModel must be null, a string, or an object with modelID, got ${typeof state.sessionModel}`) }
     }
   }
   if (state.currentTaskId !== null && typeof state.currentTaskId !== "string") {
-    return workflowStateValidationError(`currentTaskId must be null or a string, got ${typeof state.currentTaskId}`)
+    return { success: false, error: workflowStateValidationError(`currentTaskId must be null or a string, got ${typeof state.currentTaskId}`) }
   }
   if (state.phase !== "IMPLEMENTATION" && state.currentTaskId !== null) {
-    return workflowStateValidationError(`currentTaskId must be null outside IMPLEMENTATION, got "${state.currentTaskId}" in ${state.phase}`)
+    return { success: false, error: workflowStateValidationError(`currentTaskId must be null outside IMPLEMENTATION, got "${state.currentTaskId}" in ${state.phase}`) }
   }
   if (!Array.isArray(state.feedbackHistory)) {
-    return workflowStateValidationError(`feedbackHistory must be an array, got ${typeof state.feedbackHistory}`)
+    return { success: false, error: workflowStateValidationError(`feedbackHistory must be an array, got ${typeof state.feedbackHistory}`) }
   }
   for (let i = 0; i < state.feedbackHistory.length; i++) {
     const entry = state.feedbackHistory[i]
     if (!entry || typeof entry !== "object") {
-      return workflowStateValidationError(`feedbackHistory[${i}] must be an object`)
+      return { success: false, error: workflowStateValidationError(`feedbackHistory[${i}] must be an object`) }
     }
     if (typeof entry.phase !== "string") {
-      return workflowStateValidationError(`feedbackHistory[${i}].phase must be a string`)
+      return { success: false, error: workflowStateValidationError(`feedbackHistory[${i}].phase must be a string`) }
     }
     if (typeof entry.feedback !== "string") {
-      return workflowStateValidationError(`feedbackHistory[${i}].feedback must be a string`)
+      return { success: false, error: workflowStateValidationError(`feedbackHistory[${i}].feedback must be a string`) }
     }
     if (typeof entry.timestamp !== "number" || entry.timestamp < 0) {
-      return workflowStateValidationError(`feedbackHistory[${i}].timestamp must be a non-negative number`)
+      return { success: false, error: workflowStateValidationError(`feedbackHistory[${i}].timestamp must be a non-negative number`) }
     }
   }
   if (state.backtrackContext != null) {
     if (typeof state.backtrackContext !== "object" || Array.isArray(state.backtrackContext)) {
-      return workflowStateValidationError(`backtrackContext must be null or an object`)
+      return { success: false, error: workflowStateValidationError(`backtrackContext must be null or an object`) }
     }
     if (state.phaseState !== "REDRAFT") {
-      return workflowStateValidationError(`backtrackContext may only be present while phaseState is "REDRAFT", got "${state.phaseState}"`)
+      return { success: false, error: workflowStateValidationError(`backtrackContext may only be present while phaseState is "REDRAFT", got "${state.phaseState}"`) }
     }
     if (typeof state.backtrackContext.sourcePhase !== "string") {
-      return workflowStateValidationError(`backtrackContext.sourcePhase must be a Phase string`)
+      return { success: false, error: workflowStateValidationError(`backtrackContext.sourcePhase must be a Phase string`) }
     }
     if (typeof state.backtrackContext.targetPhase !== "string") {
-      return workflowStateValidationError(`backtrackContext.targetPhase must be a Phase string`)
+      return { success: false, error: workflowStateValidationError(`backtrackContext.targetPhase must be a Phase string`) }
     }
     if (!validPhases.includes(state.backtrackContext.sourcePhase as Phase)) {
-      return workflowStateValidationError(`backtrackContext.sourcePhase has invalid phase "${state.backtrackContext.sourcePhase}"`)
+      return { success: false, error: workflowStateValidationError(`backtrackContext.sourcePhase has invalid phase "${state.backtrackContext.sourcePhase}"`) }
     }
     if (!validPhases.includes(state.backtrackContext.targetPhase as Phase)) {
-      return workflowStateValidationError(`backtrackContext.targetPhase has invalid phase "${state.backtrackContext.targetPhase}"`)
+      return { success: false, error: workflowStateValidationError(`backtrackContext.targetPhase has invalid phase "${state.backtrackContext.targetPhase}"`) }
     }
     if (typeof state.backtrackContext.reason !== "string" || state.backtrackContext.reason.trim().length === 0) {
-      return workflowStateValidationError(`backtrackContext.reason must be a non-empty string`)
+      return { success: false, error: workflowStateValidationError(`backtrackContext.reason must be a non-empty string`) }
     }
     if (state.backtrackContext.targetPhase === "MODE_SELECT" || state.backtrackContext.targetPhase === "DONE") {
-      return workflowStateValidationError(`backtrackContext.targetPhase must be an artifact-authoring phase, got "${state.backtrackContext.targetPhase}"`)
+      return { success: false, error: workflowStateValidationError(`backtrackContext.targetPhase must be an artifact-authoring phase, got "${state.backtrackContext.targetPhase}"`) }
     }
   }
   if (state.implDag !== null) {
     if (!Array.isArray(state.implDag)) {
-      return workflowStateValidationError(`implDag must be null or an array, got ${typeof state.implDag}`)
+      return { success: false, error: workflowStateValidationError(`implDag must be null or an array, got ${typeof state.implDag}`) }
     }
     for (const node of state.implDag) {
       if (!node || typeof node !== "object") {
-        return workflowStateValidationError(`implDag contains a non-object entry`)
+        return { success: false, error: workflowStateValidationError(`implDag contains a non-object entry`) }
       }
       if (typeof node.id !== "string" || !node.id) {
-        return workflowStateValidationError(`implDag task missing required "id" string field`)
+        return { success: false, error: workflowStateValidationError(`implDag task missing required "id" string field`) }
       }
       if (!Array.isArray(node.dependencies)) {
-        return workflowStateValidationError(`implDag task "${node.id}" missing required "dependencies" array`)
+        return { success: false, error: workflowStateValidationError(`implDag task "${node.id}" missing required "dependencies" array`) }
       }
       if (!Array.isArray(node.expectedTests)) {
-        return workflowStateValidationError(`implDag task "${node.id}" missing required "expectedTests" array`)
+        return { success: false, error: workflowStateValidationError(`implDag task "${node.id}" missing required "expectedTests" array`) }
       }
       const validStatuses = ["pending", "in-flight", "complete", "aborted", "human-gated", "delegated"]
       if (typeof node.status !== "string" || !validStatuses.includes(node.status)) {
-        return workflowStateValidationError(`implDag task "${node.id}" has invalid status "${node.status}"`)
+        return { success: false, error: workflowStateValidationError(`implDag task "${node.id}" has invalid status "${node.status}"`) }
       }
       // v22: validate expectedFiles array
       if (node.expectedFiles !== undefined && node.expectedFiles !== null) {
         if (!Array.isArray(node.expectedFiles)) {
-          return workflowStateValidationError(`implDag task "${node.id}" expectedFiles must be an array`)
+          return { success: false, error: workflowStateValidationError(`implDag task "${node.id}" expectedFiles must be an array`) }
         }
         for (let j = 0; j < node.expectedFiles.length; j++) {
           if (typeof node.expectedFiles[j] !== "string") {
-            return workflowStateValidationError(`implDag task "${node.id}" expectedFiles[${j}] must be a string`)
+            return { success: false, error: workflowStateValidationError(`implDag task "${node.id}" expectedFiles[${j}] must be a string`) }
           }
         }
       }
@@ -686,112 +710,112 @@ export function validateWorkflowState(state: WorkflowState): WorkflowStateValida
       if (node.category !== undefined && node.category !== null) {
         const validCategories = ["scaffold", "human-gate", "integration", "standalone"]
         if (typeof node.category !== "string" || !validCategories.includes(node.category)) {
-          return workflowStateValidationError(`implDag task "${node.id}" has invalid category "${node.category}". Valid: ${validCategories.join(", ")}`)
+          return { success: false, error: workflowStateValidationError(`implDag task "${node.id}" has invalid category "${node.category}". Valid: ${validCategories.join(", ")}`) }
         }
       }
       // v12: validate humanGate field if present
       if (node.humanGate !== undefined && node.humanGate !== null) {
         const hg = node.humanGate
         if (typeof hg !== "object" || Array.isArray(hg)) {
-          return workflowStateValidationError(`implDag task "${node.id}" humanGate must be an object`)
+          return { success: false, error: workflowStateValidationError(`implDag task "${node.id}" humanGate must be an object`) }
         }
         if (typeof hg.whatIsNeeded !== "string") {
-          return workflowStateValidationError(`implDag task "${node.id}" humanGate.whatIsNeeded must be a string`)
+          return { success: false, error: workflowStateValidationError(`implDag task "${node.id}" humanGate.whatIsNeeded must be a string`) }
         }
         if (typeof hg.why !== "string") {
-          return workflowStateValidationError(`implDag task "${node.id}" humanGate.why must be a string`)
+          return { success: false, error: workflowStateValidationError(`implDag task "${node.id}" humanGate.why must be a string`) }
         }
         if (typeof hg.verificationSteps !== "string") {
-          return workflowStateValidationError(`implDag task "${node.id}" humanGate.verificationSteps must be a string`)
+          return { success: false, error: workflowStateValidationError(`implDag task "${node.id}" humanGate.verificationSteps must be a string`) }
         }
         if (typeof hg.resolved !== "boolean") {
-          return workflowStateValidationError(`implDag task "${node.id}" humanGate.resolved must be a boolean`)
+          return { success: false, error: workflowStateValidationError(`implDag task "${node.id}" humanGate.resolved must be a boolean`) }
         }
       }
       // v12: cross-field invariant — human-gated status requires humanGate metadata
       if (node.status === "human-gated" && (!node.humanGate || typeof node.humanGate !== "object")) {
-        return workflowStateValidationError(`implDag task "${node.id}" has status "human-gated" but no humanGate metadata`)
+        return { success: false, error: workflowStateValidationError(`implDag task "${node.id}" has status "human-gated" but no humanGate metadata`) }
       }
     }
     try {
       const dagValidation = createImplDAG(state.implDag).validate()
       if (!dagValidation.valid) {
-        return workflowStateValidationError(`implDag graph invalid: ${dagValidation.errors.join("; ")}`)
+        return { success: false, error: workflowStateValidationError(`implDag graph invalid: ${dagValidation.errors.join("; ")}`) }
       }
     } catch (error) {
-      return workflowStateValidationError(`implDag graph validation failed: ${error instanceof Error ? error.message : String(error)}`)
+      return { success: false, error: workflowStateValidationError(`implDag graph validation failed: ${error instanceof Error ? error.message : String(error)}`) }
     }
   }
   if (state.phaseApprovalCounts !== null && state.phaseApprovalCounts !== undefined) {
     if (typeof state.phaseApprovalCounts !== "object" || Array.isArray(state.phaseApprovalCounts)) {
-      return workflowStateValidationError(`phaseApprovalCounts must be an object, got ${typeof state.phaseApprovalCounts}`)
+      return { success: false, error: workflowStateValidationError(`phaseApprovalCounts must be an object, got ${typeof state.phaseApprovalCounts}`) }
     }
     for (const [key, val] of Object.entries(state.phaseApprovalCounts)) {
       if (typeof val !== "number" || val < 0) {
-        return workflowStateValidationError(`phaseApprovalCounts["${key}"] must be a non-negative number`)
+        return { success: false, error: workflowStateValidationError(`phaseApprovalCounts["${key}"] must be a non-negative number`) }
       }
     }
   }
   if (typeof state.escapePending !== "boolean") {
-    return workflowStateValidationError(`escapePending must be a boolean, got ${typeof state.escapePending}`)
+    return { success: false, error: workflowStateValidationError(`escapePending must be a boolean, got ${typeof state.escapePending}`) }
   }
   if (state.pendingRevisionSteps !== null && !Array.isArray(state.pendingRevisionSteps)) {
-    return workflowStateValidationError(`pendingRevisionSteps must be null or an array, got ${typeof state.pendingRevisionSteps}`)
+    return { success: false, error: workflowStateValidationError(`pendingRevisionSteps must be null or an array, got ${typeof state.pendingRevisionSteps}`) }
   }
   // M1: Cross-field invariant — escapePending requires pendingRevisionSteps
   if (state.escapePending && (state.pendingRevisionSteps === null || state.pendingRevisionSteps.length === 0)) {
-    return workflowStateValidationError(`escapePending is true but pendingRevisionSteps is ${state.pendingRevisionSteps === null ? "null" : "empty"} — escape hatch requires pending steps`)
+    return { success: false, error: workflowStateValidationError(`escapePending is true but pendingRevisionSteps is ${state.pendingRevisionSteps === null ? "null" : "empty"} — escape hatch requires pending steps`) }
   }
   // M2: Cross-field invariant — escapePending requires ESCAPE_HATCH phaseState
   // (structural guarantee: the state machine enforces this via the escape_hatch_triggered event)
   if (state.escapePending && state.phaseState !== "ESCAPE_HATCH") {
-    return workflowStateValidationError(`escapePending is true but phaseState is "${state.phaseState}" — must be "ESCAPE_HATCH" (state machine should enforce this)`)
+    return { success: false, error: workflowStateValidationError(`escapePending is true but phaseState is "${state.phaseState}" — must be "ESCAPE_HATCH" (state machine should enforce this)`) }
   }
   if (typeof state.userGateMessageReceived !== "boolean") {
-    return workflowStateValidationError(`userGateMessageReceived must be a boolean, got ${typeof state.userGateMessageReceived}`)
+    return { success: false, error: workflowStateValidationError(`userGateMessageReceived must be a boolean, got ${typeof state.userGateMessageReceived}`) }
   }
   if (state.reviewArtifactHash !== null && typeof state.reviewArtifactHash !== "string") {
-    return workflowStateValidationError(`reviewArtifactHash must be a string or null, got ${typeof state.reviewArtifactHash}`)
+    return { success: false, error: workflowStateValidationError(`reviewArtifactHash must be a string or null, got ${typeof state.reviewArtifactHash}`) }
   }
   if (state.latestReviewResults !== null && !Array.isArray(state.latestReviewResults)) {
-    return workflowStateValidationError(`latestReviewResults must be an array or null, got ${typeof state.latestReviewResults}`)
+    return { success: false, error: workflowStateValidationError(`latestReviewResults must be an array or null, got ${typeof state.latestReviewResults}`) }
   }
   if (state.artifactDiskPaths !== null && state.artifactDiskPaths !== undefined) {
     if (typeof state.artifactDiskPaths !== "object" || Array.isArray(state.artifactDiskPaths)) {
-      return workflowStateValidationError(`artifactDiskPaths must be an object, got ${typeof state.artifactDiskPaths}`)
+      return { success: false, error: workflowStateValidationError(`artifactDiskPaths must be an object, got ${typeof state.artifactDiskPaths}`) }
     }
     for (const [key, val] of Object.entries(state.artifactDiskPaths)) {
       if (typeof val !== "string") {
-        return workflowStateValidationError(`artifactDiskPaths["${key}"] must be a string, got ${typeof val}`)
+        return { success: false, error: workflowStateValidationError(`artifactDiskPaths["${key}"] must be a string, got ${typeof val}`) }
       }
       if (!val.startsWith("/")) {
-        return workflowStateValidationError(`artifactDiskPaths["${key}"] must be an absolute path (start with "/"), got "${val}"`)
+        return { success: false, error: workflowStateValidationError(`artifactDiskPaths["${key}"] must be an absolute path (start with "/"), got "${val}"`) }
       }
     }
   }
   // approvedArtifactFiles — validate as object with absolute string path arrays
   if (state.approvedArtifactFiles !== undefined && (typeof state.approvedArtifactFiles !== "object" || Array.isArray(state.approvedArtifactFiles) || state.approvedArtifactFiles === null)) {
-    return workflowStateValidationError(`approvedArtifactFiles must be an object, got ${typeof state.approvedArtifactFiles}`)
+    return { success: false, error: workflowStateValidationError(`approvedArtifactFiles must be an object, got ${typeof state.approvedArtifactFiles}`) }
   }
   for (const [key, val] of Object.entries(state.approvedArtifactFiles ?? {})) {
     if (!Array.isArray(val)) {
-      return workflowStateValidationError(`approvedArtifactFiles["${key}"] must be an array`)
+      return { success: false, error: workflowStateValidationError(`approvedArtifactFiles["${key}"] must be an array`) }
     }
     for (let i = 0; i < val.length; i++) {
       const path = val[i]
       if (typeof path !== "string") {
-        return workflowStateValidationError(`approvedArtifactFiles["${key}"][${i}] must be a string`)
+        return { success: false, error: workflowStateValidationError(`approvedArtifactFiles["${key}"][${i}] must be a string`) }
       }
       if (!path.startsWith("/")) {
-        return workflowStateValidationError(`approvedArtifactFiles["${key}"][${i}] must be an absolute path (start with "/"), got "${path}"`)
+        return { success: false, error: workflowStateValidationError(`approvedArtifactFiles["${key}"][${i}] must be an absolute path (start with "/"), got "${path}"`) }
       }
     }
   }
   if (state.featureName !== null && typeof state.featureName !== "string") {
-    return workflowStateValidationError(`featureName must be null or a string, got ${typeof state.featureName}`)
+    return { success: false, error: workflowStateValidationError(`featureName must be null or a string, got ${typeof state.featureName}`) }
   }
   if (typeof state.featureName === "string" && state.featureName.length === 0) {
-    return workflowStateValidationError(`featureName must not be an empty string (use null for no feature)`)
+    return { success: false, error: workflowStateValidationError(`featureName must not be an empty string (use null for no feature)`) }
   }
   // Security: featureName is used to construct artifact directory paths
   // (.openartisan/<featureName>/). Reject names containing path traversal
@@ -800,149 +824,149 @@ export function validateWorkflowState(state: WorkflowState): WorkflowStateValida
   // Each segment is validated individually.
   if (typeof state.featureName === "string") {
     if (/\.\./.test(state.featureName)) {
-      return workflowStateValidationError(`featureName must not contain ".." (path traversal), got "${state.featureName}"`)
+      return { success: false, error: workflowStateValidationError(`featureName must not contain ".." (path traversal), got "${state.featureName}"`) }
     }
     if (/\\/.test(state.featureName)) {
-      return workflowStateValidationError(`featureName must not contain backslashes, got "${state.featureName}"`)
+      return { success: false, error: workflowStateValidationError(`featureName must not contain backslashes, got "${state.featureName}"`) }
     }
     if (state.featureName.startsWith("/") || state.featureName.endsWith("/")) {
-      return workflowStateValidationError(`featureName must not start or end with "/", got "${state.featureName}"`)
+      return { success: false, error: workflowStateValidationError(`featureName must not start or end with "/", got "${state.featureName}"`) }
     }
     if (/\/\//.test(state.featureName)) {
-      return workflowStateValidationError(`featureName must not contain consecutive slashes, got "${state.featureName}"`)
+      return { success: false, error: workflowStateValidationError(`featureName must not contain consecutive slashes, got "${state.featureName}"`) }
     }
     const segments = state.featureName.split("/")
     for (let i = 0; i < segments.length; i++) {
       if (segments[i] === "sub" && i === 0) {
         // "sub" is reserved for nesting but only rejected as the TOP-LEVEL name.
         // It's allowed as an interior segment (e.g., "parent/sub/child").
-        return workflowStateValidationError(`featureName "sub" is reserved (used for sub-workflow directory nesting). Choose a different name.`)
+        return { success: false, error: workflowStateValidationError(`featureName "sub" is reserved (used for sub-workflow directory nesting). Choose a different name.`) }
       }
       if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(segments[i]!)) {
-        return workflowStateValidationError(`featureName segment "${segments[i]}" must start with alphanumeric and contain only alphanumeric, dots, hyphens, and underscores, got "${state.featureName}"`)
+        return { success: false, error: workflowStateValidationError(`featureName segment "${segments[i]}" must start with alphanumeric and contain only alphanumeric, dots, hyphens, and underscores, got "${state.featureName}"`) }
       }
     }
   }
   // v13: activeAgent
   if (state.activeAgent !== null && state.activeAgent !== undefined) {
     if (typeof state.activeAgent !== "string") {
-      return workflowStateValidationError(`activeAgent must be null or a string, got ${typeof state.activeAgent}`)
+      return { success: false, error: workflowStateValidationError(`activeAgent must be null or a string, got ${typeof state.activeAgent}`) }
     }
     if (state.activeAgent.length === 0) {
-      return workflowStateValidationError(`activeAgent must not be an empty string (use null for unknown/non-artisan agents)`)
+      return { success: false, error: workflowStateValidationError(`activeAgent must not be an empty string (use null for unknown/non-artisan agents)`) }
     }
   }
   // v14: taskCompletionInProgress
   if (state.taskCompletionInProgress !== null && state.taskCompletionInProgress !== undefined) {
     if (typeof state.taskCompletionInProgress !== "string") {
-      return workflowStateValidationError(`taskCompletionInProgress must be null or a string, got ${typeof state.taskCompletionInProgress}`)
+      return { success: false, error: workflowStateValidationError(`taskCompletionInProgress must be null or a string, got ${typeof state.taskCompletionInProgress}`) }
     }
     if (state.taskCompletionInProgress.length === 0) {
-      return workflowStateValidationError(`taskCompletionInProgress must not be an empty string (use null when no completion is in progress)`)
+      return { success: false, error: workflowStateValidationError(`taskCompletionInProgress must not be an empty string (use null when no completion is in progress)`) }
     }
     if (state.phase !== "IMPLEMENTATION") {
-      return workflowStateValidationError(`taskCompletionInProgress must be null outside IMPLEMENTATION, got "${state.taskCompletionInProgress}" in ${state.phase}`)
+      return { success: false, error: workflowStateValidationError(`taskCompletionInProgress must be null outside IMPLEMENTATION, got "${state.taskCompletionInProgress}" in ${state.phase}`) }
     }
     if (state.currentTaskId !== state.taskCompletionInProgress) {
-      return workflowStateValidationError(`taskCompletionInProgress "${state.taskCompletionInProgress}" must match currentTaskId while review is pending`)
+      return { success: false, error: workflowStateValidationError(`taskCompletionInProgress "${state.taskCompletionInProgress}" must match currentTaskId while review is pending`) }
     }
   }
   // v15: taskReviewCount
   if (typeof state.taskReviewCount !== "number" || state.taskReviewCount < 0 || !Number.isInteger(state.taskReviewCount)) {
-    return workflowStateValidationError(`taskReviewCount must be a non-negative integer, got ${state.taskReviewCount}`)
+    return { success: false, error: workflowStateValidationError(`taskReviewCount must be a non-negative integer, got ${state.taskReviewCount}`) }
   }
   if (state.phase !== "IMPLEMENTATION" && state.taskReviewCount !== 0) {
-    return workflowStateValidationError(`taskReviewCount must be 0 outside IMPLEMENTATION, got ${state.taskReviewCount} in ${state.phase}`)
+    return { success: false, error: workflowStateValidationError(`taskReviewCount must be 0 outside IMPLEMENTATION, got ${state.taskReviewCount} in ${state.phase}`) }
   }
   // v15: pendingFeedback
   if (state.pendingFeedback !== null && state.pendingFeedback !== undefined) {
     if (typeof state.pendingFeedback !== "string") {
-      return workflowStateValidationError(`pendingFeedback must be null or a string, got ${typeof state.pendingFeedback}`)
+      return { success: false, error: workflowStateValidationError(`pendingFeedback must be null or a string, got ${typeof state.pendingFeedback}`) }
     }
   }
   // v11: revisionBaseline
   if (state.revisionBaseline !== null && state.revisionBaseline !== undefined) {
     const rb = state.revisionBaseline as Record<string, unknown>
     if (typeof rb !== "object" || Array.isArray(rb)) {
-      return workflowStateValidationError(`revisionBaseline must be null or an object, got ${typeof rb}`)
+      return { success: false, error: workflowStateValidationError(`revisionBaseline must be null or an object, got ${typeof rb}`) }
     }
     if (rb.type !== "content-hash" && rb.type !== "git-sha") {
-      return workflowStateValidationError(`revisionBaseline.type must be "content-hash" or "git-sha", got "${rb.type}"`)
+      return { success: false, error: workflowStateValidationError(`revisionBaseline.type must be "content-hash" or "git-sha", got "${rb.type}"`) }
     }
     if (rb.type === "content-hash" && typeof rb.hash !== "string") {
-      return workflowStateValidationError(`revisionBaseline of type "content-hash" must have a string "hash" field`)
+      return { success: false, error: workflowStateValidationError(`revisionBaseline of type "content-hash" must have a string "hash" field`) }
     }
     if (rb.type === "git-sha" && typeof rb.sha !== "string") {
-      return workflowStateValidationError(`revisionBaseline of type "git-sha" must have a string "sha" field`)
+      return { success: false, error: workflowStateValidationError(`revisionBaseline of type "git-sha" must have a string "sha" field`) }
     }
   }
   // v16: userMessages
   if (!Array.isArray(state.userMessages)) {
-    return workflowStateValidationError(`userMessages must be an array, got ${typeof state.userMessages}`)
+    return { success: false, error: workflowStateValidationError(`userMessages must be an array, got ${typeof state.userMessages}`) }
   }
   for (let i = 0; i < state.userMessages.length; i++) {
     if (typeof state.userMessages[i] !== "string") {
-      return workflowStateValidationError(`userMessages[${i}] must be a string`)
+      return { success: false, error: workflowStateValidationError(`userMessages[${i}] must be a string`) }
     }
   }
   // Nullable string fields — validate type when non-null
   if (state.lastCheckpointTag !== null && typeof state.lastCheckpointTag !== "string") {
-    return workflowStateValidationError(`lastCheckpointTag must be null or a string, got ${typeof state.lastCheckpointTag}`)
+    return { success: false, error: workflowStateValidationError(`lastCheckpointTag must be null or a string, got ${typeof state.lastCheckpointTag}`) }
   }
   if (state.orchestratorSessionId !== null && typeof state.orchestratorSessionId !== "string") {
-    return workflowStateValidationError(`orchestratorSessionId must be null or a string, got ${typeof state.orchestratorSessionId}`)
+    return { success: false, error: workflowStateValidationError(`orchestratorSessionId must be null or a string, got ${typeof state.orchestratorSessionId}`) }
   }
   if (state.intentBaseline !== null && typeof state.intentBaseline !== "string") {
-    return workflowStateValidationError(`intentBaseline must be null or a string, got ${typeof state.intentBaseline}`)
+    return { success: false, error: workflowStateValidationError(`intentBaseline must be null or a string, got ${typeof state.intentBaseline}`) }
   }
   if (state.modeDetectionNote !== null && typeof state.modeDetectionNote !== "string") {
-    return workflowStateValidationError(`modeDetectionNote must be null or a string, got ${typeof state.modeDetectionNote}`)
+    return { success: false, error: workflowStateValidationError(`modeDetectionNote must be null or a string, got ${typeof state.modeDetectionNote}`) }
   }
   if (state.discoveryReport !== null && typeof state.discoveryReport !== "string") {
-    return workflowStateValidationError(`discoveryReport must be null or a string, got ${typeof state.discoveryReport}`)
+    return { success: false, error: workflowStateValidationError(`discoveryReport must be null or a string, got ${typeof state.discoveryReport}`) }
   }
   // approvedArtifacts — validate as object with string values
   if (typeof state.approvedArtifacts !== "object" || Array.isArray(state.approvedArtifacts) || state.approvedArtifacts === null) {
-    return workflowStateValidationError(`approvedArtifacts must be an object, got ${typeof state.approvedArtifacts}`)
+    return { success: false, error: workflowStateValidationError(`approvedArtifacts must be an object, got ${typeof state.approvedArtifacts}`) }
   }
   for (const [key, val] of Object.entries(state.approvedArtifacts)) {
     if (typeof val !== "string") {
-      return workflowStateValidationError(`approvedArtifacts["${key}"] must be a string, got ${typeof val}`)
+      return { success: false, error: workflowStateValidationError(`approvedArtifacts["${key}"] must be a string, got ${typeof val}`) }
     }
   }
   // cachedPriorState — validate shape when non-null (transient, cleared on load)
   if (state.cachedPriorState !== null && state.cachedPriorState !== undefined) {
     const cps = state.cachedPriorState as Record<string, unknown>
     if (typeof cps !== "object" || Array.isArray(cps)) {
-      return workflowStateValidationError(`cachedPriorState must be null or an object, got ${typeof cps}`)
+      return { success: false, error: workflowStateValidationError(`cachedPriorState must be null or an object, got ${typeof cps}`) }
     }
     if (typeof cps.phase !== "string") {
-      return workflowStateValidationError(`cachedPriorState.phase must be a string`)
+      return { success: false, error: workflowStateValidationError(`cachedPriorState.phase must be a string`) }
     }
     if (typeof cps.artifactDiskPaths !== "object" || Array.isArray(cps.artifactDiskPaths) || cps.artifactDiskPaths === null) {
-      return workflowStateValidationError(`cachedPriorState.artifactDiskPaths must be an object`)
+      return { success: false, error: workflowStateValidationError(`cachedPriorState.artifactDiskPaths must be an object`) }
     }
   }
   // v21: parentWorkflow
   if (state.parentWorkflow !== null && state.parentWorkflow !== undefined) {
     const pw = state.parentWorkflow as Record<string, unknown>
     if (typeof pw !== "object" || Array.isArray(pw)) {
-      return workflowStateValidationError(`parentWorkflow must be null or an object, got ${typeof pw}`)
+      return { success: false, error: workflowStateValidationError(`parentWorkflow must be null or an object, got ${typeof pw}`) }
     }
     if (typeof pw.sessionId !== "string" || !pw.sessionId) {
-      return workflowStateValidationError(`parentWorkflow.sessionId must be a non-empty string`)
+      return { success: false, error: workflowStateValidationError(`parentWorkflow.sessionId must be a non-empty string`) }
     }
     if (typeof pw.featureName !== "string" || !pw.featureName) {
-      return workflowStateValidationError(`parentWorkflow.featureName must be a non-empty string`)
+      return { success: false, error: workflowStateValidationError(`parentWorkflow.featureName must be a non-empty string`) }
     }
     if (typeof pw.taskId !== "string" || !pw.taskId) {
-      return workflowStateValidationError(`parentWorkflow.taskId must be a non-empty string`)
+      return { success: false, error: workflowStateValidationError(`parentWorkflow.taskId must be a non-empty string`) }
     }
   }
   if (state.implDag !== null) {
     const taskIds = new Set(state.implDag.map((task) => task.id))
     if (state.currentTaskId !== null && !taskIds.has(state.currentTaskId)) {
-      return workflowStateValidationError(`currentTaskId "${state.currentTaskId}" does not exist in implDag`)
+      return { success: false, error: workflowStateValidationError(`currentTaskId "${state.currentTaskId}" does not exist in implDag`) }
     }
     const currentTask = state.currentTaskId !== null
       ? state.implDag.find((task) => task.id === state.currentTaskId) ?? null
@@ -952,58 +976,58 @@ export function validateWorkflowState(state: WorkflowState): WorkflowStateValida
       (currentTask.status === "complete" || currentTask.status === "aborted") &&
       state.taskCompletionInProgress !== state.currentTaskId
     ) {
-      return workflowStateValidationError(`currentTaskId "${state.currentTaskId}" cannot point to a terminal task with status "${currentTask.status}"`)
+      return { success: false, error: workflowStateValidationError(`currentTaskId "${state.currentTaskId}" cannot point to a terminal task with status "${currentTask.status}"`) }
     }
     if (state.taskCompletionInProgress !== null && !taskIds.has(state.taskCompletionInProgress)) {
-      return workflowStateValidationError(`taskCompletionInProgress "${state.taskCompletionInProgress}" does not exist in implDag`)
+      return { success: false, error: workflowStateValidationError(`taskCompletionInProgress "${state.taskCompletionInProgress}" does not exist in implDag`) }
     }
     if (state.phase === "DONE") {
       const unfinished = state.implDag.filter((task) => task.status !== "complete" && task.status !== "aborted")
       if (unfinished.length > 0) {
-        return workflowStateValidationError(`DONE cannot contain unresolved implDag work: ${unfinished.map((task) => task.id).join(", ")}`)
+        return { success: false, error: workflowStateValidationError(`DONE cannot contain unresolved implDag work: ${unfinished.map((task) => task.id).join(", ")}`) }
       }
     }
   }
   // v21: childWorkflows
   if (!Array.isArray(state.childWorkflows)) {
-    return workflowStateValidationError(`childWorkflows must be an array, got ${typeof state.childWorkflows}`)
+    return { success: false, error: workflowStateValidationError(`childWorkflows must be an array, got ${typeof state.childWorkflows}`) }
   }
   const validChildStatuses = ["pending", "running", "complete", "failed"]
   for (let i = 0; i < state.childWorkflows.length; i++) {
     const cw = state.childWorkflows[i]
     if (!cw || typeof cw !== "object") {
-      return workflowStateValidationError(`childWorkflows[${i}] must be an object`)
+      return { success: false, error: workflowStateValidationError(`childWorkflows[${i}] must be an object`) }
     }
     if (typeof cw.taskId !== "string" || !cw.taskId) {
-      return workflowStateValidationError(`childWorkflows[${i}].taskId must be a non-empty string`)
+      return { success: false, error: workflowStateValidationError(`childWorkflows[${i}].taskId must be a non-empty string`) }
     }
     if (typeof cw.featureName !== "string" || !cw.featureName) {
-      return workflowStateValidationError(`childWorkflows[${i}].featureName must be a non-empty string`)
+      return { success: false, error: workflowStateValidationError(`childWorkflows[${i}].featureName must be a non-empty string`) }
     }
     if (cw.sessionId !== null && (typeof cw.sessionId !== "string" || !cw.sessionId)) {
-      return workflowStateValidationError(`childWorkflows[${i}].sessionId must be null or a non-empty string`)
+      return { success: false, error: workflowStateValidationError(`childWorkflows[${i}].sessionId must be null or a non-empty string`) }
     }
     if (typeof cw.status !== "string" || !validChildStatuses.includes(cw.status)) {
-      return workflowStateValidationError(`childWorkflows[${i}].status must be one of ${validChildStatuses.join(", ")}, got "${cw.status}"`)
+      return { success: false, error: workflowStateValidationError(`childWorkflows[${i}].status must be one of ${validChildStatuses.join(", ")}, got "${cw.status}"`) }
     }
     if (typeof cw.delegatedAt !== "string" || !cw.delegatedAt) {
-      return workflowStateValidationError(`childWorkflows[${i}].delegatedAt must be a non-empty ISO timestamp string`)
+      return { success: false, error: workflowStateValidationError(`childWorkflows[${i}].delegatedAt must be a non-empty ISO timestamp string`) }
     }
   }
   // v21: concurrency
   if (!state.concurrency || typeof state.concurrency !== "object" || Array.isArray(state.concurrency)) {
-    return workflowStateValidationError(`concurrency must be an object, got ${typeof state.concurrency}`)
+    return { success: false, error: workflowStateValidationError(`concurrency must be an object, got ${typeof state.concurrency}`) }
   }
   if (typeof state.concurrency.maxParallelTasks !== "number" || !Number.isInteger(state.concurrency.maxParallelTasks) || state.concurrency.maxParallelTasks < 1) {
-    return workflowStateValidationError(`concurrency.maxParallelTasks must be a positive integer, got ${state.concurrency.maxParallelTasks}`)
+    return { success: false, error: workflowStateValidationError(`concurrency.maxParallelTasks must be a positive integer, got ${state.concurrency.maxParallelTasks}`) }
   }
   // v22: reviewArtifactFiles
   if (!Array.isArray(state.reviewArtifactFiles)) {
-    return workflowStateValidationError(`reviewArtifactFiles must be an array, got ${typeof state.reviewArtifactFiles}`)
+    return { success: false, error: workflowStateValidationError(`reviewArtifactFiles must be an array, got ${typeof state.reviewArtifactFiles}`) }
   }
   for (let i = 0; i < state.reviewArtifactFiles.length; i++) {
     if (typeof state.reviewArtifactFiles[i] !== "string") {
-      return workflowStateValidationError(`reviewArtifactFiles[${i}] must be a string`)
+      return { success: false, error: workflowStateValidationError(`reviewArtifactFiles[${i}] must be a string`) }
     }
   }
   // v21 cross-field: running childWorkflows entries must reference a "delegated" DAG task
@@ -1013,10 +1037,15 @@ export function validateWorkflowState(state: WorkflowState): WorkflowStateValida
       if (cw.status === "running" || cw.status === "pending") {
         const dagTask = state.implDag.find((t) => t.id === cw.taskId)
         if (dagTask && dagTask.status !== "delegated") {
-          return workflowStateValidationError(`childWorkflows[${i}] (taskId="${cw.taskId}") has status "${cw.status}" but the DAG task has status "${dagTask.status}" — expected "delegated"`)
+          return { success: false, error: workflowStateValidationError(`childWorkflows[${i}] (taskId="${cw.taskId}") has status "${cw.status}" but the DAG task has status "${dagTask.status}" — expected "delegated"`) }
         }
       }
     }
   }
-  return null
+  return { success: true }
+}
+
+export function validateWorkflowState(state: WorkflowState): string | null {
+  const result = validateWorkflowStateResult(state)
+  return result.success ? null : result.error.message
 }

@@ -6,7 +6,7 @@ import type {
   TaskBoundaryChangeApplyResult,
 } from "./tool-types"
 import type { BacktrackContext } from "./workflow-state-types"
-import type { ArtifactKey, Phase, PhaseState, WorkflowEvent, WorkflowMode } from "./workflow-primitives"
+import type { ArtifactKey, Phase, PhaseState, WorkflowEvent, WorkflowMode } from "./types"
 
 /**
  * Shared structural transition-descriptor seam chosen by the approved plan.
@@ -217,12 +217,7 @@ export type SupportedExecutableSeamKind =
   | "task-boundary-revision-workflow"
   | "workflow-guidance-legality"
 
-export type SupportedExecutableSeamErrorPattern =
-  | "TransitionOutcome"
-  | "StructuralTransitionResult"
-  | "RoadmapResult"
-  | "validation-string-null"
-  | "throws"
+export type SupportedExecutableSeamErrorPattern = "structured-success-error-result"
 
 /**
  * TESTS-phase import policy for an approved executable seam.
@@ -300,20 +295,19 @@ export type InterfaceErrorPattern =
   | "string-null-legacy-validation"
 
 /**
- * Explicitly records the compatibility patterns this repository already exposes.
+ * Explicitly records the compatibility notes this repository still carries while the
+ * public structural workflow interface surface converges on a single result-envelope pattern.
  *
- * The structural-state-machine-rigor feature extends these existing contracts instead of
- * forcing a repo-wide error-pattern rewrite during INTERFACES. Reviewer/tooling consumers
- * can use this declaration to distinguish deliberate compatibility seams from accidental drift.
+ * Decision note: the public contract for this feature uses structured success/error result
+ * unions. Existing implementation seams may still require compatibility adapters internally,
+ * but those legacy mechanics are not modeled as first-class public interface patterns here.
  */
 export interface LegacyInterfaceCompatibilityPolicy {
   policyName: "open-artisan-interface-compatibility"
   featureName: "structural-state-machine-rigor"
   canonicalPatternForNewStructuralContracts: "success-result-union"
-  approvedLegacyPatterns: InterfaceErrorPattern[]
   compatibilitySeams: Array<{
     seam: string
-    pattern: InterfaceErrorPattern
     rationale: string
   }>
   decision: string
@@ -342,39 +336,30 @@ export const LEGACY_INTERFACE_COMPATIBILITY_POLICY: LegacyInterfaceCompatibility
   policyName: "open-artisan-interface-compatibility",
   featureName: "structural-state-machine-rigor",
   canonicalPatternForNewStructuralContracts: "success-result-union",
-  approvedLegacyPatterns: [
-    "ok-result-union",
-    "success-result-union",
-    "throws-typed-error",
-    "string-null-legacy-validation",
-  ],
   compatibilitySeams: [
     {
       seam: "StateMachine and related transition helpers",
-      pattern: "ok-result-union",
-      rationale: "Existing transition legality/runtime helper seams already use ok-based discriminated unions and downstream runtime code depends on that shape.",
+      rationale: "Existing transition legality/runtime helper seams still require a compatibility adapter because downstream runtime code depends on their established return shape.",
     },
     {
       seam: "Roadmap validation helpers",
-      pattern: "string-null-legacy-validation",
-      rationale: "Roadmap validation is an existing local helper seam whose runtime contract was explicitly preserved to avoid breaking current behavior and tests during INTERFACES.",
+      rationale: "Roadmap validation is an existing local helper seam whose runtime contract may still be bridged for compatibility while the public interface surface standardizes on structured result unions.",
     },
     {
       seam: "StateBackend and SessionRegistry mutation-style methods",
-      pattern: "throws-typed-error",
-      rationale: "These low-level storage/session graph seams document typed thrown errors rather than result unions because their existing consumers already rely on mutation/throw semantics.",
+      rationale: "Low-level storage/session graph seams may still need compatibility adapters during migration, but the public workflow interface contract should not expose those mixed patterns as first-class approved surface area.",
     },
   ],
   decision:
-    "Preserve existing repository compatibility seams while requiring new structural-state-machine-rigor contracts to use explicit typed policies and structured result/error declarations.",
+    "Converge the public structural workflow interface surface on structured success/error result unions while documenting where implementation-time compatibility adapters may still exist internally.",
   alternativesConsidered: [
-    "force a repo-wide single error pattern in INTERFACES",
-    "hide legacy patterns and leave the mixed contracts undocumented",
+    "force a repo-wide single error pattern in INTERFACES and rewrite all implementations immediately",
+    "leave mixed public error patterns codified in the interface layer",
   ],
   tradeoffs: [
-    "keeps compatibility with already-approved runtime contracts",
-    "documents mixed patterns explicitly so later work does not mistake them for accidental drift",
-    "defers a repo-wide error normalization refactor to a dedicated future change instead of smuggling it into this feature",
+    "keeps the public interface contract coherent for new work",
+    "documents compatibility seams without blessing them as long-term public API patterns",
+    "still requires later implementation work to align internal adapters with the public contract",
   ],
 }
 
@@ -456,7 +441,7 @@ export const SUPPORTED_EXECUTABLE_SEAM_DESCRIPTORS: readonly SupportedExecutable
     kind: "state-machine",
     ownerModule: "#core/state-machine",
     primaryInterface: "StateMachine",
-    errorPattern: "TransitionOutcome",
+    errorPattern: "structured-success-error-result",
     runtimeCoverageExpectedAt: "TESTS",
     importPolicy: "owner-module-public-runtime-contract",
     suiteStyle: "mixed-characterization-and-target-state",
@@ -470,7 +455,7 @@ export const SUPPORTED_EXECUTABLE_SEAM_DESCRIPTORS: readonly SupportedExecutable
     kind: "phase-tool-policy",
     ownerModule: "#core/hooks/tool-guard",
     primaryInterface: "PhaseToolPolicy",
-    errorPattern: "StructuralTransitionResult",
+    errorPattern: "structured-success-error-result",
     runtimeCoverageExpectedAt: "TESTS",
     importPolicy: "owner-module-public-runtime-contract",
     suiteStyle: "mixed-characterization-and-target-state",
@@ -484,7 +469,7 @@ export const SUPPORTED_EXECUTABLE_SEAM_DESCRIPTORS: readonly SupportedExecutable
     kind: "request-review-file-artifact",
     ownerModule: "#core/tools/request-review",
     primaryInterface: "RequestReviewArgs",
-    errorPattern: "StructuralTransitionResult",
+    errorPattern: "structured-success-error-result",
     runtimeCoverageExpectedAt: "TESTS",
     importPolicy: "owner-module-public-runtime-contract",
     suiteStyle: "characterization-regression",
@@ -498,7 +483,7 @@ export const SUPPORTED_EXECUTABLE_SEAM_DESCRIPTORS: readonly SupportedExecutable
     kind: "session-state-validation",
     ownerModule: "#core/session-state",
     primaryInterface: "SessionStateStore",
-    errorPattern: "validation-string-null",
+    errorPattern: "structured-success-error-result",
     runtimeCoverageExpectedAt: "TESTS",
     importPolicy: "owner-module-public-runtime-contract",
     suiteStyle: "mixed-characterization-and-target-state",
@@ -512,7 +497,7 @@ export const SUPPORTED_EXECUTABLE_SEAM_DESCRIPTORS: readonly SupportedExecutable
     kind: "scheduler-parallel-contract",
     ownerModule: "#core/scheduler",
     primaryInterface: "WorkflowConcurrency",
-    errorPattern: "StructuralTransitionResult",
+    errorPattern: "structured-success-error-result",
     runtimeCoverageExpectedAt: "TESTS",
     importPolicy: "owner-module-public-runtime-contract",
     suiteStyle: "characterization-regression",
@@ -526,7 +511,7 @@ export const SUPPORTED_EXECUTABLE_SEAM_DESCRIPTORS: readonly SupportedExecutable
     kind: "bridge-runtime",
     ownerModule: "#bridge/methods/tool-execute",
     primaryInterface: "BridgeContext",
-    errorPattern: "StructuralTransitionResult",
+    errorPattern: "structured-success-error-result",
     runtimeCoverageExpectedAt: "TESTS",
     importPolicy: "owner-module-public-runtime-contract",
     suiteStyle: "mixed-characterization-and-target-state",
@@ -540,7 +525,7 @@ export const SUPPORTED_EXECUTABLE_SEAM_DESCRIPTORS: readonly SupportedExecutable
     kind: "hermes-post-tool-continuation",
     ownerModule: "packages/adapter-hermes/hermes_adapter/workflow_tools.py",
     primaryInterface: "HermesContinuationSeam",
-    errorPattern: "throws",
+    errorPattern: "structured-success-error-result",
     runtimeCoverageExpectedAt: "TESTS",
     importPolicy: "owner-module-public-runtime-contract",
     suiteStyle: "mixed-characterization-and-target-state",
@@ -554,7 +539,7 @@ export const SUPPORTED_EXECUTABLE_SEAM_DESCRIPTORS: readonly SupportedExecutable
     kind: "claude-hook-phase-gating",
     ownerModule: "#claude-code/src/hook-handlers",
     primaryInterface: "ClaudeHookPhaseGatingSeam",
-    errorPattern: "throws",
+    errorPattern: "structured-success-error-result",
     runtimeCoverageExpectedAt: "TESTS",
     importPolicy: "owner-module-public-runtime-contract",
     suiteStyle: "characterization-regression",
@@ -568,7 +553,7 @@ export const SUPPORTED_EXECUTABLE_SEAM_DESCRIPTORS: readonly SupportedExecutable
     kind: "task-boundary-revision-workflow",
     ownerModule: "#plugin/index",
     primaryInterface: "TaskBoundaryRevisionSeam",
-    errorPattern: "StructuralTransitionResult",
+    errorPattern: "structured-success-error-result",
     runtimeCoverageExpectedAt: "TESTS",
     importPolicy: "owner-module-public-runtime-contract",
     suiteStyle: "mixed-characterization-and-target-state",
@@ -582,7 +567,7 @@ export const SUPPORTED_EXECUTABLE_SEAM_DESCRIPTORS: readonly SupportedExecutable
     kind: "workflow-guidance-legality",
     ownerModule: "#core/hooks/system-transform",
     primaryInterface: "WorkflowGuidanceLegalitySeam",
-    errorPattern: "throws",
+    errorPattern: "structured-success-error-result",
     runtimeCoverageExpectedAt: "TESTS",
     importPolicy: "owner-module-public-runtime-contract",
     suiteStyle: "mixed-characterization-and-target-state",

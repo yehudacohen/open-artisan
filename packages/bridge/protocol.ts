@@ -5,6 +5,8 @@
  * This file defines only the method-specific parameter and result types.
  */
 import type { Phase, PhaseState, WorkflowMode } from "../core/workflow-primitives"
+import type { WorkflowProgressEvent, WorkflowProgressStatus } from "../core/workflow-progress"
+import type { WorkflowNextActionKind } from "../core/workflow-next-action"
 import type {
   AttachBridgeResult,
   AttachBridgeClientParams,
@@ -101,12 +103,45 @@ export interface StateHealthParams {
   traceId?: string
 }
 
+export interface ProgressEmitParams {
+  sessionId: string
+  kind: string
+  status?: WorkflowProgressStatus
+  message: string
+  spanId?: string | null
+  parentSpanId?: string | null
+  parentEventId?: string | null
+  taskId?: string | null
+  metadata?: Record<string, unknown>
+  traceId?: string
+}
+
+export interface ProgressEmitResult {
+  event: WorkflowProgressEvent
+}
+
+export interface ProgressListParams {
+  sessionId: string
+  sinceEventId?: string | null
+  limit?: number
+  traceId?: string
+}
+
+export interface ProgressListResult {
+  events: WorkflowProgressEvent[]
+  nextCursor: string | null
+}
+
 export interface BridgeRuntimeHealthSummary {
+  initialized: boolean
   backendKind: "filesystem" | "db"
+  projectDir: string | null
   stateDir: string | null
   pgliteDataDir: string | null
+  pgliteDatabasePath: string | null
   pgliteDatabaseFileName: string | null
   pgliteSchemaName: string | null
+  requestedSessionFound: boolean
   featureName: string | null
   phase: string
   phaseState: string
@@ -123,6 +158,11 @@ export interface BridgeRuntimeHealthSummary {
   currentTaskId: string | null
   lastRecoveryAction: string
   awaitingUserGate: boolean
+  nextAction: WorkflowNextActionKind
+  shouldContinue: boolean
+  requiresAdapterAction: boolean
+  stopReason: string | null
+  continuationMessage: string | null
   noopReason: string | null
 }
 
@@ -153,6 +193,33 @@ export interface PromptBuildParams {
   traceId?: string
 }
 
+export interface TaskReviewContextParams {
+  sessionId: string
+  traceId?: string
+}
+
+export interface TaskReviewContextResult {
+  prompt: string | null
+}
+
+export interface PhaseReviewContextParams {
+  sessionId: string
+  traceId?: string
+}
+
+export interface PhaseReviewContextResult {
+  prompt: string | null
+}
+
+export interface AutoApproveContextParams {
+  sessionId: string
+  traceId?: string
+}
+
+export interface AutoApproveContextResult {
+  prompt: string | null
+}
+
 export interface IdleCheckParams {
   sessionId: string
   traceId?: string
@@ -172,7 +239,7 @@ export interface ToolExecuteParams {
     sessionId: string
     directory?: string
     agent?: string
-    invocation?: "author" | "isolated-reviewer" | "system"
+    invocation?: "author" | "isolated-reviewer" | "auto-approver" | "system"
   }
   traceId?: string
 }
@@ -293,3 +360,47 @@ export interface BridgeLeaseRemoveResult extends RemoveBridgeClientLeaseResult {
 export interface BridgeStateRemoveResultRpc {
   removal: RemoveBridgeStateResult
 }
+
+/**
+ * Structured bridge method error surfaced at the application protocol layer.
+ * Numeric code aligns with JSON-RPC / bridge runtime error codes, while message/data
+ * carry method-specific details for tests and adapters.
+ */
+export interface BridgeMethodError {
+  code: number
+  message: string
+  data?: Record<string, unknown>
+  retryable?: boolean
+}
+
+/** Generic success/error result envelope for bridge protocol methods. */
+export type BridgeMethodResult<T> =
+  | { success: true; value: T }
+  | { success: false; error: BridgeMethodError }
+
+export type LifecycleInitMethodResult = BridgeMethodResult<void>
+export type LifecycleSessionMethodResult = BridgeMethodResult<void>
+export type LifecycleShutdownMethodResult = BridgeMethodResult<void>
+export type StateGetMethodResult = BridgeMethodResult<Record<string, unknown> | StateGetWithRuntimeHealthResult | null>
+export type StateHealthMethodResult = BridgeMethodResult<BridgeRuntimeHealthSummary>
+export type ProgressEmitMethodResult = BridgeMethodResult<ProgressEmitResult>
+export type ProgressListMethodResult = BridgeMethodResult<ProgressListResult>
+export type GuardCheckMethodResult = BridgeMethodResult<GuardCheckResult>
+export type GuardPolicyMethodResult = BridgeMethodResult<GuardPolicyResult>
+export type PromptBuildMethodResult = BridgeMethodResult<string>
+export type TaskReviewContextMethodResult = BridgeMethodResult<TaskReviewContextResult>
+export type PhaseReviewContextMethodResult = BridgeMethodResult<PhaseReviewContextResult>
+export type AutoApproveContextMethodResult = BridgeMethodResult<AutoApproveContextResult>
+export type IdleCheckMethodResult = BridgeMethodResult<IdleCheckResult>
+export type MessageProcessMethodResult = BridgeMethodResult<MessageProcessResult>
+export type ToolExecuteMethodResult = BridgeMethodResult<string | Record<string, unknown>>
+export type BridgeDiscoverMethodResult = BridgeMethodResult<BridgeDiscoverResult>
+export type BridgeAttachMethodResult = BridgeMethodResult<BridgeAttachRpcResult>
+export type BridgeLeaseRefreshMethodResult = BridgeMethodResult<BridgeLeaseRefreshResult>
+export type BridgeDetachMethodResult = BridgeMethodResult<BridgeDetachResult>
+export type BridgeMetadataGetMethodResult = BridgeMethodResult<BridgeMetadataGetResult>
+export type BridgeShutdownEligibilityMethodResult = BridgeMethodResult<BridgeShutdownEligibilityResult>
+export type BridgeMetadataUpsertMethodResult = BridgeMethodResult<BridgeMetadataUpsertResult>
+export type BridgeLeaseUpsertMethodResult = BridgeMethodResult<BridgeLeaseUpsertResult>
+export type BridgeLeaseRemoveMethodResult = BridgeMethodResult<BridgeLeaseRemoveResult>
+export type BridgeStateRemoveMethodResult = BridgeMethodResult<BridgeStateRemoveResultRpc>

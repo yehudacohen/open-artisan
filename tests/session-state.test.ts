@@ -71,6 +71,7 @@ function makeState(sessionId: string, featureName: string | null, overrides?: Pa
     childWorkflows: [],
     concurrency: { maxParallelTasks: 1 },
     reviewArtifactFiles: [],
+    realWorldAcceptanceScenario: null,
     ...overrides,
   }
 }
@@ -125,6 +126,12 @@ describe("SessionStateStore — create", () => {
     expect(state.lastCheckpointTag).toBeNull()
     expect(state.intentBaseline).toBeNull()
     expect(state.featureName).toBeNull()
+    expect(state.realWorldAcceptanceScenario).toBeNull()
+  })
+
+  it("creates state with v25 realWorldAcceptanceScenario defaulting to null", async () => {
+    const state = await store.create("session-v25")
+    expect(state.realWorldAcceptanceScenario).toBeNull()
   })
 
   it("creates state with v6 fields (currentTaskId, feedbackHistory)", async () => {

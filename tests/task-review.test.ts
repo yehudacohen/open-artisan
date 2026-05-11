@@ -156,6 +156,31 @@ describe("buildTaskReviewPrompt", () => {
     expect(prompt).toContain("interfaces.md")
   })
 
+  it("includes realWorldAcceptanceScenario in task review prompts", () => {
+    const prompt = buildTaskReviewPrompt(makeRequest({
+      realWorldAcceptanceScenario: {
+        scenario: "A maintainer needs task reviewers to preserve the user's motivating workflow use case.",
+        requiredCapabilities: ["Task review checks implementation sufficiency for the scenario"],
+        acceptanceChecks: ["Implementation work remains sufficient for the scenario"],
+        explicitNonGoals: ["Do not infer scenarios from arbitrary chat"],
+        sourceArtifactPath: "/workspace/.openartisan/feature/plan.md",
+        capturedAtPhase: "PLANNING",
+      },
+    } as any))
+
+    expect(prompt).toContain("Real-World Acceptance Scenario")
+    expect(prompt).toContain("A maintainer needs task reviewers")
+    expect(prompt).toContain("Task review checks implementation sufficiency")
+    expect(prompt).toContain("Implementation work remains sufficient for the scenario")
+  })
+
+  it("omits realWorldAcceptanceScenario when task review has no captured scenario", () => {
+    const prompt = buildTaskReviewPrompt(makeRequest({ realWorldAcceptanceScenario: null } as any))
+
+    expect(prompt).not.toContain("Real-World Acceptance Scenario")
+    expect(prompt).not.toContain("Scenario Sufficiency")
+  })
+
   it("includes conventions reference when provided", () => {
     const prompt = buildTaskReviewPrompt(makeRequest({
       conventions: "Use camelCase for all function names",

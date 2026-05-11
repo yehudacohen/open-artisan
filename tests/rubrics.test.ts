@@ -80,4 +80,20 @@ describe("shared rubrics", () => {
     expect(reviewerRubric).toContain("real entry point")
     expect(reviewerRubric).toContain("Integration seam check")
   })
+
+  it("adds scenario sufficiency as a phase-review lens after planning", () => {
+    const criteria = buildPhaseAcceptanceCriteria("IMPLEMENTATION", "INCREMENTAL")
+
+    expect(criteria).toContain("real-world acceptance scenario")
+    expect(criteria).toContain("preserve")
+    expect(criteria).toContain("required capabilities")
+    expect(criteria).toContain("acceptance checks")
+  })
+
+  it("adds scenario sufficiency as a task-review lens", () => {
+    const rubric = buildTaskReviewRubric({ taskCategory: "standalone", hasAdjacentTasks: false })
+
+    expect(rubric).toContain("real-world acceptance scenario")
+    expect(rubric).toContain("sufficient for the scenario")
+  })
 })

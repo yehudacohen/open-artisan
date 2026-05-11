@@ -41,6 +41,33 @@ describe("buildWorkflowSystemPrompt — state header", () => {
     const prompt = buildWorkflowSystemPrompt(makeState({ lastCheckpointTag: "workflow/planning-v1" }))
     expect(prompt).toContain("workflow/planning-v1")
   })
+
+  it("includes realWorldAcceptanceScenario after PLANNING capture", () => {
+    const prompt = buildWorkflowSystemPrompt(makeState({
+      phase: "TESTS",
+      phaseState: "DRAFT",
+      realWorldAcceptanceScenario: {
+        scenario: "A maintainer needs reviewers to preserve the user's motivating workflow use case.",
+        requiredCapabilities: ["Carry the scenario into later author prompts"],
+        acceptanceChecks: ["Reviewers evaluate artifacts against the captured scenario"],
+        explicitNonGoals: ["Do not infer scenarios from arbitrary chat"],
+        sourceArtifactPath: "/workspace/.openartisan/feature/plan.md",
+        capturedAtPhase: "PLANNING",
+      },
+    }))
+
+    expect(prompt).toContain("Real-World Acceptance Scenario")
+    expect(prompt).toContain("A maintainer needs reviewers")
+    expect(prompt).toContain("Carry the scenario into later author prompts")
+    expect(prompt).toContain("Reviewers evaluate artifacts against the captured scenario")
+  })
+
+  it("omits realWorldAcceptanceScenario when no scenario has been captured", () => {
+    const prompt = buildWorkflowSystemPrompt(makeState({ realWorldAcceptanceScenario: null }))
+
+    expect(prompt).not.toContain("Real-World Acceptance Scenario")
+    expect(prompt).not.toContain("Scenario Sufficiency")
+  })
 })
 
 // ---------------------------------------------------------------------------

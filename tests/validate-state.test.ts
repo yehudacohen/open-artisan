@@ -48,6 +48,7 @@ function makeValidState(overrides: Partial<WorkflowState> = {}): WorkflowState {
     childWorkflows: [],
     concurrency: { maxParallelTasks: 1 },
     reviewArtifactFiles: [],
+    realWorldAcceptanceScenario: null,
     ...overrides,
   }
 }
@@ -198,6 +199,61 @@ describe("validateWorkflowState — fileAllowlist in INCREMENTAL mode", () => {
       fileAllowlist: ["relative/path.ts"], // would fail in INCREMENTAL, but not GREENFIELD
     })
     expect(validateWorkflowState(state)).toBeNull()
+  })
+})
+
+describe("validateWorkflowState — realWorldAcceptanceScenario", () => {
+  const validScenario = {
+    scenario: "A maintainer needs later reviewers to preserve the user's motivating workflow use case.",
+    requiredCapabilities: ["Capture the scenario from planning"],
+    acceptanceChecks: ["Review artifacts against the captured scenario"],
+    explicitNonGoals: ["Do not infer scenarios from arbitrary chat"],
+    sourceArtifactPath: "/workspace/.openartisan/feature/plan.md",
+    capturedAtPhase: "PLANNING" as const,
+  }
+
+  it("accepts null realWorldAcceptanceScenario for fresh and migrated workflows", () => {
+    expect(validateWorkflowState(makeValidState({ realWorldAcceptanceScenario: null }))).toBeNull()
+  })
+
+  it("accepts a fully populated realWorldAcceptanceScenario captured from PLANNING", () => {
+    expect(validateWorkflowState(makeValidState({ realWorldAcceptanceScenario: validScenario }))).toBeNull()
+  })
+
+  it("rejects an empty scenario prose value", () => {
+    const err = validateWorkflowState(makeValidState({
+      realWorldAcceptanceScenario: { ...validScenario, scenario: " " },
+    }))
+
+    expect(err).not.toBeNull()
+    expect(err).toContain("realWorldAcceptanceScenario.scenario")
+  })
+
+  it("rejects missing required capabilities and acceptance checks", () => {
+    const err = validateWorkflowState(makeValidState({
+      realWorldAcceptanceScenario: { ...validScenario, requiredCapabilities: [], acceptanceChecks: [] },
+    }))
+
+    expect(err).not.toBeNull()
+    expect(err).toContain("realWorldAcceptanceScenario.requiredCapabilities")
+  })
+
+  it("rejects a relative scenario sourceArtifactPath", () => {
+    const err = validateWorkflowState(makeValidState({
+      realWorldAcceptanceScenario: { ...validScenario, sourceArtifactPath: "plan.md" },
+    }))
+
+    expect(err).not.toBeNull()
+    expect(err).toContain("realWorldAcceptanceScenario.sourceArtifactPath")
+  })
+
+  it("rejects any capturedAtPhase other than PLANNING", () => {
+    const err = validateWorkflowState(makeValidState({
+      realWorldAcceptanceScenario: { ...validScenario, capturedAtPhase: "TESTS" as any },
+    }))
+
+    expect(err).not.toBeNull()
+    expect(err).toContain("realWorldAcceptanceScenario.capturedAtPhase")
   })
 })
 

@@ -152,6 +152,29 @@ function schemaPropertyNames(schema: unknown): string[] {
   return Object.keys(jsonSchema.properties ?? {}).sort()
 }
 
+const VALID_REAL_WORLD_ACCEPTANCE_SCENARIO = `## Real-World Acceptance Scenario
+
+### Scenario
+A maintainer needs the workflow to preserve the user's motivating use case across reviews and compaction.
+
+### Required Capabilities
+- Capture the scenario from the planning artifact
+- Carry the scenario into downstream review prompts
+
+### Acceptance Checks
+- Later artifacts are evaluated against the captured scenario
+- Scope drift is surfaced before implementation
+
+### Explicit Non-Goals
+- Do not infer scenarios from arbitrary chat
+`
+
+function withRealWorldAcceptanceScenario(content: string): string {
+  return content.includes("## Real-World Acceptance Scenario")
+    ? content
+    : `${content.trim()}\n\n${VALID_REAL_WORLD_ACCEPTANCE_SCENARIO}`
+}
+
 function planArtifactPath(featureName: string) {
   return join(tempDir, ".openartisan", featureName, "plan.md")
 }
@@ -163,7 +186,7 @@ function implPlanArtifactPath(featureName: string) {
 async function writePlanArtifact(featureName: string, content = "# Plan\n\nPlan text") {
   const planPath = planArtifactPath(featureName)
   mkdirSync(join(tempDir, ".openartisan", featureName), { recursive: true })
-  await Bun.write(planPath, content)
+  await Bun.write(planPath, withRealWorldAcceptanceScenario(content))
   return planPath
 }
 
@@ -2220,6 +2243,28 @@ describe("End-to-end: GREENFIELD happy path through PLANNING", () => {
     expect(state.latestReviewResults?.[0]?.evidence).toContain("reviewer runtime unavailable")
   })
 
+  it("falls back to typed agent criteria when isolated reviewer violates JSON output contract", async () => {
+    const sid = `int-test-${Date.now()}-reviewer-invalid-json-fallback`
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: sid } } },
+    })
+    const ctx = { directory: tempDir, sessionId: sid }
+    const featureName = "reviewer-invalid-json-fallback"
+
+    await plugin.tool.select_mode.execute({ mode: "GREENFIELD", feature_name: featureName }, ctx)
+    await requestPlanningReview(ctx, featureName)
+    ;(client.session.prompt as ReturnType<typeof mock>)
+      .mockImplementationOnce(async () => ({ data: { parts: [{ type: "text", text: "**not json**" }] } }))
+      .mockImplementationOnce(async () => ({ data: { parts: [{ type: "text", text: "**still not json**" }] } }))
+
+    const result = await plugin.tool.mark_satisfied.execute({ criteria_met: planningPassCriteria() }, ctx)
+
+    expect(result).toContain("Self-review complete")
+    const state = plugin._testStore.get(sid)
+    expect(state.phase).toBe("PLANNING")
+    expect(state.phaseState).toBe("USER_GATE")
+  })
+
   it("select_mode → request_review → mark_satisfied → submit_feedback(approve)", async () => {
     const sid = `int-test-${Date.now()}-e2e`
     await plugin.event({
@@ -3024,7 +3069,7 @@ describe("request_review — re-submit at REVIEW state", () => {
 
     const planPath = join(tempDir, ".openartisan", "review-artifact-files", "plan.md")
     mkdirSync(join(tempDir, ".openartisan", "review-artifact-files"), { recursive: true })
-    await Bun.write(planPath, "# Plan\n\nUse file references for review.")
+    await Bun.write(planPath, withRealWorldAcceptanceScenario("# Plan\n\nUse file references for review."))
 
     const result = await plugin.tool.request_review.execute(
       {
@@ -3042,6 +3087,81 @@ describe("request_review — re-submit at REVIEW state", () => {
     expect(state.reviewArtifactHash).not.toBeNull()
   })
 
+  it("PLANNING request_review persists realWorldAcceptanceScenario from the planning artifact", async () => {
+    const sid = `int-test-${Date.now()}-planning-scenario-capture`
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: sid } } },
+    })
+    const ctx = { directory: tempDir, sessionId: sid }
+
+    await plugin.tool.select_mode.execute(
+      { mode: "GREENFIELD", feature_name: "planning-scenario-capture" },
+      ctx,
+    )
+
+    const planPath = await writePlanArtifact("planning-scenario-capture", `# Plan
+
+${VALID_REAL_WORLD_ACCEPTANCE_SCENARIO}`)
+    const result = await plugin.tool.request_review.execute(
+      {
+        summary: "Plan ready",
+        artifact_description: "Plan doc with real-world scenario",
+        artifact_files: [planPath],
+      },
+      ctx,
+    )
+
+    expect(result).not.toContain("Error")
+    const state = plugin._testStore.get(sid)
+    expect(state.phaseState).toBe("REVIEW")
+    expect(state.realWorldAcceptanceScenario).toMatchObject({
+      scenario: "A maintainer needs the workflow to preserve the user's motivating use case across reviews and compaction.",
+      requiredCapabilities: [
+        "Capture the scenario from the planning artifact",
+        "Carry the scenario into downstream review prompts",
+      ],
+      acceptanceChecks: [
+        "Later artifacts are evaluated against the captured scenario",
+        "Scope drift is surfaced before implementation",
+      ],
+      explicitNonGoals: ["Do not infer scenarios from arbitrary chat"],
+      sourceArtifactPath: planPath,
+      capturedAtPhase: "PLANNING",
+    })
+  })
+
+  it("PLANNING request_review rejects a planning artifact without ## Real-World Acceptance Scenario", async () => {
+    const sid = `int-test-${Date.now()}-planning-scenario-missing`
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: sid } } },
+    })
+    const ctx = { directory: tempDir, sessionId: sid }
+
+    await plugin.tool.select_mode.execute(
+      { mode: "GREENFIELD", feature_name: "planning-scenario-missing" },
+      ctx,
+    )
+
+    const planPath = planArtifactPath("planning-scenario-missing")
+    mkdirSync(join(tempDir, ".openartisan", "planning-scenario-missing"), { recursive: true })
+    await Bun.write(planPath, "# Plan\n\nNo scenario section here.")
+
+    const result = await plugin.tool.request_review.execute(
+      {
+        summary: "Plan ready",
+        artifact_description: "Plan doc without scenario",
+        artifact_files: [planPath],
+      },
+      ctx,
+    )
+
+    expect(result).toContain("Error")
+    expect(result).toContain("## Real-World Acceptance Scenario")
+    const state = plugin._testStore.get(sid)
+    expect(state.phaseState).toBe("DRAFT")
+    expect(state.realWorldAcceptanceScenario).toBeNull()
+  })
+
   it("rejects request_review with artifact_markdown", async () => {
     const sid = `int-test-${Date.now()}-review-files-and-markdown`
     await plugin.event({
@@ -3056,7 +3176,7 @@ describe("request_review — re-submit at REVIEW state", () => {
 
     const planPath = join(tempDir, ".openartisan", "review-files-and-markdown", "plan.md")
     mkdirSync(join(tempDir, ".openartisan", "review-files-and-markdown"), { recursive: true })
-    await Bun.write(planPath, "# Plan\n\nOriginal on-disk plan.")
+    await Bun.write(planPath, withRealWorldAcceptanceScenario("# Plan\n\nOriginal on-disk plan."))
 
     const result = await plugin.tool.request_review.execute(
       {
@@ -3088,7 +3208,7 @@ describe("request_review — re-submit at REVIEW state", () => {
     const relativePlanPath = join(".openartisan", "review-relative-artifact-files", "plan.md")
     const absolutePlanPath = join(tempDir, relativePlanPath)
     mkdirSync(join(tempDir, ".openartisan", "review-relative-artifact-files"), { recursive: true })
-    await Bun.write(absolutePlanPath, "# Plan\n\nUse relative file references for review.")
+    await Bun.write(absolutePlanPath, withRealWorldAcceptanceScenario("# Plan\n\nUse relative file references for review."))
 
     const result = await plugin.tool.request_review.execute(
       {
@@ -3160,7 +3280,7 @@ describe("request_review — re-submit at REVIEW state", () => {
     )
     ;(client.session.prompt as ReturnType<typeof mock>).mockClear()
 
-    await Bun.write(planPath, "Plan v2")
+    await Bun.write(planPath, withRealWorldAcceptanceScenario("Plan v2"))
     const result = await plugin.tool.request_review.execute(
       { summary: "Plan", artifact_description: "Plan doc", artifact_files: [planPath] },
       ctx,
@@ -3197,7 +3317,7 @@ describe("request_review — re-submit at REVIEW state", () => {
       draft.latestReviewResults = [{ criterion: "Old", met: false, evidence: "stale" }]
     })
 
-    await Bun.write(planPath, "Plan v2")
+    await Bun.write(planPath, withRealWorldAcceptanceScenario("Plan v2"))
     await plugin.tool.request_review.execute(
       { summary: "Updated plan", artifact_description: "Plan", artifact_files: [planPath] },
       ctx,
@@ -3374,7 +3494,7 @@ describe("fileAllowlist — relative paths are normalized to absolute", () => {
 
     const store = plugin._testStore
     const planPath = `${tempDir}/.openartisan/allowlist-derived-test/plan.md`
-    await Bun.write(planPath, "# Planning\n\n## Narrow allowlist\n- src/a.ts\n- tests/a.test.ts\n")
+    await Bun.write(planPath, withRealWorldAcceptanceScenario("# Planning\n\n## Narrow allowlist\n- src/a.ts\n- tests/a.test.ts\n"))
     await store.update(sid, (draft: any) => {
       draft.phase = "PLANNING"
       draft.phaseState = "USER_GATE"
@@ -3410,7 +3530,7 @@ describe("fileAllowlist — relative paths are normalized to absolute", () => {
 
     const store = plugin._testStore
     const planPath = `${tempDir}/.openartisan/allowlist-missing-test/plan.md`
-    await Bun.write(planPath, "# Planning\n\nNo allowlist here.\n")
+    await Bun.write(planPath, withRealWorldAcceptanceScenario("# Planning\n\nNo allowlist here.\n"))
     await store.update(sid, (draft: any) => {
       draft.phase = "PLANNING"
       draft.phaseState = "USER_GATE"
@@ -3443,7 +3563,7 @@ describe("fileAllowlist — relative paths are normalized to absolute", () => {
 
     const store = plugin._testStore
     const planPath = `${tempDir}/.openartisan/impl-allowlist-recovery-test/plan.md`
-    await Bun.write(planPath, "# Planning\n\n## Narrow allowlist\n- src/allowed.ts\n- tests/allowed.test.ts\n")
+    await Bun.write(planPath, withRealWorldAcceptanceScenario("# Planning\n\n## Narrow allowlist\n- src/allowed.ts\n- tests/allowed.test.ts\n"))
     await store.update(sid, (draft: any) => {
       draft.phase = "IMPL_PLAN"
       draft.phaseState = "USER_GATE"
@@ -3614,7 +3734,7 @@ describe("fileAllowlist — relative paths are normalized to absolute", () => {
 
     const store = plugin._testStore
     const planPath = `${tempDir}/.openartisan/tests-allowlist-recovery-test/plan.md`
-    await Bun.write(planPath, "# Planning\n\n## Narrow allowlist\n- tests/in-scope.test.ts\n")
+    await Bun.write(planPath, withRealWorldAcceptanceScenario("# Planning\n\n## Narrow allowlist\n- tests/in-scope.test.ts\n"))
     await store.update(sid, (draft: any) => {
       draft.phase = "TESTS"
       draft.phaseState = "USER_GATE"

@@ -134,6 +134,29 @@ Create the core module with basic exports.
 Build the feature layer on top of core module.
 `
 
+const VALID_REAL_WORLD_ACCEPTANCE_SCENARIO = `## Real-World Acceptance Scenario
+
+### Scenario
+A maintainer needs the workflow to preserve the user's motivating use case through implementation review.
+
+### Required Capabilities
+- Capture the scenario from planning
+- Carry the scenario into request review and task review gates
+
+### Acceptance Checks
+- Review gates evaluate artifacts against the scenario
+- Implementation review catches scope drift before completion
+
+### Explicit Non-Goals
+- Do not infer scenarios from arbitrary chat
+`
+
+function withRealWorldAcceptanceScenario(content: string): string {
+  return content.includes("## Real-World Acceptance Scenario")
+    ? content
+    : `${content.trim()}\n\n${VALID_REAL_WORLD_ACCEPTANCE_SCENARIO}`
+}
+
 // ---------------------------------------------------------------------------
 // Plugin instance & helpers
 // ---------------------------------------------------------------------------
@@ -174,7 +197,7 @@ async function writeMarkdownArtifact(featureName: string, fileName: string, cont
   const artifactDir = join(tempDir, ".openartisan", featureName)
   mkdirSync(artifactDir, { recursive: true })
   const artifactPath = join(artifactDir, fileName)
-  await Bun.write(artifactPath, content)
+  await Bun.write(artifactPath, fileName === "plan.md" ? withRealWorldAcceptanceScenario(content) : content)
   return artifactPath
 }
 

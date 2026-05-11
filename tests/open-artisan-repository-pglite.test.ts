@@ -849,6 +849,27 @@ describe("PGlite Open Artisan repository", () => {
     expect(exported.ok && exported.value.implDag?.[0]?.humanGate?.resolved).toBe(true)
   })
 
+  it("round-trips realWorldAcceptanceScenario through DB workflow-state compatibility", async () => {
+    const repo = tempRepo()
+    const state = legacyState()
+    state.realWorldAcceptanceScenario = {
+      scenario: "A maintainer needs persisted DB state to preserve the user's motivating workflow use case.",
+      requiredCapabilities: ["Persist the scenario with workflow state"],
+      acceptanceChecks: ["Exported state contains the captured scenario"],
+      explicitNonGoals: ["Do not infer scenarios from arbitrary chat"],
+      sourceArtifactPath: "/workspace/.openartisan/feature/plan.md",
+      capturedAtPhase: "PLANNING",
+    }
+
+    const imported = await importLegacyWorkflowState(repo, state)
+    expect(imported.ok).toBe(true)
+    const workflowId = imported.ok ? imported.value.workflowId : ""
+
+    const exported = await exportLegacyWorkflowState(repo, workflowId)
+    expect(exported.ok).toBe(true)
+    expect(exported.ok && exported.value.realWorldAcceptanceScenario).toEqual(state.realWorldAcceptanceScenario)
+  })
+
   it("exposes repository-backed StateBackend compatibility", async () => {
     const repo = tempRepo()
     const dir = mkdtempSync(join(tmpdir(), "oa-db-backend-"))

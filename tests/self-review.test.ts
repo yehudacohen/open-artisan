@@ -143,6 +143,13 @@ describe("dispatchSelfReview — all criteria met", () => {
     expect(dispatcher._createMock.mock.calls).toHaveLength(1)
     expect(dispatcher._destroyMock.mock.calls).toHaveLength(1)
   })
+
+  it("does not request adapter-level JSON schema formatting", async () => {
+    const dispatcher = makeDispatcher(makeReviewResponse())
+    await dispatchSelfReview(dispatcher, BASE_REQ)
+
+    expect(dispatcher._promptMock.mock.calls[0]?.[1]).toBeUndefined()
+  })
 })
 
 describe("buildReviewPrompt — intent baseline context", () => {
@@ -172,6 +179,14 @@ describe("buildReviewPrompt — intent baseline context", () => {
     expect(prompt).toContain("source contracts")
   })
 
+  it("starts with a strict JSON-only output contract", () => {
+    const prompt = buildReviewPrompt(BASE_REQ)
+
+    expect(prompt.startsWith("CRITICAL OUTPUT CONTRACT")).toBe(true)
+    expect(prompt).toContain("ONLY one valid JSON object")
+    expect(prompt).toContain("Do not include markdown")
+  })
+
   it("includes recent feedback as authoritative conflict-resolution context", () => {
     const prompt = buildReviewPrompt({
       ...BASE_REQ,
@@ -190,6 +205,37 @@ describe("buildReviewPrompt — intent baseline context", () => {
     expect(prompt).toContain("Do not resurrect requirements")
     expect(prompt).toContain("factory-advertised { spec: ... } schemas")
     expect(prompt).toContain("newer feedback as authoritative")
+  })
+
+  it("includes realWorldAcceptanceScenario as a review lens when captured", () => {
+    const prompt = buildReviewPrompt({
+      ...BASE_REQ,
+      phase: "TESTS",
+      realWorldAcceptanceScenario: {
+        scenario: "A maintainer needs test reviewers to preserve the user's motivating workflow use case.",
+        requiredCapabilities: ["Tests cover prompt consumers that carry the scenario"],
+        acceptanceChecks: ["Reviewed tests catch missing scenario wiring"],
+        explicitNonGoals: ["Do not infer scenarios from arbitrary chat"],
+        sourceArtifactPath: "/workspace/.openartisan/feature/plan.md",
+        capturedAtPhase: "PLANNING",
+      },
+    } as any)
+
+    expect(prompt).toContain("Real-World Acceptance Scenario")
+    expect(prompt).toContain("A maintainer needs test reviewers")
+    expect(prompt).toContain("Tests cover prompt consumers that carry the scenario")
+    expect(prompt).toContain("Reviewed tests catch missing scenario wiring")
+    expect(prompt).toContain("evaluate Vision alignment")
+  })
+
+  it("omits realWorldAcceptanceScenario review context when no scenario has been captured", () => {
+    const prompt = buildReviewPrompt({
+      ...BASE_REQ,
+      realWorldAcceptanceScenario: null,
+    } as any)
+
+    expect(prompt).not.toContain("Real-World Acceptance Scenario")
+    expect(prompt).not.toContain("Scenario Sufficiency")
   })
 
   it("limits review scope to explicitly listed artifact files", () => {
@@ -395,7 +441,7 @@ describe("dispatchSelfReview — invalid JSON recovery", () => {
     expect(repairPrompt).toContain("Return ONLY a valid JSON object")
   })
 
-  it("requests JSON schema structured output for review and repair prompts", async () => {
+  it("does not request adapter-level JSON schema formatting for review or repair prompts", async () => {
     const dispatcher = makeDispatcherSequence([
       "* First invalid reviewer response.",
       makeReviewResponse(),
@@ -406,9 +452,8 @@ describe("dispatchSelfReview — invalid JSON recovery", () => {
     expect(result.success).toBe(true)
     const firstOptions = dispatcher._promptMock.mock.calls[0]?.[1] as any
     const repairOptions = dispatcher._promptMock.mock.calls[1]?.[1] as any
-    expect(firstOptions?.responseFormat?.type).toBe("json_schema")
-    expect(firstOptions?.responseFormat?.schema?.required).toContain("criteria_results")
-    expect(repairOptions?.responseFormat?.type).toBe("json_schema")
+    expect(firstOptions).toBeUndefined()
+    expect(repairOptions).toBeUndefined()
   })
 
   it("returns an actionable snippet when reviewer JSON repair also fails", async () => {

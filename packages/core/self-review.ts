@@ -26,30 +26,6 @@ import { SELF_REVIEW_TIMEOUT_MS } from "./constants"
 import { buildSelfReviewStructuralGate } from "./rubrics"
 import { countExpectedBlockingCriteria } from "./tools/mark-satisfied"
 
-const SELF_REVIEW_JSON_SCHEMA: Record<string, unknown> = {
-  type: "object",
-  additionalProperties: false,
-  required: ["satisfied", "criteria_results"],
-  properties: {
-    satisfied: { type: "boolean" },
-    criteria_results: {
-      type: "array",
-      items: {
-        type: "object",
-        additionalProperties: false,
-        required: ["criterion", "met", "evidence", "severity"],
-        properties: {
-          criterion: { type: "string" },
-          met: { type: "boolean" },
-          evidence: { type: "string" },
-          severity: { enum: ["blocking", "suggestion", "design-invariant"] },
-          score: { type: "number", minimum: 1, maximum: 10 },
-        },
-      },
-    },
-  },
-}
-
 // ---------------------------------------------------------------------------
 // Prompt builder
 // ---------------------------------------------------------------------------
@@ -93,6 +69,8 @@ export interface SelfReviewRequest {
 export function buildReviewPrompt(req: SelfReviewRequest): string {
   const lines: string[] = []
 
+  lines.push("CRITICAL OUTPUT CONTRACT: your final response must be ONLY one valid JSON object. Do not include markdown, headings, bullets, code fences, preamble, or analysis outside JSON string fields.")
+  lines.push("")
   lines.push(`You are reviewing the **${req.phase}** artifact produced by the workflow.`)
   lines.push("")
   lines.push("## Artifact to Review")
@@ -295,7 +273,10 @@ async function ephemeralReviewPrompt(
     ...(parentModel ? { model: parentModel } : {}),
   })
   try {
-    return await session.prompt(prompt, { responseFormat: { type: "json_schema", schema: SELF_REVIEW_JSON_SCHEMA } })
+    // OpenCode currently persists prompt format metadata into message history;
+    // the json_schema request shape breaks history polling fallback before text
+    // extraction can recover. The prompt and JSON repair path still enforce JSON.
+    return await session.prompt(prompt)
   } finally {
     await session.destroy()
   }
@@ -354,6 +335,8 @@ export function parseReviewResult(raw: string): SelfReviewResult {
 
 function buildJsonRepairPrompt(rawText: string): string {
   return [
+    "CRITICAL OUTPUT CONTRACT: return ONLY one valid JSON object. Do not include markdown, headings, bullets, code fences, preamble, or analysis outside JSON string fields.",
+    "",
     "Your previous review response was not valid JSON.",
     "Return ONLY a valid JSON object matching this exact schema. Do not include markdown, bullets, code fences, or commentary.",
     "",

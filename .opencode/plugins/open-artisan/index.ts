@@ -1432,14 +1432,19 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             if (reviewResult && !reviewResult.success) {
               const reviewerError = reviewResult.error || reviewResult.message || "unknown error"
               log.warn(`Review ${iterationInfo.current}/${iterationInfo.max}: reviewer error`, { detail: reviewerError })
-              await store.update(sessionId, (draft) => {
-                draft.latestReviewResults = [{
-                  criterion: "Isolated reviewer runtime failed",
-                  met: false,
-                  evidence: reviewerError,
-                }]
-              })
-              return `Error: Isolated reviewer failed: ${reviewerError}. Workflow state remains at ${state.phase}/${state.phaseState}; fix the reviewer/runtime issue or turn off Open Artisan before retrying.`
+              const reviewerOutputContractFailure = reviewerError.includes("Reviewer returned invalid JSON")
+              if (reviewerOutputContractFailure) {
+                log.warn("Reviewer violated JSON output contract; using typed agent criteria fallback", { detail: reviewerError })
+              } else {
+                await store.update(sessionId, (draft) => {
+                  draft.latestReviewResults = [{
+                    criterion: "Isolated reviewer runtime failed",
+                    met: false,
+                    evidence: reviewerError,
+                  }]
+                })
+                return `Error: Isolated reviewer failed: ${reviewerError}. Workflow state remains at ${state.phase}/${state.phaseState}; fix the reviewer/runtime issue or turn off Open Artisan before retrying.`
+              }
             }
 
             if (reviewResult?.success) {

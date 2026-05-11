@@ -179,6 +179,35 @@ describe("buildCompactionContext — intent baseline", () => {
   })
 })
 
+describe("buildCompactionContext — realWorldAcceptanceScenario", () => {
+  it("preserves the captured scenario across compaction", () => {
+    const ctx = buildCompactionContext(makeState({
+      phase: "IMPLEMENTATION",
+      phaseState: "SCHEDULING",
+      realWorldAcceptanceScenario: {
+        scenario: "A maintainer needs task reviews to preserve the user's motivating workflow use case.",
+        requiredCapabilities: ["Carry scenario context into task reviews"],
+        acceptanceChecks: ["Implementation work remains sufficient for the scenario"],
+        explicitNonGoals: ["Do not infer scenarios from arbitrary chat"],
+        sourceArtifactPath: "/workspace/.openartisan/feature/plan.md",
+        capturedAtPhase: "PLANNING",
+      },
+    }))
+
+    expect(ctx).toContain("Real-World Acceptance Scenario")
+    expect(ctx).toContain("A maintainer needs task reviews")
+    expect(ctx).toContain("Carry scenario context into task reviews")
+    expect(ctx).toContain("Implementation work remains sufficient for the scenario")
+  })
+
+  it("omits scenario context when realWorldAcceptanceScenario is null", () => {
+    const ctx = buildCompactionContext(makeState({ realWorldAcceptanceScenario: null }))
+
+    expect(ctx).not.toContain("Real-World Acceptance Scenario")
+    expect(ctx).not.toContain("Scenario Sufficiency")
+  })
+})
+
 describe("buildCompactionContext — file allowlist section", () => {
   it("includes allowlist in INCREMENTAL mode", () => {
     const ctx = buildCompactionContext(

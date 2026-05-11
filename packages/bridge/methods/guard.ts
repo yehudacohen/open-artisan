@@ -5,13 +5,20 @@
  * guard.policy: Return the tool policy metadata for a phase/state combination.
  */
 import { JSONRPCErrorException } from "json-rpc-2.0"
-import { resolve } from "node:path"
+import { relative, resolve } from "node:path"
 import type { MethodHandler } from "../server"
 import type { GuardCheckParams, GuardPolicyParams, GuardCheckResult, GuardPolicyResult } from "../protocol"
 import { SESSION_NOT_FOUND, INVALID_PARAMS } from "../protocol"
 import { extractWriteToolPaths, getPhaseToolPolicy, getTaskWriteFiles } from "../../core/hooks/tool-guard"
 import { WORKFLOW_TOOL_NAMES } from "../../core/workflow-tool-names"
 import type { Phase, PhaseState, WorkflowMode } from "../../core/workflow-primitives"
+
+function getCommandArg(args: unknown): string {
+  if (!args || typeof args !== "object") return ""
+  const record = args as Record<string, unknown>
+  const command = record["command"] ?? record["cmd"] ?? record["script"]
+  return typeof command === "string" ? command : ""
+}
 
 export const handleGuardCheck: MethodHandler = async (params, ctx) => {
   const p = params as Partial<GuardCheckParams>
@@ -52,6 +59,16 @@ export const handleGuardCheck: MethodHandler = async (params, ctx) => {
     throw new JSONRPCErrorException(`Session "${p.sessionId}" not found`, SESSION_NOT_FOUND)
   }
 
+  if (toolName === "mark_satisfied" && ctx.capabilities.selfReview !== "agent-only") {
+    return {
+      allowed: false,
+      reason: "mark_satisfied is disabled for bridge isolated-review workflows. Use request_review and wait for the isolated reviewer submission.",
+      policyVersion: ctx.policyVersion,
+      phase: state.phase,
+      phaseState: state.phaseState,
+    } satisfies GuardCheckResult
+  }
+
   if (WORKFLOW_TOOL_NAMES.has(toolName)) {
     return {
       allowed: true,
@@ -82,7 +99,7 @@ export const handleGuardCheck: MethodHandler = async (params, ctx) => {
 
   // Check bash command predicate
   if (policy.bashCommandPredicate && policyToolName.includes("bash")) {
-    const command = (p.args?.["command"] ?? p.args?.["cmd"] ?? p.args?.["script"] ?? "") as string
+    const command = getCommandArg(p.args)
     if (command && !policy.bashCommandPredicate(command)) {
       return {
         allowed: false,
@@ -96,7 +113,7 @@ export const handleGuardCheck: MethodHandler = async (params, ctx) => {
   if (policy.writePathPredicate) {
     const writeTokens = ["write", "edit", "patch", "create", "overwrite"]
     if (writeTokens.some((t) => policyToolName.includes(t))) {
-      const filePaths = extractWriteToolPaths(p.args)
+      const filePaths = extractWriteToolPaths(p)
       if (filePaths.length === 0) {
         return {
           allowed: false,
@@ -104,9 +121,17 @@ export const handleGuardCheck: MethodHandler = async (params, ctx) => {
           policyVersion: ctx.policyVersion,
         } satisfies GuardCheckResult
       }
-      const baseDir = ctx.projectDir ?? process.cwd()
+      const baseDir = resolve(ctx.projectDir ?? process.cwd())
       for (const filePath of filePaths) {
         const checkedPath = filePath.startsWith("/") ? filePath : resolve(baseDir, filePath)
+        const rel = relative(baseDir, checkedPath)
+        if (rel === ".." || rel.startsWith("../") || rel.startsWith("/")) {
+          return {
+            allowed: false,
+            reason: `Writing to "${filePath}" is blocked because it is outside the project root "${baseDir}".`,
+            policyVersion: ctx.policyVersion,
+          } satisfies GuardCheckResult
+        }
         if (policy.writePathPredicate(checkedPath)) continue
         return {
           allowed: false,

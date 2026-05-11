@@ -1,12 +1,12 @@
 /**
- * chat-message.ts — Intercepts incoming user messages at USER_GATE states.
+ * chat-message.ts — Intercepts incoming user messages at workflow gate states.
  *
- * When the workflow is in a USER_GATE sub-state, artifact decisions are routed
- * through submit_feedback. Clarification/meta questions are deliberately left
- * as normal conversation so asking "what am I reviewing?" does not corrupt the
- * workflow into REVISE.
- * 1. Detects if the session is in USER_GATE
- * 2. If so, classifies the message as approve or feedback
+ * When the workflow is in a USER_GATE/HUMAN_GATE sub-state, user decisions are
+ * routed through submit_feedback. Clarification/meta questions are deliberately
+ * left as normal conversation so asking "what am I reviewing?" does not corrupt
+ * the workflow into REVISE or falsely resolve a manual gate.
+ * 1. Detects if the session is in a user-facing gate
+ * 2. If so, classifies or routes the message
  * 3. Modifies the message parts to include routing instructions
  *
  * The actual state transition happens in the tool handler (submit_feedback tool),
@@ -54,6 +54,7 @@ function looksLikeApproval(text: string): boolean {
   if (APPROVAL_PREFIX_RE.test(trimmed)) return true
 
   const normalized = trimmed.replace(/[.!?]/g, "").trim()
+  if (/\bapprove\s+(?:the\s+)?(?:user\s+)?gate\b/.test(normalized)) return true
   if (/^i\s+approve\b/.test(normalized) && !/\b(?:but|except|unless|however|please|fix|add|remove|revise)\b/.test(normalized)) return true
 
   // Accept short approval + non-substantive tail patterns like
@@ -139,8 +140,8 @@ export function processUserMessage(
   state: WorkflowState,
   parts: Array<{ type: string; text?: string }>,
 ): ChatMessageOutput {
-  // Only intercept at user gate states (USER_GATE or ESCAPE_HATCH)
-  if (state.phaseState !== "USER_GATE" && state.phaseState !== "ESCAPE_HATCH") {
+  // Only intercept at user-facing gate states.
+  if (state.phaseState !== "USER_GATE" && state.phaseState !== "ESCAPE_HATCH" && state.phaseState !== "HUMAN_GATE") {
     return { parts, intercepted: false, feedbackType: null }
   }
 
@@ -153,6 +154,20 @@ export function processUserMessage(
 
   if (state.phaseState === "ESCAPE_HATCH" && looksLikeEscapeHatchClarification(textContent)) {
     return { parts, intercepted: false, feedbackType: null }
+  }
+
+  if (state.phaseState === "HUMAN_GATE") {
+    if (looksLikeUserGateMetaQuestion(textContent)) {
+      return { parts, intercepted: false, feedbackType: null }
+    }
+    return {
+      parts: [
+        { type: "text", text: buildHumanGateNote(state) },
+        ...parts,
+      ],
+      intercepted: true,
+      feedbackType: "approve",
+    }
   }
 
   // In ESCAPE_HATCH, non-clarification user messages are decisions/feedback
@@ -208,6 +223,22 @@ function buildEscapeHatchNote(phase: Phase): string {
     `Call \`submit_feedback\` NOW with feedback_type="revise" and feedback_text set to the user's exact message. ` +
     `This must be your first and only tool call. Do NOT do research or analysis first. ` +
     `Note: approval is NOT available during an escape hatch — only revision feedback.`
+  )
+}
+
+function buildHumanGateNote(state: WorkflowState): string {
+  const unresolved = (state.implDag ?? [])
+    .filter((task) => task.status === "human-gated" && (!task.humanGate || !task.humanGate.resolved))
+    .map((task) => task.id)
+  const taskHint = unresolved.length > 0
+    ? ` Current unresolved human-gated task IDs: ${unresolved.join(", ")}.`
+    : ""
+  return (
+    `[WORKFLOW HUMAN GATE — IMMEDIATE ACTION REQUIRED] ` +
+    `The user has provided a response for a manual implementation gate.${taskHint} ` +
+    `If they confirmed one or more gates are resolved, call \`submit_feedback\` NOW with ` +
+    `feedback_type="approve", feedback_text set to the user's message, and resolved_human_gates listing the resolved task IDs. ` +
+    `Do not approve the implementation artifact from HUMAN_GATE; only resolve the listed human-gated tasks.`
   )
 }
 

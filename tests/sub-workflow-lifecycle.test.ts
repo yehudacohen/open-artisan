@@ -18,7 +18,7 @@ import { join } from "node:path"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 
-import { createSessionStateStore } from "#core/session-state"
+import { createSessionStateStore as createRawSessionStateStore } from "#core/session-state"
 import { createFileSystemStateBackend } from "#core/state-backend-fs"
 import { processSpawnSubWorkflow } from "#core/tools/spawn-sub-workflow"
 import { processQueryChildWorkflow } from "#core/tools/query-workflow"
@@ -28,6 +28,20 @@ import { nextSchedulerDecision } from "#core/scheduler"
 import { SUB_WORKFLOW_TIMEOUT_MS } from "#core/constants"
 import { SCHEMA_VERSION, type SessionStateStore, type WorkflowState } from "#core/workflow-state-types"
 import type { TaskNode } from "#core/dag"
+
+type RuntimeSessionStateStore = Omit<SessionStateStore, "get" | "findByFeatureName" | "findPersistedByFeatureName" | "create" | "update" | "migrateSession" | "delete"> & {
+  get(sessionId: string): WorkflowState | null
+  findByFeatureName(featureName: string): WorkflowState | null
+  findPersistedByFeatureName(featureName: string): Promise<WorkflowState | null>
+  create(sessionId: string): Promise<WorkflowState>
+  update(sessionId: string, mutator: (draft: WorkflowState) => void): Promise<WorkflowState>
+  migrateSession(oldSessionId: string, newSessionId: string): Promise<WorkflowState>
+  delete(sessionId: string): Promise<void>
+}
+
+function createSessionStateStore(...args: Parameters<typeof createRawSessionStateStore>): RuntimeSessionStateStore {
+  return createRawSessionStateStore(...args) as unknown as RuntimeSessionStateStore
+}
 
 function makeTask(overrides: Partial<TaskNode> & { id: string }): TaskNode {
   return {
@@ -41,7 +55,7 @@ function makeTask(overrides: Partial<TaskNode> & { id: string }): TaskNode {
   }
 }
 
-let store: SessionStateStore
+let store: RuntimeSessionStateStore
 let tmpDir: string
 
 beforeEach(async () => {

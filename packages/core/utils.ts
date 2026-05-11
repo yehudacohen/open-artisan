@@ -63,15 +63,33 @@ export function withTimeout<T>(promise: Promise<T>, ms: number, label: string): 
  */
 export function extractTextFromPromptResult(result: unknown, label = "prompt"): string {
   if (!result || typeof result !== "object") throw new Error(`Empty ${label} result`)
-  // v2 SDK returns { data: { info, parts: Part[] }, request, response }
-  const r = result as Record<string, unknown>
-  const data = (r["data"] ?? r) as Record<string, unknown>
-  if (Array.isArray(data["parts"])) {
-    for (const p of data["parts"] as Array<{ type?: string; text?: string }>) {
-      if (p.type === "text" && typeof p.text === "string") return p.text
+  const text = findPromptText(result)
+  if (text) return text
+  throw new Error(`Cannot extract text from ${label} result: ${JSON.stringify(result).slice(0, 200)}`)
+}
+
+function findPromptText(value: unknown, depth = 0): string | null {
+  if (!value || typeof value !== "object" || depth > 4) return null
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const nested = findPromptText(item, depth + 1)
+      if (nested) return nested
+    }
+    return null
+  }
+  const record = value as Record<string, unknown>
+  if (Array.isArray(record["parts"])) {
+    for (const part of record["parts"] as Array<Record<string, unknown>>) {
+      if (part?.type === "text" && typeof part.text === "string") return part.text
+      if (typeof part?.text === "string") return part.text
+      if (typeof part?.content === "string") return part.content
     }
   }
-  throw new Error(`Cannot extract text from ${label} result: ${JSON.stringify(result).slice(0, 200)}`)
+  for (const key of ["data", "message", "info", "body", "result", "output"]) {
+    const nested = findPromptText(record[key], depth + 1)
+    if (nested) return nested
+  }
+  return null
 }
 
 /**
@@ -113,12 +131,48 @@ export function extractJsonFromText(text: string): string {
  */
 export function extractEphemeralSessionId(response: unknown, label = "session"): string {
   if (!response || typeof response !== "object") throw new Error(`${label}: empty session.create() response`)
-  // SDK returns { data: Session, request, response } where Session has id: string
-  const r = response as Record<string, unknown>
-  const data = (r["data"] ?? r) as Record<string, unknown>
-  const id = data["id"] as string | undefined
-  if (!id) throw new Error(`${label}: could not extract session ID from session.create() response`)
+  const id = findSessionId(response)
+  if (!id) throw new Error(`${label}: could not extract session ID from session.create() response: ${summarizeUnknown(response)}`)
   return id
+}
+
+function findSessionId(value: unknown, depth = 0): string | null {
+  if (!value || typeof value !== "object" || depth > 3) return null
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const nested = findSessionId(item, depth + 1)
+      if (nested) return nested
+    }
+    return null
+  }
+  const record = value as Record<string, unknown>
+  for (const key of ["id", "sessionID", "sessionId", "session_id"]) {
+    const direct = record[key]
+    if (typeof direct === "string" && direct.length > 0) return direct
+  }
+  for (const key of ["data", "session", "info", "body", "result", "properties", "path", "value"]) {
+    const nested = findSessionId(record[key], depth + 1)
+    if (nested) return nested
+  }
+  return null
+}
+
+function summarizeUnknown(value: unknown): string {
+  const seen = new WeakSet<object>()
+  try {
+    const json = JSON.stringify(value, (_key, nested) => {
+      if (typeof nested === "function") return `[Function ${nested.name || "anonymous"}]`
+      if (nested && typeof nested === "object") {
+        if (seen.has(nested)) return "[Circular]"
+        seen.add(nested)
+      }
+      if (typeof nested === "string" && nested.length > 500) return `${nested.slice(0, 500)}...[truncated ${nested.length}]`
+      return nested
+    })
+    return (json ?? String(value)).slice(0, 1000)
+  } catch {
+    return String(value)
+  }
 }
 
 // ---------------------------------------------------------------------------

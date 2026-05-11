@@ -40,7 +40,7 @@ Before launch or resume, verify:
 
 Inspect at minimum:
 
-- `.opencode/openartisan-errors.log`
+- `.openartisan/openartisan-errors.log`
 - `.openartisan/<feature>/workflow-state.json`
 - current phase artifacts under `.openartisan/<feature>/`
 - OpenCode-visible driver messages and tool calls

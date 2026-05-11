@@ -75,6 +75,18 @@ describe("compareIntentsWithLLM — classifications", () => {
     const result = await compareIntentsWithLLM(makeInput({ dispatcher }))
     expect(result.classification).toBe("ERROR")
   })
+
+  it("classifies prose responses that clearly say DIFFERENT", async () => {
+    const dispatcher = makeDispatcher({ promptText: "These tasks are different: one reviews discovery artifacts while the other tests runtime fixes." })
+    const result = await compareIntentsWithLLM(makeInput({ dispatcher }))
+    expect(result.classification).toBe("DIFFERENT")
+  })
+
+  it("classifies prose responses that clearly say PARTIAL", async () => {
+    const dispatcher = makeDispatcher({ promptText: "The prior workflow partially covers this request but does not test reviewer recovery." })
+    const result = await compareIntentsWithLLM(makeInput({ dispatcher }))
+    expect(result.classification).toBe("PARTIAL")
+  })
 })
 
 // ---------------------------------------------------------------------------

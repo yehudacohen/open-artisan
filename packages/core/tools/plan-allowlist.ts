@@ -1,9 +1,94 @@
 import { resolve } from "node:path"
+import { readFileSync } from "node:fs"
+
+import type { Phase, WorkflowMode } from "../workflow-primitives"
+
+function normalizeHeading(text: string): string {
+  return text
+    .replace(/^#{1,6}\s+/, "")
+    .replace(/^\d+[.)]?\s+/, "")
+    .replace(/\s*\([^)]*\)\s*$/g, "")
+    .trim()
+    .toLowerCase()
+}
+
+function headingLevel(text: string): number | null {
+  const match = /^(#{1,6})\s+/.exec(text.trim())
+  return match ? match[1]!.length : null
+}
+
+function isAllowlistHeading(lower: string): boolean {
+  return (
+    lower === "allowlist" ||
+    lower === "file allowlist" ||
+    lower === "file allowlist:" ||
+    lower === "allowlist:" ||
+    lower === "narrow allowlist" ||
+    lower === "narrow allowlist:" ||
+    lower === "minimal incremental file allowlist" ||
+    lower === "minimal incremental file allowlist:" ||
+    lower === "requested file allowlist" ||
+    lower === "requested file allowlist:" ||
+    lower === "replacement allowlist" ||
+    lower === "replacement allowlist:" ||
+    lower === "replacement file allowlist" ||
+    lower === "replacement file allowlist:" ||
+    lower === "requested replacement allowlist" ||
+    lower === "requested replacement allowlist:" ||
+    lower === "full requested replacement allowlist" ||
+    lower === "full requested replacement allowlist:" ||
+    /^file allowlist\b/.test(lower)
+  )
+}
+
+function isConcreteAllowlistHeading(lower: string): boolean {
+  return (
+    lower === "allowlist" ||
+    lower === "allowlist:" ||
+    lower === "narrow allowlist" ||
+    lower === "narrow allowlist:" ||
+    lower === "minimal incremental file allowlist" ||
+    lower === "minimal incremental file allowlist:" ||
+    lower === "requested file allowlist" ||
+    lower === "requested file allowlist:" ||
+    lower === "replacement allowlist" ||
+    lower === "replacement allowlist:" ||
+    lower === "replacement file allowlist" ||
+    lower === "replacement file allowlist:" ||
+    lower === "requested replacement allowlist" ||
+    lower === "requested replacement allowlist:" ||
+    lower === "full requested replacement allowlist" ||
+    lower === "full requested replacement allowlist:"
+  )
+}
+
+function startsConcreteAllowlistList(trimmed: string): boolean {
+  const lower = trimmed.toLowerCase().replace(/[*_`]/g, "")
+  return (
+    /expected to touch.*only.*these files/.test(lower) ||
+    lower.includes("requests approval to modify only") ||
+    lower.includes("modify only these files")
+  )
+}
+
+function isNonPathAllowlistSubsection(lower: string): boolean {
+  return (
+    lower.includes("delta") ||
+    lower.includes("decision") ||
+    lower.includes("semantics") ||
+    lower.includes("rationale") ||
+    lower.includes("alternative") ||
+    lower.includes("risk")
+  )
+}
 
 export function extractApprovedFileAllowlist(planContent: string, cwd: string): string[] {
   const lines = planContent.split("\n")
   const collected: string[] = []
   let inAllowlist = false
+  let collectingConcreteList = false
+  let ignoringSubsectionBullets = false
+  let allowlistHeadingLevel: number | null = null
 
   const pushCandidate = (candidate: string): void => {
     const normalized = candidate.trim()
@@ -17,36 +102,75 @@ export function extractApprovedFileAllowlist(planContent: string, cwd: string): 
 
   for (const line of lines) {
     const trimmed = line.trim()
-    const normalizedHeading = trimmed.replace(/^#{1,6}\s+/, "")
-    const lower = normalizedHeading.toLowerCase()
+    const currentHeadingLevel = headingLevel(trimmed)
+    const isHeading = currentHeadingLevel !== null
+    const lower = normalizeHeading(trimmed)
 
     if (!inAllowlist) {
-      if (
-        lower === "allowlist" ||
-        lower === "file allowlist:" ||
-        lower === "allowlist:" ||
-        lower === "narrow allowlist" ||
-        lower === "narrow allowlist:" ||
-        lower === "minimal incremental file allowlist" ||
-        lower === "minimal incremental file allowlist:"
-      ) {
+      if (isAllowlistHeading(lower)) {
         inAllowlist = true
+        allowlistHeadingLevel = currentHeadingLevel
+        collectingConcreteList = isConcreteAllowlistHeading(lower) && !lower.startsWith("file allowlist")
+        ignoringSubsectionBullets = !collectingConcreteList
       }
       continue
     }
 
-    if (trimmed === "") {
+    if (isHeading) {
+      if (collected.length > 0 && allowlistHeadingLevel !== null && currentHeadingLevel! <= allowlistHeadingLevel) {
+        break
+      }
+      if (isConcreteAllowlistHeading(lower) && !isNonPathAllowlistSubsection(lower)) {
+        collectingConcreteList = true
+        ignoringSubsectionBullets = false
+        continue
+      }
+      if (isNonPathAllowlistSubsection(lower)) {
+        if (collected.length > 0) break
+        collectingConcreteList = false
+        ignoringSubsectionBullets = true
+        continue
+      }
+      // Category headings inside a concrete allowlist list are allowed.
+      if (collectingConcreteList) continue
       if (collected.length > 0) break
       continue
     }
 
+    const boldSubsection = /^\*\*(.+):\*\*$/.exec(trimmed)
+    if (boldSubsection) {
+      const boldLower = normalizeHeading(boldSubsection[1]!)
+      if (isNonPathAllowlistSubsection(boldLower)) {
+        if (collected.length > 0) break
+        collectingConcreteList = false
+        ignoringSubsectionBullets = true
+      }
+      continue
+    }
+
+    if (startsConcreteAllowlistList(trimmed)) {
+      collectingConcreteList = true
+      ignoringSubsectionBullets = false
+      continue
+    }
+
+    if (trimmed === "") {
+      if (collected.length > 0 && !collectingConcreteList) break
+      continue
+    }
+
     if (/^(#{1,6}\s|[A-Za-z].*:$)/.test(trimmed) && !trimmed.startsWith("- ")) {
-      break
+      if (collected.length > 0) break
+      continue
     }
 
     const bulletMatch = /^[-*]\s+(.+)$/.exec(trimmed)
     if (!bulletMatch) {
       if (collected.length > 0) break
+      continue
+    }
+
+    if (!collectingConcreteList || ignoringSubsectionBullets) {
       continue
     }
 
@@ -60,4 +184,28 @@ export function extractApprovedFileAllowlist(planContent: string, cwd: string): 
   }
 
   return collected
+}
+
+export function deriveReviewFileAllowlist(input: {
+  phase: Phase
+  mode: WorkflowMode | null
+  artifactPaths: string[]
+  fallbackAllowlist: string[]
+  cwd: string
+}): { allowlist: string[]; source: "planning-artifact" | "active-state" | "none" } {
+  if (input.mode === "INCREMENTAL" && input.phase === "PLANNING") {
+    for (const artifactPath of input.artifactPaths) {
+      try {
+        const extracted = extractApprovedFileAllowlist(readFileSync(artifactPath, "utf-8"), input.cwd)
+        if (extracted.length > 0) return { allowlist: extracted, source: "planning-artifact" }
+      } catch {
+        // Continue to the next artifact path, then fall back to active state.
+      }
+    }
+  }
+
+  if (input.fallbackAllowlist.length > 0) {
+    return { allowlist: input.fallbackAllowlist, source: "active-state" }
+  }
+  return { allowlist: [], source: "none" }
 }

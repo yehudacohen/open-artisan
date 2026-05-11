@@ -16,7 +16,6 @@
  * Complex commands accept JSON on stdin:
  *   echo '{"summary":"Plan ready","artifact_files":[".openartisan/feat/plan.md"]}' | artisan request-review
  *   echo '{"task_id":"T1","implementation_summary":"Built auth","tests_passing":true}' | artisan mark-task-complete
- *   echo '{"criteria_met":[...]}' | artisan mark-satisfied
  *   echo '{"feedback_type":"approve","feedback_text":"LGTM"}' | artisan submit-feedback
  */
 
@@ -109,7 +108,7 @@ async function ensureSession(): Promise<void> {
 
 /** Call tool.execute with the given tool name and args. */
 async function execTool(name: string, args: Record<string, unknown> = {}): Promise<string> {
-  if (name === "mark_satisfied" || name === "submit_task_review" || name === "submit_phase_review") {
+  if (name === "mark_satisfied" || name === "submit_task_review" || name === "submit_phase_review" || name === "submit_auto_approve") {
     return `Error: ${name} is reserved for isolated reviewers. Use request_review/mark_task_complete and let the Claude Code hook submit reviewer results.`
   }
 
@@ -132,19 +131,15 @@ async function execTool(name: string, args: Record<string, unknown> = {}): Promi
 
 const TOOL_COMMANDS: Record<string, string> = {
   "select-mode": "select_mode",
-  "submit-task-review": "submit_task_review",
-  "submit-auto-approve": "submit_auto_approve",
   "reset-task": "reset_task",
   "mark-scan-complete": "mark_scan_complete",
   "mark-analyze-complete": "mark_analyze_complete",
-  "mark-satisfied": "mark_satisfied",
   "mark-task-complete": "mark_task_complete",
   "request-review": "request_review",
   "submit-feedback": "submit_feedback",
   "check-prior-workflow": "check_prior_workflow",
   "resolve-human-gate": "resolve_human_gate",
   "propose-backtrack": "propose_backtrack",
-  "spawn-sub-workflow": "spawn_sub_workflow",
   "query-parent-workflow": "query_parent_workflow",
   "query-child-workflow": "query_child_workflow",
   "analyze-task-boundary-change": "analyze_task_boundary_change",

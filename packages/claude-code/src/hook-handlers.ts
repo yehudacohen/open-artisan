@@ -103,7 +103,7 @@ function isWriteLikeTool(toolName: string, toolInput: Record<string, unknown>): 
   if (["write", "edit", "multiedit", "notebookedit"].includes(normalized)) return true
   if (normalized !== "bash") return false
   const command = String(toolInput.command ?? toolInput.cmd ?? "")
-  return /(?:>>|>[^&]|\btee\b|\bsed\s+-i\b|\bdd\b.*\bof=|<<-?\s*['"]?[A-Za-z_][A-Za-z0-9_]*['"]?|\b(?:python|python3|node|ruby|perl)\b.*\b(?:writeFile|open\s*\(|File\.write|fs\.write|write\s*\())/.test(command)
+  return /(?:>>|>[^&]|\btee\b|\bsed\s+-i\b|\bdd\b.*\bof=|<<-?\s*['"]?[A-Za-z_][A-Za-z0-9_]*['"]?|(?:^|[;&|]\s*)(?:touch|mkdir|cp|mv|rm|rmdir|install|chmod|chown|ln|truncate|rsync|patch|cpio|unzip|tar\s+(?:-[A-Za-z]*x[A-Za-z]*|x[A-Za-z]*|--extract)|git\s+(?:add|commit|checkout|restore|reset|clean|mv|rm|apply|am)|(?:curl|wget)\b(?=.*\s(?:-o|-O|--output(?:=|\s)|--output-document(?:=|\s))))|\b(?:python|python3|node|ruby|perl)\b.*\b(?:writeFile|open\s*\(|File\.write|fs\.write|write\s*\(|write_text\s*\(|write_bytes\s*\(|append_text\s*\(|append_bytes\s*\())/.test(command)
 }
 
 function bridgeUnavailableDecision(toolName: string, toolInput: Record<string, unknown>): HookOutput {
@@ -371,12 +371,9 @@ export async function handleStop(input: HookInput): Promise<HookOutput> {
     const approvePrompt = await bridgeCall(stateDir, "task.getAutoApproveContext", { sessionId })
     if (approvePrompt && typeof approvePrompt === "string") {
       const projectDir = input.cwd ?? process.env["CLAUDE_PROJECT_DIR"] ?? process.cwd()
+      const autoApproveToken = extractReviewToken(approvePrompt)
+      if (!autoApproveToken) return ALLOW
       try {
-        // First set userGateMessageReceived so submit_auto_approve works
-        await bridgeCall(stateDir, "message.process", {
-          sessionId,
-          parts: [{ type: "text", text: "(robot-artisan auto-approval)" }],
-        })
         const approveOutput = execFileSync("claude", ["--print", "--max-turns", "1", "-p", approvePrompt], {
           timeout: 120_000,
           encoding: "utf-8",
@@ -384,8 +381,8 @@ export async function handleStop(input: HookInput): Promise<HookOutput> {
         })
         await bridgeCall(stateDir, "tool.execute", {
           name: "submit_auto_approve",
-          args: { review_output: approveOutput },
-          context: { sessionId, directory: projectDir },
+          args: { review_output: approveOutput, review_token: autoApproveToken },
+          context: { sessionId, directory: projectDir, invocation: "auto-approver" },
         })
         return {
           stdout: null,
@@ -402,8 +399,8 @@ export async function handleStop(input: HookInput): Promise<HookOutput> {
         })
         await bridgeCall(stateDir, "tool.execute", {
           name: "submit_auto_approve",
-          args: { review_output: failureOutput },
-          context: { sessionId, directory: projectDir },
+          args: { review_output: failureOutput, review_token: autoApproveToken },
+          context: { sessionId, directory: projectDir, invocation: "auto-approver" },
         })
         return {
           stdout: null,

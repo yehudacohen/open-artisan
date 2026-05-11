@@ -39,7 +39,7 @@ Pure, side-effect-free table-driven FSM. 34 valid (Phase, PhaseState) combinatio
 
 ### Session State (`session-state.ts`, `state-backend-fs.ts`, `open-artisan-state-backend-db.ts`)
 
-Pluggable persistence via `StateBackend` interface (read/write/remove/list/lock). The default runtime backend is the PGlite-backed repository (`.openartisan/open-artisan.db`) exposed through `open-artisan-state-backend-db.ts`; `FileSystemStateBackend` remains the explicit legacy/fallback backend and stores per-feature state at `.openartisan/<featureName>/workflow-state.json`. Current workflow-state schema is v24, with migrations for prior versions. Sub-workflow state nests under parent feature state. Sessions without a featureName (pre-MODE_SELECT) are memory-only. Two-layer locking combines per-feature promise chains with backend locks; persisted updates re-read the latest backend snapshot while holding the backend lock before mutating. `validateWorkflowState()` runs before every persist.
+Pluggable persistence via `StateBackend` interface (read/write/remove/list/lock). The default runtime backend is the PGlite-backed repository under `.openartisan/workflow-db/` exposed through `open-artisan-state-backend-db.ts`; `FileSystemStateBackend` remains the explicit legacy/fallback backend and stores per-feature state at `.openartisan/<featureName>/workflow-state.json`. Current workflow-state schema is v24, with migrations for prior versions. Sub-workflow state nests under parent feature state. Sessions without a featureName (pre-MODE_SELECT) are memory-only. Two-layer locking combines per-feature promise chains with backend locks; persisted updates re-read the latest backend snapshot while holding the backend lock before mutating. Initial feature adoption rejects collisions with an existing persisted non-MODE_SELECT workflow. `validateWorkflowState()` runs before every persist.
 
 ### Session Registry (`session-registry.ts`)
 
@@ -76,7 +76,7 @@ The IMPL_PLAN artifact is parsed from Markdown into a task DAG. Each task declar
 
 ### Sub-Workflows (`tools/spawn-sub-workflow.ts`, `tools/query-workflow.ts`, `tools/complete-sub-workflow.ts`)
 
-`spawn_sub_workflow` delegates a DAG task to an independent child session that runs its own MODE_SELECT → DONE cycle. Child state nests under parent on disk (`.openartisan/<parent>/sub/<child>/`). Parent tracks children via `childWorkflows` array; child links back via `parentWorkflow` field. `query_parent_workflow` / `query_child_workflow` provide read-only cross-workflow inspection. Child completion automatically propagates to parent (delegated → complete). Timeout and cascade-abort sync children when parent's plan changes.
+`spawn_sub_workflow` delegates a DAG task to an independent child session that runs its own MODE_SELECT → DONE cycle in OpenCode. Child state nests under parent on disk (`.openartisan/<parent>/sub/<child>/`). Parent tracks children via `childWorkflows` array; child links back via `parentWorkflow` field. `query_parent_workflow` / `query_child_workflow` provide read-only cross-workflow inspection. Child completion automatically propagates to parent (delegated → complete). Timeout and cascade-abort sync children when parent's plan changes. Bridge adapters do not expose `spawn_sub_workflow` until adapter-managed child session creation is implemented.
 
 ### Bridge Server (`packages/bridge/`)
 

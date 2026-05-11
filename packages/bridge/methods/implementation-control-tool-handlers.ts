@@ -42,6 +42,9 @@ export const handleCheckPriorWorkflow: ToolHandler = async (args, toolCtx, ctx) 
   const parsedArgs = parseToolArgs(CheckPriorWorkflowToolSchema, args)
   if (!parsedArgs.success) return `Error: ${parsedArgs.error}`
   const featureName = parsedArgs.data.feature_name.trim()
+  if (!store.get(toolCtx.sessionId)) {
+    await store.create(toolCtx.sessionId)
+  }
 
   const priorState = await store.findPersistedByFeatureName(featureName)
   if (!priorState) {

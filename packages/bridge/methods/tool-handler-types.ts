@@ -4,7 +4,7 @@ export interface ToolContext {
   sessionId: string
   directory: string
   agent?: string
-  invocation?: "author" | "isolated-reviewer" | "system"
+  invocation?: "author" | "isolated-reviewer" | "auto-approver" | "system"
 }
 
 export type ToolHandler = (

@@ -22,8 +22,33 @@ import type { ArtifactKey, Phase, WorkflowMode } from "./workflow-primitives"
 import type { CriterionResult, RebuttalRequest, RebuttalResult, SelfReviewResult } from "./review-types"
 import type { SubagentDispatcher } from "./subagent-dispatcher"
 import { withTimeout, extractJsonFromText } from "./utils"
-import { SELF_REVIEW_TIMEOUT_MS, MAX_ARTIFACT_CONTENT_CHARS } from "./constants"
+import { SELF_REVIEW_TIMEOUT_MS } from "./constants"
 import { buildSelfReviewStructuralGate } from "./rubrics"
+import { countExpectedBlockingCriteria } from "./tools/mark-satisfied"
+
+const SELF_REVIEW_JSON_SCHEMA: Record<string, unknown> = {
+  type: "object",
+  additionalProperties: false,
+  required: ["satisfied", "criteria_results"],
+  properties: {
+    satisfied: { type: "boolean" },
+    criteria_results: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["criterion", "met", "evidence", "severity"],
+        properties: {
+          criterion: { type: "string" },
+          met: { type: "boolean" },
+          evidence: { type: "string" },
+          severity: { enum: ["blocking", "suggestion", "design-invariant"] },
+          score: { type: "number", minimum: 1, maximum: 10 },
+        },
+      },
+    },
+  },
+}
 
 // ---------------------------------------------------------------------------
 // Prompt builder
@@ -38,12 +63,6 @@ export interface SelfReviewRequest {
   criteriaText: string
   /** Optional upstream artifact summaries for context */
   upstreamSummary?: string
-  /**
-   * Optional inline artifact content for phases whose artifacts live in memory
-   * (PLANNING, IMPL_PLAN, DISCOVERY). When provided AND artifactPaths is empty,
-   * the reviewer evaluates this text directly instead of reading files.
-   */
-  artifactContent?: string
   /** Parent session ID — when set, the ephemeral review session is created as a
    *  child of this session so the user can see the review in the TUI. */
   parentSessionId?: string
@@ -53,6 +72,8 @@ export interface SelfReviewRequest {
   parentModel?: string | { modelID: string; providerID?: string }
   /** Absolute file allowlist (INCREMENTAL mode) for phase gating */
   fileAllowlist?: string[]
+  /** Whether the allowlist is active state or the candidate proposed by a planning artifact. */
+  fileAllowlistSource?: "active-state" | "planning-artifact" | "none"
   /** Approved artifact hashes for state-aware allowlist review */
   approvedArtifacts?: Partial<Record<ArtifactKey, string>>
   /** Disk paths for approved artifacts (if available) */
@@ -100,25 +121,18 @@ export function buildReviewPrompt(req: SelfReviewRequest): string {
       "dependency has pre-existing issues unless the listed artifact itself introduces or relies on that issue.",
     )
     lines.push(
+      "If a listed file is an established shared source file containing unrelated legacy APIs, limit findings " +
+      "to the declarations, schemas, tests, or implementation changes that are part of the current reviewed " +
+      "artifact. Do not require a repo-wide cleanup of unrelated pre-existing public contracts just because " +
+      "they live in the same file.",
+    )
+    lines.push(
       "For TypeScript module augmentation, review the augmentation declarations in the listed artifact; " +
       "do not treat the original augmented module as a reviewed artifact unless it is explicitly listed below.",
     )
     for (const p of req.artifactPaths) {
       lines.push(`  - \`${p}\``)
     }
-  } else if (req.artifactContent) {
-    lines.push(
-      "The artifact for this phase is an in-memory document (not written to disk). " +
-      "Evaluate the following content directly:",
-    )
-    lines.push("")
-    lines.push("```")
-    // Cap at MAX_ARTIFACT_CONTENT_CHARS to prevent extreme prompt size
-    const capped = req.artifactContent.length > MAX_ARTIFACT_CONTENT_CHARS
-      ? req.artifactContent.slice(0, MAX_ARTIFACT_CONTENT_CHARS) + `\n\n[... artifact truncated at ${MAX_ARTIFACT_CONTENT_CHARS} chars — read the full file from disk for complete content ...]`
-      : req.artifactContent
-    lines.push(capped)
-    lines.push("```")
   } else {
     // Guide the reviewer on where to find files when no explicit paths are provided.
     // For file-based phases (INTERFACES, TESTS, IMPLEMENTATION), the artifacts are
@@ -143,6 +157,15 @@ export function buildReviewPrompt(req: SelfReviewRequest): string {
 
   lines.push("## Acceptance Criteria")
   lines.push(req.criteriaText)
+  const expectedBlockingCount = countExpectedBlockingCriteria(req.criteriaText)
+  if (expectedBlockingCount > 0) {
+    lines.push("")
+    lines.push(
+      `Required criteria count: return at least ${expectedBlockingCount} blocking/design-invariant entries in ` +
+      "`criteria_results`. This count includes the numbered blocking criteria AND every [Q] quality criterion. " +
+      "Do not collapse multiple criteria into one entry.",
+    )
+  }
   lines.push("")
   lines.push(buildSelfReviewStructuralGate(req.phase))
   lines.push("")
@@ -202,10 +225,15 @@ export function buildReviewPrompt(req: SelfReviewRequest): string {
 
   if (req.fileAllowlist && req.fileAllowlist.length > 0) {
     lines.push("## Allowlist Review (State-Aware)")
-    lines.push("The file allowlist governs which phases can be executed in INCREMENTAL mode.")
-    lines.push("Verify it includes all files needed for unfinished phases, considering what is already approved.")
+    if (req.phase === "PLANNING" && req.mode === "INCREMENTAL" && req.fileAllowlistSource === "planning-artifact") {
+      lines.push("This is the candidate replacement allowlist proposed by the current PLANNING artifact under review.")
+      lines.push("Evaluate allowlist adequacy against this candidate allowlist, not against any stale active allowlist from before the planning revision/backtrack.")
+    } else {
+      lines.push("The file allowlist governs which phases can be executed in INCREMENTAL mode.")
+      lines.push("Verify it includes all files needed for unfinished phases, considering what is already approved.")
+    }
     lines.push("")
-    lines.push("**Allowlist:**")
+    lines.push(req.fileAllowlistSource === "planning-artifact" ? "**Candidate allowlist from reviewed plan artifact:**" : "**Allowlist:**")
     for (const p of req.fileAllowlist) {
       lines.push(`- ${p}`)
     }
@@ -225,14 +253,15 @@ export function buildReviewPrompt(req: SelfReviewRequest): string {
   lines.push("## Instructions")
   lines.push("1. Read every artifact file listed above before forming any opinion.")
   lines.push("2. Evaluate each acceptance criterion independently.")
-  lines.push("3. Reconcile criteria against the latest approved user direction. If older plans or prior artifacts conflict with newer feedback, treat the newer feedback as authoritative unless a design-invariant criterion explicitly says otherwise.")
-  lines.push("4. Do not require concrete fields, files, APIs, or behavior that were explicitly rejected or superseded by recent user feedback. Mark only real gaps against the current approved intent.")
-  lines.push("5. For standard criteria: state met (true/false), provide evidence (quote or file:line), and mark severity.")
-  lines.push("6. For [Q] quality criteria: provide a numeric `score` (1-10) and evidence justifying the score. score >= 9 means met, < 9 means not met.")
-  lines.push("7. Use the full 1-10 range honestly. Reward excellence just as clearly as you punish flaws; do not compress scores into a narrow band.")
-  lines.push("8. Scoring guide: 1-2 = fundamentally broken, 3-4 = major gaps, 5-6 = mixed/adequate but clearly incomplete, 7-8 = strong with meaningful improvement still needed, 9 = excellent and ready to advance, 10 = exceptional work that materially exceeds the normal quality bar for this phase.")
-  lines.push("9. Set `satisfied` to true ONLY if ALL blocking criteria are met AND ALL [Q] scores are >= 9.")
-  lines.push("10. Return your assessment as a JSON object. IMPORTANT: reply with ONLY the JSON — no preamble, no explanation.")
+  lines.push("3. Scope findings to the reviewed artifact for this phase. In mixed legacy files, do not fail unrelated pre-existing APIs unless the current artifact changes, depends on, or claims them.")
+  lines.push("4. Reconcile criteria against the latest approved user direction. If older plans or prior artifacts conflict with newer feedback, treat the newer feedback as authoritative unless a design-invariant criterion explicitly says otherwise.")
+  lines.push("5. Do not require concrete fields, files, APIs, or behavior that were explicitly rejected or superseded by recent user feedback. Mark only real gaps against the current approved intent.")
+  lines.push("6. For standard criteria: state met (true/false), provide evidence (quote or file:line), and mark severity.")
+  lines.push("7. For [Q] quality criteria: provide a numeric `score` (1-10) and evidence justifying the score. score >= 9 means met, < 9 means not met.")
+  lines.push("8. Use the full 1-10 range honestly. Reward excellence just as clearly as you punish flaws; do not compress scores into a narrow band.")
+  lines.push("9. Scoring guide: 1-2 = fundamentally broken, 3-4 = major gaps, 5-6 = mixed/adequate but clearly incomplete, 7-8 = strong with meaningful improvement still needed, 9 = excellent and ready to advance, 10 = exceptional work that materially exceeds the normal quality bar for this phase.")
+  lines.push("10. Set `satisfied` to true ONLY if ALL blocking criteria are met AND ALL [Q] scores are >= 9.")
+  lines.push("11. Return your assessment as a JSON object. IMPORTANT: reply with ONLY the JSON — no preamble, no explanation.")
   lines.push("")
   lines.push("The JSON must match this structure:")
   lines.push("```json")
@@ -266,7 +295,7 @@ async function ephemeralReviewPrompt(
     ...(parentModel ? { model: parentModel } : {}),
   })
   try {
-    return await session.prompt(prompt)
+    return await session.prompt(prompt, { responseFormat: { type: "json_schema", schema: SELF_REVIEW_JSON_SCHEMA } })
   } finally {
     await session.destroy()
   }
@@ -323,6 +352,43 @@ export function parseReviewResult(raw: string): SelfReviewResult {
   return { success: true, satisfied, criteriaResults }
 }
 
+function buildJsonRepairPrompt(rawText: string): string {
+  return [
+    "Your previous review response was not valid JSON.",
+    "Return ONLY a valid JSON object matching this exact schema. Do not include markdown, bullets, code fences, or commentary.",
+    "",
+    "Required schema:",
+    JSON.stringify({
+      satisfied: false,
+      criteria_results: [
+        { criterion: "<criterion text>", met: false, evidence: "<specific evidence>", severity: "blocking", score: 9 },
+      ],
+    }, null, 2),
+    "",
+    "Previous invalid response:",
+    "```",
+    summarizeReviewerText(rawText),
+    "```",
+  ].join("\n")
+}
+
+function summarizeReviewerText(text: string): string {
+  const normalized = text.replace(/\s+/g, " ").trim()
+  return normalized.length > 1000 ? `${normalized.slice(0, 1000)}...[truncated ${normalized.length}]` : normalized
+}
+
+function parseReviewText(text: string): SelfReviewResult {
+  try {
+    return parseReviewResult(extractJsonFromText(text))
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    return {
+      success: false,
+      error: `Reviewer returned invalid JSON: ${message}. Output snippet: ${summarizeReviewerText(text)}`,
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Main export
 // ---------------------------------------------------------------------------
@@ -348,7 +414,20 @@ export async function dispatchSelfReview(
       SELF_REVIEW_TIMEOUT_MS,
       "self-review",
     )
-    return parseReviewResult(extractJsonFromText(text))
+    const parsed = parseReviewText(text)
+    if (parsed.success) return parsed
+
+    const repairedText = await withTimeout(
+      ephemeralReviewPrompt(dispatcher, buildJsonRepairPrompt(text), req.parentSessionId, req.parentModel, `${title} JSON repair`),
+      SELF_REVIEW_TIMEOUT_MS,
+      "self-review-json-repair",
+    )
+    const repaired = parseReviewText(repairedText)
+    if (repaired.success) return repaired
+    return {
+      success: false,
+      error: `${parsed.error}. JSON repair failed: ${repaired.error}`,
+    }
   } catch (err) {
     const errorMsg = err instanceof Error ? err.message : String(err)
     return {

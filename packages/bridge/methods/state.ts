@@ -4,12 +4,14 @@
  * state.get: Returns the WorkflowState for a session (or null if not found).
  */
 import { JSONRPCErrorException } from "json-rpc-2.0"
+import { join } from "node:path"
 import type { MethodHandler } from "../server"
 import { INVALID_PARAMS } from "../protocol"
 import type { BridgeRuntimeHealthSummary, StateGetParams, StateHealthParams } from "../protocol"
 import { loadBridgeLeaseSnapshot, loadBridgeMetadata } from "../bridge-meta"
 import type { BridgeContext } from "../server"
 import { workflowDbId } from "../../core/runtime-persistence"
+import { classifyWorkflowNextAction } from "../../core/workflow-next-action"
 
 type DbLeaseHealthSummary = Pick<
   BridgeRuntimeHealthSummary,
@@ -53,34 +55,49 @@ async function buildDbLeaseHealthSummary(
 
 async function buildRuntimeHealthSummary(
   sessionId: string,
-  state: Record<string, unknown>,
+  state: Record<string, unknown> | null,
   ctx: BridgeContext,
 ): Promise<BridgeRuntimeHealthSummary> {
-  const stateDir = ctx.stateDir
+  const stateDir = ctx.stateDir ?? ctx.runtimeBackendInfo.stateDir
   const metadata = stateDir ? await loadBridgeMetadata(stateDir) : null
   const leases = stateDir ? await loadBridgeLeaseSnapshot(stateDir) : null
   const clients = leases?.clients ?? []
   const activeKinds = Array.from(new Set(clients.map((client) => client.clientKind))).sort()
-  const phase = typeof state.phase === "string" ? state.phase : "MODE_SELECT"
-  const phaseState = typeof state.phaseState === "string" ? state.phaseState : "DRAFT"
-  const pendingTaskReview = typeof state.taskCompletionInProgress === "string" && state.taskCompletionInProgress.length > 0
+  const phase = typeof state?.phase === "string" ? state.phase : "MODE_SELECT"
+  const phaseState = typeof state?.phaseState === "string" ? state.phaseState : "DRAFT"
+  const pendingTaskReview =
+    (typeof state?.taskCompletionInProgress === "string" && state.taskCompletionInProgress.length > 0) ||
+    (phase === "IMPLEMENTATION" && phaseState === "TASK_REVIEW" && typeof state?.currentTaskId === "string")
   const awaitingUserGate = phaseState === "USER_GATE"
-  const dbLeaseHealth = await buildDbLeaseHealthSummary(sessionId, state, ctx)
+  const currentTaskId = typeof state?.currentTaskId === "string" ? state.currentTaskId : null
+  const taskCompletionInProgress = typeof state?.taskCompletionInProgress === "string" ? state.taskCompletionInProgress : null
+  const nextAction = classifyWorkflowNextAction(state
+    ? { phase, phaseState, currentTaskId, taskCompletionInProgress }
+    : null)
+  const dbLeaseHealth = await buildDbLeaseHealthSummary(sessionId, state ?? {}, ctx)
+  const pgliteDatabasePath = ctx.runtimeBackendInfo.pgliteDataDir && ctx.runtimeBackendInfo.pgliteDatabaseFileName
+    ? join(ctx.runtimeBackendInfo.pgliteDataDir, ctx.runtimeBackendInfo.pgliteDatabaseFileName)
+    : null
+  const taskReviewId = taskCompletionInProgress ?? currentTaskId
   const noopReason = pendingTaskReview
-    ? `pending task review for ${state.taskCompletionInProgress as string}`
+    ? `pending task review for ${taskReviewId ?? "current task"}`
     : awaitingUserGate
       ? `awaiting user gate at ${phase}`
       : phaseState === "REVIEW"
         ? `awaiting review result for ${phase}`
-        : null
+        : nextAction.stopReason
 
   return {
+    initialized: ctx.engine !== null,
     backendKind: ctx.runtimeBackendInfo.backendKind,
+    projectDir: ctx.projectDir,
     stateDir: ctx.runtimeBackendInfo.stateDir,
     pgliteDataDir: ctx.runtimeBackendInfo.pgliteDataDir,
+    pgliteDatabasePath,
     pgliteDatabaseFileName: ctx.runtimeBackendInfo.pgliteDatabaseFileName,
     pgliteSchemaName: ctx.runtimeBackendInfo.pgliteSchemaName,
-    featureName: typeof state.featureName === "string" ? state.featureName : null,
+    requestedSessionFound: state !== null,
+    featureName: typeof state?.featureName === "string" ? state.featureName : null,
     phase,
     phaseState,
     bridgeTransport: metadata?.transport ?? "stdio",
@@ -89,14 +106,21 @@ async function buildRuntimeHealthSummary(
     bridgeActiveClientKinds: activeKinds,
     ...dbLeaseHealth,
     pendingTaskReview,
-    currentTaskId: typeof state.currentTaskId === "string" ? state.currentTaskId : null,
+    currentTaskId,
     lastRecoveryAction:
-      metadata?.transport === "unix-socket"
-        ? clients.some((client) => client.sessionId === sessionId)
-          ? "attached-shared-bridge"
-          : "shared-bridge-active"
-        : "bridge-stdio-only",
+      ctx.engine === null
+        ? "bridge-uninitialized"
+        : metadata?.transport === "unix-socket"
+          ? clients.some((client) => client.sessionId === sessionId)
+            ? "attached-shared-bridge"
+            : "shared-bridge-active"
+          : "bridge-stdio-only",
     awaitingUserGate,
+    nextAction: nextAction.nextAction,
+    shouldContinue: nextAction.shouldContinue,
+    requiresAdapterAction: nextAction.requiresAdapterAction,
+    stopReason: nextAction.stopReason,
+    continuationMessage: nextAction.continuationMessage,
     noopReason,
   }
 }
@@ -105,8 +129,8 @@ export async function resolveRuntimeHealth(
   sessionId: string,
   state: Record<string, unknown> | null,
   ctx: BridgeContext,
-): Promise<BridgeRuntimeHealthSummary | null> {
-  return state ? buildRuntimeHealthSummary(sessionId, state, ctx) : null
+): Promise<BridgeRuntimeHealthSummary> {
+  return buildRuntimeHealthSummary(sessionId, state, ctx)
 }
 
 export const handleStateGet: MethodHandler = async (params, ctx) => {
@@ -133,7 +157,7 @@ export const handleStateHealth: MethodHandler = async (params, ctx) => {
     throw new JSONRPCErrorException("sessionId is required", INVALID_PARAMS)
   }
 
-  const state = ctx.engine!.store.get(p.sessionId)
+  const state = ctx.engine?.store.get(p.sessionId) ?? null
   const snapshot = state ? structuredClone(state) as unknown as Record<string, unknown> : null
   return resolveRuntimeHealth(p.sessionId, snapshot, ctx)
 }

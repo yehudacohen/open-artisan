@@ -94,6 +94,8 @@ class ContinuationRequest(TypedDict, total=False):
     gatewayRouting: GatewayRoutingInfo
     workflowState: JsonObject
     rawSessionContext: JsonObject
+    leaseId: str
+    stateFingerprint: str
 
 
 class ContinuationOutcome(TypedDict, total=False):
@@ -105,6 +107,9 @@ class ContinuationOutcome(TypedDict, total=False):
     detail: str
     missingFields: list[str]
     error: str
+    leaseId: str
+    workerPid: int
+    stateFingerprint: str
 
 
 @runtime_checkable
@@ -166,7 +171,7 @@ class NativeSessionDirectContinuationRunner:
         }
 
         try:
-            _launch_python_worker(
+            process = _launch_python_worker(
                 _DIRECT_CONTINUATION_WORKER,
                 payload,
                 project_dir=project_dir,
@@ -185,12 +190,16 @@ class NativeSessionDirectContinuationRunner:
                 "error": str(exc),
             }
 
-        return {
+        outcome: ContinuationOutcome = {
             "kind": "continued",
             "strategy": "direct_runner",
             "sessionId": session_id,
             "detail": "Launched Hermes native session continuation worker",
         }
+        if isinstance(getattr(process, "pid", None), int):
+            outcome["workerPid"] = process.pid
+        _set_outcome_metadata(outcome, request)
+        return outcome
 
 
 class GatewayBackgroundContinuationHandoff:
@@ -245,7 +254,7 @@ class GatewayBackgroundContinuationHandoff:
         }
 
         try:
-            _launch_python_worker(
+            process = _launch_python_worker(
                 _GATEWAY_CONTINUATION_WORKER,
                 payload,
                 project_dir=project_dir,
@@ -266,12 +275,16 @@ class GatewayBackgroundContinuationHandoff:
                 "error": str(exc),
             }
 
-        return {
+        outcome: ContinuationOutcome = {
             "kind": "handoff_requested",
             "strategy": "gateway_handoff",
             "sessionId": session_id,
             "detail": f"Launched {platform} gateway continuation worker",
         }
+        if isinstance(getattr(process, "pid", None), int):
+            outcome["workerPid"] = process.pid
+        _set_outcome_metadata(outcome, request)
+        return outcome
 
 
 def _resolve_python_command() -> str | None:
@@ -296,7 +309,7 @@ def _launch_python_worker(
     *,
     project_dir: str,
     extra_env: dict[str, str] | None = None,
-) -> None:
+) -> subprocess.Popen[Any]:
     python_command = _resolve_python_command()
     if not python_command:
         raise RuntimeError("Python runtime not found")
@@ -306,7 +319,7 @@ def _launch_python_worker(
     if extra_env:
         env.update(extra_env)
 
-    subprocess.Popen(
+    return subprocess.Popen(
         [python_command, "-c", script, json.dumps(payload)],
         cwd=project_dir or None,
         env=env,
@@ -315,6 +328,15 @@ def _launch_python_worker(
         stderr=subprocess.DEVNULL,
         start_new_session=True,
     )
+
+
+def _set_outcome_metadata(outcome: ContinuationOutcome, request: ContinuationRequest) -> None:
+    lease_id = _string_value(request.get("leaseId"))
+    state_fingerprint = _string_value(request.get("stateFingerprint"))
+    if lease_id:
+        outcome["leaseId"] = lease_id
+    if state_fingerprint:
+        outcome["stateFingerprint"] = state_fingerprint
 
 
 _DIRECT_CONTINUATION_WORKER = textwrap.dedent(

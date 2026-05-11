@@ -203,8 +203,8 @@ describe("buildWorkflowSystemPrompt — structural workflow sub-states", () => {
       mode: "INCREMENTAL",
     }))
     expect(prompt).toContain("CASCADE_CHECK")
-    expect(prompt).toContain("cascade_step_skipped")
     expect(prompt).toContain("scheduling_complete")
+    expect(prompt).not.toContain("cascade_step_skipped")
   })
 
   it("treats IMPLEMENTATION/SCHEDULING as dispatch work rather than authoring", () => {

@@ -10,6 +10,9 @@
         "feature_name": {
           "type": "string",
           "minLength": 1
+        },
+        "user_intent": {
+          "type": "string"
         }
       },
       "required": [
@@ -83,62 +86,6 @@
     }
   },
   {
-    "hermes_name": "oa_mark_satisfied",
-    "bridge_name": "mark_satisfied",
-    "description": "Submit isolated phase-review criteria assessment for the current artifact.",
-    "schema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "type": "object",
-      "properties": {
-        "criteria_met": {
-          "type": "array",
-          "items": {
-            "type": "object",
-            "properties": {
-              "criterion": {
-                "type": "string"
-              },
-              "met": {
-                "type": "boolean"
-              },
-              "evidence": {
-                "type": "string"
-              },
-              "severity": {
-                "type": "string",
-                "enum": [
-                  "blocking",
-                  "suggestion",
-                  "design-invariant"
-                ]
-              },
-              "score": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "number"
-                  }
-                ]
-              }
-            },
-            "required": [
-              "criterion",
-              "met",
-              "evidence"
-            ],
-            "additionalProperties": false
-          }
-        }
-      },
-      "required": [
-        "criteria_met"
-      ],
-      "additionalProperties": false
-    }
-  },
-  {
     "hermes_name": "oa_request_review",
     "bridge_name": "request_review",
     "description": "Submit the current artifact for isolated review.",
@@ -155,13 +102,11 @@
           "minLength": 1
         },
         "artifact_files": {
+          "minItems": 1,
           "type": "array",
           "items": {
             "type": "string"
           }
-        },
-        "artifact_markdown": {
-          "type": "string"
         }
       },
       "required": [
@@ -210,6 +155,28 @@
     }
   },
   {
+    "hermes_name": "oa_scheduling_complete",
+    "bridge_name": "scheduling_complete",
+    "description": "Resolve a structural SKIP_CHECK, CASCADE_CHECK, or SCHEDULING state by entering active work.",
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    }
+  },
+  {
+    "hermes_name": "oa_phase_skipped",
+    "bridge_name": "phase_skipped",
+    "description": "Resolve a structural SKIP_CHECK state by skipping the current phase.",
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    }
+  },
+  {
     "hermes_name": "oa_mark_task_complete",
     "bridge_name": "mark_task_complete",
     "description": "Mark the current implementation DAG task complete and request task review.",
@@ -232,25 +199,6 @@
         "task_id",
         "implementation_summary",
         "tests_passing"
-      ],
-      "additionalProperties": false
-    }
-  },
-  {
-    "hermes_name": "oa_submit_auto_approve",
-    "bridge_name": "submit_auto_approve",
-    "description": "Submit auto-approval results for robot-artisan mode.",
-    "schema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "type": "object",
-      "properties": {
-        "review_output": {
-          "type": "string",
-          "minLength": 1
-        }
-      },
-      "required": [
-        "review_output"
       ],
       "additionalProperties": false
     }
@@ -334,25 +282,44 @@
     }
   },
   {
-    "hermes_name": "oa_spawn_sub_workflow",
-    "bridge_name": "spawn_sub_workflow",
-    "description": "Delegate an implementation DAG task to a child workflow.",
+    "hermes_name": "oa_propose_direct_application",
+    "bridge_name": "propose_direct_application",
+    "description": "Propose and structurally apply a small safe patch without starting the full workflow.",
     "schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "type": "object",
       "properties": {
-        "task_id": {
+        "summary": {
           "type": "string",
           "minLength": 1
         },
-        "feature_name": {
+        "why_safe": {
           "type": "string",
           "minLength": 1
+        },
+        "affected_files": {
+          "minItems": 1,
+          "maxItems": 3,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "patch": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 20000
+        },
+        "verification_command": {
+          "type": "string"
         }
       },
       "required": [
-        "task_id",
-        "feature_name"
+        "summary",
+        "why_safe",
+        "affected_files",
+        "patch"
       ],
       "additionalProperties": false
     }
@@ -498,7 +465,9 @@
       },
       "required": [
         "task_id",
-        "reason"
+        "reason",
+        "expected_impacted_tasks",
+        "expected_reset_tasks"
       ],
       "additionalProperties": false
     }

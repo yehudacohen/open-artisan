@@ -9,7 +9,9 @@ import { tmpdir } from "node:os"
 
 import { createSessionStateStore as createRawSessionStateStore } from "#core/session-state"
 import { createFileSystemStateBackend, migrateLegacyStateFile } from "#core/state-backend-fs"
+import { SESSION_STORE_OPERATION_TIMEOUT_ENV } from "#core/constants"
 import { SCHEMA_VERSION, type SessionStateStore, type WorkflowState } from "#core/workflow-state-types"
+import type { StateBackend } from "#core/state-backend-types"
 
 type RuntimeSessionStateStore = Omit<SessionStateStore, "get" | "findByFeatureName" | "findPersistedByFeatureName" | "create" | "update" | "migrateSession" | "delete"> & {
   get(sessionId: string): WorkflowState | null
@@ -87,14 +89,21 @@ function writeLegacyState(filePath: string, states: Record<string, unknown>): vo
 
 let store: RuntimeSessionStateStore
 let tmpDir: string
+let previousStoreOperationTimeout: string | undefined
 
 beforeEach(async () => {
   tmpDir = await mkdtemp(join(tmpdir(), "sw-test-"))
+  previousStoreOperationTimeout = process.env[SESSION_STORE_OPERATION_TIMEOUT_ENV]
   store = createSessionStateStore(createFileSystemStateBackend(tmpDir))
   await store.load()
 })
 
 afterEach(async () => {
+  if (previousStoreOperationTimeout === undefined) {
+    delete process.env[SESSION_STORE_OPERATION_TIMEOUT_ENV]
+  } else {
+    process.env[SESSION_STORE_OPERATION_TIMEOUT_ENV] = previousStoreOperationTimeout
+  }
   await rm(tmpDir, { recursive: true, force: true })
 })
 
@@ -504,6 +513,54 @@ describe("SessionStateStore — concurrent update serialization (G22)", () => {
 
     expect(failingStore.get("s-fail")?.featureName).toBeNull()
     expect(failingStore.get("s-fail")?.phase).toBe("MODE_SELECT")
+  })
+
+  it("times out a wedged durable update and allows later updates on the same feature", async () => {
+    process.env[SESSION_STORE_OPERATION_TIMEOUT_ENV] = "10"
+    let hangWrites = false
+    const backing = new Map<string, string>()
+    const backend: StateBackend = {
+      async read(key) { return backing.get(key) ?? null },
+      async write(key, value) {
+        if (hangWrites) await new Promise(() => {})
+        backing.set(key, value)
+      },
+      async remove(key) { backing.delete(key) },
+      async list() { return Array.from(backing.keys()) },
+      async lock() { return { async release() {} } },
+    }
+    const wedgedStore = createSessionStateStore(backend)
+    await wedgedStore.create("s-wedged")
+    await wedgedStore.update("s-wedged", (draft) => {
+      draft.featureName = "wedged-feature"
+      draft.mode = "GREENFIELD"
+      draft.phase = "PLANNING"
+      draft.phaseState = "DRAFT"
+    })
+
+    hangWrites = true
+    await expect(wedgedStore.update("s-wedged", (draft) => {
+      draft.iterationCount = 1
+    })).rejects.toThrow("timed out")
+
+    hangWrites = false
+    const recovered = await wedgedStore.update("s-wedged", (draft) => {
+      draft.iterationCount = 2
+    })
+    expect(recovered.iterationCount).toBe(2)
+  })
+
+  it("times out a wedged persisted feature lookup", async () => {
+    process.env[SESSION_STORE_OPERATION_TIMEOUT_ENV] = "10"
+    const backend: StateBackend = {
+      async read() { return new Promise<string>(() => {}) },
+      async write() {},
+      async remove() {},
+      async list() { return [] },
+      async lock() { return { async release() {} } },
+    }
+    const wedgedStore = createSessionStateStore(backend)
+    await expect(wedgedStore.findPersistedByFeatureName("wedged-feature")).rejects.toThrow("timed out")
   })
 
   it("rejects feature reuse for an existing persisted workflow", async () => {
@@ -1474,6 +1531,31 @@ describe("SessionStateStore — per-feature file storage", () => {
     expect(found?.phase).toBe("INTERFACES")
     expect(await freshStore.findPersistedByFeatureName("missing-feature")).toBeNull()
   })
+
+  it("migrateSession rewrites the persisted owner from the old session id", async () => {
+    await store.create("old-session")
+    await store.update("old-session", (d) => {
+      d.featureName = "resume-feature"
+      d.mode = "INCREMENTAL"
+      d.phase = "DISCOVERY"
+      d.phaseState = "REVISE"
+    })
+
+    const migrated = await store.migrateSession("old-session", "new-session")
+
+    expect(migrated.sessionId).toBe("new-session")
+    expect(store.get("old-session")).toBeNull()
+    expect(store.get("new-session")?.phaseState).toBe("REVISE")
+
+    const persistedPath = join(tmpDir, "resume-feature", "workflow-state.json")
+    const persisted = JSON.parse(readFileSync(persistedPath, "utf8")) as WorkflowState
+    expect(persisted.sessionId).toBe("new-session")
+
+    const freshStore = createSessionStateStore(createFileSystemStateBackend(tmpDir))
+    const found = await freshStore.findPersistedByFeatureName("resume-feature")
+    expect(found?.sessionId).toBe("new-session")
+    expect(found?.phase).toBe("DISCOVERY")
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -1646,6 +1728,18 @@ describe("SessionStateStore — legacy migration", () => {
     expect(result.success).toBe(true)
     // The per-feature file should win (migration skips existing features)
     expect(migStore.get("s1")?.approvalCount).toBe(10)
+  })
+})
+
+describe("FileSystemStateBackend — listing", () => {
+  it("does not recurse into reserved DB storage directories", async () => {
+    writePerFeatureState(tmpDir, "kept-feature", makeState("kept-session", "kept-feature"))
+    writePerFeatureState(join(tmpDir, "workflow-db"), "db-internal", makeState("db-session", "db-internal"))
+    writePerFeatureState(join(tmpDir, "workflow-db-locks"), "lock-internal", makeState("lock-session", "lock-internal"))
+
+    const backend = createFileSystemStateBackend(tmpDir)
+
+    expect(await backend.list()).toEqual(["kept-feature"])
   })
 })
 

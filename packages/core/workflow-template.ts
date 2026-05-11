@@ -38,13 +38,13 @@ const TOOLS = [
   { cli: "mark-scan-complete", tool: "mark_scan_complete", desc: "Complete discovery scan (REFACTOR/INCREMENTAL)" },
   { cli: "mark-analyze-complete", tool: "mark_analyze_complete", desc: "Complete discovery analysis" },
   { cli: "mark-satisfied", tool: "mark_satisfied", desc: "OpenCode/self-review compatibility only; bridge adapters use isolated review submission" },
-  { cli: "request-review", tool: "request_review", desc: "Submit review artifacts (`artifact_files`, or markdown via `artifact_markdown`)" },
+  { cli: "request-review", tool: "request_review", desc: "Submit review artifacts by on-disk `artifact_files`" },
   { cli: "submit-feedback", tool: "submit_feedback", desc: "Approve or request revision at USER_GATE" },
   { cli: "mark-task-complete", tool: "mark_task_complete", desc: "Complete a DAG task during IMPLEMENTATION" },
   { cli: "check-prior-workflow", tool: "check_prior_workflow", desc: "Check for existing workflow state" },
   { cli: "resolve-human-gate", tool: "resolve_human_gate", desc: "Flag a task requiring manual action" },
   { cli: "propose-backtrack", tool: "propose_backtrack", desc: "Go back to an earlier phase" },
-  { cli: "spawn-sub-workflow", tool: "spawn_sub_workflow", desc: "Delegate a DAG task to a child workflow" },
+  { cli: "propose-direct-application", tool: "propose_direct_application", desc: "Propose and structurally apply a small safe patch without starting the full workflow" },
   { cli: "query-parent-workflow", tool: "query_parent_workflow", desc: "Read parent workflow state (sub-workflows)" },
   { cli: "query-child-workflow", tool: "query_child_workflow", desc: "Read child workflow state (sub-workflows)" },
   { cli: "state", tool: "state", desc: "Show current workflow state" },
@@ -149,6 +149,9 @@ export function generateWorkflowTemplate(config: TemplateConfig): string {
 
   // Mode-specific rules
   lines.push("## Mode-Specific Rules")
+  lines.push("")
+  lines.push("### Direct Application")
+  lines.push(`For small/simple tasks where the full phased workflow is too heavy, propose a direct patch with ${tn("propose_direct_application")}. Open Artisan will structurally inspect the patch and apply it only if it is narrow, safe, and outside an active workflow. If rejected, use the full workflow.`)
   lines.push("")
   lines.push("### GREENFIELD")
   lines.push("No constraints beyond the standard phases. Discovery is skipped.")

@@ -58,8 +58,10 @@ import { createImplDAG } from "./dag"
  *        and persisted BacktrackContext provenance on WorkflowState.
  *   v24: added approvedArtifactFiles so source-file artifacts approved via
  *        request_review artifact_files remain the downstream source of truth.
+ *   v25: added realWorldAcceptanceScenario, a structured scenario sufficiency
+ *        contract captured from PLANNING artifacts and consumed by later prompts/reviews.
  */
-export const SCHEMA_VERSION = 24
+export const SCHEMA_VERSION = 25
 
 /**
  * Runtime concurrency policy for nested or delegated workflow execution.
@@ -70,6 +72,117 @@ export interface WorkflowConcurrency {
 }
 
 export type UserAuthoredText = string
+
+/**
+ * Persisted real-world acceptance scenario captured from the approved PLANNING artifact.
+ *
+ * Lifecycle:
+ * - null on fresh or migrated workflows until PLANNING `request_review` accepts a valid section.
+ * - Created or updated only from a PLANNING artifact's `## Real-World Acceptance Scenario` section.
+ * - Read by author prompts, isolated phase reviews, task/final implementation reviews, and compaction.
+ *
+ * Validation constraints:
+ * - `scenario` is non-empty user-authored prose after trimming.
+ * - `requiredCapabilities` and `acceptanceChecks` contain non-empty trimmed items.
+ * - `explicitNonGoals` contains non-empty trimmed items when non-empty; an empty
+ *   array represents the approved sentinel text `None beyond the plan scope boundaries.`.
+ * - `requiredCapabilities` and `acceptanceChecks` must each contain at least one item.
+ * - `sourceArtifactPath` is an absolute file path to the planning artifact that supplied the scenario.
+ * - `capturedAtPhase` is always `"PLANNING"`.
+ *
+ * Error handling contract:
+ * - Parsers/validators return structured validation failures rather than throwing for malformed artifacts.
+ * - Prompt/review consumers must tolerate null by omitting the scenario block.
+ * - Diagnostics must not log full user-authored scenario text.
+ */
+export interface ScenarioSufficiencyContext {
+  scenario: UserAuthoredText
+  requiredCapabilities: UserAuthoredText[]
+  acceptanceChecks: UserAuthoredText[]
+  explicitNonGoals: UserAuthoredText[]
+  sourceArtifactPath: string
+  capturedAtPhase: "PLANNING"
+}
+
+export type ScenarioSufficiencyValidationCode =
+  | "SCENARIO_SECTION_MISSING"
+  | "SCENARIO_PROSE_MISSING"
+  | "REQUIRED_CAPABILITIES_MISSING"
+  | "ACCEPTANCE_CHECKS_MISSING"
+  | "EXPLICIT_NON_GOALS_MISSING"
+  | "SOURCE_ARTIFACT_PATH_INVALID"
+
+export interface ScenarioSufficiencyValidationError {
+  code: ScenarioSufficiencyValidationCode
+  message: string
+  sourceArtifactPath: string
+}
+
+export type ScenarioSufficiencyParseResult =
+  | { success: true; scenario: ScenarioSufficiencyContext }
+  | { success: false; errors: ScenarioSufficiencyValidationError[] }
+
+export interface ScenarioSufficiencyPromptBlockOptions {
+  heading?: string
+  includeSourcePath?: boolean
+}
+
+export type ScenarioSufficiencyPromptBlockResult =
+  | { success: true; block: string | null }
+  | { success: false; errors: ScenarioSufficiencyValidationError[] }
+
+export type ScenarioSufficiencyLogEvent =
+  | "scenario.section_missing"
+  | "scenario.validation_failed"
+  | "scenario.captured"
+  | "scenario.prompt_block_omitted"
+
+export interface ScenarioSufficiencyLogEventPayload {
+  event: ScenarioSufficiencyLogEvent
+  sourceArtifactPath?: string
+  errorCodes?: ScenarioSufficiencyValidationCode[]
+  scenarioTextLogged: false
+}
+
+/**
+ * Interface decision record:
+ * - Chosen: a persisted nullable value object plus a small pure helper-module
+ *   contract, because the approved plan needs durable scenario context without a
+ *   new workflow phase, tool, or adapter protocol surface.
+ * - Rejected: storing raw planning markdown, because consumers would re-parse
+ *   user-authored text and increase privacy/logging risk.
+ * - Rejected: a separate CRUD repository, because the scenario lifecycle is owned
+ *   by the parent WorkflowState and deletion happens with workflow-state deletion.
+ * - Risk: migrated workflows have null scenario until their planning artifact is
+ *   re-reviewed; prompt builders therefore return a successful null block.
+ */
+
+/**
+ * Contract implemented by `packages/core/scenario-sufficiency.ts`.
+ * The implementation module owns the runtime exports; this interface records
+ * the source contract without creating ambient runtime functions in this file.
+ */
+export interface ScenarioSufficiencyModuleContract {
+  /**
+   * Parse the required `## Real-World Acceptance Scenario` planning section.
+   * Implementations must return structured validation errors for malformed artifacts
+   * and must not log full user-authored scenario text.
+   */
+  parseRealWorldAcceptanceScenario(
+    markdown: UserAuthoredText,
+    sourceArtifactPath: string,
+  ): ScenarioSufficiencyParseResult
+
+  /**
+   * Build a concise scenario sufficiency context block for author prompts,
+   * isolated reviews, task reviews, and compaction. Returns a successful null
+   * block when no scenario has been captured yet.
+   */
+  buildScenarioSufficiencyPromptBlock(
+    scenario: ScenarioSufficiencyContext | null,
+    options?: ScenarioSufficiencyPromptBlockOptions,
+  ): ScenarioSufficiencyPromptBlockResult
+}
 
 /**
  * Persisted provenance for a structural backtrack/redraft flow.
@@ -170,6 +283,12 @@ export interface WorkflowState {
    * Injected into the CONVENTIONS drafting system prompt.
    */
   discoveryReport: string | null
+
+  /**
+   * Structured real-world acceptance scenario captured from the PLANNING artifact.
+   * null before capture and for migrated workflows that have not re-submitted planning.
+   */
+  realWorldAcceptanceScenario?: ScenarioSufficiencyContext | null
 
   /**
    * The ID of the task currently being executed by the agent in the IMPLEMENTATION phase.
@@ -450,28 +569,15 @@ export interface StoreLoadResult {
 /**
  * Session-state store load failure.
  *
- * Keep the public runtime contract string-first for compatibility with existing
- * callers and implementations. Optional structured fields may be added by newer
- * producers, but they are not required by the interface artifact.
+ * String-first failure result retained for compatibility with existing callers.
  */
 export interface StoreLoadError {
   success: false
-  /**
-   * Established runtime compatibility field consumed directly by current callers.
-   * Optional typed fields annotate the same failure without changing the string-first shape.
-   */
   error: string
-  code?: "STORE_LOAD_FAILED"
-  message?: string
-  details?: string
 }
 
 /**
  * Runtime-compatible session lookup result.
- *
- * Decision note: this remains compatible with direct `WorkflowState | null` access for existing
- * owner modules, while also exposing an explicit structured failure branch for callers that need
- * typed error inspection.
  */
 export type SessionStateLookupResult = WorkflowState | null
 
@@ -484,33 +590,25 @@ export interface SessionStateStoreError {
   message: string
 }
 
-/** Structured compatibility envelope for callers that want an explicit error branch. */
 export type SessionStateLookupEnvelope =
   | { success: true; value: WorkflowState | null }
   | { success: false; error: SessionStateStoreError }
 
-/** Structured compatibility failure branch for mutation-style store methods. */
 export type SessionStateMutationFailure<T> =
   { success: false; error: SessionStateStoreError } & Partial<T>
 
-/** Structured compatibility envelope for mutation-style store methods. */
 export type SessionStateMutationEnvelope<T> =
   | { success: true; value: T }
   | SessionStateMutationFailure<T>
 
 /**
  * Runtime-compatible mutation result.
- *
- * Decision note: existing workflow owner modules treat `create()`/`update()`/`migrateSession()`
- * as returning the updated `WorkflowState` directly and `delete()` as `void`. The public
- * interface therefore preserves that direct-return shape instead of introducing an envelope
- * that would force unrelated implementation rewrites during INTERFACES.
- *
- * For explicit typed-error consumers, the corresponding `SessionStateMutationEnvelope<T>`
- * alias records the structured error branch. This direct result alias keeps the established
- * runtime call shape while still making the failure branch part of the public contract.
  */
 export type SessionStateStoreResult<T> = T
+
+export type SessionStateDeleteResult =
+  | { success: true }
+  | { success: false; error: SessionStateStoreError }
 
 export interface SessionStateStore {
   /**
@@ -957,6 +1055,41 @@ export function validateWorkflowStateResult(state: WorkflowState): WorkflowState
   }
   if (state.discoveryReport !== null && typeof state.discoveryReport !== "string") {
     return { success: false, error: workflowStateValidationError(`discoveryReport must be null or a string, got ${typeof state.discoveryReport}`) }
+  }
+  if (state.realWorldAcceptanceScenario != null) {
+    const scenario = state.realWorldAcceptanceScenario
+    if (typeof scenario !== "object" || Array.isArray(scenario)) {
+      return { success: false, error: workflowStateValidationError(`realWorldAcceptanceScenario must be null or an object, got ${typeof scenario}`) }
+    }
+    if (typeof scenario.scenario !== "string" || scenario.scenario.trim().length === 0) {
+      return { success: false, error: workflowStateValidationError(`realWorldAcceptanceScenario.scenario must be a non-empty string`) }
+    }
+    if (!Array.isArray(scenario.requiredCapabilities) || scenario.requiredCapabilities.length === 0) {
+      return { success: false, error: workflowStateValidationError(`realWorldAcceptanceScenario.requiredCapabilities must be a non-empty array`) }
+    }
+    if (!Array.isArray(scenario.acceptanceChecks) || scenario.acceptanceChecks.length === 0) {
+      return { success: false, error: workflowStateValidationError(`realWorldAcceptanceScenario.acceptanceChecks must be a non-empty array`) }
+    }
+    if (!Array.isArray(scenario.explicitNonGoals)) {
+      return { success: false, error: workflowStateValidationError(`realWorldAcceptanceScenario.explicitNonGoals must be an array`) }
+    }
+    for (const [field, values] of Object.entries({
+      requiredCapabilities: scenario.requiredCapabilities,
+      acceptanceChecks: scenario.acceptanceChecks,
+      explicitNonGoals: scenario.explicitNonGoals,
+    })) {
+      for (let i = 0; i < values.length; i++) {
+        if (typeof values[i] !== "string" || values[i]!.trim().length === 0) {
+          return { success: false, error: workflowStateValidationError(`realWorldAcceptanceScenario.${field}[${i}] must be a non-empty string`) }
+        }
+      }
+    }
+    if (typeof scenario.sourceArtifactPath !== "string" || !scenario.sourceArtifactPath.startsWith("/")) {
+      return { success: false, error: workflowStateValidationError(`realWorldAcceptanceScenario.sourceArtifactPath must be an absolute path`) }
+    }
+    if (scenario.capturedAtPhase !== "PLANNING") {
+      return { success: false, error: workflowStateValidationError(`realWorldAcceptanceScenario.capturedAtPhase must be "PLANNING"`) }
+    }
   }
   // approvedArtifacts — validate as object with string values
   if (typeof state.approvedArtifacts !== "object" || Array.isArray(state.approvedArtifacts) || state.approvedArtifacts === null) {

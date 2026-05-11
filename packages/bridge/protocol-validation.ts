@@ -28,10 +28,10 @@ const StateGetParamsSchema = z.object({
 
 const GuardCheckParamsSchema = z.object({
   toolName: z.string().min(1),
-  args: z.record(z.string(), z.unknown()).default({}),
+  args: z.unknown().default({}),
   sessionId: z.string().min(1),
   traceId: z.string().optional(),
-}).strict()
+}).passthrough()
 
 const GuardPolicyParamsSchema = z.object({
   phase: z.string().min(1),
@@ -43,6 +43,26 @@ const GuardPolicyParamsSchema = z.object({
 }).strict()
 
 const SessionParamsSchema = z.object({ sessionId: z.string().min(1), traceId: z.string().optional() }).strict()
+
+const ProgressEmitParamsSchema = z.object({
+  sessionId: z.string().min(1),
+  kind: z.string().min(1),
+  status: z.enum(["started", "in-progress", "succeeded", "failed", "blocked"]).optional(),
+  message: z.string().min(1),
+  spanId: z.string().nullable().optional(),
+  parentSpanId: z.string().nullable().optional(),
+  parentEventId: z.string().nullable().optional(),
+  taskId: z.string().nullable().optional(),
+  metadata: z.record(z.string(), z.unknown()).optional(),
+  traceId: z.string().optional(),
+}).strict()
+
+const ProgressListParamsSchema = z.object({
+  sessionId: z.string().min(1),
+  sinceEventId: z.string().nullable().optional(),
+  limit: z.number().int().min(1).max(500).optional(),
+  traceId: z.string().optional(),
+}).strict()
 
 const MessageProcessParamsSchema = z.object({
   sessionId: z.string().min(1),
@@ -58,7 +78,7 @@ const ToolExecuteParamsSchema = z.object({
     sessionId: z.string().min(1),
     directory: z.string().optional(),
     agent: z.string().optional(),
-    invocation: z.enum(["author", "isolated-reviewer", "system"]).optional(),
+    invocation: z.enum(["author", "isolated-reviewer", "auto-approver", "system"]).optional(),
   }).strict(),
   traceId: z.string().optional(),
 }).strict()
@@ -71,6 +91,8 @@ const BridgeMethodSchemas: Record<string, z.ZodType<Record<string, unknown>>> = 
   "lifecycle.sessionDeleted": LifecycleSessionParamsSchema,
   "state.get": StateGetParamsSchema,
   "state.health": SessionParamsSchema,
+  "progress.emit": ProgressEmitParamsSchema,
+  "progress.list": ProgressListParamsSchema,
   "guard.check": GuardCheckParamsSchema,
   "guard.policy": GuardPolicyParamsSchema,
   "prompt.build": SessionParamsSchema,

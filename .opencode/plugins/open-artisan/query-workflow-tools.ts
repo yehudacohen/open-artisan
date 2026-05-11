@@ -10,7 +10,9 @@ import {
   QUERY_PARENT_WORKFLOW_DESCRIPTION,
 } from "../../../packages/core/tools/query-workflow"
 import { resolveSessionId } from "../../../packages/core/utils"
-import type { ToolExecuteContext } from "./client-types"
+import type { ToolContext } from "@opencode-ai/plugin"
+
+type ToolExecuteContext = ToolContext & { sessionId?: string; session_id?: string; session?: { id: string }; [key: string]: unknown }
 
 export function createQueryWorkflowTools(tool: any, ctx: { store: SessionStateStore }) {
   return {

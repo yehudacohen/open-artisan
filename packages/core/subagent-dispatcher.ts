@@ -48,9 +48,21 @@ export interface SubagentSession {
    * Send a prompt and return the response text.
    * The adapter handles response envelope parsing internally.
    */
-  prompt(text: string): Promise<string>
+  prompt(text: string, options?: SubagentPromptOptions): Promise<string>
   /** Destroy the session (best-effort — failures are silently ignored). */
   destroy(): Promise<void>
+}
+
+export interface SubagentPromptOptions {
+  /**
+   * Adapter-native structured output request. Adapters that support model-level
+   * JSON schema enforcement should pass this through to the underlying LLM API;
+   * adapters that do not support it may ignore it and rely on prompt validation.
+   */
+  responseFormat?: {
+    type: "json_schema"
+    schema: Record<string, unknown>
+  }
 }
 
 /**

@@ -605,8 +605,8 @@ describe("PGlite Open Artisan repository", () => {
       implDag: [
         {
           id: "T1",
-          description: "Invalid human gate",
-          dependencies: [],
+          description: "Invalid dependency",
+          dependencies: ["missing-task"],
           expectedTests: [],
           expectedFiles: ["invalid.md"],
           estimatedComplexity: "small",
@@ -703,6 +703,25 @@ describe("PGlite Open Artisan repository", () => {
     expect(exported.ok && exported.value.implDag?.[0]?.humanGate?.whatIsNeeded).toBe("Provision service")
   })
 
+  it("deduplicates legacy task graph paths during compatibility imports", async () => {
+    const repo = tempRepo()
+    const state = legacyState()
+    state.implDag![0]!.expectedFiles = ["infra/setup.md", "infra/setup.md"]
+    state.implDag![0]!.expectedTests = ["tests/setup.test.ts", "tests/setup.test.ts"]
+
+    const imported = await repo.importWorkflowState(state)
+    expect(imported.ok).toBe(true)
+
+    const workflowId = imported.ok ? imported.value.workflowId : ""
+    const projection = valueOf(await repo.getWorkflow(workflowId))
+    expect(projection?.taskGraph?.ownedFiles).toEqual([
+      { taskId: "workflow:legacy-feature:T1", path: "infra/setup.md" },
+    ])
+    expect(projection?.taskGraph?.expectedTests).toEqual([
+      { taskId: "workflow:legacy-feature:T1", path: "tests/setup.test.ts" },
+    ])
+  })
+
   it("preserves resolved human gate task status during compatibility imports", async () => {
     const repo = tempRepo()
     const state = legacyState()
@@ -724,6 +743,20 @@ describe("PGlite Open Artisan repository", () => {
     const exported = valueOf(await repo.exportWorkflowState(workflowId))
     expect(exported.implDag?.[0]?.status).toBe("complete")
     expect(exported.implDag?.[0]?.humanGate?.resolved).toBe(true)
+  })
+
+  it("normalizes legacy human gate task categories during compatibility imports", async () => {
+    const repo = tempRepo()
+    const state = legacyState()
+    state.implDag![0]!.category = "standalone"
+
+    const imported = await repo.importWorkflowState(state)
+    expect(imported.ok).toBe(true)
+
+    const workflowId = imported.ok ? imported.value.workflowId : ""
+    const projection = valueOf(await repo.getWorkflow(workflowId))
+    expect(projection?.taskGraph?.tasks[0]?.category).toBe("human-gate")
+    expect(projection?.unresolvedHumanGates).toHaveLength(1)
   })
 
   it("records workflow transition events from compatibility state imports", async () => {
@@ -861,6 +894,130 @@ describe("PGlite Open Artisan repository", () => {
 
     const acquired = valueOf(await waiting)
     await acquired.release()
+  })
+
+  it("allows the same repository owner to reclaim a workflow lock", async () => {
+    const schemaName = nextSchemaName()
+    const repo = trackRepo(createPGliteOpenArtisanRepository({ connection: { dataDir: sharedPGliteDir() }, schemaName }))
+
+    const firstLock = valueOf(await repo.lockWorkflowState("legacy-feature", { timeoutMs: 50, pollMs: 10 }))
+    const secondLock = valueOf(await repo.lockWorkflowState("legacy-feature", { timeoutMs: 50, pollMs: 10 }))
+
+    await secondLock.release()
+    await firstLock.release()
+  })
+
+  it("allows repositories in the same process to reclaim a workflow lock", async () => {
+    const schemaName = nextSchemaName()
+    const repoA = trackRepo(createPGliteOpenArtisanRepository({ connection: { dataDir: sharedPGliteDir() }, schemaName }))
+    const repoB = trackRepo(createPGliteOpenArtisanRepository({ connection: { dataDir: sharedPGliteDir() }, schemaName }))
+
+    const firstLock = valueOf(await repoA.lockWorkflowState("legacy-feature", { timeoutMs: 50, pollMs: 10 }))
+    const secondLock = valueOf(await repoB.lockWorkflowState("legacy-feature", { timeoutMs: 50, pollMs: 10, allowSameProcessReclaim: true }))
+
+    await secondLock.release()
+    await firstLock.release()
+  })
+
+  it("allows runtime workflow locks to reclaim a dead process owner", async () => {
+    const schemaName = nextSchemaName()
+    const repoA = trackRepo(createPGliteOpenArtisanRepository({ connection: { dataDir: sharedPGliteDir() }, schemaName }))
+    const repoB = trackRepo(createPGliteOpenArtisanRepository({ connection: { dataDir: sharedPGliteDir() }, schemaName }))
+    const lock = valueOf(await repoA.lockWorkflowState("legacy-feature", { timeoutMs: 50, pollMs: 10 }))
+    await lock.release()
+
+    const db = new Kysely<any>({ dialect: new PGliteDialect(new PGlite(join(sharedPGliteDir(), DEFAULT_OPEN_ARTISAN_DB_FILE_NAME))) })
+    tempRepos.push({ dispose: async () => { await db.destroy() } } as OpenArtisanRepository)
+    await db.withSchema(schemaName)
+      .insertInto("database_operation_locks")
+      .values({
+        lock_key: "workflow-state:legacy-feature",
+        owner_id: "open-artisan:99999999:dead-owner",
+        lease_expires_at: new Date(Date.now() + 60_000).toISOString(),
+        created_at: now(),
+        updated_at: now(),
+      })
+      .execute()
+
+    const reclaimed = valueOf(await repoB.lockWorkflowState("legacy-feature", { timeoutMs: 50, pollMs: 10, allowSameProcessReclaim: true }))
+    await reclaimed.release()
+  })
+
+  it("allows runtime repository operations to reclaim a stale operation lock", async () => {
+    const schemaName = nextSchemaName()
+    const dataDir = tempDir()
+    const repo = trackRepo(createPGliteOpenArtisanRepository({
+      connection: { dataDir },
+      schemaName,
+      allowSameProcessReclaim: true,
+    }))
+
+    valueOf(await repo.createWorkflow(workflow({ id: "bootstrap-workflow", featureName: "bootstrap-workflow" })))
+
+    const db = new Kysely<any>({ dialect: new PGliteDialect(new PGlite(join(dataDir, DEFAULT_OPEN_ARTISAN_DB_FILE_NAME))) })
+    await db.withSchema(schemaName)
+      .insertInto("database_operation_locks")
+      .values({
+        lock_key: "open-artisan:repository-operation",
+        owner_id: "open-artisan:99999999:dead-owner",
+        lease_expires_at: new Date(Date.now() + 60_000).toISOString(),
+        created_at: now(),
+        updated_at: now(),
+      })
+      .execute()
+    await db.destroy()
+
+    expect(valueOf(await repo.createWorkflow(workflow({ id: "reclaimed-workflow", featureName: "reclaimed-workflow" }))).id).toBe("reclaimed-workflow")
+  }, 15_000)
+
+  it("allows explicit runtime reclaim of a workflow lock from another owner", async () => {
+    const schemaName = nextSchemaName()
+    const repoA = trackRepo(createPGliteOpenArtisanRepository({ connection: { dataDir: sharedPGliteDir() }, schemaName }))
+    const repoB = trackRepo(createPGliteOpenArtisanRepository({ connection: { dataDir: sharedPGliteDir() }, schemaName }))
+
+    const firstLock = valueOf(await repoA.lockWorkflowState("legacy-feature", { timeoutMs: 50, pollMs: 10 }))
+    const secondLock = valueOf(await repoB.lockWorkflowState("legacy-feature", { timeoutMs: 50, pollMs: 10, allowSameProcessReclaim: true }))
+
+    await secondLock.release()
+    await firstLock.release()
+  })
+
+  it("retries transient PGlite aborts while acquiring workflow locks", async () => {
+    const schemaName = nextSchemaName()
+    let shouldAbort = true
+    const queue: PGliteAccessQueue = {
+      run: async (_scope, run) => {
+        if (shouldAbort) {
+          shouldAbort = false
+          throw new Error("Aborted(). Build with -sASSERTIONS for more info.")
+        }
+        return run()
+      },
+    }
+    const repo = trackRepo(createPGliteOpenArtisanRepository({ connection: { dataDir: sharedPGliteDir() }, schemaName, accessQueue: queue }))
+
+    const lock = valueOf(await repo.lockWorkflowState("legacy-feature", { timeoutMs: 500, pollMs: 10 }))
+    await lock.release()
+  })
+
+  it("retries transient PGlite aborts during repository operations", async () => {
+    const schemaName = nextSchemaName()
+    let shouldAbort = true
+    const queue: PGliteAccessQueue = {
+      run: async (_scope, run) => {
+        if (shouldAbort) {
+          shouldAbort = false
+          throw new Error("Aborted(). Build with -sASSERTIONS for more info.")
+        }
+        return run()
+      },
+    }
+    const repo = trackRepo(createPGliteOpenArtisanRepository({ connection: { dataDir: sharedPGliteDir() }, schemaName, accessQueue: queue }))
+
+    const result = await repo.listWorkflows()
+
+    expect(result.ok).toBe(true)
+    expect(result.ok ? result.value : []).toEqual([])
   })
 
   it("renews repository workflow locks before short leases expire", async () => {

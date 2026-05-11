@@ -72,7 +72,7 @@ async function bridgeCall(
 }
 
 async function execTool(name: string, args: Record<string, unknown> = {}): Promise<string> {
-  if (name === "mark_satisfied" || name === "submit_task_review" || name === "submit_phase_review") {
+  if (name === "mark_satisfied" || name === "submit_task_review" || name === "submit_phase_review" || name === "submit_auto_approve") {
     return `Error: ${name} is reserved for isolated reviewers. Use request_review/mark_task_complete and let the Claude Code hook submit reviewer results.`
   }
 

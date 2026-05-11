@@ -21,14 +21,18 @@ import re
 import subprocess
 from typing import Any
 
+from . import continuation
 from .types import BridgeClient
 from .constants import resolve_reviewer_command
 from .workflow_tools import ensure_workflow_session
 from .session_projects import (
     get_session_project_dir,
+    has_explicit_session_project,
     is_openartisan_project,
     resolve_project_dir,
+    set_last_session_context,
     set_session_project_dir,
+    set_last_user_message,
 )
 
 logger = logging.getLogger(__name__)
@@ -72,9 +76,45 @@ def _completed_returncode(result: Any) -> int:
     return value if isinstance(value, int) else 0
 
 
+def _emit_progress(
+    bridge: BridgeClient,
+    session_id: str,
+    *,
+    kind: str,
+    status: str,
+    message: str,
+    span_id: str | None = None,
+    parent_span_id: str | None = None,
+    parent_event_id: str | None = None,
+    task_id: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> str | None:
+    try:
+        result = bridge.call(
+            "progress.emit",
+            {
+                "sessionId": session_id,
+                "kind": kind,
+                "status": status,
+                "message": message,
+                **({"spanId": span_id} if span_id else {}),
+                **({"parentSpanId": parent_span_id} if parent_span_id else {}),
+                **({"parentEventId": parent_event_id} if parent_event_id else {}),
+                **({"taskId": task_id} if task_id else {}),
+                **({"metadata": metadata} if metadata else {}),
+            },
+        )
+        if isinstance(result, dict) and isinstance(result.get("event"), dict):
+            event_id = result["event"].get("id")
+            return event_id if isinstance(event_id, str) else None
+    except Exception:
+        logger.debug("progress.emit failed", exc_info=True)
+    return None
+
+
 def _extract_user_message(kwargs: dict[str, Any]) -> str | None:
     """Best-effort extraction of real user text from Hermes hook kwargs."""
-    for key in ("user_message", "message", "prompt", "input"):
+    for key in ("user_message", "user_task", "message", "prompt", "input"):
         value = kwargs.get(key)
         if isinstance(value, str) and value.strip():
             return value.strip()
@@ -139,13 +179,17 @@ def create_prompt_hook(
                 return {"context": ""}
             set_session_project_dir(session_id, effective_project_dir)
         workflow_session_id = session_id
+        initial_user_message = _extract_user_message(kwargs)
+        if initial_user_message:
+            set_last_user_message(session_id, initial_user_message)
+        set_last_session_context(session_id, continuation.build_session_context(kwargs))
         try:
             ensure_workflow_session(bridge, session_id, effective_project_dir)
             state = bridge.call("state.get", {"sessionId": session_id})
             if not state or not isinstance(state, dict):
                 logger.debug("state.get returned non-dict: %s", type(state).__name__)
                 state = {}
-            if session_id != "default":
+            if session_id != "default" and not has_explicit_session_project(session_id):
                 fallback_state = bridge.call("state.get", {"sessionId": "default"})
                 runtime_phase = state.get("phase")
                 if (
@@ -164,8 +208,8 @@ def create_prompt_hook(
             elif state.get("phaseState") == "REVIEW":
                 dispatch_phase_review(bridge, workflow_session_id, state, effective_project_dir)
 
-            if state.get("phaseState") == "USER_GATE":
-                user_message = _extract_user_message(kwargs)
+            if state.get("phaseState") in {"USER_GATE", "HUMAN_GATE"}:
+                user_message = initial_user_message
                 if user_message:
                     bridge.call(
                         "message.process",
@@ -205,9 +249,31 @@ def _dispatch_task_review(
 
     Falls back gracefully on failure — the agent can still submit manually.
     """
+    review_token: str | None = None
+    task_id = str(state.get("taskCompletionInProgress") or state.get("currentTaskId") or "current-task")
+    span_id = f"task-review:{task_id}"
+    root_event_id = _emit_progress(
+        bridge,
+        session_id,
+        kind="task-review",
+        status="started",
+        message=f"Per-task review started for {task_id}",
+        span_id=span_id,
+        task_id=task_id,
+    )
     try:
         review_prompt = bridge.call("task.getReviewContext", {"sessionId": session_id})
         if not review_prompt or not isinstance(review_prompt, str):
+            _emit_progress(
+                bridge,
+                session_id,
+                kind="task-review",
+                status="blocked",
+                message=f"Task review context unavailable for {task_id}",
+                span_id=span_id,
+                parent_event_id=root_event_id,
+                task_id=task_id,
+            )
             return
         review_token = _extract_review_token(review_prompt)
 
@@ -215,6 +281,17 @@ def _dispatch_task_review(
         # Omit --model so it inherits the user's default (parent) model.
         review_output = ""
         try:
+            subprocess_event_id = _emit_progress(
+                bridge,
+                session_id,
+                kind="task-review.subprocess",
+                status="started",
+                message=f"Reviewer subprocess started for {task_id}",
+                span_id=f"{span_id}:subprocess",
+                parent_span_id=span_id,
+                parent_event_id=root_event_id,
+                task_id=task_id,
+            )
             result = subprocess.run(
                 resolve_reviewer_command(review_prompt),
                 capture_output=True,
@@ -223,14 +300,46 @@ def _dispatch_task_review(
                 timeout=_review_timeout_s(),
             )
             returncode = _completed_returncode(result)
-            review_output = result.stdout if returncode == 0 else _format_failed_review_output(
-                f"reviewer command exited with code {returncode}",
-                result.stdout,
-                result.stderr,
-            )
+            if returncode != 0:
+                _emit_progress(
+                    bridge,
+                    session_id,
+                    kind="task-review.subprocess",
+                    status="failed",
+                    message=f"Reviewer subprocess exited with code {returncode} for {task_id}",
+                    span_id=f"{span_id}:subprocess",
+                    parent_span_id=span_id,
+                    parent_event_id=subprocess_event_id or root_event_id,
+                    task_id=task_id,
+                    metadata={"returncode": returncode},
+                )
+                _auto_accept_review(
+                    bridge,
+                    session_id,
+                    project_dir,
+                    _format_failed_review_output(
+                        f"reviewer command exited with code {returncode}",
+                        result.stdout,
+                        result.stderr,
+                    ),
+                    review_token,
+                )
+                return
+            review_output = result.stdout
         except (FileNotFoundError, subprocess.TimeoutExpired) as e:
             logger.warning(
                 "Isolated reviewer (claude CLI) not available or timed out: %s", e
+            )
+            _emit_progress(
+                bridge,
+                session_id,
+                kind="task-review.subprocess",
+                status="failed",
+                message=f"Reviewer subprocess failed for {task_id}: {e}",
+                span_id=f"{span_id}:subprocess",
+                parent_span_id=span_id,
+                parent_event_id=root_event_id,
+                task_id=task_id,
             )
             # Graceful degradation: auto-accept to clear the gate.
             # Full implementation review at the end catches issues.
@@ -238,6 +347,17 @@ def _dispatch_task_review(
             return
 
         if not review_output.strip():
+            _emit_progress(
+                bridge,
+                session_id,
+                kind="task-review.subprocess",
+                status="failed",
+                message=f"Reviewer subprocess returned empty output for {task_id}",
+                span_id=f"{span_id}:subprocess",
+                parent_span_id=span_id,
+                parent_event_id=root_event_id,
+                task_id=task_id,
+            )
             _auto_accept_review(
                 bridge, session_id, project_dir, "Empty reviewer output", review_token
             )
@@ -252,6 +372,16 @@ def _dispatch_task_review(
                 "context": {"sessionId": session_id, "directory": project_dir, "invocation": "isolated-reviewer"},
             },
         )
+        _emit_progress(
+            bridge,
+            session_id,
+            kind="task-review",
+            status="succeeded",
+            message=f"Per-task review submitted for {task_id}",
+            span_id=span_id,
+            parent_event_id=root_event_id,
+            task_id=task_id,
+        )
         logger.info(
             "Per-task review dispatched for task %s",
             state.get("taskCompletionInProgress"),
@@ -259,6 +389,16 @@ def _dispatch_task_review(
 
     except Exception as e:
         logger.warning("Per-task review dispatch failed: %s", e)
+        _emit_progress(
+            bridge,
+            session_id,
+            kind="task-review",
+            status="failed",
+            message=f"Per-task review dispatch failed for {task_id}: {e}",
+            span_id=span_id,
+            parent_event_id=root_event_id,
+            task_id=task_id,
+        )
         # Graceful degradation: auto-accept to clear the gate
         try:
             _auto_accept_review(bridge, session_id, project_dir, str(e), review_token)
@@ -278,6 +418,16 @@ def dispatch_phase_review(
     authoring agent must not self-submit criteria for phase approval.
     """
     review_token: str | None = None
+    phase = str(state.get("phase") or "current-phase")
+    span_id = f"phase-review:{phase}"
+    root_event_id = _emit_progress(
+        bridge,
+        session_id,
+        kind="phase-review",
+        status="started",
+        message=f"Phase review started for {phase}",
+        span_id=span_id,
+    )
 
     def submit_review_result(review_args: dict[str, Any]) -> None:
         if not review_token:
@@ -304,13 +454,41 @@ def dispatch_phase_review(
                 state.get("phase"),
                 state.get("phaseState"),
             )
+            _emit_progress(
+                bridge,
+                session_id,
+                kind="phase-review",
+                status="blocked",
+                message=f"Phase review context unavailable for {phase}",
+                span_id=span_id,
+                parent_event_id=root_event_id,
+            )
             return
         review_token = _extract_review_token(review_prompt)
         if not review_token:
             logger.warning("Phase review context did not include a review token")
+            _emit_progress(
+                bridge,
+                session_id,
+                kind="phase-review",
+                status="blocked",
+                message=f"Phase review token unavailable for {phase}",
+                span_id=span_id,
+                parent_event_id=root_event_id,
+            )
             return
 
         try:
+            subprocess_event_id = _emit_progress(
+                bridge,
+                session_id,
+                kind="phase-review.subprocess",
+                status="started",
+                message=f"Phase reviewer subprocess started for {phase}",
+                span_id=f"{span_id}:subprocess",
+                parent_span_id=span_id,
+                parent_event_id=root_event_id,
+            )
             result = subprocess.run(
                 resolve_reviewer_command(review_prompt),
                 capture_output=True,
@@ -324,11 +502,41 @@ def dispatch_phase_review(
                 "review_stderr": result.stderr,
                 "review_exit_code": returncode,
             }
+            _emit_progress(
+                bridge,
+                session_id,
+                kind="phase-review.subprocess",
+                status="succeeded" if returncode == 0 else "failed",
+                message=f"Phase reviewer subprocess exited with code {returncode} for {phase}",
+                span_id=f"{span_id}:subprocess",
+                parent_span_id=span_id,
+                parent_event_id=subprocess_event_id or root_event_id,
+                metadata={"returncode": returncode},
+            )
         except (FileNotFoundError, subprocess.TimeoutExpired) as e:
             logger.warning("Isolated phase reviewer unavailable or timed out: %s", e)
             review_args = {"review_error": str(e)}
+            _emit_progress(
+                bridge,
+                session_id,
+                kind="phase-review.subprocess",
+                status="failed",
+                message=f"Phase reviewer subprocess failed for {phase}: {e}",
+                span_id=f"{span_id}:subprocess",
+                parent_span_id=span_id,
+                parent_event_id=root_event_id,
+            )
 
         submit_review_result(review_args)
+        _emit_progress(
+            bridge,
+            session_id,
+            kind="phase-review",
+            status="succeeded",
+            message=f"Phase review submitted for {phase}",
+            span_id=span_id,
+            parent_event_id=root_event_id,
+        )
         logger.info(
             "Phase review dispatched for %s/%s",
             state.get("phase"),
@@ -336,6 +544,15 @@ def dispatch_phase_review(
         )
     except Exception as e:
         logger.warning("Phase review dispatch failed: %s", e)
+        _emit_progress(
+            bridge,
+            session_id,
+            kind="phase-review",
+            status="failed",
+            message=f"Phase review dispatch failed for {phase}: {e}",
+            span_id=span_id,
+            parent_event_id=root_event_id,
+        )
         if not review_token:
             logger.debug("Cannot submit phase review failure without a review token")
             return
@@ -393,19 +610,13 @@ def _dispatch_auto_approve(
     fails, the agent proceeds as normal at USER_GATE.
     """
     try:
-        # Set userGateMessageReceived so submit_auto_approve can work
-        bridge.call(
-            "message.process",
-            {
-                "sessionId": session_id,
-                "parts": [{"type": "text", "text": "(robot-artisan auto-approval)"}],
-            },
-        )
-
         approve_prompt = bridge.call(
             "task.getAutoApproveContext", {"sessionId": session_id}
         )
         if not approve_prompt or not isinstance(approve_prompt, str):
+            return
+        approve_token = _extract_review_token(approve_prompt)
+        if not approve_token:
             return
 
         try:
@@ -428,8 +639,8 @@ def _dispatch_auto_approve(
             "tool.execute",
             {
                 "name": "submit_auto_approve",
-                "args": {"review_output": approve_output},
-                "context": {"sessionId": session_id, "directory": project_dir},
+                "args": {"review_output": approve_output, "review_token": approve_token},
+                "context": {"sessionId": session_id, "directory": project_dir, "invocation": "auto-approver"},
             },
         )
         logger.info("Robot-artisan auto-approval dispatched")

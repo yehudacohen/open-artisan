@@ -53,7 +53,7 @@ export function validateFileBasedReviewArtifacts(input: {
       return `request_review for ${input.phase} cannot review .openartisan artifacts (${file}). Submit real project files instead.`
     }
     if (input.phase === "INTERFACES" && !isInterfaceFile(file)) {
-      return `request_review for INTERFACES only accepts interface/type/schema files; invalid artifact file: ${file}`
+      return `request_review for INTERFACES only accepts interface/type/schema files; invalid artifact file: ${file}. If the approved plan named this as a reviewed INTERFACES artifact, backtrack to PLANNING and reclassify it as a supporting dependency or choose a phase-legal interface artifact.`
     }
     if (input.phase === "TESTS" && !isTestFile(file)) {
       return `request_review for TESTS only accepts runnable test/spec files; invalid artifact file: ${file}`

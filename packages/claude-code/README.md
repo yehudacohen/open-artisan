@@ -46,7 +46,7 @@ Claude Code doesn't support custom native tools. MCP provides custom tools but t
 Long-lived background process that hosts the bridge engine and Unix socket. Started by `/artisan on` or the SessionStart hook. Daemonizes on startup.
 
 - Creates the core engine (EngineContext with SessionStateStore, StateMachine, SessionRegistry)
-- Loads persisted workflow state from the Open Artisan runtime backend (`.openartisan/workflow-db/open-artisan.pg` by default)
+- Loads persisted workflow state from the Open Artisan runtime backend (`.openartisan/workflow-db/` by default)
 - Opens Unix socket for hook scripts and CLI
 - Uses isolated phase review via hook-dispatched reviewer subprocesses; the human reviews at USER_GATE
 

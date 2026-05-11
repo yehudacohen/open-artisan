@@ -40,9 +40,17 @@ export const handleApplyTaskBoundaryChange: ToolHandler = async (args, toolCtx, 
   const parsedArgs = parseToolArgs(ApplyTaskBoundaryChangeSchema, args)
   if (!parsedArgs.success) return `Error: ${parsedArgs.error}`
   const result = applyTaskBoundaryChange(toApplyTaskBoundaryChangeArgs(parsedArgs.data), state)
-  if (!result.success) return `Error: ${result.error}`
+  if (!result.success) return `Error: ${result.error.message}`
   await store.update(toolCtx.sessionId, (draft) => {
     draft.implDag = result.updatedNodes
+    if (draft.phase === "IMPLEMENTATION" && (draft.phaseState === "TASK_REVIEW" || draft.phaseState === "TASK_REVISE")) {
+      draft.phaseState = "DRAFT"
+      draft.currentTaskId = result.analysis.taskId
+      draft.taskCompletionInProgress = null
+      draft.reviewArtifactHash = null
+      draft.reviewArtifactFiles = []
+      draft.latestReviewResults = null
+    }
   })
   return result.message
 }

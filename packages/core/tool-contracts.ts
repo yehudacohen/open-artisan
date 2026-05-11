@@ -13,6 +13,9 @@ import {
   ApplyPatchSuggestionSchema,
   ApplyTaskBoundaryChangeSchema,
   CheckPriorWorkflowToolSchema,
+  GuardedEditSchema,
+  GuardedPatchSchema,
+  GuardedWriteSchema,
   MarkAnalyzeCompleteToolSchema,
   MarkSatisfiedToolSchema,
   MarkScanCompleteToolSchema,
@@ -33,6 +36,7 @@ import {
   SelectModeToolSchema,
   SpawnSubWorkflowToolSchema,
   StateToolSchema,
+  StructuralTransitionToolSchema,
   SubmitAutoApproveToolSchema,
   SubmitFeedbackToolSchema,
   SubmitPhaseReviewToolSchema,
@@ -142,11 +146,56 @@ export interface ToolContractProjectionFailure {
 /** Structured success/error result for derived tool-surface projection. */
 export type ToolContractProjectionResult = ToolContractProjectionSuccess | ToolContractProjectionFailure
 
+/**
+ * Pure validation contract for canonical registry checking.
+ *
+ * Implementations must verify explicit role classification, canonical naming,
+ * and author-facing MCP exposure invariants before generation proceeds.
+ */
+export declare function validateToolContracts(
+  contracts: readonly ToolContract[],
+): ToolContractValidationResult
+
+/**
+ * Pure projection contract for deriving adapter-facing tool surfaces from the
+ * canonical registry.
+ */
+export declare function deriveToolContractProjection(
+  contracts: readonly ToolContract[],
+  config: ToolContractProjectionConfig,
+): ToolContractProjectionResult
+
 /** Operational drift signal for generated or declared adapter surfaces. */
 export interface ToolContractOperationalDrift {
   kind: "generated-artifact-drift" | "manifest-drift"
   expectedSource: "canonical-registry" | "hermes-author-projection"
   affectedToolNames: readonly string[]
+}
+
+/** Metric names emitted for projection/validation observability. */
+export type ToolContractProjectionMetricName =
+  | "tool-contracts.validation"
+  | "tool-contracts.projection"
+  | "tool-contracts.drift"
+
+/** Structured metric event for projection/validation observability. */
+export interface ToolContractProjectionMetricEvent {
+  name: ToolContractProjectionMetricName
+  health: ToolContractProjectionHealth
+  contractCount: number
+  errorCount: number
+}
+
+/** Log levels used by projection/validation observability. */
+export type ToolContractProjectionLogLevel = "debug" | "info" | "warn" | "error"
+
+/** Structured log event for projection/validation observability. */
+export interface ToolContractProjectionLogEvent {
+  level: ToolContractProjectionLogLevel
+  message: string
+  health: ToolContractProjectionHealth
+  contractName?: string
+  code?: ToolContractValidationErrorCode | ToolContractProjectionError["code"]
 }
 
 /** Valid runtime health/configuration states for the Hermes projection pipeline. */
@@ -166,6 +215,8 @@ export const TOOL_CONTRACTS: readonly ToolContract[] = [
   { name: "mark_satisfied", description: "Submit isolated phase-review criteria assessment for the current artifact.", schema: MarkSatisfiedToolSchema, workflowGuard: true, exposeTo: ["bridge", "mcp", "opencode"], hermesSurfaceRole: "reviewer", mcpName: "oa_mark_satisfied" },
   { name: "request_review", description: "Submit the current artifact for isolated review.", schema: RequestReviewToolSchema, workflowGuard: true, exposeTo: ["bridge", "mcp", "opencode"], hermesSurfaceRole: "author", mcpName: "oa_request_review" },
   { name: "submit_feedback", description: "Approve or request revision of the current artifact at a user gate.", schema: SubmitFeedbackToolSchema, workflowGuard: true, exposeTo: ["bridge", "mcp", "opencode"], hermesSurfaceRole: "author", mcpName: "oa_submit_feedback" },
+  { name: "scheduling_complete", description: "Resolve a structural SKIP_CHECK, CASCADE_CHECK, or SCHEDULING state by entering active work.", schema: StructuralTransitionToolSchema, workflowGuard: true, exposeTo: ["bridge", "mcp", "opencode"], hermesSurfaceRole: "author", mcpName: "oa_scheduling_complete" },
+  { name: "phase_skipped", description: "Resolve a structural SKIP_CHECK state by skipping the current phase.", schema: StructuralTransitionToolSchema, workflowGuard: true, exposeTo: ["bridge", "mcp", "opencode"], hermesSurfaceRole: "author", mcpName: "oa_phase_skipped" },
   { name: "mark_task_complete", description: "Mark the current implementation DAG task complete and request task review.", schema: MarkTaskCompleteToolSchema, workflowGuard: true, exposeTo: ["bridge", "mcp", "opencode"], hermesSurfaceRole: "author", mcpName: "oa_mark_task_complete" },
   { name: "submit_task_review", description: "Submit per-task isolated review results.", schema: SubmitTaskReviewToolSchema, workflowGuard: true, exposeTo: ["bridge"], hermesSurfaceRole: "reviewer" },
   { name: "submit_phase_review", description: "Submit phase-level isolated review results.", schema: SubmitPhaseReviewToolSchema, workflowGuard: false, exposeTo: ["bridge"], hermesSurfaceRole: "reviewer" },
@@ -182,6 +233,9 @@ export const TOOL_CONTRACTS: readonly ToolContract[] = [
   { name: "route_patch_suggestions", description: "Route pending reviewer patch suggestions to apply, defer, backtrack, or ask.", schema: RoutePatchSuggestionsSchema, workflowGuard: true, exposeTo: ["bridge", "mcp", "opencode"], hermesSurfaceRole: "author", mcpName: "oa_route_patch_suggestions" },
   { name: "resolve_patch_suggestion", description: "Record the disposition of a persisted reviewer patch suggestion.", schema: ResolvePatchSuggestionSchema, workflowGuard: true, exposeTo: ["bridge", "mcp", "opencode"], hermesSurfaceRole: "author", mcpName: "oa_resolve_patch_suggestion" },
   { name: "apply_patch_suggestion", description: "Apply a persisted reviewer patch suggestion to the worktree.", schema: ApplyPatchSuggestionSchema, workflowGuard: true, exposeTo: ["bridge", "mcp", "opencode"], hermesSurfaceRole: "author", mcpName: "oa_apply_patch_suggestion" },
+  { name: "guarded_edit", description: "Safely edit one file after validating the target path against the active phase policy.", schema: GuardedEditSchema, workflowGuard: true, exposeTo: ["opencode"], hermesSurfaceRole: "none" },
+  { name: "guarded_write", description: "Safely create one file after validating the target path against the active phase policy.", schema: GuardedWriteSchema, workflowGuard: true, exposeTo: ["opencode"], hermesSurfaceRole: "none" },
+  { name: "guarded_patch", description: "Safely apply an OpenCode-style patch after validating every target path against the active phase policy.", schema: GuardedPatchSchema, workflowGuard: true, exposeTo: ["opencode"], hermesSurfaceRole: "none" },
   { name: "report_drift", description: "Report workflow drift using artifact, task, worktree, DB, and changed-file signals.", schema: ReportDriftToolSchema, workflowGuard: true, exposeTo: ["bridge", "mcp", "opencode"], hermesSurfaceRole: "author", mcpName: "oa_report_drift" },
   { name: "plan_drift_repair", description: "Build a graph-native repair plan for reported workflow drift.", schema: PlanDriftRepairToolSchema, workflowGuard: true, exposeTo: ["bridge", "mcp", "opencode"], hermesSurfaceRole: "author", mcpName: "oa_plan_drift_repair" },
   { name: "apply_drift_repair", description: "Apply approved drift repair actions through existing workflow tools.", schema: ApplyDriftRepairToolSchema, workflowGuard: true, exposeTo: ["bridge", "mcp", "opencode"], hermesSurfaceRole: "author", mcpName: "oa_apply_drift_repair" },

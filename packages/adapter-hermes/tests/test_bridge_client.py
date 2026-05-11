@@ -56,7 +56,7 @@ class TestSubprocessLifecycle:
             assert call_args[0][1]["transport"] == "stdio"
             assert call_args[0][1]["registerRuntime"] is False
 
-    def test_start_falls_back_to_local_bridge_when_shared_socket_probe_fails(
+    def test_start_refuses_local_bridge_when_live_shared_socket_probe_fails(
         self, tmp_path
     ):
         client = StdioBridgeClient()
@@ -78,9 +78,10 @@ class TestSubprocessLifecycle:
             patch.object(client, "_spawn_process") as mock_spawn,
             patch.object(client, "_send_rpc", return_value="ready"),
         ):
-            client.start(str(tmp_path))
+            with pytest.raises(BridgeError, match="refusing to spawn a local bridge"):
+                client.start(str(tmp_path))
 
-        mock_spawn.assert_called_once()
+        mock_spawn.assert_not_called()
         assert client._socket_path is None
 
     def test_ensure_started_reuses_healthy_shared_bridge_without_restarting(self):
@@ -97,6 +98,64 @@ class TestSubprocessLifecycle:
         mock_probe.assert_called_once()
         mock_start.assert_not_called()
         assert client._transport_mode == "shared-socket"
+
+    def test_shared_bridge_probe_requires_initialized_engine(self):
+        client = StdioBridgeClient()
+        client._socket_path = "/tmp/project/.openartisan/.bridge.sock"
+
+        with patch.object(
+            client,
+            "_send_socket_rpc",
+            side_effect=["pong", {"initialized": True}],
+        ) as mock_rpc:
+            client._probe_shared_bridge()
+
+        assert mock_rpc.call_args_list[0].args == ("lifecycle.ping", {})
+        assert mock_rpc.call_args_list[1].args == ("state.health", {"sessionId": "default"})
+
+    def test_shared_bridge_probe_rejects_uninitialized_engine(self):
+        client = StdioBridgeClient()
+        client._socket_path = "/tmp/project/.openartisan/.bridge.sock"
+
+        with patch.object(
+            client,
+            "_send_socket_rpc",
+            side_effect=["pong", {"initialized": False}],
+        ):
+            with pytest.raises(BridgeError, match="not initialized"):
+                client._probe_shared_bridge()
+
+    def test_shared_bridge_probe_rejects_wrong_project(self):
+        client = StdioBridgeClient()
+        client._project_dir = "/tmp/project"
+        client._state_dir = "/tmp/project/.openartisan"
+        client._socket_path = "/tmp/other/.openartisan/.bridge.sock"
+
+        with patch.object(
+            client,
+            "_send_socket_rpc",
+            side_effect=[
+                "pong",
+                {
+                    "initialized": True,
+                    "projectDir": "/tmp/other",
+                    "stateDir": "/tmp/other/.openartisan",
+                },
+            ],
+        ):
+            with pytest.raises(BridgeError, match="project mismatch"):
+                client._probe_shared_bridge()
+
+    def test_ensure_started_restarts_when_project_changes(self):
+        client = StdioBridgeClient()
+        client._project_dir = "/tmp/old"
+        client._state_dir = "/tmp/old/.openartisan"
+        client._socket_path = "/tmp/old/.openartisan/.bridge.sock"
+
+        with patch.object(client, "start") as mock_start:
+            client.ensure_started("/tmp/new")
+
+        mock_start.assert_called_once_with("/tmp/new")
 
     def test_ensure_started_recovers_from_unhealthy_shared_bridge(self):
         client = StdioBridgeClient()
@@ -143,6 +202,26 @@ class TestSubprocessLifecycle:
             client.start(str(tmp_path))
 
         assert client._ensured_sessions == set()
+
+    def test_start_stops_local_process_when_init_fails(self, tmp_path):
+        client = StdioBridgeClient()
+        process = MagicMock()
+        process.wait.return_value = None
+
+        def spawn() -> None:
+            client._process = process
+
+        with (
+            patch.object(client, "discover_bridge", return_value={"kind": "no_bridge"}),
+            patch.object(client, "_spawn_process", side_effect=spawn),
+            patch.object(client, "_send_rpc", side_effect=BridgeError("init failed")),
+        ):
+            with pytest.raises(BridgeError, match="init failed"):
+                client.start(str(tmp_path))
+
+        process.terminate.assert_called_once()
+        process.wait.assert_called_once_with(timeout=2)
+        assert client._process is None
 
     def test_start_shuts_down_existing_bridge_when_project_changes(self, tmp_path):
         client = StdioBridgeClient()
@@ -195,7 +274,7 @@ class TestSubprocessLifecycle:
         assert mock_spawn.call_count == 2
         assert mock_rpc.call_count == 2
 
-    def test_start_takes_over_live_bridge_when_shared_socket_is_missing(self, tmp_path):
+    def test_start_refuses_takeover_when_live_bridge_probe_fails(self, tmp_path):
         client = StdioBridgeClient()
         state_dir = tmp_path / ".openartisan"
         state_dir.mkdir()
@@ -216,24 +295,16 @@ class TestSubprocessLifecycle:
             ),
             patch.object(client, "_spawn_process") as mock_spawn,
             patch.object(client, "shutdown") as mock_shutdown,
-            patch.object(
-                client,
-                "_send_rpc",
-                side_effect=[
-                    BridgeError(
-                        "Bridge RPC error: Another bridge process is already running (PID 12345). Kill it or remove .bridge-pid manually."
-                    ),
-                    "ready",
-                ],
-            ) as mock_rpc,
+            patch.object(client, "_send_rpc") as mock_rpc,
             patch("os.kill") as mock_kill,
         ):
-            client.start(str(tmp_path))
+            with pytest.raises(BridgeError, match="refusing to spawn a local bridge"):
+                client.start(str(tmp_path))
 
-        assert mock_kill.call_args_list[-1].args == (12345, 15)
-        mock_shutdown.assert_called_once()
-        assert mock_spawn.call_count == 2
-        assert mock_rpc.call_count == 2
+        mock_kill.assert_not_called()
+        mock_shutdown.assert_not_called()
+        mock_spawn.assert_not_called()
+        mock_rpc.assert_not_called()
 
     def test_start_takes_over_stale_bridge_state(self, tmp_path):
         client = StdioBridgeClient()
@@ -336,6 +407,31 @@ class TestJsonRpcRoundTrip:
         with patch.object(client, "_send_rpc", side_effect=BridgeError("RPC error")):
             with pytest.raises(BridgeError, match="RPC error"):
                 client.call("bad.method")
+
+    def test_call_recovers_uninitialized_local_bridge(self):
+        client = StdioBridgeClient()
+        client._project_dir = "/tmp/project"
+        client._process = MagicMock()
+        client._process.poll.return_value = None
+
+        with (
+            patch.object(
+                client,
+                "_send_rpc",
+                side_effect=[
+                    BridgeError("Bridge RPC error: Bridge not initialized. Call lifecycle.init first."),
+                    "ready",
+                    {"phase": "PLANNING"},
+                ],
+            ) as mock_rpc,
+            patch.object(client, "discover_bridge", return_value={"kind": "no_bridge"}),
+            patch.object(client, "_spawn_process"),
+        ):
+            result = client.call("state.get", {"sessionId": "s1"})
+
+        assert result == {"phase": "PLANNING"}
+        assert mock_rpc.call_args_list[1].args[0] == "lifecycle.init"
+        assert mock_rpc.call_args_list[2].args == ("state.get", {"sessionId": "s1"})
 
     def test_call_with_none_params(self):
         """call() with no params should send empty dict."""

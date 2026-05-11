@@ -74,10 +74,12 @@ export function createOpenArtisanRuntimeBackend(
   const repositoryOptions: Parameters<typeof createPGliteOpenArtisanRepository>[0] = { connection }
   if (options.pglite?.schemaName) repositoryOptions.schemaName = options.pglite.schemaName
   if (options.pglite?.accessQueue) repositoryOptions.accessQueue = options.pglite.accessQueue
+  repositoryOptions.allowSameProcessReclaim = true
   const repository = createPGliteOpenArtisanRepository(repositoryOptions)
   return {
     kind,
     stateBackend: createOpenArtisanDbStateBackend(repository, stateDir, {
+      allowSameProcessLockReclaim: true,
       legacyFallback: createFileSystemStateBackend(stateDir),
     }),
     roadmapBackend: createOpenArtisanDbRoadmapStateBackend(repository, stateDir),

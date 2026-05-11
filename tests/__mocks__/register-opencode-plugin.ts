@@ -6,6 +6,19 @@
  * without the real OpenCode runtime being installed.
  */
 import { plugin } from "bun"
+import { mkdtempSync, rmSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+
+const testProjectDir = mkdtempSync(join(tmpdir(), "openartisan-test-project-"))
+
+// Any test that initializes the plugin without an explicit `directory` should
+// still write runtime state outside the repository checkout.
+process.env["OPENCODE_PROJECT_DIR"] = testProjectDir
+
+process.on("exit", () => {
+  rmSync(testProjectDir, { recursive: true, force: true })
+})
 
 plugin({
   name: "opencode-plugin-mock",

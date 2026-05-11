@@ -75,7 +75,7 @@ If you've found a bug, please [open an issue](https://github.com/yehudacohen/ope
 - What you expected to happen
 - What actually happened
 - Steps to reproduce, if possible
-- The contents of `.opencode/openartisan-errors.log` (if relevant)
+- The contents of `.openartisan/openartisan-errors.log` (if relevant)
 - Your OpenCode and Bun versions
 
 ### Suggesting Features
@@ -150,7 +150,7 @@ The state machine in `state-machine.ts` is the heart of the plugin. If you're mo
 1. Update the transition table in `buildTable()`.
 2. Update `VALID_PHASE_STATES` in `types.ts` if adding new phase/state combinations.
 3. Update `validateWorkflowState()` in `types.ts` for any new state fields.
-4. Bump `SCHEMA_VERSION` in `constants.ts` and add migration logic in `session-state.ts`.
+4. Bump `SCHEMA_VERSION` in `workflow-state-types.ts` and add migration logic in `session-state.ts`.
 5. Add transition tests in `tests/state-machine.test.ts`.
 6. Update the design document in `docs/structured-workflow-design.md`.
 
@@ -185,7 +185,7 @@ If you're new to the project, here's a suggested reading order:
 ### Debug Tips
 
 - Set `OPENARTISAN_DEBUG=1` to enable debug output to stderr.
-- Check `.opencode/openartisan-errors.log` for persisted errors and warnings (JSON lines format).
+- Check `.openartisan/openartisan-errors.log` for persisted errors and warnings (JSON lines format).
 - OpenCode logs are at `~/.local/share/opencode/log/` -- useful for diagnosing SDK-level issues.
 - Run individual test files: `bun test tests/state-machine.test.ts`
 

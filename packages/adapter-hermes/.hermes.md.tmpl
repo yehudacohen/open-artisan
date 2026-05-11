@@ -20,13 +20,13 @@ Each phase follows: **DRAFT → REVIEW → USER_GATE → (optional REVISE)**
 | `oa_mark_scan_complete` | Complete discovery scan (REFACTOR/INCREMENTAL) |
 | `oa_mark_analyze_complete` | Complete discovery analysis |
 | `oa_mark_satisfied` | OpenCode/self-review compatibility only; bridge adapters use isolated review submission |
-| `oa_request_review` | Submit review artifacts (`artifact_files`, or markdown via `artifact_markdown`) |
+| `oa_request_review` | Submit review artifacts by on-disk `artifact_files` |
 | `oa_submit_feedback` | Approve or request revision at USER_GATE |
 | `oa_mark_task_complete` | Complete a DAG task during IMPLEMENTATION |
 | `oa_check_prior_workflow` | Check for existing workflow state |
 | `oa_resolve_human_gate` | Flag a task requiring manual action |
 | `oa_propose_backtrack` | Go back to an earlier phase |
-| `oa_spawn_sub_workflow` | Delegate a DAG task to a child workflow |
+| `oa_propose_direct_application` | Propose and structurally apply a small safe patch without starting the full workflow |
 | `oa_query_parent_workflow` | Read parent workflow state (sub-workflows) |
 | `oa_query_child_workflow` | Read child workflow state (sub-workflows) |
 | `oa_state` | Show current workflow state |
@@ -76,6 +76,9 @@ Address ALL feedback points. Call `oa_request_review` when done. No check-ins, n
 - You cannot write to files belonging to a different task.
 
 ## Mode-Specific Rules
+
+### Direct Application
+For small/simple tasks where the full phased workflow is too heavy, propose a direct patch with `oa_propose_direct_application`. Open Artisan will structurally inspect the patch and apply it only if it is narrow, safe, and outside an active workflow. If rejected, use the full workflow.
 
 ### GREENFIELD
 No constraints beyond the standard phases. Discovery is skipped.

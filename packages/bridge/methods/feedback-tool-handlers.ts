@@ -18,6 +18,7 @@ import { extractApprovedFileAllowlist } from "../../core/tools/plan-allowlist"
 import { parseToolArgs } from "../../core/tool-args"
 import { SubmitFeedbackToolSchema } from "../../core/schemas"
 import { computeSubmitFeedbackApproveTransition, computeSubmitFeedbackReviseTransition } from "../../core/tools/transitions"
+import { computeForwardSkip } from "../../core/fast-forward"
 import {
   buildSubmitFeedbackClarificationMessage,
   buildSelfApprovalBlockedMessage,
@@ -103,6 +104,41 @@ function readArtifactContent(state: WorkflowState, artifactKey: ArtifactKey): st
     return readFileSync(diskPath, "utf-8")
   } catch {
     return undefined
+  }
+}
+
+function resolveStructuralApprovalTarget(
+  state: WorkflowState,
+  nextPhase: WorkflowState["phase"],
+  nextPhaseState: WorkflowState["phaseState"],
+  effectiveAllowlist: string[],
+  ctx: BridgeContext,
+): { phase: WorkflowState["phase"]; phaseState: WorkflowState["phaseState"]; message: string } {
+  if (nextPhaseState !== "SKIP_CHECK") {
+    return { phase: nextPhase, phaseState: nextPhaseState, message: "" }
+  }
+
+  const forwardSkip = computeForwardSkip(nextPhase, state.mode, effectiveAllowlist)
+  if (forwardSkip) {
+    return {
+      phase: forwardSkip.targetPhase,
+      phaseState: forwardSkip.targetPhaseState,
+      message: `\n\n${forwardSkip.message}`,
+    }
+  }
+
+  const outcome = ctx.engine!.sm.transition(nextPhase, "SKIP_CHECK", "scheduling_complete", state.mode)
+  if (!outcome.ok) {
+    return {
+      phase: nextPhase,
+      phaseState: nextPhaseState,
+      message: `\n\nWarning: Could not auto-resolve ${nextPhase}/SKIP_CHECK: ${outcome.message}`,
+    }
+  }
+  return {
+    phase: outcome.nextPhase,
+    phaseState: outcome.nextPhaseState,
+    message: `\n\nStructural skip check complete. Continuing with ${outcome.nextPhase}/${outcome.nextPhaseState}.`,
   }
 }
 
@@ -320,6 +356,14 @@ async function applyApprovalTransition(
   const approvalResult = computeSubmitFeedbackApproveTransition(state, sm)
   if (!approvalResult.success) return `Error: ${approvalResult.error}`
   const approval = approvalResult.transition
+  const effectiveAllowlist = state.mode === "INCREMENTAL" ? allowlists.get() : state.fileAllowlist
+  const structuralTarget = resolveStructuralApprovalTarget(
+    state,
+    approval.nextPhase,
+    approval.nextPhaseState,
+    effectiveAllowlist,
+    ctx,
+  )
 
   const approveArtifactKey = approval.artifactKey
   const approveArtifactPath = approveArtifactKey && approveArtifactKey !== "implementation"
@@ -336,8 +380,8 @@ async function applyApprovalTransition(
     approval.nextPhase === "DONE"
 
   await store.update(toolCtx.sessionId, (draft) => {
-    draft.phase = approval.nextPhase
-    draft.phaseState = approval.nextPhaseState
+    draft.phase = structuralTarget.phase
+    draft.phaseState = structuralTarget.phaseState
     draft.approvalCount = approval.newApprovalCount
     draft.phaseApprovalCounts[state.phase] = approval.phaseCount
     draft.iterationCount = 0
@@ -392,7 +436,6 @@ async function applyApprovalTransition(
       draft.fileAllowlist.length === 0 &&
       (state.phase === "INTERFACES" || state.phase === "TESTS" || state.phase === "IMPL_PLAN")
     ) {
-      const effectiveAllowlist = allowlists.get()
       if (effectiveAllowlist.length > 0) {
         draft.fileAllowlist = effectiveAllowlist
       }
@@ -420,7 +463,7 @@ async function applyApprovalTransition(
     })
   }
 
-  return approval.responseMessage
+  return approval.responseMessage + structuralTarget.message
 }
 
 async function handleApproveFeedback(

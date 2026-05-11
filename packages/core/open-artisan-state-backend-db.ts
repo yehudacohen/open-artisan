@@ -16,12 +16,17 @@ import { parseAndMigrateWorkflowStateJson } from "./session-state"
 export interface OpenArtisanDbStateBackendOptions {
   lockTimeoutMs?: number
   lockPollMs?: number
+  allowSameProcessLockReclaim?: boolean
   legacyFallback?: StateBackend
 }
 
 function assertOk<T>(result: OpenArtisanDbResult<T>): T {
   if (!result.ok) throw new Error(result.error.message)
   return result.value
+}
+
+function isRecoverableDbStateFailure(result: OpenArtisanDbResult<unknown>): boolean {
+  return !result.ok && (result.error.retryable || result.error.code === "lock-timeout" || result.error.code === "storage-failure")
 }
 
 function effectiveFeatureName(state: WorkflowState): string {
@@ -40,10 +45,24 @@ export function createOpenArtisanDbStateBackend(
     const { state, changed } = parseAndMigrateWorkflowStateJson(raw)
     if (!state) return raw
     if (effectiveFeatureName(state) !== featureName) return raw
-    assertOk(await importLegacyWorkflowState(repository, state, { bestEffort: true }))
+    const importResult = await importLegacyWorkflowState(repository, state, { bestEffort: true })
+    if (!importResult.ok && !isRecoverableDbStateFailure(importResult)) {
+      throw new Error(importResult.error.message)
+    }
     const migratedRaw = changed ? JSON.stringify(state) : raw
-    if (changed) await options.legacyFallback.write(featureName, migratedRaw)
+    if (changed) {
+      try {
+        await options.legacyFallback.write(featureName, migratedRaw)
+      } catch {
+        // Compatibility mirror writes are best-effort; the DB import above is canonical.
+      }
+    }
     return migratedRaw
+  }
+
+  async function readLegacyFallback(featureName: string): Promise<string | null> {
+    if (!options.legacyFallback) return null
+    return options.legacyFallback.read(featureName)
   }
 
   return {
@@ -52,9 +71,13 @@ export function createOpenArtisanDbStateBackend(
     },
 
     async read(featureName: string) {
-      const projection = assertOk(await repository.getWorkflowByFeature(featureName))
+      const projectionResult = await repository.getWorkflowByFeature(featureName)
+      if (isRecoverableDbStateFailure(projectionResult)) return readLegacyFallback(featureName)
+      const projection = assertOk(projectionResult)
       if (!projection) return importLegacyFallback(featureName)
-      const state = assertOk(await exportLegacyWorkflowState(repository, projection.workflow.id))
+      const stateResult = await exportLegacyWorkflowState(repository, projection.workflow.id)
+      if (isRecoverableDbStateFailure(stateResult)) return readLegacyFallback(featureName)
+      const state = assertOk(stateResult)
       return JSON.stringify(state)
     },
 
@@ -68,18 +91,36 @@ export function createOpenArtisanDbStateBackend(
           `StateBackend feature mismatch: write key "${_featureName}" does not match state feature "${effectiveFeatureName(state)}"`,
         )
       }
-      assertOk(await importLegacyWorkflowState(repository, state, { bestEffort: true }))
-      if (options.legacyFallback) await options.legacyFallback.write(_featureName, JSON.stringify(state))
+      const importResult = await importLegacyWorkflowState(repository, state, { bestEffort: true })
+      if (!importResult.ok && (!options.legacyFallback || !isRecoverableDbStateFailure(importResult))) {
+        throw new Error(importResult.error.message)
+      }
+      if (options.legacyFallback) {
+        try {
+          await options.legacyFallback.write(_featureName, JSON.stringify(state))
+        } catch {
+          // Do not report failure after the canonical DB write has committed.
+        }
+      }
     },
 
     async remove(featureName: string) {
-      const projection = assertOk(await repository.getWorkflowByFeature(featureName))
-      if (projection) assertOk(await repository.deleteWorkflow(projection.workflow.id))
+      const projectionResult = await repository.getWorkflowByFeature(featureName)
+      if (projectionResult.ok) {
+        const projection = projectionResult.value
+        if (projection) assertOk(await repository.deleteWorkflow(projection.workflow.id))
+      } else if (!options.legacyFallback || !isRecoverableDbStateFailure(projectionResult)) {
+        throw new Error(projectionResult.error.message)
+      }
       if (options.legacyFallback) await options.legacyFallback.remove(featureName)
     },
 
     async list() {
-      const features = new Set(assertOk(await repository.listWorkflows()).map((workflow) => workflow.featureName))
+      const listResult = await repository.listWorkflows()
+      const features = new Set(listResult.ok ? listResult.value.map((workflow) => workflow.featureName) : [])
+      if (!listResult.ok && (!options.legacyFallback || !isRecoverableDbStateFailure(listResult))) {
+        throw new Error(listResult.error.message)
+      }
       if (options.legacyFallback) {
         for (const featureName of await options.legacyFallback.list()) features.add(featureName)
       }
@@ -87,10 +128,14 @@ export function createOpenArtisanDbStateBackend(
     },
 
     async lock(featureName: string) {
-      return assertOk(await repository.lockWorkflowState(featureName, {
+      const lockResult = await repository.lockWorkflowState(featureName, {
         ...(options.lockTimeoutMs === undefined ? {} : { timeoutMs: options.lockTimeoutMs }),
         ...(options.lockPollMs === undefined ? {} : { pollMs: options.lockPollMs }),
-      }))
+        ...(options.allowSameProcessLockReclaim === undefined ? {} : { allowSameProcessReclaim: options.allowSameProcessLockReclaim }),
+      })
+      if (lockResult.ok) return lockResult.value
+      if (options.legacyFallback && isRecoverableDbStateFailure(lockResult)) return options.legacyFallback.lock(featureName)
+      throw new Error(lockResult.error.message)
     },
   }
 }

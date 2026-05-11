@@ -35,7 +35,9 @@ jobs:
             ${{ runner.os }}-bun-
 
       - name: Install dependencies
-        run: bun install --frozen-lockfile
+        run: |
+          bun install --frozen-lockfile
+          bun install --cwd .opencode --frozen-lockfile
 
       - name: Verify all
         run: bun run verify:all

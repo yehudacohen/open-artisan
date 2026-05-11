@@ -41,8 +41,12 @@ export async function persistActiveAgent(
 
   const state = store.get(sessionId)
   if (!state) return normalized
+  const persistedAgent = normalizeAgentName(state.activeAgent)
+  if (persistedAgent && !isArtisanAgent(persistedAgent)) {
+    return persistedAgent
+  }
   if (isArtisanAgent(state.activeAgent) && !isArtisanAgent(normalized)) {
-    return normalizeAgentName(state.activeAgent) ?? normalized
+    return persistedAgent ?? normalized
   }
   if (state.activeAgent === normalized) return normalized
 

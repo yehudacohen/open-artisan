@@ -6,7 +6,7 @@ import { join, resolve } from "node:path"
 import { mkdir, mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 
-import { handleInit, handleSessionCreated } from "#bridge/methods/lifecycle"
+import { handleInit, handleSessionCreated, handleSessionDeleted } from "#bridge/methods/lifecycle"
 import { handleToolExecute, handleTaskGetReviewContext, handlePhaseGetReviewContext, handleAutoApproveContext } from "#bridge/methods/tool-execute"
 import type { BridgeContext } from "#bridge/server"
 import type { EngineContext } from "#core/engine-context"
@@ -44,7 +44,7 @@ beforeEach(async () => {
 })
 
 afterEach(async () => {
-  await rm(tmpDir, { recursive: true, force: true })
+  await handleSessionDeleted({ sessionId: "s1" }, ctx)
 })
 
 function exec(name: string, args: Record<string, unknown> = {}) {
@@ -352,34 +352,52 @@ describe("tool.execute — task boundary revision workflow", () => {
 
     expect(result).toContain("T1")
     expect(result).toContain("T2")
-    expect(result).toContain("completed task")
+    expect(result).toContain("Completed task(s) must be reset")
   })
 
-  it("reports allowlist violations when an added file is outside the approved allowlist", async () => {
-    await exec("select_mode", { mode: "GREENFIELD", feature_name: "boundary-allowlist" })
+  it("returns the structured public boundary-change analysis shape", async () => {
+    await exec("select_mode", { mode: "GREENFIELD", feature_name: "boundary-analysis-shape" })
     await ctx.engine!.store.update("s1", (d) => {
       d.phase = "IMPLEMENTATION"
       d.phaseState = "DRAFT"
       d.mode = "INCREMENTAL"
-      d.featureName = "boundary-allowlist"
-      d.fileAllowlist = ["/repo/src/b.ts", "/repo/tests/b.test.ts"]
+      d.featureName = "boundary-analysis-shape"
+      d.fileAllowlist = ["/repo/src/a.ts", "/repo/src/b.ts", "/repo/tests/a.test.ts", "/repo/tests/b.test.ts"]
       d.implDag = [
-        { id: "T2", description: "Target task", dependencies: [], expectedFiles: ["/repo/src/b.ts"], expectedTests: ["/repo/tests/b.test.ts"], estimatedComplexity: "medium", status: "pending" },
+        { id: "T1", description: "Done task", dependencies: [], expectedFiles: ["/repo/src/a.ts"], expectedTests: ["/repo/tests/a.test.ts"], estimatedComplexity: "small", status: "complete" },
+        { id: "T2", description: "Target task", dependencies: ["T1"], expectedFiles: ["/repo/src/b.ts"], expectedTests: ["/repo/tests/b.test.ts"], estimatedComplexity: "medium", status: "pending" },
       ]
       d.currentTaskId = "T2"
     })
 
-    const result = await exec("analyze_task_boundary_change", {
+    const raw = await exec("analyze_task_boundary_change", {
       task_id: "T2",
-      add_files: ["/repo/src/outside.ts"],
-      reason: "Need to test the planning escalation path.",
+      add_files: ["/repo/src/a.ts"],
+      remove_files: ["/repo/src/b.ts"],
+      add_expected_tests: ["/repo/tests/a.test.ts"],
+      remove_expected_tests: ["/repo/tests/b.test.ts"],
+      reason: "T2 must absorb the runtime seam already exercised by review.",
     })
 
-    expect(result).toContain("allowlist")
-    expect(result).toContain("/repo/src/outside.ts")
+    const analysis = JSON.parse(raw)
+    expect(analysis.taskId).toBe("T2")
+    expect([...analysis.impactedTaskIds].sort()).toEqual(["T1", "T2"])
+    expect(analysis.completedTaskIdsToReset).toEqual(["T1"])
+    expect(analysis.overlappingOwnedFiles).toEqual(["/repo/src/a.ts"])
+    expect(analysis.overlappingExpectedTests).toEqual(["/repo/tests/a.test.ts"])
+    expect(analysis.addFiles).toEqual(["/repo/src/a.ts"])
+    expect(analysis.removeFiles).toEqual(["/repo/src/b.ts"])
+    expect(analysis.addExpectedTests).toEqual(["/repo/tests/a.test.ts"])
+    expect(analysis.removeExpectedTests).toEqual(["/repo/tests/b.test.ts"])
+    expect(analysis.preservesAllowlist).toBe(true)
+    expect(analysis.preservesDependencyOrdering).toBe(true)
+    expect(analysis.preservesParallelism).toBe(false)
+    expect(analysis.rationale).toBe("T2 must absorb the runtime seam already exercised by review.")
+    expect(Array.isArray(analysis.conflicts)).toBe(true)
+    expect(analysis.conflicts[0]?.kind).toBe("file-overlap")
   })
 
-  it("applies an ownership change and resets completed impacted tasks", async () => {
+  it("applies an ownership change, resets completed impacted tasks, and clears stale task-review state", async () => {
     await exec("select_mode", { mode: "GREENFIELD", feature_name: "boundary-apply" })
     await ctx.engine!.store.update("s1", (d) => {
       d.phase = "IMPLEMENTATION"
@@ -392,6 +410,10 @@ describe("tool.execute — task boundary revision workflow", () => {
         { id: "T2", description: "Target task", dependencies: ["T1"], expectedFiles: ["/repo/src/b.ts"], expectedTests: ["/repo/tests/b.test.ts"], estimatedComplexity: "medium", status: "pending" },
       ]
       d.currentTaskId = "T2"
+      d.taskCompletionInProgress = "T2"
+      d.reviewArtifactHash = "stale-review-hash"
+      d.reviewArtifactFiles = ["/repo/tests/b.test.ts"]
+      d.latestReviewResults = [{ criterion: "Old review", met: false, evidence: "stale" }]
     })
 
     const result = await exec("apply_task_boundary_change", {
@@ -411,6 +433,12 @@ describe("tool.execute — task boundary revision workflow", () => {
     expect(t1?.status).toBe("pending")
     expect(t2?.expectedFiles).toContain("/repo/src/a.ts")
     expect(t2?.expectedFiles).not.toContain("/repo/src/b.ts")
+    expect(state?.phaseState).toBe("DRAFT")
+    expect(state?.currentTaskId).toBe("T2")
+    expect(state?.taskCompletionInProgress).toBeNull()
+    expect(state?.reviewArtifactHash).toBeNull()
+    expect(state?.reviewArtifactFiles).toEqual([])
+    expect(state?.latestReviewResults).toBeNull()
   })
 })
 
@@ -1435,15 +1463,12 @@ describe("tool.execute — agent-only mode", () => {
     expect(ctx.engine!.store.get("s1")?.phaseState).toBe("REVIEW")
   })
 
-  it("materializes markdown artifact content for DISCOVERY/CONVENTIONS", async () => {
+  it("rejects markdown artifact content for DISCOVERY/CONVENTIONS", async () => {
     await exec("select_mode", { mode: "GREENFIELD", feature_name: `conv-materialize-${Date.now()}` })
     await ctx.engine!.store.update("s1", (d) => {
       d.phase = "DISCOVERY"
       d.phaseState = "CONVENTIONS"
     })
-    const feature = ctx.engine!.store.get("s1")?.featureName ?? "conv-materialize"
-    const conventionsPath = join(tmpDir, ".openartisan", feature, "conventions.md")
-
     const result = await exec("request_review", {
       summary: "Conventions",
       artifact_description: "Conventions doc",
@@ -1451,11 +1476,9 @@ describe("tool.execute — agent-only mode", () => {
       artifact_markdown: "# Conventions\n\n- Use Bun.\n",
     })
 
-    expect(result).toContain("Transitioning to DISCOVERY/REVIEW")
-    const state = ctx.engine!.store.get("s1")
-    expect(state?.phaseState).toBe("REVIEW")
-    expect(state?.reviewArtifactFiles).toEqual([conventionsPath])
-    expect(await Bun.file(conventionsPath).text()).toContain("Use Bun")
+    expect(result).toContain("Error")
+    expect(result).toContain("artifact_markdown")
+    expect(ctx.engine!.store.get("s1")?.phaseState).toBe("CONVENTIONS")
   })
 
   it("rejects request_review artifact_content for PLANNING", async () => {

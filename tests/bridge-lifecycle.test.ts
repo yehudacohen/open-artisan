@@ -182,6 +182,7 @@ describe("lifecycle.sessionDeleted", () => {
     await handleSessionCreated({ sessionId: "s1" }, ctx)
     await ctx.engine!.store.update("s1", (d) => {
       d.featureName = "persisted-feature"
+      d.mode = "GREENFIELD"
       d.phase = "PLANNING"
     })
     expect(ctx.engine!.store.get("s1")).not.toBeNull()
@@ -222,8 +223,11 @@ describe("state.get", () => {
     expect(result.state).not.toBeNull()
     expect(result.state.sessionId).toBe("s1")
     expect(result.runtimeHealth.phase).toBe("MODE_SELECT")
+    expect(result.runtimeHealth.initialized).toBe(true)
     expect(result.runtimeHealth.backendKind).toBe("filesystem")
+    expect(result.runtimeHealth.projectDir).toBe(tmpDir)
     expect(result.runtimeHealth.stateDir).toBe(join(tmpDir, ".openartisan"))
+    expect(result.runtimeHealth.requestedSessionFound).toBe(true)
     expect(result.runtimeHealth.bridgeTransport).toBe("unix-socket")
     expect(result.runtimeHealth.bridgeSocketPath).toBe(ctx.stateDir ? join(ctx.stateDir, ".bridge.sock") : null)
     expect(result.runtimeHealth.bridgeAttachedClients).toBeGreaterThan(0)
@@ -244,10 +248,21 @@ describe("state.get", () => {
     await handleSessionCreated({ sessionId: "s1", agent: "hermes" }, ctx)
     const result = await handleStateHealth({ sessionId: "s1" }, ctx) as any
     expect(result.phase).toBe("MODE_SELECT")
+    expect(result.initialized).toBe(true)
     expect(result.backendKind).toBe("filesystem")
+    expect(result.projectDir).toBe(tmpDir)
     expect(result.bridgeTransport).toBe("unix-socket")
     expect(result.bridgeSocketPath).toBe(ctx.stateDir ? join(ctx.stateDir, ".bridge.sock") : null)
     expect(result.bridgeActiveClientKinds).toContain("hermes")
+  })
+
+  it("state.health reports uninitialized bridge context without loading state", async () => {
+    const result = await handleStateHealth({ sessionId: "s1" }, ctx) as any
+    expect(result.initialized).toBe(false)
+    expect(result.projectDir).toBeNull()
+    expect(result.stateDir).toBeNull()
+    expect(result.requestedSessionFound).toBe(false)
+    expect(result.lastRecoveryAction).toBe("bridge-uninitialized")
   })
 })
 
@@ -271,6 +286,24 @@ describe("initialization guard", () => {
     // The server's addMethod wrapper checks engine === null for non-INIT_FREE methods
     // We can't easily test via stdio, but we can verify the ctx is uninitialized
     expect(server.initialized).toBe(false)
+  })
+
+  it("server dispatch allows state.health before lifecycle.init", async () => {
+    const { createBridgeEngine } = await import("#bridge/server")
+
+    const engine = createBridgeEngine({
+      "state.health": handleStateHealth,
+    })
+
+    const response = await engine.receiveJSON(JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "state.health",
+      params: { sessionId: "s1" },
+    }))
+    const parsed = JSON.parse(response ?? "{}")
+    expect(parsed.error).toBeUndefined()
+    expect(parsed.result.initialized).toBe(false)
   })
 })
 

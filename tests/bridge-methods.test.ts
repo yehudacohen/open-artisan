@@ -8,7 +8,7 @@ import { join } from "node:path"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 
-import { handleInit, handleSessionCreated } from "#bridge/methods/lifecycle"
+import { handleInit, handleSessionCreated, handleSessionDeleted } from "#bridge/methods/lifecycle"
 import { handleGuardCheck, handleGuardPolicy } from "#bridge/methods/guard"
 import { handlePromptBuild, handlePromptCompaction } from "#bridge/methods/prompt"
 import { handleStateGet, handleStateHealth } from "#bridge/methods/state"
@@ -52,7 +52,7 @@ beforeEach(async () => {
 })
 
 afterEach(async () => {
-  await rm(tmpDir, { recursive: true, force: true })
+  await handleSessionDeleted({ sessionId: "s1" }, ctx)
 })
 
 // ---------------------------------------------------------------------------

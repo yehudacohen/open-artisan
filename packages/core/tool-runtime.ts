@@ -35,7 +35,14 @@ export async function detectActiveAgent(
 ): Promise<void> {
   const detectedAgent = extractAgentName(context)
   if (detectedAgent) {
-    await persistActiveAgent(store, sessionId, isArtisanAgent(detectedAgent) ? detectedAgent : "build-artisan")
+    if (isArtisanAgent(detectedAgent)) {
+      await persistActiveAgent(store, sessionId, detectedAgent)
+      return
+    }
+
+    await store.update(sessionId, (draft) => {
+      draft.activeAgent = "build-artisan"
+    })
     return
   }
 

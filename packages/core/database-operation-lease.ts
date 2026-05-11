@@ -31,6 +31,7 @@ export interface DatabaseOperationLeaseOptions {
   timeoutMs?: number
   pollMs?: number
   leaseMs?: number
+  allowSameProcessReclaim?: boolean
   renew?: DatabaseOperationLeaseRenewal
 }
 
@@ -66,11 +67,50 @@ function isExpectedLeaseContention(error: unknown): boolean {
   return /duplicate|unique|constraint|primary key/i.test(message)
 }
 
+const sameProcessLeases = new Map<string, Map<string, number>>()
+
+function leaseIdentity(schemaName: string, leaseKey: string): string {
+  return `${schemaName}:${leaseKey}`
+}
+
+function hasSameProcessHolder(identity: string, ownerId: string): boolean {
+  const owners = sameProcessLeases.get(identity)
+  if (!owners) return false
+  for (const [heldOwnerId, count] of owners) {
+    if (heldOwnerId !== ownerId && count > 0) return true
+  }
+  return false
+}
+
+function registerSameProcessLease(identity: string, ownerId: string): () => void {
+  let owners = sameProcessLeases.get(identity)
+  if (!owners) {
+    owners = new Map()
+    sameProcessLeases.set(identity, owners)
+  }
+  owners.set(ownerId, (owners.get(ownerId) ?? 0) + 1)
+  let released = false
+  return () => {
+    if (released) return
+    released = true
+    const currentOwners = sameProcessLeases.get(identity)
+    if (!currentOwners) return
+    const nextCount = (currentOwners.get(ownerId) ?? 0) - 1
+    if (nextCount > 0) {
+      currentOwners.set(ownerId, nextCount)
+    } else {
+      currentOwners.delete(ownerId)
+    }
+    if (currentOwners.size === 0) sameProcessLeases.delete(identity)
+  }
+}
+
 function buildLease(
   schemaDb: Kysely<DatabaseOperationLeaseDatabase>,
   leaseKey: string,
   ownerId: string,
   stopRenewal: () => void,
+  unregisterSameProcessLease: () => void,
 ): DatabaseOperationLease {
   let released = false
   return {
@@ -79,6 +119,7 @@ function buildLease(
       if (released) return
       released = true
       stopRenewal()
+      unregisterSameProcessLease()
       await schemaDb
         .deleteFrom("database_operation_locks")
         .where("lock_key", "=", leaseKey)
@@ -104,9 +145,18 @@ export async function acquireDatabaseOperationLease(
   const intervalMs = Math.max(Math.floor(leaseMs / DB_OPERATION_LEASE_RENEWAL_DIVISOR), DB_OPERATION_LEASE_MIN_RENEWAL_MS)
   const deadline = Date.now() + timeoutMs
   const schemaDb = db.withSchema(schemaName)
+  const identity = leaseIdentity(schemaName, options.leaseKey)
   let lastContentionMessage: string | null = null
 
   while (true) {
+    if (!options.allowSameProcessReclaim && hasSameProcessHolder(identity, ownerId)) {
+      if (Date.now() >= deadline) {
+        throw new Error(`Timed out acquiring DB operation lease ${options.leaseKey}. Same-process lease is still held.`)
+      }
+      await sleep(pollMs)
+      continue
+    }
+
     const now = new Date().toISOString()
     const leaseExpiresAt = new Date(Date.now() + leaseMs).toISOString()
 
@@ -123,7 +173,49 @@ export async function acquireDatabaseOperationLease(
 
     if (hasUpdatedRow(updateResult)) {
       const stopRenewal = options.renew?.({ leaseKey: options.leaseKey, ownerId, leaseMs, intervalMs }) ?? (() => {})
-      return buildLease(schemaDb, options.leaseKey, ownerId, stopRenewal)
+      return buildLease(schemaDb, options.leaseKey, ownerId, stopRenewal, registerSameProcessLease(identity, ownerId))
+    }
+
+    const sameOwnerUpdateResult = await schemaDb
+      .updateTable("database_operation_locks")
+      .set({
+        lease_expires_at: leaseExpiresAt,
+        updated_at: now,
+      })
+      .where("lock_key", "=", options.leaseKey)
+      .where("owner_id", "=", ownerId)
+      .executeTakeFirst()
+
+    if (hasUpdatedRow(sameOwnerUpdateResult)) {
+      const stopRenewal = options.renew?.({ leaseKey: options.leaseKey, ownerId, leaseMs, intervalMs }) ?? (() => {})
+      return buildLease(schemaDb, options.leaseKey, ownerId, stopRenewal, registerSameProcessLease(identity, ownerId))
+    }
+
+    const existingLock = await schemaDb
+      .selectFrom("database_operation_locks")
+      .select(["owner_id"])
+      .where("lock_key", "=", options.leaseKey)
+      .executeTakeFirst()
+
+    // Runtime recovery only: OpenCode can restart while the old repository owner
+    // left a live logical lease behind. Normal repository callers leave this off
+    // so contention semantics remain strict in tests and non-runtime code.
+    if (options.allowSameProcessReclaim && existingLock) {
+      const sameProcessUpdateResult = await schemaDb
+        .updateTable("database_operation_locks")
+        .set({
+          owner_id: ownerId,
+          lease_expires_at: leaseExpiresAt,
+          updated_at: now,
+        })
+        .where("lock_key", "=", options.leaseKey)
+        .where("owner_id", "=", existingLock.owner_id)
+        .executeTakeFirst()
+
+      if (hasUpdatedRow(sameProcessUpdateResult)) {
+        const stopRenewal = options.renew?.({ leaseKey: options.leaseKey, ownerId, leaseMs, intervalMs }) ?? (() => {})
+        return buildLease(schemaDb, options.leaseKey, ownerId, stopRenewal, registerSameProcessLease(identity, ownerId))
+      }
     }
 
     try {
@@ -138,9 +230,25 @@ export async function acquireDatabaseOperationLease(
         })
         .execute()
       const stopRenewal = options.renew?.({ leaseKey: options.leaseKey, ownerId, leaseMs, intervalMs }) ?? (() => {})
-      return buildLease(schemaDb, options.leaseKey, ownerId, stopRenewal)
+      return buildLease(schemaDb, options.leaseKey, ownerId, stopRenewal, registerSameProcessLease(identity, ownerId))
     } catch (error) {
       if (!isExpectedLeaseContention(error)) throw error
+      if (options.allowSameProcessReclaim) {
+        const reclaimResult = await schemaDb
+          .updateTable("database_operation_locks")
+          .set({
+            owner_id: ownerId,
+            lease_expires_at: leaseExpiresAt,
+            updated_at: now,
+          })
+          .where("lock_key", "=", options.leaseKey)
+          .executeTakeFirst()
+
+        if (hasUpdatedRow(reclaimResult)) {
+          const stopRenewal = options.renew?.({ leaseKey: options.leaseKey, ownerId, leaseMs, intervalMs }) ?? (() => {})
+          return buildLease(schemaDb, options.leaseKey, ownerId, stopRenewal, registerSameProcessLease(identity, ownerId))
+        }
+      }
       lastContentionMessage = error instanceof Error ? error.message : String(error)
     }
 

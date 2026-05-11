@@ -15,6 +15,35 @@ from .types import BridgeClient, BridgeError, HermesContext, make_error_response
 from .constants import GUARDED_TOOLS, ARTISAN_COMMAND_RE, TOOLSET_NAME
 
 
+GUARDED_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
+    "write_file": {
+        "type": "object",
+        "properties": {"path": {"type": "string"}, "file_path": {"type": "string"}, "content": {"type": "string"}},
+        "additionalProperties": True,
+    },
+    "create_file": {
+        "type": "object",
+        "properties": {"path": {"type": "string"}, "file_path": {"type": "string"}, "content": {"type": "string"}},
+        "additionalProperties": True,
+    },
+    "edit_file": {
+        "type": "object",
+        "properties": {"path": {"type": "string"}, "file_path": {"type": "string"}, "old_string": {"type": "string"}, "new_string": {"type": "string"}},
+        "additionalProperties": True,
+    },
+    "patch_file": {
+        "type": "object",
+        "properties": {"path": {"type": "string"}, "file_path": {"type": "string"}, "patch": {"type": "string"}},
+        "additionalProperties": True,
+    },
+    "execute_command": {
+        "type": "object",
+        "properties": {"command": {"type": "string"}, "cmd": {"type": "string"}, "script": {"type": "string"}},
+        "additionalProperties": True,
+    },
+}
+
+
 def register_guard_wrappers(
     ctx: HermesContext,
     bridge: BridgeClient,
@@ -47,7 +76,7 @@ def register_guard_wrappers(
             schema={
                 "name": tool_name,
                 "description": f"(guarded) {tool_name}",
-                "parameters": {"type": "object", "properties": {}},
+                "parameters": GUARDED_TOOL_SCHEMAS.get(tool_name, {"type": "object", "additionalProperties": True}),
             },
             handler=lambda args, _tn=_tool_name, _oh=_original: _guarded_handler(
                 bridge,

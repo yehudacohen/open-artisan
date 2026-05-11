@@ -105,7 +105,12 @@ class TestToolRegistration:
         apply = mock_ctx.get_registered_tool("oa_apply_task_boundary_change")
         assert apply is not None
         assert apply["toolset"] == TOOLSET_NAME
-        assert apply["parameters"]["required"] == ["task_id", "reason"]
+        assert apply["parameters"]["required"] == [
+            "task_id",
+            "reason",
+            "expected_impacted_tasks",
+            "expected_reset_tasks",
+        ]
         assert apply["parameters"]["properties"]["expected_reset_tasks"]["items"]["type"] == "string"
 
     def test_registers_patch_suggestion_application_tool(self, mock_ctx, mock_bridge):
@@ -684,7 +689,7 @@ class TestBridgeDelegation:
         parsed = json.loads(result)
         assert parsed["kind"] == "stale_bridge_recovered"
         assert parsed["pluginReloaded"] is False
-        assert started_bridge.get_calls("recover_stale_bridge")[0][1]["projectDir"].endswith("/open-artisan")
+        assert started_bridge.get_calls("recover_stale_bridge")[0][1]["projectDir"].endswith("/project")
         assert started_bridge.get_calls("lifecycle.sessionCreated") == []
 
     def test_request_review_dispatches_phase_review_immediately(self, started_bridge):

@@ -34,6 +34,7 @@ import { DEFAULT_BRIDGE_SOCKET_FILENAME, SHARED_BRIDGE_PROTOCOL_VERSION } from "
 import { createRoadmapSliceService } from "../../core/roadmap-slice-service"
 import { matchesRoadmapQuery, roadmapError, roadmapOk } from "../../core/roadmap-types"
 import { DEFAULT_OPEN_ARTISAN_DB_FILE_NAME, DEFAULT_OPEN_ARTISAN_DB_SCHEMA } from "../../core/open-artisan-repository-schema"
+import { createDiagnosticTrace } from "../../core/diagnostic-trace"
 import type { EngineContext } from "../../core/engine-context"
 import type { SubagentDispatcher } from "../../core/subagent-dispatcher"
 import type { NotificationSink } from "../../core/logger"
@@ -211,6 +212,7 @@ export const handleInit: MethodHandler = async (params, ctx) => {
     subagentDispatcher: externalReviewDispatcher,
     log,
     notify: noopNotify,
+    trace: createDiagnosticTrace(stateDir, "bridge"),
     graph,
     ...(runtimeBackend.services ? { openArtisanServices: runtimeBackend.services } : {}),
     designDocPath: null,

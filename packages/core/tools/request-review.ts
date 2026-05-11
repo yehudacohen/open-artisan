@@ -20,10 +20,7 @@ against the acceptance criteria using mark_satisfied.
 
 Pass artifact file references that the reviewer can read from disk.
 Relative artifact_files paths are resolved from the project directory before being stored.
-Do not pass legacy artifact_content; normal workflow review is file-based only.
-For workflow-authored markdown phases only, you may pass artifact_markdown with
-artifact_files: [] and the tool will materialize the canonical .openartisan file
-before review.
+Do not pass inline artifact content; normal workflow review is file-based only.
 
 Markdown artifacts are valid only for markdown phases:
 - DISCOVERY conventions: .openartisan/<feature>/conventions.md

@@ -117,7 +117,7 @@ export interface DbWorkflow {
   updatedAt: IsoTimestamp
 }
 
-export type DbWorkflowRuntimeEvent = "repository_import" | "phase_transition" | "fast_forward" | "patch_applied"
+export type DbWorkflowRuntimeEvent = "repository_import" | "phase_transition" | "fast_forward" | "patch_applied" | "progress"
 export type DbWorkflowEventSource = "compatibility-import" | "repository-api" | "runtime" | "manual"
 
 export interface DbWorkflowEventMetadata {
@@ -149,15 +149,35 @@ export interface DbWorkflowPhaseTransitionEvent extends DbWorkflowEventBase {
   metadata: DbWorkflowEventMetadata
 }
 
+export interface DbWorkflowProgressEvent extends DbWorkflowEventBase {
+  event: "progress"
+  fromPhase?: never
+  fromPhaseState?: never
+  toPhase?: never
+  toPhaseState?: never
+  sessionId: string
+  featureName: string | null
+  phase: Phase
+  phaseState: PhaseState
+  taskId: string | null
+  kind: string
+  status: "started" | "in-progress" | "succeeded" | "failed" | "blocked"
+  message: string
+  spanId: string | null
+  parentSpanId: string | null
+  parentEventId: string | null
+  metadata: DbWorkflowEventMetadata & { progress?: Record<string, unknown> }
+}
+
 export interface DbWorkflowRuntimeFactEvent extends DbWorkflowEventBase {
-  event: Exclude<DbWorkflowRuntimeEvent, "phase_transition">
+  event: Exclude<DbWorkflowRuntimeEvent, "phase_transition" | "progress">
   fromPhase?: never
   fromPhaseState?: never
   toPhase?: never
   toPhaseState?: never
 }
 
-export type DbWorkflowEvent = DbWorkflowStateMachineEvent | DbWorkflowPhaseTransitionEvent | DbWorkflowRuntimeFactEvent
+export type DbWorkflowEvent = DbWorkflowStateMachineEvent | DbWorkflowPhaseTransitionEvent | DbWorkflowProgressEvent | DbWorkflowRuntimeFactEvent
 export type DbWorkflowEventKind = DbWorkflowEvent["event"]
 
 export interface DbWorkflowRoadmapLink {
@@ -412,6 +432,7 @@ export interface OpenArtisanRepositoryLockOptions {
   timeoutMs?: number
   pollMs?: number
   leaseMs?: number
+  allowSameProcessReclaim?: boolean
 }
 
 export interface OpenArtisanRepositoryLock {

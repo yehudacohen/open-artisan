@@ -41,8 +41,8 @@ describe("Workflow template sync", () => {
       "oa_select_mode", "oa_mark_scan_complete", "oa_mark_analyze_complete",
       "oa_mark_satisfied", "oa_request_review", "oa_submit_feedback",
       "oa_mark_task_complete", "oa_check_prior_workflow", "oa_resolve_human_gate",
-      "oa_propose_backtrack", "oa_spawn_sub_workflow", "oa_query_parent_workflow",
-      "oa_query_child_workflow", "oa_state",
+      "oa_propose_backtrack", "oa_query_parent_workflow",
+      "oa_query_child_workflow", "oa_state", "oa_propose_direct_application",
     ]
     for (const tool of tools) {
       expect(content).toContain(tool)

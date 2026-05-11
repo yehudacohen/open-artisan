@@ -83,6 +83,7 @@ export interface OpenArtisanPGliteRepositoryOptions {
   }
   schemaName?: string
   accessQueue?: PGliteAccessQueue
+  allowSameProcessReclaim?: boolean
 }
 
 type DbExecutor = Kysely<OpenArtisanDatabase>
@@ -243,23 +244,23 @@ function buildImportedTaskGraph(state: WorkflowState, workflowId: string): DbTas
       taskKey: task.id,
       description: task.description,
       status: task.status,
-      category: task.category ?? "standalone",
+      category: task.humanGate ? "human-gate" : (task.category ?? "standalone"),
       complexity: task.estimatedComplexity,
       createdAt: nowIso(),
       updatedAt: nowIso(),
     })),
     dependencies: state.implDag.flatMap((task) =>
-      task.dependencies.map((dependency) => ({
+      unique(task.dependencies).map((dependency) => ({
         workflowId,
         fromTaskId: `${workflowId}:${dependency}`,
         toTaskId: `${workflowId}:${task.id}`,
       })),
     ),
     ownedFiles: state.implDag.flatMap((task) =>
-      task.expectedFiles.map((path) => ({ taskId: `${workflowId}:${task.id}`, path })),
+      unique(task.expectedFiles).map((path) => ({ taskId: `${workflowId}:${task.id}`, path })),
     ),
     expectedTests: state.implDag.flatMap((task) =>
-      task.expectedTests.map((path) => ({ taskId: `${workflowId}:${task.id}`, path })),
+      unique(task.expectedTests).map((path) => ({ taskId: `${workflowId}:${task.id}`, path })),
     ),
     roadmapLinks: [],
   }
@@ -362,6 +363,12 @@ export function createPGliteOpenArtisanRepository(
     return () => clearInterval(timer)
   }
 
+  function isRetryableLockAcquisitionError(error: unknown): boolean {
+    const message = error instanceof Error ? error.message : String(error)
+    return message.includes("Timed out acquiring DB operation lease") ||
+      /\bAborted\(\)|Build with -sASSERTIONS/i.test(message)
+  }
+
   async function acquireRepositoryLock(
     leaseKey: string,
     options: OpenArtisanRepositoryLockOptions = {},
@@ -382,6 +389,7 @@ export function createPGliteOpenArtisanRepository(
             timeoutMs: 0,
             pollMs: 0,
             leaseMs,
+            ...(options.allowSameProcessReclaim === undefined ? {} : { allowSameProcessReclaim: options.allowSameProcessReclaim }),
             renew: startQueuedLeaseRenewal,
           })
           return openArtisanDbOk({
@@ -392,8 +400,7 @@ export function createPGliteOpenArtisanRepository(
         })
       } catch (error) {
         lastError = error
-        const message = error instanceof Error ? error.message : String(error)
-        if (!message.includes("Timed out acquiring DB operation lease")) {
+        if (!isRetryableLockAcquisitionError(error)) {
           return dbFailure(`Open Artisan DB lock acquisition failed for ${leaseKey}`, error)
         }
       }
@@ -416,22 +423,40 @@ export function createPGliteOpenArtisanRepository(
       }
     }
 
-    try {
-      return await withDb("openartisan.withInitializedDb", async (db) => {
-        await ensureInitialized(db)
-        const lease = await acquireDatabaseOperationLease(asDatabaseOperationLeaseDb(db), schemaName, {
-          leaseKey: "open-artisan:repository-operation",
-          ownerId: leaseOwnerId,
-          renew: startQueuedLeaseRenewal,
+    const leaseKey = "open-artisan:repository-operation"
+    const deadline = Date.now() + DB_OPERATION_LEASE_TIMEOUT_MS
+    let lastError: unknown = null
+
+    while (true) {
+      try {
+        return await withDb("openartisan.withInitializedDb", async (db) => {
+          await ensureInitialized(db)
+          const lease = await acquireDatabaseOperationLease(asDatabaseOperationLeaseDb(db), schemaName, {
+            leaseKey,
+            ownerId: leaseOwnerId,
+            timeoutMs: 0,
+            pollMs: 0,
+            ...(options.allowSameProcessReclaim === undefined ? {} : { allowSameProcessReclaim: options.allowSameProcessReclaim }),
+            renew: startQueuedLeaseRenewal,
+          })
+          try {
+            return await run(db)
+          } finally {
+            await lease.release()
+          }
         })
-        try {
-          return await run(db)
-        } finally {
-          await lease.release()
+      } catch (error) {
+        lastError = error
+        if (!isRetryableLockAcquisitionError(error)) {
+          return dbFailure("Open Artisan DB operation failed", error)
         }
-      })
-    } catch (error) {
-      return dbFailure("Open Artisan DB operation failed", error)
+      }
+
+      if (Date.now() >= deadline) {
+        const suffix = lastError instanceof Error ? ` ${lastError.message}` : ""
+        return openArtisanDbError("lock-timeout", `Timed out acquiring DB operation lease ${leaseKey}.${suffix}`, true)
+      }
+      await sleep(DB_OPERATION_LEASE_POLL_MS)
     }
   }
 
@@ -1521,8 +1546,8 @@ export function createPGliteOpenArtisanRepository(
     },
 
     importWorkflowState(state: WorkflowState) {
-      const validationError = validateWorkflowState(state)
-      if (validationError) return Promise.resolve(invalidInput<JsonWorkflowImportResult>(String(validationError)))
+      const validation = validateWorkflowState(state, { format: "structured" })
+      if (!validation.success) return Promise.resolve(invalidInput<JsonWorkflowImportResult>(validation.error.message))
       return withInitializedDb(async (db) => {
         return withTransaction(db, async (db) => {
         const featureName = state.featureName ?? state.sessionId

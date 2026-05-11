@@ -79,6 +79,24 @@ describe("handleIdle — reprompt for active states", () => {
     expect(decision.message).toContain("mark_satisfied")
   })
 
+  it("escalates reviewer runtime failures instead of asking for more self-review", () => {
+    const state = makeState({
+      phase: "INTERFACES",
+      phaseState: "REVIEW",
+      retryCount: 0,
+      latestReviewResults: [{
+        criterion: "Isolated reviewer runtime failed",
+        met: false,
+        evidence: "Reviewer returned invalid JSON",
+      }],
+    })
+    const decision = handleIdle(state)
+    expect(decision.action).toBe("escalate")
+    if (decision.action !== "escalate") return
+    expect(decision.message).toContain("isolated reviewer/runtime failed")
+    expect(decision.message).toContain("do not keep revising the artifact")
+  })
+
   it("reprompts in REVIEW state on second idle", () => {
     const state = makeState({ phaseState: "REVIEW", retryCount: 1 })
     const decision = handleIdle(state)

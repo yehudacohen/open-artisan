@@ -1,6 +1,7 @@
 import { resolve } from "node:path"
 
 import type { EngineContext } from "#core/engine-context"
+import type { WorkflowState } from "#core/workflow-state-types"
 import {
   IDLE_COOLDOWN_MS,
   MAX_IDLE_RETRIES,
@@ -13,7 +14,7 @@ import { handleIdle } from "#core/hooks/idle-handler"
 import { buildSubagentContext, buildWorkflowSystemPrompt } from "#core/hooks/system-transform"
 import { extractWriteToolPaths, getPhaseToolPolicy, getTaskWriteFiles } from "#core/hooks/tool-guard"
 import { detectMode } from "#core/mode-detect"
-import { extractAgentName, isArtisanAgent, isWorkflowSessionActive, normalizeAgentName, persistActiveAgent } from "#core/agent-policy"
+import { extractAgentName, isArtisanAgent, isWorkflowSessionActive, normalizeAgentName } from "#core/agent-policy"
 import type { ModeDetectionResult } from "#core/mode-detection-types"
 
 type SessionEvent = { type: string; properties?: Record<string, unknown> }
@@ -38,14 +39,16 @@ function enforceWritePathPredicate(input: {
   phaseState: string
   allowedDescription: string
   projectRoot: string
-  args: Record<string, unknown> | undefined
+  args: unknown
   predicate: (filePath: string) => boolean
+  onMissingTarget?: () => void
 }): void {
   const filePaths = extractWriteToolPaths(input.args)
   if (filePaths.length === 0) {
+    input.onMissingTarget?.()
     throw new Error(
       `[Workflow] Tool "${input.tool}" is write-like but no target path could be extracted in ${input.phase}/${input.phaseState}. ` +
-      `Use a write/edit tool with an explicit file path. ${input.allowedDescription}`,
+      `${input.tool === "apply_patch" ? "Native apply_patch payloads do not expose patch text to Open Artisan's guard in OpenCode; use guarded_patch for OpenCode-style diffs, guarded_edit for exact-span edits, or guarded_write for whole-file writes. " : "Use a write/edit tool with an explicit file path. "}${input.allowedDescription}`,
     )
   }
   for (const filePath of filePaths) {
@@ -57,6 +60,20 @@ function enforceWritePathPredicate(input: {
       )
     }
   }
+}
+
+function summarizeToolPayload(value: unknown): string {
+  const seen = new WeakSet<object>()
+  const json = JSON.stringify(value, (_key, nested) => {
+    if (typeof nested === "function") return `[Function ${nested.name || "anonymous"}]`
+    if (nested && typeof nested === "object") {
+      if (seen.has(nested)) return "[Circular]"
+      seen.add(nested)
+    }
+    if (typeof nested === "string" && nested.length > 1200) return `${nested.slice(0, 1200)}...[truncated ${nested.length}]`
+    return nested
+  })
+  return (json ?? String(value)).slice(0, 5000)
 }
 
 function shouldForceWorkflowDormant(text: string): boolean {
@@ -86,6 +103,14 @@ function shouldForceWorkflowDormant(text: string): boolean {
     "do not use open artisan",
     "don't use open-artisan",
     "do not use open-artisan",
+    "fix open artisan itself",
+    "fix open-artisan itself",
+    "repair open artisan",
+    "repair open-artisan",
+    "work on open artisan itself",
+    "work on open-artisan itself",
+    "open artisan maintenance",
+    "open-artisan maintenance",
     "restarted the opencode session",
     "just restarted",
     "restarted",
@@ -103,6 +128,12 @@ function shouldActivateWorkflow(text: string): boolean {
     "use open artisan",
     "use openartisan",
     "use artisan",
+    "turn on open artisan",
+    "turn on open-artisan",
+    "turn on openartisan",
+    "open artisan on",
+    "open-artisan on",
+    "openartisan on",
     "turn on workflow",
     "enable workflow",
     "enable the workflow",
@@ -116,6 +147,11 @@ function isArtisanLockedSession(state: { activeAgent?: string | null }, detected
   return isArtisanAgent(detectedAgent) || persistedAgent === "artisan" || persistedAgent === "robot-artisan"
 }
 
+function shouldInjectIdlePrompts(): boolean {
+  const value = process.env["OPENARTISAN_IDLE_PROMPTS"]?.toLowerCase()
+  return !["0", "false", "off"].includes(value ?? "")
+}
+
 export function createPluginHooks({
   ctx,
   projectRoot,
@@ -124,13 +160,99 @@ export function createPluginHooks({
   extractModelConfig,
   logTransition,
 }: HookDeps) {
+  const nonrecoverableGuardBlocks = new Map<string, string>()
+  const dormantSessions = new Set<string>()
+
+  function stateTraceFields(sessionId: string | undefined): Record<string, unknown> {
+    if (!sessionId) return {}
+    const state = ctx.store.get(sessionId)
+    return {
+      sessionId,
+      activeSessionId: ctx.sessions.getActiveId(),
+      phase: state?.phase,
+      phaseState: state?.phaseState,
+      activeAgent: state?.activeAgent,
+      retryCount: state?.retryCount,
+      isWorkflowActive: state ? isWorkflowSessionActive(state) : false,
+    }
+  }
+
+  function traceHookStart(hook: string, fields: Record<string, unknown> = {}): number {
+    ctx.trace.record("hook.start", { hook, ...fields })
+    return Date.now()
+  }
+
+  function traceHookEnd(hook: string, started: number, sessionId?: string, fields: Record<string, unknown> = {}): void {
+    ctx.trace.record("hook.end", {
+      hook,
+      durationMs: Date.now() - started,
+      ...stateTraceFields(sessionId),
+      ...fields,
+    })
+  }
+
+  function markNonrecoverableGuardBlock(sessionId: string, message: string): void {
+    nonrecoverableGuardBlocks.set(sessionId, message)
+  }
+
+  function clearNonrecoverableGuardBlock(sessionId: string): void {
+    nonrecoverableGuardBlocks.delete(sessionId)
+  }
+
+  function isDormantSession(sessionId: string): boolean {
+    return dormantSessions.has(sessionId)
+  }
+
+  function markDormantSession(sessionId: string): void {
+    dormantSessions.add(sessionId)
+    ctx.trace.record("session.dormant", { sessionId, dormant: true })
+  }
+
+  function clearDormantSession(sessionId: string): void {
+    if (!dormantSessions.delete(sessionId)) return
+    ctx.trace.record("session.dormant", { sessionId, dormant: false })
+  }
+
+  function mutateHookMemory(hook: string, sessionId: string, label: string, mutator: (draft: WorkflowState) => void): boolean {
+    const state = ctx.store.get(sessionId)
+    if (!state) return false
+    mutator(state)
+    ctx.trace.record("hook.memoryMutation", {
+      hook,
+      sessionId,
+      label,
+      ...stateTraceFields(sessionId),
+    })
+    return true
+  }
+
+  function applyActiveAgentInMemory(hook: string, sessionId: string, agentName: string): string {
+    const normalized = normalizeAgentName(agentName)
+    if (!normalized) return agentName
+    const state = ctx.store.get(sessionId)
+    if (!state) return normalized
+    const persistedAgent = normalizeAgentName(state.activeAgent)
+    if (persistedAgent && !isArtisanAgent(persistedAgent)) return persistedAgent
+    if (isArtisanAgent(state.activeAgent) && !isArtisanAgent(normalized)) return persistedAgent ?? normalized
+    if (state.activeAgent === normalized) return normalized
+    mutateHookMemory(hook, sessionId, "activeAgent", (draft) => {
+      draft.activeAgent = normalized
+    })
+    return normalized
+  }
+
   return {
     event: async ({ event }: { event: SessionEvent }) => {
+      const hook = "event"
+      const started = traceHookStart(hook, { eventType: event.type })
+      let hookSessionId: string | undefined
+      let hookError: string | undefined
       const { store, log, sessions, lastRepromptTimestamps, notify } = ctx
       try {
         if (event.type === "session.created") {
           const info = event.properties?.["info"] as { id?: string; parentID?: string; [key: string]: unknown } | undefined
           const sessionId = info?.id
+          hookSessionId = sessionId
           if (!sessionId) return
 
           if (info?.parentID) {
@@ -138,6 +260,7 @@ export function createPluginHooks({
             return
           }
 
+          clearNonrecoverableGuardBlock(sessionId)
           sessions.registerPrimary(sessionId)
           sessions.setActive(sessionId)
           try {
@@ -151,7 +274,7 @@ export function createPluginHooks({
           try {
             const cwd = (info as any)?.path?.cwd ?? (info as any)?.path ?? process.cwd()
             const detectionResult = await detectMode(typeof cwd === "string" ? cwd : process.cwd())
-            await store.update(sessionId, (draft) => {
+            mutateHookMemory(hook, sessionId, "session.created.modeDetection", (draft) => {
               if (detectedAgent) {
                 draft.activeAgent = detectedAgent
               }
@@ -166,7 +289,10 @@ export function createPluginHooks({
         if (event.type === "session.deleted") {
           const info = event.properties?.["info"] as { id?: string } | undefined
           const sessionId = info?.id
+          hookSessionId = sessionId
           if (!sessionId) return
+          clearNonrecoverableGuardBlock(sessionId)
+          dormantSessions.delete(sessionId)
           sessions.unregister(sessionId)
           try {
             await store.delete(sessionId)
@@ -182,13 +308,38 @@ export function createPluginHooks({
             (event.properties?.["sessionId"] as string | undefined) ??
             (event.properties?.["session_id"] as string | undefined)
           )
+          hookSessionId = sessionId
           if (!sessionId) return
 
           const state = store.get(sessionId)
           if (!state) return
+          if (isDormantSession(sessionId)) return
           const activeSessionId = sessions.getActiveId()
-          if (activeSessionId && activeSessionId !== sessionId) return
           if (!isWorkflowSessionActive(state)) return
+
+          if (activeSessionId && activeSessionId !== sessionId) {
+            const activeState = store.get(activeSessionId)
+            const activeSessionOwnsWorkflow =
+              activeState !== null &&
+              activeState !== undefined &&
+              !sessions.isChild(activeSessionId) &&
+              isWorkflowSessionActive(activeState)
+
+            if (activeSessionOwnsWorkflow) {
+              log.debug("Idle ignored for non-active workflow session", {
+                detail: `sessionId=${sessionId} activeSessionId=${activeSessionId}`,
+              })
+              return
+            }
+
+            sessions.setActive(sessionId)
+          }
+
+          const guardBlock = nonrecoverableGuardBlocks.get(sessionId)
+          if (guardBlock) {
+            log.warn("Idle ignored after nonrecoverable workflow guard blocker", { sessionId, detail: guardBlock })
+            return
+          }
 
           const now = Date.now()
           const lastReprompt = lastRepromptTimestamps.get(sessionId) ?? 0
@@ -199,7 +350,7 @@ export function createPluginHooks({
             const timedOut = findTimedOutChildren(state)
             if (timedOut.length > 0) {
               try {
-                await store.update(sessionId, (draft) => {
+                mutateHookMemory(hook, sessionId, "idle.subWorkflowTimeout", (draft) => {
                   for (const to of timedOut) {
                     const aborted = applyDelegationTimeout(draft, to.taskId)
                     log.warn("Idle timeout: sub-workflow timed out", {
@@ -210,18 +361,34 @@ export function createPluginHooks({
                 const timeoutMsg = timedOut.map(
                   (to) => `Sub-workflow "${to.featureName}" for task "${to.taskId}" timed out after ${Math.round(to.elapsedMs / 60000)} minutes. The task and its dependents have been aborted.`,
                 ).join("\n")
-                await ctx.promptExistingSession(sessionId,
-                  `**Sub-workflow timeout detected:**\n${timeoutMsg}\n\n` +
-                  `Implement the timed-out task(s) directly or spawn a smaller sub-workflow.`,
-                )
+                if (shouldInjectIdlePrompts()) {
+                  await ctx.promptExistingSession(sessionId,
+                    `**Sub-workflow timeout detected:**\n${timeoutMsg}\n\n` +
+                    `Implement the timed-out task(s) directly or spawn a smaller sub-workflow.`,
+                    { reason: "sub-workflow-timeout", caller: "event.session.idle" },
+                  )
+                } else {
+                  ctx.trace.record("idle.prompt.skipped", { sessionId, reason: "sub-workflow-timeout" })
+                }
               } catch (err) {
-                log.warn("Failed to handle idle timeout", { detail: err instanceof Error ? err.message : String(err) })
+                const detail = err instanceof Error ? err.message : String(err)
+                ctx.trace.record("idle.subWorkflowTimeout.failed", { sessionId, error: detail })
+                log.warn("Failed to handle idle timeout", { detail })
               }
               return
             }
           }
 
           const decision = handleIdle(state)
+          ctx.trace.record("idle.decision", {
+            sessionId,
+            action: decision.action,
+            phase: state.phase,
+            phaseState: state.phaseState,
+            activeAgent: state.activeAgent,
+            retryCount: state.retryCount,
+            nextRetryCount: decision.action === "reprompt" ? decision.retryCount : undefined,
+          })
           if (decision.action === "ignore") return
 
           if (decision.action === "escalate") {
@@ -232,18 +399,26 @@ export function createPluginHooks({
               // ignore
             }
             try {
-              await store.update(sessionId, (draft) => { draft.retryCount = MAX_IDLE_RETRIES + 1 })
+              mutateHookMemory(hook, sessionId, "idle.escalationRetry", (draft) => { draft.retryCount = MAX_IDLE_RETRIES + 1 })
             } catch (e) {
               log.warn("Failed to reset retryCount on escalation", { detail: e instanceof Error ? e.message : String(e), sessionId })
             }
-            try {
-              await ctx.promptExistingSession(sessionId,
-                `WORKFLOW STALLED: You have stopped ${state.retryCount} times during ${state.phase}/${state.phaseState} ` +
-                `without completing the current step. Stop what you are doing and ask the user for guidance. ` +
-                `Explain what you were trying to do and where you got stuck.`,
-              )
-            } catch {
-              // ignore
+            if (shouldInjectIdlePrompts()) {
+              try {
+                await ctx.promptExistingSession(sessionId,
+                  `WORKFLOW STALLED: You have stopped ${state.retryCount} times during ${state.phase}/${state.phaseState} ` +
+                  `without completing the current step. Stop what you are doing and ask the user for guidance. ` +
+                  `Explain what you were trying to do and where you got stuck.`,
+                  { reason: "idle-escalation", caller: "event.session.idle" },
+                )
+              } catch (err) {
+                ctx.trace.record("idle.escalationPrompt.failed", {
+                  sessionId,
+                  error: err instanceof Error ? err.message : String(err),
+                })
+              }
+            } else {
+              ctx.trace.record("idle.prompt.skipped", { sessionId, reason: "idle-escalation" })
             }
             return
           }
@@ -251,16 +426,27 @@ export function createPluginHooks({
           log.warn(`Idle reprompt ${decision.retryCount}/${MAX_IDLE_RETRIES} at ${state.phase}/${state.phaseState}`, { sessionId })
           try {
             lastRepromptTimestamps.set(sessionId, Date.now())
-            await ctx.promptExistingSession(sessionId, decision.message)
-            await store.update(sessionId, (draft) => {
+            if (shouldInjectIdlePrompts()) {
+              await ctx.promptExistingSession(sessionId, decision.message, { reason: "idle-reprompt", caller: "event.session.idle" })
+            } else {
+              ctx.trace.record("idle.prompt.skipped", { sessionId, reason: "idle-reprompt", retryCount: decision.retryCount })
+            }
+            mutateHookMemory(hook, sessionId, "idle.retryCount", (draft) => {
               draft.retryCount = decision.retryCount
             })
-          } catch {
-            // ignore
+          } catch (err) {
+            ctx.trace.record("idle.reprompt.failed", {
+              sessionId,
+              retryCount: decision.retryCount,
+              error: err instanceof Error ? err.message : String(err),
+            })
           }
         }
       } catch (e) {
+        hookError = e instanceof Error ? e.message : String(e)
         log.error("Unhandled error in event hook", { detail: e instanceof Error ? e.stack ?? e.message : String(e) })
+      } finally {
+        traceHookEnd(hook, started, hookSessionId, { eventType: event.type, ...(hookError ? { error: hookError } : {}) })
       }
     },
 
@@ -268,6 +454,11 @@ export function createPluginHooks({
       input: { sessionID?: string; sessionId?: string; session_id?: string; messageID?: string; [key: string]: unknown },
       output: { message: { sessionID?: string; sessionId?: string; id?: string }; parts: Array<{ type: string; text?: string; id?: string; sessionID?: string; messageID?: string }> },
     ) => {
+      const hook = "chat.message"
+      const started = traceHookStart(hook)
+      let hookSessionId: string | undefined
+      let hookError: string | undefined
+      let didMutateOutput = false
       const { store, log, notify, sessions } = ctx
       try {
         const sessionId = (
@@ -277,6 +468,7 @@ export function createPluginHooks({
           (output.message?.sessionID as string | undefined) ??
           (output.message?.sessionId as string | undefined)
         )
+        hookSessionId = sessionId
         if (!sessionId) return
         sessions.setActive(sessionId)
 
@@ -291,42 +483,49 @@ export function createPluginHooks({
           .trim()
 
         if (textContent && shouldActivateWorkflow(textContent) && !isArtisanLockedSession(state, detectedAgent)) {
-          await store.update(sessionId, (draft) => {
+          clearDormantSession(sessionId)
+          mutateHookMemory(hook, sessionId, "chat.activateWorkflow", (draft) => {
             draft.activeAgent = "build-artisan"
             draft.retryCount = 0
             draft.userGateMessageReceived = false
           })
+          ctx.trace.record("chat.activeAgent.changed", { sessionId, from: state.activeAgent, to: "build-artisan", reason: "explicit-opt-in" })
         }
 
         if (detectedAgent) {
-          await persistActiveAgent(store, sessionId, detectedAgent)
+          if (!isDormantSession(sessionId)) {
+            applyActiveAgentInMemory(hook, sessionId, detectedAgent)
+          }
         }
 
         const refreshedState = store.get(sessionId)
         if (!refreshedState) return
 
         if (textContent && refreshedState.retryCount > MAX_IDLE_RETRIES) {
-          await store.update(sessionId, (draft) => {
+          mutateHookMemory(hook, sessionId, "chat.retryReset", (draft) => {
             draft.retryCount = 0
           })
         }
+        if (textContent) clearNonrecoverableGuardBlock(sessionId)
 
         if (
           textContent &&
           shouldForceWorkflowDormant(textContent) &&
           (!isArtisanLockedSession(refreshedState, detectedAgent) || explicitlyNamesOpenArtisan(textContent))
         ) {
-          await store.update(sessionId, (draft) => {
+          markDormantSession(sessionId)
+          mutateHookMemory(hook, sessionId, "chat.forceDormant", (draft) => {
             draft.activeAgent = "build"
             draft.retryCount = 0
             draft.userGateMessageReceived = false
           })
+          ctx.trace.record("chat.activeAgent.changed", { sessionId, from: refreshedState.activeAgent, to: "build", reason: "explicit-opt-out" })
           return
         }
         if (!isWorkflowSessionActive(refreshedState, detectedAgent)) return
 
         if (refreshedState.phase === "DONE") {
-          await store.update(sessionId, (draft) => {
+          mutateHookMemory(hook, sessionId, "chat.doneReset", (draft) => {
             draft.phase = "MODE_SELECT"
             draft.phaseState = "DRAFT"
             draft.iterationCount = 0
@@ -357,7 +556,7 @@ export function createPluginHooks({
         const messageId = (input.messageID as string | undefined) ?? (output.message?.id as string | undefined) ?? ""
 
         if (textContent) {
-          await store.update(sessionId, (draft) => {
+          mutateHookMemory(hook, sessionId, "chat.userMessage", (draft) => {
             draft.userMessages.push(textContent)
             if (!draft.intentBaseline) {
               draft.intentBaseline = textContent.slice(0, MAX_INTENT_BASELINE_CHARS)
@@ -368,8 +567,19 @@ export function createPluginHooks({
         if (refreshedState.phaseState !== "USER_GATE") return
 
         const result = processUserMessage(refreshedState, output.parts)
+        ctx.trace.record("chat.userGate.routing", {
+          sessionId,
+          intercepted: result.intercepted,
+          feedbackType: result.feedbackType,
+          phase: refreshedState.phase,
+          phaseState: refreshedState.phaseState,
+        })
         if (result.intercepted) {
           const injectedText = result.parts[0]?.text ?? ""
+          mutateHookMemory(hook, sessionId, "chat.userGateReceived", (draft) => {
+            draft.userGateMessageReceived = true
+          })
+
           if (injectedText) {
             output.parts.splice(0, 0, {
               type: "text",
@@ -378,14 +588,14 @@ export function createPluginHooks({
               sessionID: sessionId,
               messageID: messageId,
             })
+            didMutateOutput = true
           }
-
-          await store.update(sessionId, (draft) => {
-            draft.userGateMessageReceived = true
-          })
         }
       } catch (e) {
+        hookError = e instanceof Error ? e.message : String(e)
         log.error("Unhandled error in chat.message hook", { detail: e instanceof Error ? e.stack ?? e.message : String(e) })
+      } finally {
+        traceHookEnd(hook, started, hookSessionId, { didMutateOutput, ...(hookError ? { error: hookError } : {}) })
       }
     },
 
@@ -393,9 +603,15 @@ export function createPluginHooks({
       input: { sessionID?: string; sessionId?: string; session_id?: string; model?: unknown },
       output: { system: string[] },
     ) => {
+      const hook = "experimental.chat.system.transform"
+      const started = traceHookStart(hook)
+      let hookSessionId: string | undefined
+      let hookError: string | undefined
+      let injected = false
       const { store, log, sessions } = ctx
       try {
         const sessionId = (input.sessionID ?? input.sessionId ?? input.session_id) as string | undefined
+        hookSessionId = sessionId
         if (!sessionId) return
         sessions.setActive(sessionId)
 
@@ -413,10 +629,11 @@ export function createPluginHooks({
 
         const state = store.get(sessionId)
         if (!state) return
+        if (isDormantSession(sessionId)) return
 
         const detectedAgent = extractAgentName(input)
         if (detectedAgent) {
-          await persistActiveAgent(store, sessionId, detectedAgent)
+          applyActiveAgentInMemory(hook, sessionId, detectedAgent)
         }
 
         const refreshedState = store.get(sessionId)
@@ -433,7 +650,7 @@ export function createPluginHooks({
             || current.modelID !== modelConfig.modelID
             || (current.providerID ?? undefined) !== (modelConfig.providerID ?? undefined)
           if (changed) {
-            await store.update(sessionId, (draft) => {
+            mutateHookMemory(hook, sessionId, "system.sessionModel", (draft) => {
               draft.sessionModel = modelConfig
             })
           }
@@ -444,18 +661,31 @@ export function createPluginHooks({
         if (!isWorkflowSessionActive(refreshedState, detectedAgent)) return
 
         output.system.push(buildWorkflowSystemPrompt(refreshedState))
+        injected = true
         if (refreshedState.phaseState === "USER_GATE") {
           output.system.push(buildUserGateHint(refreshedState.phase, refreshedState.phaseState))
         }
       } catch (e) {
+        hookError = e instanceof Error ? e.message : String(e)
         log.error("Unhandled error in system.transform hook", { detail: e instanceof Error ? e.stack ?? e.message : String(e) })
+      } finally {
+        traceHookEnd(hook, started, hookSessionId, { injected, ...(hookError ? { error: hookError } : {}) })
       }
     },
 
-    "tool.execute.before": async (input: { sessionID?: string; sessionId?: string; session_id?: string; tool: string; args?: Record<string, unknown> }) => {
+    "tool.execute.before": async (
+      input: { sessionID?: string; sessionId?: string; session_id?: string; tool: string; args?: Record<string, unknown> },
+      output?: { args?: Record<string, unknown> },
+    ) => {
+      const hook = "tool.execute.before"
+      const started = traceHookStart(hook, { tool: input.tool })
+      let hookSessionId: string | undefined
+      let hookError: string | undefined
+      let policySource: "session" | "parent" | "none" = "none"
       const { store, log, sessions } = ctx
       try {
         const sessionId = (input.sessionID ?? input.sessionId ?? input.session_id) as string | undefined
+        hookSessionId = sessionId
         if (!sessionId) return
 
         const parentId = sessions.getParent(sessionId)
@@ -473,6 +703,7 @@ export function createPluginHooks({
             }
             const parentState = store.get(parentId)
             if (!parentState) return
+            policySource = "parent"
             const rawParentTaskFiles = parentState.currentTaskId && parentState.implDag
               ? getTaskWriteFiles(parentState.implDag.find((task) => task.id === parentState.currentTaskId))
               : undefined
@@ -492,7 +723,8 @@ export function createPluginHooks({
               )
             }
             if (policy.bashCommandPredicate && toolName.includes("bash")) {
-              const command = (input.args?.["command"] ?? input.args?.["cmd"] ?? input.args?.["script"] ?? "") as string
+              const toolArgs = output?.args ?? input.args
+              const command = (toolArgs?.["command"] ?? toolArgs?.["cmd"] ?? toolArgs?.["script"] ?? "") as string
               if (command && !policy.bashCommandPredicate(command)) {
                 throw new Error(
                   `[Workflow] Bash command blocked in INCREMENTAL mode — file-write operators (>, >>, tee, sed -i) are not allowed.`,
@@ -507,20 +739,29 @@ export function createPluginHooks({
                 phaseState: parentState.phaseState,
                 allowedDescription: policy.allowedDescription,
                 projectRoot,
-                args: input.args,
+                args: { ...input, args: output?.args ?? input.args },
                 predicate: policy.writePathPredicate,
+                onMissingTarget: () => {
+                  const message = `Tool "${input.tool}" had no extractable target path in ${parentState.phase}/${parentState.phaseState}.`
+                  markNonrecoverableGuardBlock(parentId, message)
+                  if (toolName === "apply_patch") {
+                    log.warn("OPENARTISAN_APPLY_PATCH_PAYLOAD_DIAGNOSTIC", { detail: `${message} payload=${summarizeToolPayload(input)}` })
+                  }
+                },
               })
             }
+            clearNonrecoverableGuardBlock(parentId)
             return
           }
         }
 
         const state = store.get(sessionId)
         if (!state) return
+        if (isDormantSession(sessionId)) return
 
         const detectedAgent = extractAgentName(input)
         if (detectedAgent) {
-          await persistActiveAgent(store, sessionId, detectedAgent)
+          applyActiveAgentInMemory(hook, sessionId, detectedAgent)
         }
 
         const refreshedState = store.get(sessionId)
@@ -530,6 +771,7 @@ export function createPluginHooks({
         if (!isWorkflowSessionActive(refreshedState, detectedAgent)) return
         if (WORKFLOW_TOOL_NAMES.has(input.tool)) return
         if (passthroughToolNames.has(input.tool.toLowerCase())) return
+        policySource = "session"
 
         const rawTaskFiles = refreshedState.currentTaskId && refreshedState.implDag
           ? getTaskWriteFiles(refreshedState.implDag.find((task) => task.id === refreshedState.currentTaskId))
@@ -551,7 +793,8 @@ export function createPluginHooks({
           )
         }
         if (policy.bashCommandPredicate && toolName.includes("bash")) {
-          const command = (input.args?.["command"] ?? input.args?.["cmd"] ?? input.args?.["script"] ?? "") as string
+          const toolArgs = output?.args ?? input.args
+          const command = (toolArgs?.["command"] ?? toolArgs?.["cmd"] ?? toolArgs?.["script"] ?? "") as string
           if (command && !policy.bashCommandPredicate(command)) {
             throw new Error(
               `[Workflow] Bash command blocked in INCREMENTAL mode — file-write operators (>, >>, tee, sed -i) are not allowed. ` +
@@ -567,13 +810,24 @@ export function createPluginHooks({
             phaseState: refreshedState.phaseState,
             allowedDescription: policy.allowedDescription,
             projectRoot,
-            args: input.args,
+            args: { ...input, args: output?.args ?? input.args },
             predicate: policy.writePathPredicate,
+            onMissingTarget: () => {
+              const message = `Tool "${input.tool}" had no extractable target path in ${refreshedState.phase}/${refreshedState.phaseState}.`
+              markNonrecoverableGuardBlock(sessionId, message)
+              if (toolName === "apply_patch") {
+                log.warn("OPENARTISAN_APPLY_PATCH_PAYLOAD_DIAGNOSTIC", { detail: `${message} payload=${summarizeToolPayload(input)}` })
+              }
+            },
           })
         }
+        clearNonrecoverableGuardBlock(sessionId)
       } catch (e) {
+        hookError = e instanceof Error ? e.message : String(e)
         if (e instanceof Error && e.message.startsWith("[Workflow]")) throw e
         log.error("Unhandled error in tool.execute.before hook", { detail: e instanceof Error ? e.stack ?? e.message : String(e) })
+      } finally {
+        traceHookEnd(hook, started, hookSessionId, { tool: input.tool, policySource, ...(hookError ? { error: hookError } : {}) })
       }
     },
 
@@ -581,18 +835,66 @@ export function createPluginHooks({
       input: { sessionID?: string; sessionId?: string; session_id?: string },
       output: { context?: string[] },
     ) => {
+      const hook = "experimental.session.compacting"
+      const started = traceHookStart(hook)
+      let hookSessionId: string | undefined
+      let hookError: string | undefined
+      let injected = false
       const { store, log } = ctx
       try {
         const sessionId = (input.sessionID ?? input.sessionId ?? input.session_id) as string | undefined
+        hookSessionId = sessionId
         if (!sessionId) return
         const state = store.get(sessionId)
         if (!state) return
+        if (isDormantSession(sessionId)) return
         if (!isWorkflowSessionActive(state)) return
 
         output.context ??= []
         output.context.push(buildCompactionContext(state))
+        injected = true
       } catch (e) {
+        hookError = e instanceof Error ? e.message : String(e)
         log.error("Unhandled error in compacting hook", { detail: e instanceof Error ? e.stack ?? e.message : String(e) })
+      } finally {
+        traceHookEnd(hook, started, hookSessionId, { injected, ...(hookError ? { error: hookError } : {}) })
+      }
+    },
+
+    "experimental.compaction.autocontinue": async (
+      input: { sessionID?: string; sessionId?: string; session_id?: string },
+      output: { enabled: boolean },
+    ) => {
+      const hook = "experimental.compaction.autocontinue"
+      const started = traceHookStart(hook)
+      let hookSessionId: string | undefined
+      let hookError: string | undefined
+      let disabled = false
+      const { store, log } = ctx
+      try {
+        const sessionId = (input.sessionID ?? input.sessionId ?? input.session_id) as string | undefined
+        hookSessionId = sessionId
+        if (!sessionId) return
+        const state = store.get(sessionId)
+        if (!state) return
+        if (isDormantSession(sessionId)) return
+        if (!isWorkflowSessionActive(state)) return
+
+        if (
+          state.phaseState === "USER_GATE" ||
+          state.phaseState === "ESCAPE_HATCH" ||
+          state.phaseState === "HUMAN_GATE" ||
+          state.phase === "MODE_SELECT" ||
+          state.phase === "DONE"
+        ) {
+          output.enabled = false
+          disabled = true
+        }
+      } catch (e) {
+        hookError = e instanceof Error ? e.message : String(e)
+        log.error("Unhandled error in compaction.autocontinue hook", { detail: e instanceof Error ? e.stack ?? e.message : String(e) })
+      } finally {
+        traceHookEnd(hook, started, hookSessionId, { disabled, ...(hookError ? { error: hookError } : {}) })
       }
     },
   }

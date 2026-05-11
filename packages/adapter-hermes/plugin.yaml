@@ -15,9 +15,12 @@ tools:
   - oa_reset_task
   - oa_request_review
   - oa_submit_feedback
+  - oa_scheduling_complete
+  - oa_phase_skipped
   - oa_check_prior_workflow
   - oa_resolve_human_gate
   - oa_propose_backtrack
+  - oa_propose_direct_application
   - oa_spawn_sub_workflow
   - oa_analyze_task_boundary_change
   - oa_apply_task_boundary_change

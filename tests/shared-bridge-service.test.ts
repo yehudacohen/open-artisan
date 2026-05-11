@@ -269,10 +269,3 @@ describe("shared bridge shutdown eligibility", () => {
     expect(eligibility.activeClientCount).toBe(0)
   })
 })
-
-describe("shared bridge future tasks", () => {
-  it.todo("T3 implements shutdown eligibility and service lifetime behavior", () => {})
-  it.todo("T4 integrates Claude Code shared-bridge attach behavior", () => {})
-  it.todo("T5 integrates Hermes shared-bridge attach behavior", () => {})
-  it.todo("T6 verifies full bridge and adapter dogfooding flows", () => {})
-})

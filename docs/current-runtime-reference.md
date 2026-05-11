@@ -12,7 +12,7 @@ GitHub Actions runs the same command on pushes and pull requests via `.github/wo
 
 Current workflow schema version: v24.
 
-Default DB path: `.openartisan/workflow-db/open-artisan.pg`.
+Default PGlite data directory: `.openartisan/workflow-db/`.
 
 Filesystem compatibility state path: `.openartisan/<featureName>/workflow-state.json`.
 
@@ -24,7 +24,7 @@ Legacy single-file state is migrated on load. Future schema versions are rejecte
 
 Phase and task reviews are isolated-reviewer submissions. Bridge adapters request review context, receive a one-time `OPEN_ARTISAN_REVIEW_TOKEN`, spawn an isolated reviewer, and submit the reviewer result with `review_token`.
 
-Author-facing Claude/Hermes tools must not call `mark_satisfied`, `submit_task_review`, or `submit_phase_review` directly.
+Author-facing Claude/Hermes tools must not call `mark_satisfied`, `submit_task_review`, or `submit_phase_review` directly. Bridge `tool.execute` structurally rejects reviewer submission tools outside isolated-reviewer invocation, and rejects `mark_satisfied` unless the bridge was explicitly initialized in `agent-only` review mode.
 
 ## Adapter Boundaries
 
@@ -33,6 +33,8 @@ OpenCode is the native plugin adapter and still owns some direct workflow handle
 Claude Code uses a Unix socket bridge protected by `.openartisan/.bridge-token`; hooks fail closed for write-like tools when Open Artisan is enabled but the bridge guard is unavailable.
 
 Hermes uses the bridge client and the same socket token when attaching to a shared Claude bridge.
+
+The stdio bridge rejects oversized JSON-RPC request lines and converts transport-loop failures into JSON-RPC errors instead of allowing unhandled rejections to terminate the process.
 
 ## DB Runtime
 

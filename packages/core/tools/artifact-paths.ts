@@ -9,10 +9,9 @@
  * - GREENFIELD/REFACTOR modes: we use glob-based heuristics per phase since there is
  *   no explicit allowlist. These are best-effort — the reviewer will fall back to
  *   "no specific paths" mode if the paths are empty or files do not exist.
- * - PLANNING/IMPL_PLAN: artifacts are in-memory documents (not written to disk by
- *   the workflow itself), so we return [] and the reviewer uses conversation context.
- * - DISCOVERY: conventions document is stored in state.conventions (not a file),
- *   return [].
+ * - DISCOVERY/PLANNING/IMPL_PLAN: artifacts are canonical files under
+ *   .openartisan/<feature>/ when submitted for review; return persisted paths when
+ *   available.
  *
  * The returned paths are absolute. Callers must not assume the files exist — the
  * reviewer's prompt gracefully handles the empty-paths case.
@@ -88,9 +87,9 @@ export function resolveArtifactPaths(
     case "DONE":
       return []
 
-    // Phases whose artifacts are written to .openartisan/ at approval time.
+    // Phases whose artifacts are submitted as canonical .openartisan/ files.
     // If the disk path exists in state, return it so the reviewer reads the real file.
-    // Fall back to [] if not yet written (e.g. first review before any approval).
+    // Fall back to [] if not yet registered by request_review.
     case "DISCOVERY": {
       const p = artifactDiskPaths["conventions"]
       return p && existsSync(p) ? [p] : []

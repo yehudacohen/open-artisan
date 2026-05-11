@@ -51,6 +51,14 @@ export type ProposeBacktrackOutcome =
 
 import { PHASE_ORDER } from "../constants"
 
+function isBacktrackAuthoringState(state: WorkflowState): boolean {
+  return (
+    state.phaseState === "DRAFT" ||
+    state.phaseState === "REVISE" ||
+    (state.phase === "IMPLEMENTATION" && state.phaseState === "TASK_REVISE")
+  )
+}
+
 // ---------------------------------------------------------------------------
 // Handler
 // ---------------------------------------------------------------------------
@@ -60,12 +68,14 @@ export async function handleProposeBacktrack(
   state: WorkflowState,
   orchestrator: Orchestrator,
 ): Promise<ProposeBacktrackOutcome> {
-  // 1. PhaseState guard — only valid from agent-active working states
-  if (state.phaseState !== "DRAFT" && state.phaseState !== "REVISE") {
+  // 1. PhaseState guard — only valid from agent-active working states.
+  // TASK_REVISE is the implementation-phase repair state where an isolated
+  // reviewer may reveal that the approved upstream scope must change.
+  if (!isBacktrackAuthoringState(state)) {
     return {
       action: "error",
       message:
-        `propose_backtrack can only be called from DRAFT or REVISE state ` +
+        `propose_backtrack can only be called from DRAFT, REVISE, or IMPLEMENTATION/TASK_REVISE state ` +
         `(current: ${state.phase}/${state.phaseState}).`,
     }
   }

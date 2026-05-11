@@ -105,7 +105,7 @@ Do not defer Open Artisan defects if they are actively blocking or degrading the
 
 At natural boundaries inspect:
 
-- `.opencode/openartisan-errors.log` when present
+- `.openartisan/openartisan-errors.log` when present
 - `.openartisan/<feature>/workflow-state.json` when present
 - current phase artifacts under `.openartisan/<feature>/` when present
 - current worktree state

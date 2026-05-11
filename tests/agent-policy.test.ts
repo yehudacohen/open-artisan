@@ -86,4 +86,18 @@ describe("agent-policy", () => {
     expect(persisted).toBe("artisan")
     expect(store.get("s1")?.activeAgent).toBe("artisan")
   })
+
+  it("does not reactivate an explicitly dormant session from transient artisan metadata", async () => {
+    const dir = await makeTempDir("agent-policy-dormant-")
+    const store = createSessionStateStore(createFileSystemStateBackend(dir))
+    await store.create("s1")
+    await store.update("s1", (draft) => {
+      draft.activeAgent = "build"
+    })
+
+    const persisted = await persistActiveAgent(store, "s1", "artisan")
+
+    expect(persisted).toBe("build")
+    expect(store.get("s1")?.activeAgent).toBe("build")
+  })
 })

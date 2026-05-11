@@ -135,13 +135,6 @@ export interface RequestReviewArgs {
    * Inline artifact content is intentionally not part of the public contract.
    */
   artifact_files: string[]
-  /**
-   * Markdown artifact text for workflow-authored markdown phases only.
-   * Tool handlers may materialize this to .openartisan/<feature>/<artifact>.md
-   * before review. This is intentionally distinct from legacy artifact_content,
-   * which is not accepted as a review source of truth.
-   */
-  artifact_markdown?: string
 }
 
 /**

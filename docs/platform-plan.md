@@ -58,7 +58,8 @@ Delegation of DAG tasks to independent child workflow sessions.
 
 - `parentWorkflow` and `childWorkflows` fields on WorkflowState
 - `"delegated"` TaskStatus (treated like in-flight for dependencies)
-- Tools: `spawn_sub_workflow`, `query_parent_workflow`, `query_child_workflow`
+- OpenCode tools: `spawn_sub_workflow`, `query_parent_workflow`, `query_child_workflow`
+- Bridge adapters currently expose read-only parent/child queries; child session spawning waits for adapter-managed session creation.
 - State nesting: `.openartisan/<parent>/sub/<child>/workflow-state.json`
 - Timeout detection (`SUB_WORKFLOW_TIMEOUT_MS` = 30 min)
 - Cascade abort sync when parent plan changes

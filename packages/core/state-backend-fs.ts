@@ -19,6 +19,9 @@ const LOCK_FILE = ".lock"
 const ROADMAP_NAMESPACE_DIR = "roadmap"
 const ROADMAP_STATE_FILE = "roadmap-state.json"
 const ROADMAP_SCHEMA_VERSION = 1
+const WORKFLOW_DB_DIR = "workflow-db"
+const WORKFLOW_DB_LOCKS_DIR = "workflow-db-locks"
+const RESERVED_ROOT_SCAN_DIRS = new Set([WORKFLOW_DB_DIR, WORKFLOW_DB_LOCKS_DIR])
 
 export interface FileLockOptions {
   timeoutMs?: number
@@ -197,6 +200,7 @@ export function createFileSystemStateBackend(baseDir: string): StateBackend {
         try { entries = readdirSync(dir) } catch { return }
         for (const entry of entries) {
           if (entry.startsWith(".")) continue // skip hidden dirs (.lock, .git, etc.)
+          if (depth === 0 && RESERVED_ROOT_SCAN_DIRS.has(entry)) continue
           const fullPath = join(dir, entry)
           try { if (!lstatSync(fullPath).isDirectory()) continue } catch { continue }
           const featurePath = prefix ? `${prefix}/${entry}` : entry

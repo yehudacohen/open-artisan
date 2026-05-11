@@ -1,7 +1,7 @@
 /**
  * message.ts — Bridge message processing method.
  *
- * message.process: Process a user message, inject routing hints at USER_GATE.
+ * message.process: Process a user message and inject routing hints at workflow gates.
  */
 import { JSONRPCErrorException } from "json-rpc-2.0"
 import type { MethodHandler } from "../server"
@@ -33,8 +33,8 @@ export const handleMessageProcess: MethodHandler = async (params, ctx) => {
     })
   }
 
-  // If a real user message was intercepted at USER_GATE, mark that human input
-  // was received. Synthetic adapter messages must not satisfy this guard.
+  // If a real user message was intercepted at a workflow gate, mark that human
+  // input was received. Synthetic adapter messages must not satisfy this guard.
   if (result.intercepted && p.source !== "synthetic") {
     await store.update(p.sessionId, (draft) => {
       draft.userGateMessageReceived = true

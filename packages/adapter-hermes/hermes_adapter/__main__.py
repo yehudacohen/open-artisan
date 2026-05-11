@@ -49,20 +49,28 @@ def _install_plugin_into_profile(profile_name: str) -> Path:
     return profile_plugins
 
 
-def _write_profile_env(profile_name: str, bridge_cli: str) -> Path:
+def _write_profile_env(profile_name: str, bridge_cli: str, project_dir: Path) -> Path:
     env_path = _profile_root(profile_name) / ".env"
     env_path.parent.mkdir(parents=True, exist_ok=True)
-    line = f"OPENARTISAN_BRIDGE_CLI={bridge_cli}"
+    desired = {
+        "OPENARTISAN_BRIDGE_CLI": bridge_cli,
+        "OPENARTISAN_PROJECT_DIR": str(project_dir),
+    }
     existing = env_path.read_text("utf-8") if env_path.exists() else ""
     lines = existing.splitlines()
+    seen: set[str] = set()
     for idx, current in enumerate(lines):
-        if current.startswith("OPENARTISAN_BRIDGE_CLI="):
-            lines[idx] = line
-            break
-    else:
+        key = current.split("=", 1)[0]
+        if key in desired:
+            lines[idx] = f"{key}={desired[key]}"
+            seen.add(key)
+
+    for key, value in desired.items():
+        if key in seen:
+            continue
         if lines and lines[-1] != "":
             lines.append("")
-        lines.append(line)
+        lines.append(f"{key}={value}")
     env_path.write_text("\n".join(lines) + "\n", "utf-8")
     return env_path
 
@@ -123,9 +131,9 @@ def setup(project_dir: str, profile_name: str | None = None) -> None:
         print(f"  Bridge CLI: {' '.join(cmd)}")
         if profile_name:
             plugin_dir = _install_plugin_into_profile(profile_name)
-            env_path = _write_profile_env(profile_name, cmd[-1])
+            env_path = _write_profile_env(profile_name, cmd[-1], project)
             print(f"  Installed plugin into Hermes profile: {plugin_dir}")
-            print(f"  Wrote OPENARTISAN_BRIDGE_CLI to: {env_path}")
+            print(f"  Wrote OPENARTISAN_BRIDGE_CLI and OPENARTISAN_PROJECT_DIR to: {env_path}")
     except RuntimeError as e:
         print(f"  Warning: {e}", file=sys.stderr)
         print(

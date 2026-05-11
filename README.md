@@ -48,7 +48,7 @@ The agent drafts an artifact, an **isolated reviewer subagent** evaluates it aga
 - **Orchestrator routing** -- User feedback is classified as tactical (agent handles autonomously) or strategic (escalated to the user via escape hatch). Cascade depth >= 3 forces escalation.
 - **Revision baseline** -- A diff gate prevents lazy no-op revisions by comparing artifact state at REVISE entry vs. review submission.
 - **Per-task review and drift detection** -- After each implementation task, an isolated reviewer checks the work and a lightweight drift check updates downstream task descriptions.
-- **Tool guards** -- Phase-specific tool restrictions enforced in code. Write/edit tools are blocked during planning phases; bash write operators are blocked in incremental mode.
+- **Tool guards** -- Phase-specific tool restrictions enforced in code. Write/edit tools are constrained to the project root and phase-appropriate paths; bash write operators and common filesystem mutation commands are blocked in read-only states.
 - **Git checkpoints** -- A tagged commit is created at every approval gate (`workflow/<phase>-v<N>`).
 
 ### Agent Architecture
@@ -169,9 +169,11 @@ open-artisan/
 |       +-- discovery/           # Parallel scanner fleet
 |       +-- prompts/             # Phase-specific prompt templates
 |       +-- ...                  # Other modules (DAG, scheduler, review, etc.)
-+-- tests/                       # 1,121 tests across 38 files
++-- tests/                       # TypeScript runtime/integration tests
++-- packages/adapter-hermes/tests/ # Hermes adapter Python tests
 +-- docs/                        # Design documents
-    +-- structured-workflow-design.md   # Full design specification (v14)
+    +-- structured-workflow-design.md   # Historical design specification
+    +-- current-runtime-reference.md    # Current runtime reference
 ```
 
 ## Development
@@ -179,10 +181,10 @@ open-artisan/
 ### Running Tests
 
 ```bash
-bun run test
+bun run verify:all
 ```
 
-The full suite uses the repository test script because PGlite-heavy tests need a longer timeout and serial execution. Use `bun test <file>` for focused files.
+The full verification command checks generated artifacts, TypeScript, whitespace, Bun test shards, PGlite-heavy tests, and Hermes Python tests. Use `bun test <file>` or the `test:*` shard scripts for focused work.
 
 ### Watching Tests
 
@@ -198,13 +200,14 @@ Set the `OPENARTISAN_DEBUG` environment variable to enable debug output:
 OPENARTISAN_DEBUG=1 opencode
 ```
 
-Errors and warnings are always persisted to `.opencode/openartisan-errors.log` as JSON lines, regardless of the debug flag.
+Errors and warnings are always persisted to `.openartisan/openartisan-errors.log` as JSON lines, regardless of the debug flag.
 
 ## Design Documents
 
 For a deep dive into the architecture and design decisions:
 
-- **[Structured Workflow Design](docs/structured-workflow-design.md)** -- The full design specification (v14), covering all 8 phases, 34 valid state combinations, the artifact dependency graph, orchestrator routing, escape hatch flow, tool policy table, and more.
+- **[Current Runtime Reference](docs/current-runtime-reference.md)** -- Concise current-state reference for verification, persistence, review boundaries, adapters, and roadmap runtime.
+- **[Structured Workflow Design](docs/structured-workflow-design.md)** -- Historical design specification covering the phased workflow, artifact dependency graph, orchestrator routing, escape hatch flow, and tool policy table.
 
 ## License
 

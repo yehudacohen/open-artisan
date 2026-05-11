@@ -70,6 +70,16 @@ describe("computeRequestReviewTransition", () => {
     expect(result.transition.nextPhaseState).toBe("REVIEW")
   })
 
+  it("uses draft_complete from REDRAFT", () => {
+    const state = makeState({ phase: "PLANNING", phaseState: "REDRAFT", mode: "INCREMENTAL" })
+    const result = computeRequestReviewTransition(state, sm)
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    expect(result.transition.event).toBe("draft_complete")
+    expect(result.transition.nextPhase).toBe("PLANNING")
+    expect(result.transition.nextPhaseState).toBe("REVIEW")
+  })
+
   it("uses revision_complete from REVISE", () => {
     const state = makeState({ phase: "PLANNING", phaseState: "REVISE", mode: "GREENFIELD" })
     const result = computeRequestReviewTransition(state, sm)
@@ -302,6 +312,18 @@ describe("computeProposeBacktrackTransition", () => {
     expect(result.transition.clearImplDag).toBe(true)
   })
 
+  it("allows backtracking from IMPLEMENTATION/TASK_REVISE", () => {
+    const state = makeState({ phase: "IMPLEMENTATION", phaseState: "TASK_REVISE" })
+    const result = computeProposeBacktrackTransition(
+      { target_phase: "PLANNING", reason: "The reviewer found approved scope is too narrow for the required implementation repair" },
+      state,
+    )
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    expect(result.transition.targetPhase).toBe("PLANNING")
+    expect(result.transition.clearImplDag).toBe(true)
+  })
+
   it("does NOT clear IMPL DAG when backtracking within late phases", () => {
     const state = makeState({ phase: "IMPLEMENTATION", phaseState: "DRAFT" })
     const result = computeProposeBacktrackTransition(
@@ -359,7 +381,7 @@ describe("computeProposeBacktrackTransition", () => {
     expect(result.error).toContain("cannot be called from MODE_SELECT")
   })
 
-  it("rejects from non-DRAFT/REVISE state", () => {
+  it("rejects from non-authoring backtrack state", () => {
     const state = makeState({ phase: "INTERFACES", phaseState: "REVIEW" })
     const result = computeProposeBacktrackTransition(
       { target_phase: "PLANNING", reason: "This should not work from REVIEW state only DRAFT or REVISE" },
@@ -367,6 +389,6 @@ describe("computeProposeBacktrackTransition", () => {
     )
     expect(result.success).toBe(false)
     if (result.success) return
-    expect(result.error).toContain("DRAFT or REVISE")
+    expect(result.error).toContain("DRAFT, REVISE, or IMPLEMENTATION/TASK_REVISE")
   })
 })

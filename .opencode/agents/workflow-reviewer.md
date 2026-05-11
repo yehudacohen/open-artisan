@@ -53,6 +53,8 @@ For each acceptance criterion:
 - Do NOT call any workflow tools. You are a review sub-agent — the **main agent** calls
   `mark_satisfied` after reading your assessment. Your job is only to produce the assessment.
 - Your output is consumed programmatically — produce structured JSON when requested.
+- When asked for JSON, output the JSON object only. Do not include markdown,
+  preamble, analysis, scratchpad notes, or reasoning outside JSON fields.
 
 ## Evaluation Standards
 

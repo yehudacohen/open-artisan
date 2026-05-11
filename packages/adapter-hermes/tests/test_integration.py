@@ -7,20 +7,24 @@ guard enforcement → phase progression. Also tests resume after crash.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
 import shutil
 import socket
 import subprocess
+import sys
 import tempfile
 import time
+import types
 from pathlib import Path
 from subprocess import Popen
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
+import hermes_adapter
 from hermes_adapter import register, _on_session_start, _on_session_end
 from hermes_adapter.bridge_client import StdioBridgeClient
 from hermes_adapter.workflow_tools import register_workflow_tools
@@ -139,7 +143,7 @@ class TestFullRegistration:
         register_workflow_tools(mock_ctx, mock_bridge)
         register_guard_wrappers(mock_ctx, mock_bridge)
 
-        # Check workflow tools (13 + oa_state = 14)
+        # Check workflow tools and Hermes adapter-local tools.
         for hermes_name, _, _, _ in WORKFLOW_TOOLS:
             assert hermes_name in mock_ctx.registered_tool_names, (
                 f"Missing workflow tool: {hermes_name}"
@@ -158,10 +162,127 @@ class TestFullRegistration:
 
         start_hooks = mock_ctx.get_registered_hooks("on_session_start")
         assert len(start_hooks) == 1
+        assert len(mock_ctx.get_registered_hooks("pre_tool_call")) == 1
 
         start_hooks[0](session_id="runtime-session")
         state_tool = mock_ctx.get_registered_tool("oa_state")
         assert state_tool is not None
+
+    def test_interrupt_touches_activity_for_gateway_timeout_reset(self, monkeypatch):
+        """A real user interrupt should reset Hermes inactivity tracking."""
+        hermes_adapter._interrupt_activity_touch_installed = False
+        hermes_adapter._interrupt_activity_touch_targets.clear()
+
+        class FakeAgent:
+            def __init__(self) -> None:
+                self.touches: list[str] = []
+                self.interrupts: list[str | None] = []
+
+            def _touch_activity(self, desc: str) -> None:
+                self.touches.append(desc)
+
+            def interrupt(self, msg: str | None = None) -> str:
+                self.interrupts.append(msg)
+                return "interrupted"
+
+        monkeypatch.setitem(sys.modules, "run_agent", types.SimpleNamespace(AIAgent=FakeAgent))
+
+        try:
+            hermes_adapter._install_interrupt_activity_touch()
+            agent = FakeAgent()
+
+            assert agent.interrupt("approved") == "interrupted"
+            assert agent.touches == ["user interrupt received"]
+            assert agent.interrupts == ["approved"]
+
+            agent.interrupt("Execution timed out (inactivity)")
+            assert agent.touches == ["user interrupt received"]
+        finally:
+            hermes_adapter._interrupt_activity_touch_installed = False
+            hermes_adapter._interrupt_activity_touch_targets.clear()
+
+    def test_interrupt_patch_also_wraps_gateway_imported_agent(self, monkeypatch):
+        """Gateway may hold its own imported AIAgent class reference."""
+        hermes_adapter._interrupt_activity_touch_installed = False
+        hermes_adapter._interrupt_activity_touch_targets.clear()
+
+        class RunAgentClass:
+            def _touch_activity(self, desc: str) -> None:
+                self.touch = desc
+
+            def interrupt(self, msg: str | None = None) -> None:
+                self.msg = msg
+
+        class GatewayAgentClass:
+            def _touch_activity(self, desc: str) -> None:
+                self.touch = desc
+
+            def interrupt(self, msg: str | None = None) -> None:
+                self.msg = msg
+
+        monkeypatch.setitem(sys.modules, "run_agent", types.SimpleNamespace(AIAgent=RunAgentClass))
+        monkeypatch.setitem(sys.modules, "gateway", types.SimpleNamespace())
+        monkeypatch.setitem(sys.modules, "gateway.run", types.SimpleNamespace(AIAgent=GatewayAgentClass))
+
+        try:
+            hermes_adapter._install_interrupt_activity_touch()
+
+            run_agent = RunAgentClass()
+            gateway_agent = GatewayAgentClass()
+            run_agent.interrupt("approved")
+            gateway_agent.interrupt("approved")
+
+            assert run_agent.touch == "user interrupt received"
+            assert gateway_agent.touch == "user interrupt received"
+        finally:
+            hermes_adapter._interrupt_activity_touch_installed = False
+            hermes_adapter._interrupt_activity_touch_targets.clear()
+
+    def test_stale_active_session_recovery_redispatches_message(self, monkeypatch):
+        hermes_adapter._stale_active_session_recovery_installed = False
+
+        class FakeGatewayRunner:
+            async def _handle_active_session_busy_message(self, event, session_key):
+                return False
+
+        monkeypatch.setitem(sys.modules, "gateway", types.SimpleNamespace())
+        monkeypatch.setitem(sys.modules, "gateway.run", types.SimpleNamespace(GatewayRunner=FakeGatewayRunner))
+
+        class FakeEvent:
+            def __init__(self) -> None:
+                self.source = types.SimpleNamespace(platform="discord")
+
+        class FakeActiveEvent:
+            def is_set(self) -> bool:
+                return True
+
+        class FakeAdapter:
+            def __init__(self) -> None:
+                self._active_sessions = {"s1": FakeActiveEvent()}
+                self._pending_messages = {"s1": FakeEvent()}
+                self.redispatched = False
+
+            async def handle_message(self, event) -> None:
+                self.redispatched = True
+
+        try:
+            hermes_adapter._install_stale_active_session_recovery()
+            runner = FakeGatewayRunner()
+            adapter = FakeAdapter()
+            runner.adapters = {"discord": adapter}
+            runner._draining = False
+            runner._running_agents = {}
+            runner._running_agents_ts = {"s1": 1.0}
+
+            handled = asyncio.run(runner._handle_active_session_busy_message(FakeEvent(), "s1"))
+
+            assert handled is True
+            assert adapter.redispatched is True
+            assert "s1" not in adapter._active_sessions
+            assert "s1" not in adapter._pending_messages
+            assert "s1" not in runner._running_agents_ts
+        finally:
+            hermes_adapter._stale_active_session_recovery_installed = False
 
 
 # ---------------------------------------------------------------------------

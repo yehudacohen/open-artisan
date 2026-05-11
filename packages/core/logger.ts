@@ -6,7 +6,7 @@
  * Internal debug messages are suppressed unless OPENARTISAN_DEBUG is set.
  *
  * Persistent error log: errors and warnings are always appended to
- * .opencode/openartisan-errors.log as structured JSON lines. This file
+ * .openartisan/openartisan-errors.log as structured JSON lines. This file
  * survives agent recovery and can be inspected after the fact.
  *
  * Usage:

@@ -39,3 +39,16 @@ def test_discover_openartisan_projects_finds_workspace_projects(
     assert any(project["projectDir"] == str(repo) for project in projects)
     match = next(project for project in projects if project["projectDir"] == str(repo))
     assert match["featureNames"] == ["feature-a"]
+
+
+def test_resolve_project_dir_prefers_configured_openartisan_project(
+    tmp_path: Path, monkeypatch
+) -> None:
+    repo = tmp_path / "repo"
+    (repo / ".openartisan").mkdir(parents=True)
+    hermes_home = tmp_path / "hermes-agent"
+    hermes_home.mkdir()
+
+    monkeypatch.setenv("OPENARTISAN_PROJECT_DIR", str(repo))
+
+    assert resolve_project_dir("missing-session", str(hermes_home)) == str(repo.resolve())

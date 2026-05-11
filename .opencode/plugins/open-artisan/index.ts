@@ -21,16 +21,15 @@
  * Hooks are flat top-level keys. Tools use "tool" (singular) with tool() helper and tool.schema.*.
  */
 
-import { join, resolve } from "node:path"
+import { dirname, join, relative, resolve } from "node:path"
 import { existsSync, readFileSync } from "node:fs"
-import { readFile } from "node:fs/promises"
+import { mkdir, readFile, unlink, writeFile } from "node:fs/promises"
+import type { Plugin, ToolContext } from "@opencode-ai/plugin"
 
 const opencodePluginPackage = "@opencode-ai/plugin"
 const { tool } = await import(opencodePluginPackage) as { tool: any }
 
-type Plugin = any
-
-import { createSessionStateStore, setPostUpdateHook } from "../../../packages/core/session-state"
+import { createSessionStateStore, setPostUpdateHook, setSessionStateStoreTrace } from "../../../packages/core/session-state"
 import { migrateLegacyStateFile } from "../../../packages/core/state-backend-fs"
 import { createOpenArtisanRuntimeBackend } from "../../../packages/core/open-artisan-runtime-backends"
 import { handleToolExecute } from "../../../packages/bridge/methods/tool-execute"
@@ -39,6 +38,7 @@ import { createStateMachine } from "../../../packages/core/state-machine"
 import { detectActiveAgent, ensureState, wrapExecuteMap } from "../../../packages/core/tool-runtime"
 import { createGitCheckpoint } from "../../../packages/core/hooks/git-checkpoint"
 import { detectMode } from "../../../packages/core/mode-detect"
+import { createDiagnosticTrace } from "../../../packages/core/diagnostic-trace"
 import { compareIntentsWithLLM } from "../../../packages/core/intent-comparison"
 import { validatePriorState } from "../../../packages/core/type-validation"
 import { createLogger, setDefaultStateDir, type Logger, type NotificationSink } from "../../../packages/core/logger"
@@ -47,6 +47,8 @@ import {
   MAX_INTENT_DISPLAY_CHARS,
   MIN_COMPLETE_ARTIFACTS,
 } from "../../../packages/core/constants"
+import { getPhaseToolPolicy, getTaskWriteFiles } from "../../../packages/core/hooks/tool-guard"
+import { applyParsedGuardedPatch, buildGuardedChangeSummary, buildUnifiedDiff, parseGuardedPatch, type UnifiedDiffSummary } from "../../../packages/core/guarded-patch"
 import { WORKFLOW_TOOL_NAMES } from "../../../packages/core/workflow-tool-names"
 
 // Tool handlers
@@ -74,6 +76,7 @@ import { createImplDAG, type TaskCategory, type HumanGateInfo } from "../../../p
 import { applyDispatch, nextSchedulerDecision, nextSchedulerDecisionForInput, readDecisionInput } from "../../../packages/core/scheduler"
 import { resolveArtifactPaths } from "../../../packages/core/tools/artifact-paths"
 import { validateFileBasedReviewArtifacts } from "../../../packages/core/tools/file-artifact-validation"
+import { validatePlannedReviewedInterfaceArtifacts } from "../../../packages/core/tools/planning-interface-artifacts"
 import { writeArtifact, detectDesignDoc } from "../../../packages/core/artifact-store"
 import { buildAdjacentTasksForTask, dispatchTaskReview } from "../../../packages/core/task-review"
 import { dispatchDriftCheck } from "../../../packages/core/task-drift"
@@ -93,7 +96,7 @@ import { AnalyzeTaskBoundaryChangeSchema, ApplyDriftRepairToolSchema, ApplyPatch
 import { buildDriftRepairPlan, buildRepairToolCall, buildWorkflowDriftReport, type DriftRepairPlan, type DriftReport, type DriftToolCallPlan } from "../../../packages/core/drift"
 import { captureRevisionBaseline, hasArtifactChanged } from "../../../packages/core/revision-baseline"
 import { writeStatusFile } from "../../../packages/core/status-writer"
-import { extractApprovedFileAllowlist } from "../../../packages/core/tools/plan-allowlist"
+import { deriveReviewFileAllowlist, extractApprovedFileAllowlist } from "../../../packages/core/tools/plan-allowlist"
 import { computeFastForward, computeForwardSkip } from "../../../packages/core/fast-forward"
 import { cascadeAutoSkip } from "../../../packages/core/cascade-auto-skip"
 import { dispatchAutoApproval } from "../../../packages/core/auto-approve"
@@ -113,7 +116,6 @@ import type { RevisionStep } from "../../../packages/core/orchestrator-types"
 import type { CriterionResult, MarkSatisfiedArgs } from "../../../packages/core/review-types"
 import type { AnalyzeTaskBoundaryChangeArgs, ApplyTaskBoundaryChangeArgs } from "../../../packages/core/tool-types"
 import { VALID_PHASE_STATES } from "../../../packages/core/workflow-primitives"
-import type { PluginClient, ToolExecuteContext } from "./client-types"
 import { createQueryWorkflowTools } from "./query-workflow-tools"
 import { resolveSessionId } from "../../../packages/core/utils"
 import {
@@ -122,6 +124,9 @@ import {
   MAX_FEEDBACK_CHARS,
 } from "../../../packages/core/constants"
 import { DEFAULT_OPEN_ARTISAN_DB_FILE_NAME, DEFAULT_OPEN_ARTISAN_DB_SCHEMA } from "../../../packages/core/open-artisan-repository-schema"
+
+type ToolExecuteContext = ToolContext & { sessionId?: string; session_id?: string; session?: { id: string }; [key: string]: unknown }
+type RuntimeClient = Parameters<Plugin>[0]["client"] & { tui?: { showToast?: (opts: { body: { title: string; message: string; variant?: string; duration?: number } }) => void } }
 
 /** Returns a 16-char SHA-256 hex fingerprint of the given text. */
 function artifactHash(text: string): string {
@@ -144,6 +149,21 @@ async function artifactFilesHash(files: string[]): Promise<string | null> {
   }
   if (parts.length === 1) return artifactHash(parts[0]!)
   return artifactHash(parts.join("\n---OPENARTISAN-FILE---\n"))
+}
+
+function validatePlanningReviewArtifact(state: WorkflowState, artifactFiles: string[]): string | null {
+  if (state.phase !== "PLANNING") return null
+  const source = artifactFiles[0] ?? state.reviewArtifactFiles[0] ?? state.artifactDiskPaths.plan
+  if (!source) return "PLANNING review requires a concrete plan.md artifact file."
+  let content: string
+  try {
+    content = readFileSync(source, "utf-8")
+  } catch (error) {
+    return `Unable to read PLANNING artifact ${source}: ${error instanceof Error ? error.message : String(error)}`
+  }
+  const errors = validatePlannedReviewedInterfaceArtifacts(content)
+  if (errors.length === 0) return null
+  return `${source}: ${errors.join("; ")}`
 }
 
 type ReviewResubmissionKind = "unchanged resubmission" | "in-place revision" | "regenerated artifact"
@@ -320,9 +340,16 @@ function logTransition(
   const toPhase = "nextPhase" in to ? to.nextPhase : to.phase
   const toState = "nextPhaseState" in to ? to.nextPhaseState : to.phaseState
   const message = `${from.phase}/${from.phaseState} → ${toPhase}/${toState}`
+  const sink = notify?.toast
+  if (!sink) return
   try {
-    notify?.toast(`Workflow: ${trigger}`, message, "info")
-  } catch { /* ignore — sink may not be available */ }
+    sink(`Workflow: ${trigger}`, message, "info")
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error)
+    if (process.env["OPENARTISAN_DEBUG"]) {
+      process.stderr.write(`[open-artisan] toast delivery failed for ${trigger}: ${detail}\n`)
+    }
+  }
 }
 
 // Re-export for consumers who import from index.ts (G19)
@@ -360,11 +387,8 @@ export const PASSTHROUGH_TOOL_NAMES = new Set([
 // Plugin export — correct OpenCode plugin API shape
 // ---------------------------------------------------------------------------
 
-export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, worktree }: { client: unknown; directory?: string; worktree?: string }) => {
-  // Cast the raw client to our typed interface. The Plugin type from @opencode-ai/plugin
-  // passes `client` as an opaque object — we narrow it to PluginClient for type safety
-  // within the plugin body. Methods are accessed via optional chaining for robustness.
-  const client = rawClient as PluginClient
+export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, worktree }) => {
+  const client = rawClient as RuntimeClient
   // Plugin init — runs at plugin startup before the return.
   // Load persisted state from disk so sessions survive restarts.
   // IMPORTANT: Use the project directory (resolvedDir) to derive stateDir so that
@@ -387,7 +411,12 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
   const projectDir = resolvedDir || process.cwd()
   setPostUpdateHook((state, dir) => {
     // Fire-and-forget — status file write should never block state transitions
-    writeStatusFile(dir, state).catch(() => { /* non-fatal */ })
+    writeStatusFile(dir, state).catch((error) => {
+      if (process.env["OPENARTISAN_DEBUG"]) {
+        const detail = error instanceof Error ? error.message : String(error)
+        process.stderr.write(`[open-artisan] status file write failed: ${detail}\n`)
+      }
+    })
   }, projectDir)
 
   // Set the module-level default stateDir for error log persistence.
@@ -403,6 +432,20 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
   }
 
   const log = createLogger(notify, stateDir)
+  const startupLog = createLogger({ toast() {} }, stateDir)
+  const trace = createDiagnosticTrace(stateDir, "opencode-plugin", {
+    onWriteError(error, tracePath) {
+      log.warn("Open Artisan diagnostic trace write failed", {
+        detail: `${tracePath}: ${error.message}`,
+      })
+    },
+  })
+  trace.record("trace.init", {
+    stateDir,
+    traceEnabled: process.env["OPENARTISAN_TRACE"] === "1",
+    backend: runtimeBackend.kind,
+  })
+  setSessionStateStoreTrace((event, fields) => trace.record(event, fields ?? {}))
   log.debug("Plugin initialized", { detail: `stateDir: ${stateDir} backend=${runtimeBackend.kind}` })
 
   // Layer 2: Orchestrator — wires LLM-backed assess + diverge into the routing logic.
@@ -444,7 +487,13 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
   // Load persisted state on plugin startup (replaces the defunct "session.started" hook).
   // Note: legacy sessions without featureName (migration.memoryOnly) are intentionally
   // dropped — they're pre-MODE_SELECT with no artifacts or real work.
-  await store.load()
+  store.load().then((result) => {
+    if (!result.success) {
+      startupLog.error("Persisted workflow state load failed", { detail: result.error })
+    }
+  }).catch((error) => {
+    startupLog.error("Persisted workflow state load failed", { detail: error instanceof Error ? error.stack ?? error.message : String(error) })
+  })
 
   // Validate that the client object has the session API methods we depend on.
   // Subagent dispatch (discovery fleet, self-review, orchestrator) all require
@@ -489,17 +538,51 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
     subagentDispatcher,
     log,
     notify,
+    trace,
     graph,
     ...(runtimeBackend.services ? { openArtisanServices: runtimeBackend.services } : {}),
     designDocPath,
     sessions,
     lastRepromptTimestamps,
-    async promptExistingSession(sessionId: string, text: string): Promise<void> {
-      const partId = `prt_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
-      await client.session?.prompt({
-        path: { id: sessionId },
-        body: { noReply: false, parts: [{ type: "text", text, id: partId }] },
+    async promptExistingSession(sessionId: string, text: string, opts?: { reason?: string; caller?: string }): Promise<void> {
+      const started = Date.now()
+      const state = store.get(sessionId)
+      trace.record("promptExistingSession.start", {
+        sessionId,
+        reason: opts?.reason ?? "unspecified",
+        caller: opts?.caller ?? "unspecified",
+        phase: state?.phase,
+        phaseState: state?.phaseState,
+        activeAgent: state?.activeAgent,
+        retryCount: state?.retryCount,
+        noReply: false,
+        textHash: trace.hashText(text),
+        textLength: text.length,
       })
+      const partId = `prt_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+      try {
+        await client.session?.prompt({
+          path: { id: sessionId },
+          body: { noReply: false, parts: [{ type: "text", text, id: partId }] },
+        })
+        trace.record("promptExistingSession.end", {
+          sessionId,
+          reason: opts?.reason ?? "unspecified",
+          caller: opts?.caller ?? "unspecified",
+          durationMs: Date.now() - started,
+          success: true,
+        })
+      } catch (error) {
+        trace.record("promptExistingSession.end", {
+          sessionId,
+          reason: opts?.reason ?? "unspecified",
+          caller: opts?.caller ?? "unspecified",
+          durationMs: Date.now() - started,
+          success: false,
+          error: error instanceof Error ? error.message : String(error),
+        })
+        throw error
+      }
     },
   }
 
@@ -513,10 +596,11 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
     sessionId: string,
     context: ToolExecuteContext,
   ): Promise<string> {
+    let bridgePolicyVersion = 0
     const bridgeCtx = {
       get engine() { return ctx },
-      get policyVersion() { return 0 },
-      bumpPolicyVersion() {},
+      get policyVersion() { return bridgePolicyVersion },
+      bumpPolicyVersion() { bridgePolicyVersion++ },
       setEngine() {},
       stateDir,
       projectDir: projectRoot,
@@ -542,6 +626,36 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
       context: { sessionId, directory: context.directory || projectRoot },
     }, bridgeCtx)
     return typeof result === "string" ? result : JSON.stringify(result)
+  }
+
+  function resolveGuardedTarget(filePath: string, cwd: string): { success: true; targetPath: string; displayPath: string } | { success: false; error: string } {
+    const targetPath = filePath.startsWith("/") ? filePath : resolve(cwd, filePath)
+    const rel = relative(cwd, targetPath)
+    if (rel === ".." || rel.startsWith("../") || rel.startsWith("/")) {
+      return { success: false, error: `Writing to "${filePath}" is blocked because it is outside the project root "${cwd}".` }
+    }
+    return { success: true, targetPath, displayPath: rel || filePath }
+  }
+
+  function buildGuardedPolicy(state: WorkflowState, cwd: string) {
+    const rawTaskFiles = state.currentTaskId && state.implDag
+      ? getTaskWriteFiles(state.implDag.find((task) => task.id === state.currentTaskId))
+      : undefined
+    const taskFiles = rawTaskFiles?.map((file) => file.startsWith("/") ? file : resolve(cwd, file))
+    return getPhaseToolPolicy(state.phase, state.phaseState, state.mode, state.fileAllowlist, taskFiles)
+  }
+
+  function validateGuardedTarget(toolName: string, state: WorkflowState, cwd: string, filePath: string) {
+    const resolved = resolveGuardedTarget(filePath, cwd)
+    if (!resolved.success) return resolved
+    const policy = buildGuardedPolicy(state, cwd)
+    if (!policy.writePathPredicate) {
+      return { success: false as const, error: `${toolName} is blocked in ${state.phase}/${state.phaseState}. ${policy.allowedDescription}` }
+    }
+    if (!policy.writePathPredicate(resolved.targetPath)) {
+      return { success: false as const, error: `Writing to "${filePath}" is blocked in ${state.phase}/${state.phaseState}. ${policy.allowedDescription}` }
+    }
+    return { success: true as const, targetPath: resolved.targetPath, displayPath: resolved.displayPath }
   }
 
   return {
@@ -579,6 +693,10 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
               "The feature name to check for prior workflow state. " +
               "This should match what the user is asking to work on.",
             ),
+          user_intent: tool.schema
+            .string()
+            .optional()
+            .describe("Optional current user intent to compare against the prior workflow when the session intentBaseline is not populated."),
         },
         async execute(
           args: { feature_name: string; user_intent?: string | undefined },
@@ -587,6 +705,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
           const { store, log, subagentDispatcher } = ctx
           const sessionId = resolveSessionId(context)
           if (!sessionId) return "Error: Could not determine session ID."
+          await ensureState(store, sessionId, notify)
 
           const featureName = args.feature_name?.trim()
           if (!featureName) {
@@ -609,16 +728,14 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             )
           }
 
-          // Mark that check_prior_workflow was called for this feature
-          await store.update(sessionId, (draft) => {
-            draft.priorWorkflowChecked = true
-          })
-
           const state = store.get(sessionId)
           const priorState = await findPriorWorkflowState(store, featureName, log)
 
           // No prior state found
           if (!priorState) {
+            await store.update(sessionId, (draft) => {
+              draft.priorWorkflowChecked = true
+            })
             return (
               `No prior workflow found for "${featureName}". ` +
               `Proceed with select_mode to start fresh.`
@@ -629,13 +746,19 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
           const currentIntent = args.user_intent?.trim() || state?.intentBaseline || "unknown"
           const priorIntent = priorState.intentBaseline || "unknown"
 
+          await store.update(sessionId, (draft) => {
+            draft.cachedPriorState = priorState
+            draft.priorWorkflowChecked = true
+          })
+
           // Validate intents are not "unknown" before LLM call
           if (currentIntent === "unknown" || priorIntent === "unknown") {
             return (
-              `Error: Cannot compare intents - one or both intents are unknown.\n` +
+              `Prior workflow found for "${featureName}" (last phase: ${priorState.phase}).\n\n` +
+              `Cannot compare intents - one or both intents are unknown.\n` +
               `Current intent: ${currentIntent}\n` +
               `Prior intent: ${priorIntent}\n\n` +
-              `Provide user_intent parameter or ensure intentBaseline is captured.`
+              `Cached the prior workflow for select_mode so it can resume the existing workflow instead of starting fresh.`
             )
           }
 
@@ -667,12 +790,6 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             "check_prior_workflow",
             { detail: `feature=${featureName} classification=${classification} current=${currentIntent.slice(0, 100)} prior=${priorIntent.slice(0, 100)}` },
           )
-
-          // Cache the prior state for select_mode to avoid redundant file reads
-          await store.update(sessionId, (draft) => {
-            draft.cachedPriorState = priorState
-            draft.priorWorkflowChecked = true
-          })
 
           if (classification === "DIFFERENT") {
             return (
@@ -800,7 +917,14 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
           const switchingFeatures = !isSubWorkflow && state.phase !== "MODE_SELECT" && state.featureName !== null && featureName !== null && state.featureName !== featureName
 
           if (state.phase !== "MODE_SELECT" && !switchingFeatures) {
-            return `Error: Mode already selected (current phase: ${state.phase}).`
+            if (state.mode !== null && state.mode !== mode) {
+              return `Error: Mode already selected as ${state.mode}; cannot change to ${mode} for active feature ${state.featureName ?? featureName}.`
+            }
+            return (
+              `Mode: ${state.mode ?? mode}\n` +
+              `Feature: ${state.featureName ?? featureName}\n\n` +
+              `Workflow already active at ${state.phase}/${state.phaseState}.`
+            )
           }
 
           if (switchingFeatures) {
@@ -835,7 +959,23 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
               log.info("select_mode using cached prior state", { detail: `feature=${featureName}` })
             }
           }
-          
+
+          if (!isSubWorkflow && priorState) {
+            const persistedState = await store.findPersistedByFeatureName(featureName)
+            if (persistedState && persistedState.phase !== "MODE_SELECT" && persistedState.phase !== "DONE") {
+              const resumedState = persistedState.sessionId === sessionId
+                ? await store.update(sessionId, (draft) => {
+                    Object.assign(draft, persistedState)
+                  })
+                : await store.migrateSession(persistedState.sessionId, sessionId)
+              return (
+                `Mode: ${resumedState.mode ?? mode}\n` +
+                `Feature: ${featureName}\n\n` +
+                `Resuming prior workflow at ${resumedState.phase}/${resumedState.phaseState}.`
+              )
+            }
+          }
+
           // Clear cached prior state and consume the check_prior_workflow flag
           if (state.cachedPriorState || state.priorWorkflowChecked) {
             await store.update(sessionId, (draft) => {
@@ -1187,6 +1327,17 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
           // This eliminates anchoring bias. If the reviewer call fails, fall back
           // to the agent's self-reported criteria (graceful degradation).
           const criteriaText = getAcceptanceCriteria(state.phase, state.phaseState, state.mode, state.artifactDiskPaths?.design ?? null)
+          const isFileBased = ["INTERFACES", "TESTS", "IMPLEMENTATION"].includes(state.phase)
+          if (criteriaText && isFileBased && state.reviewArtifactFiles.length === 0) {
+            return (
+              `Error: No artifact files registered for the ${state.phase} review.\n\n` +
+              `The reviewer needs to know which files to evaluate. ` +
+              `Call \`request_review\` with \`artifact_files\` listing every file you ` +
+              `created or modified in this phase, then call \`mark_satisfied\` again.\n\n` +
+              `Example: \`request_review({ summary: "...", artifact_description: "...", ` +
+              `artifact_files: ["src/types.ts", "src/api.ts"] })\``
+            )
+          }
           const expectedBlocking = countExpectedBlockingCriteria(criteriaText)
           // Parse string scores to numbers — tool.schema has no .number() so
           // the schema declares score as string, but MarkSatisfiedArgs expects number.
@@ -1201,6 +1352,18 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
               })),
               state,
             ),
+          }
+          if (!parsedArgs.criteria_met || parsedArgs.criteria_met.length === 0) {
+            return "Error: criteria_met is empty. You must evaluate every acceptance criterion for this phase and provide a non-empty array."
+          }
+          if (expectedBlocking > 0) {
+            const submittedBlockingCount = parsedArgs.criteria_met.filter((criterion) => {
+              const severity = criterion.severity ?? "blocking"
+              return severity === "blocking" || severity === "design-invariant"
+            }).length
+            if (submittedBlockingCount < expectedBlocking) {
+              return `Error: Only ${submittedBlockingCount} blocking criteria submitted, but this phase requires ${expectedBlocking}. You must evaluate ALL blocking criteria independently. Re-read the acceptance criteria and call mark_satisfied again with assessments for all ${expectedBlocking} blocking criteria.`
+            }
           }
           // Iteration info for display in fail messages: "Review iteration X of Y"
           const iterationInfo = { current: state.iterationCount + 1, max: MAX_REVIEW_ITERATIONS }
@@ -1217,17 +1380,6 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             // hasn't provided them, gate here and instruct.
             // For in-memory phases, resolveArtifactPaths returns .openartisan/ disk
             // paths which are always correct.
-            const isFileBased = ["INTERFACES", "TESTS", "IMPLEMENTATION"].includes(state.phase)
-            if (isFileBased && state.reviewArtifactFiles.length === 0) {
-              return (
-                `Error: No artifact files registered for the ${state.phase} review.\n\n` +
-                `The reviewer needs to know which files to evaluate. ` +
-                `Call \`request_review\` with \`artifact_files\` listing every file you ` +
-                `created or modified in this phase, then call \`mark_satisfied\` again.\n\n` +
-                `Example: \`request_review({ summary: "...", artifact_description: "...", ` +
-                `artifact_files: ["src/types.ts", "src/api.ts"] })\``
-              )
-            }
             const artifactPaths = state.reviewArtifactFiles.length > 0
               ? state.reviewArtifactFiles
               : resolveArtifactPaths(
@@ -1237,6 +1389,13 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                   state.fileAllowlist,
                   state.artifactDiskPaths,
                 )
+            const reviewAllowlist = deriveReviewFileAllowlist({
+              phase: state.phase,
+              mode: state.mode,
+              artifactPaths,
+              fallbackAllowlist: state.fileAllowlist,
+              cwd: context.directory || process.cwd(),
+            })
             // Upstream summary: pass the disk path to the conventions file if available,
             // otherwise fall back to the inline conventions text (for backward compat
             // with sessions approved before v9 disk path tracking was added).
@@ -1257,7 +1416,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                 featureName: state.featureName,
                 ...(state.intentBaseline ? { intentBaseline: state.intentBaseline } : {}),
                 ...(state.sessionModel ? { parentModel: state.sessionModel } : {}),
-                ...(state.fileAllowlist.length > 0 ? { fileAllowlist: state.fileAllowlist } : {}),
+                ...(reviewAllowlist.allowlist.length > 0 ? { fileAllowlist: reviewAllowlist.allowlist, fileAllowlistSource: reviewAllowlist.source } : {}),
                 ...(Object.keys(state.approvedArtifacts).length > 0 ? { approvedArtifacts: state.approvedArtifacts } : {}),
                 ...(Object.keys(state.artifactDiskPaths).length > 0 ? { artifactDiskPaths: state.artifactDiskPaths } : {}),
                 ...(Object.keys(state.approvedArtifactFiles ?? {}).length > 0 ? { approvedArtifactFiles: state.approvedArtifactFiles ?? {} } : {}),
@@ -1271,22 +1430,16 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             }
 
             if (reviewResult && !reviewResult.success) {
-              log.warn(`Review ${iterationInfo.current}/${iterationInfo.max}: reviewer error — forcing revision cycle`)
-              // When the isolated reviewer fails, don't silently fall back to self-report.
-              // The agent's self-assessment is unreliable — it will self-report "all criteria met"
-              // even when the artifact is clearly incomplete. Force the agent to REVISE with
-              // explicit instructions to re-evaluate its work and address any issues before
-              // re-submitting. This prevents the agent from getting a free pass to USER_GATE.
-              result = {
-                passed: false,
-                unmetCriteria: [{
-                  criterion: "Isolated reviewer could not evaluate",
+              const reviewerError = reviewResult.error || reviewResult.message || "unknown error"
+              log.warn(`Review ${iterationInfo.current}/${iterationInfo.max}: reviewer error`, { detail: reviewerError })
+              await store.update(sessionId, (draft) => {
+                draft.latestReviewResults = [{
+                  criterion: "Isolated reviewer runtime failed",
                   met: false,
-                  evidence: `Reviewer failed: ${reviewResult.error || "unknown error"}. Re-evaluate your work against all criteria, address any issues you find, and re-submit for review.`,
-                  severity: "blocking" as const,
-                }],
-                responseMessage: `Review iteration ${iterationInfo.current} of ${iterationInfo.max}. Isolated reviewer failed and forced a revision cycle.`,
-              }
+                  evidence: reviewerError,
+                }]
+              })
+              return `Error: Isolated reviewer failed: ${reviewerError}. Workflow state remains at ${state.phase}/${state.phaseState}; fix the reviewer/runtime issue or turn off Open Artisan before retrying.`
             }
 
             if (reviewResult?.success) {
@@ -1405,7 +1558,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                 }
               }
             }
-            // If reviewer failed, result was set to "failed" above (forces revision).
+            // If reviewer failed, return an error above and leave REVIEW state unchanged.
             // If reviewer succeeded, result was set from reviewer's criteria.
             // If reviewer never ran (no criteriaText), result is agent's self-report.
           }
@@ -2238,12 +2391,9 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
               "Relative paths are resolved from the project directory before being stored. " +
               "Markdown phases must use .openartisan/<feature>/{conventions.md,plan.md,impl-plan.md}; source phases must use real project files.",
             ),
-          artifact_markdown: tool.schema.string().optional().describe(
-            "Optional markdown content for DISCOVERY/PLANNING/IMPL_PLAN only. The workflow writes it to the canonical .openartisan/<feature>/ artifact path before review.",
-          ),
         },
         async execute(
-          args: { summary: string; artifact_description: string; artifact_files: string[]; artifact_markdown?: string },
+          args: { summary: string; artifact_description: string; artifact_files: string[] } & Record<string, unknown>,
           context: ToolExecuteContext,
         ) {
           const { store, sm, log, notify } = ctx
@@ -2259,18 +2409,13 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             return "Error: request_review no longer accepts inline artifact content. Write the artifact to disk and pass artifact_files."
           }
 
-          const materializedArtifactKey = PHASE_TO_ARTIFACT[state.phase]
-          if (args.artifact_markdown?.trim()) {
-            if (!materializedArtifactKey || !["DISCOVERY", "PLANNING", "IMPL_PLAN"].includes(state.phase)) {
-              return "Error: artifact_markdown is only supported for DISCOVERY, PLANNING, and IMPL_PLAN markdown artifacts."
-            }
-            const materializedPath = await writeArtifact(cwd, materializedArtifactKey, args.artifact_markdown, state.featureName)
-            artifactFiles = [materializedPath]
+          if (Object.prototype.hasOwnProperty.call(args, "artifact_markdown")) {
+            return "Error: request_review no longer accepts artifact_markdown. Write the markdown artifact to its canonical .openartisan/<feature>/ file and pass artifact_files."
           }
 
-          const validStates = ["DRAFT", "CONVENTIONS", "REVISE", "REVIEW"]
+          const validStates = ["DRAFT", "REDRAFT", "CONVENTIONS", "REVISE", "REVIEW"]
           if (!validStates.includes(state.phaseState)) {
-            return `Error: request_review can only be called from DRAFT/CONVENTIONS/REVISE/REVIEW state (current: ${state.phaseState}).`
+            return `Error: request_review can only be called from DRAFT/REDRAFT/CONVENTIONS/REVISE/REVIEW state (current: ${state.phaseState}).`
           }
 
           // Re-submit at REVIEW: the agent realized the artifact content is stale
@@ -2285,6 +2430,10 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
               featureName: state.featureName,
             })
             if (artifactValidationError) return `Error: ${artifactValidationError}`
+            const planningContractError = validatePlanningReviewArtifact(state, artifactFiles)
+            if (planningContractError) {
+              return `Error: PLANNING review failed interface-artifact validation: ${planningContractError}. Fix the plan so reviewed INTERFACES artifacts are phase-legal, or label non-interface files as supporting dependencies before re-submitting request_review.`
+            }
 
             let artifactDiskPath: string | null = null
             const artifactKey = PHASE_TO_ARTIFACT[state.phase]
@@ -2411,8 +2560,12 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
               artifactFiles,
               cwd,
               featureName: state.featureName,
-            })
+          })
           if (artifactValidationError) return `Error: ${artifactValidationError}`
+          const planningContractError = validatePlanningReviewArtifact(state, artifactFiles)
+          if (planningContractError) {
+            return `Error: PLANNING review failed interface-artifact validation: ${planningContractError}. Fix the plan so reviewed INTERFACES artifacts are phase-legal, or label non-interface files as supporting dependencies before re-submitting request_review.`
+          }
 
           const outcome = { nextPhase: t.nextPhase, nextPhaseState: t.nextPhaseState }
 
@@ -2432,6 +2585,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             draft.latestReviewResults = null
             // Clear revision baseline — we're leaving REVISE
             draft.revisionBaseline = null
+            draft.backtrackContext = null
             // Capture artifact hash for review integrity (mark_satisfied checks this)
             draft.reviewArtifactHash = reviewHash
             // Record the disk path so mark_satisfied and system-transform can use it
@@ -2510,6 +2664,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
           if (clarificationMessage) return clarificationMessage
 
           if (result.feedbackType === "approve") {
+            const hasExplicitFeedbackText = result.feedbackText.trim().length > 0
             const resolvedHumanGates = Array.isArray(args.resolved_human_gates) ? args.resolved_human_gates : []
             if (state.phaseState === "HUMAN_GATE" && resolvedHumanGates.length === 0) {
               return "Cannot approve — HUMAN_GATE is a structural manual-action state, not a user approval surface. Resolve human-gated tasks via resolved_human_gates instead."
@@ -2524,8 +2679,13 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                 "Call submit_feedback with feedback_type='revise' and your response."
               )
             }
-            if (!state.userGateMessageReceived) {
+            if (!state.userGateMessageReceived && !hasExplicitFeedbackText) {
               return buildSelfApprovalBlockedMessage()
+            }
+            if (!state.userGateMessageReceived) {
+              await store.update(sessionId, (draft) => {
+                draft.userGateMessageReceived = true
+              })
             }
             const approvalWarning = ""
 
@@ -2665,7 +2825,11 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                   state,
                   context.directory || process.cwd(),
                 )
-              } catch { /* non-fatal */ }
+              } catch (error) {
+                log.debug("submit_feedback/cascade baseline capture failed", {
+                  detail: error instanceof Error ? error.message : String(error),
+                })
+              }
 
               logTransition(state, { phase: nextStep.phase, phaseState: "REVISE" }, "submit_feedback/cascade-advance", notify)
 
@@ -2713,8 +2877,10 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
               if (state.artifactDiskPaths.plan) {
                 try {
                   planContent = await readFile(state.artifactDiskPaths.plan, "utf-8")
-                } catch {
-                  // non-fatal
+                } catch (error) {
+                  log.debug("submit_feedback/read plan for allowlist failed", {
+                    detail: error instanceof Error ? error.message : String(error),
+                  })
                 }
               }
               return planContent ? extractApprovedFileAllowlist(planContent, cwd) : []
@@ -2772,17 +2938,21 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                 )
               }
             }
-            const shouldDeferForwardSkipToStructuralState =
-              approval.nextPhaseState === "SKIP_CHECK" || approval.nextPhaseState === "SCHEDULING"
-            const forwardSkip = shouldDeferForwardSkipToStructuralState
-              ? null
-              : computeForwardSkip(
+            const forwardSkip = approval.nextPhaseState === "SKIP_CHECK"
+              ? computeForwardSkip(
                   approval.nextPhase,
                   state.mode,
                   effectiveAllowlist,
                 )
-            const effectiveNextPhase = forwardSkip?.targetPhase ?? approval.nextPhase
-            const effectiveNextPhaseState = forwardSkip?.targetPhaseState ?? approval.nextPhaseState
+              : null
+            const structuralResolution = !forwardSkip && approval.nextPhaseState === "SKIP_CHECK"
+              ? sm.transition(approval.nextPhase, "SKIP_CHECK", "scheduling_complete", state.mode)
+              : null
+            if (structuralResolution && !structuralResolution.ok) {
+              return `Error: Could not resolve ${approval.nextPhase}/SKIP_CHECK: ${structuralResolution.message}`
+            }
+            const effectiveNextPhase = forwardSkip?.targetPhase ?? structuralResolution?.nextPhase ?? approval.nextPhase
+            const effectiveNextPhaseState = forwardSkip?.targetPhaseState ?? structuralResolution?.nextPhaseState ?? approval.nextPhaseState
 
             const artifactKey = PHASE_TO_ARTIFACT[state.phase]
             let artifactDiskPath: string | null = (artifactKey ? state.artifactDiskPaths[artifactKey] : undefined) ?? null
@@ -2790,7 +2960,10 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             if (state.phase === "IMPL_PLAN" && artifactDiskPath) {
               try {
                 implPlanContentForApproval = readFileSync(artifactDiskPath, "utf-8")
-              } catch {
+              } catch (error) {
+                log.debug("submit_feedback/read impl plan for approval failed", {
+                  detail: error instanceof Error ? error.message : String(error),
+                })
                 // handled below with a clear approval error
               }
             }
@@ -2973,11 +3146,14 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             const forwardSkipMsg = forwardSkip
               ? `\n\n${forwardSkip.message}`
               : ""
+            const structuralResolutionMsg = structuralResolution
+              ? `\n\nStructural skip check complete. Continuing with ${structuralResolution.nextPhase}/${structuralResolution.nextPhaseState}.`
+              : ""
             if (forwardSkip) {
               log.info("Forward-pass skip", { detail: `Skipped ${forwardSkip.skippedPhases.length} phase(s): ${forwardSkip.skippedPhases.join(", ")} → ${forwardSkip.targetPhase}` })
             }
 
-            return result.responseMessage + checkpointMsg + discoveryWarning + forwardSkipMsg + approvalWarning
+            return result.responseMessage + checkpointMsg + discoveryWarning + forwardSkipMsg + structuralResolutionMsg + approvalWarning
 
           } else {
             // N3 fix: mode must be set before revision routing
@@ -3160,6 +3336,54 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
         },
       }),
 
+      // -----------------------------------------------------------------------
+      // structural transition tools — resolve adapter decision states
+      // -----------------------------------------------------------------------
+      scheduling_complete: tool({
+        description:
+          "Resolve a structural SKIP_CHECK, CASCADE_CHECK, or SCHEDULING state by entering active work.",
+        args: {},
+        async execute(_args: Record<string, never>, context: ToolExecuteContext) {
+          const { store, sm, notify } = ctx
+          const sessionId = resolveSessionId(context)
+          if (!sessionId) return "Error: Could not determine session ID from tool context."
+          const state = await ensureState(store, sessionId, notify)
+          const outcome = sm.transition(state.phase, state.phaseState, "scheduling_complete", state.mode)
+          if (!outcome.ok) return `Error: ${outcome.message}`
+          logTransition(state, outcome, "scheduling_complete", notify)
+          await store.update(sessionId, (draft) => {
+            draft.phase = outcome.nextPhase
+            draft.phaseState = outcome.nextPhaseState
+            draft.retryCount = 0
+            draft.iterationCount = 0
+            draft.userGateMessageReceived = false
+          })
+          return `Structural transition complete: ${state.phase}/${state.phaseState} + scheduling_complete → ${outcome.nextPhase}/${outcome.nextPhaseState}.`
+        },
+      }),
+
+      phase_skipped: tool({
+        description: "Resolve a structural SKIP_CHECK state by skipping the current phase.",
+        args: {},
+        async execute(_args: Record<string, never>, context: ToolExecuteContext) {
+          const { store, sm, notify } = ctx
+          const sessionId = resolveSessionId(context)
+          if (!sessionId) return "Error: Could not determine session ID from tool context."
+          const state = await ensureState(store, sessionId, notify)
+          const outcome = sm.transition(state.phase, state.phaseState, "phase_skipped", state.mode)
+          if (!outcome.ok) return `Error: ${outcome.message}`
+          logTransition(state, outcome, "phase_skipped", notify)
+          await store.update(sessionId, (draft) => {
+            draft.phase = outcome.nextPhase
+            draft.phaseState = outcome.nextPhaseState
+            draft.retryCount = 0
+            draft.iterationCount = 0
+            draft.userGateMessageReceived = false
+          })
+          return `Structural transition complete: ${state.phase}/${state.phaseState} + phase_skipped → ${outcome.nextPhase}/${outcome.nextPhaseState}.`
+        },
+      }),
+
       // propose_backtrack — agent proposes going back to an earlier phase
       // -----------------------------------------------------------------------
       propose_backtrack: tool({
@@ -3225,7 +3449,10 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                 state,
                 context.directory || process.cwd(),
               )
-            } catch {
+            } catch (error) {
+              log.debug("propose_backtrack/revision baseline capture failed", {
+                detail: error instanceof Error ? error.message : String(error),
+              })
               // Non-fatal — diff gate disabled for this revision
             }
           }
@@ -3351,8 +3578,16 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             log.error("spawn_sub_workflow: failed to create child state", {
               detail: err instanceof Error ? err.message : String(err),
             })
-            try { await childSession.destroy() } catch { /* best-effort */ }
-            try { await store.delete(childSessionId) } catch { /* best-effort */ }
+            try { await childSession.destroy() } catch (cleanupErr) {
+              log.debug("spawn_sub_workflow/child destroy cleanup failed", {
+                detail: cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr),
+              })
+            }
+            try { await store.delete(childSessionId) } catch (cleanupErr) {
+              log.debug("spawn_sub_workflow/child state cleanup failed", {
+                detail: cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr),
+              })
+            }
             return `Error: Failed to create child workflow state: ${err instanceof Error ? err.message : String(err)}`
           }
 
@@ -3377,8 +3612,16 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
               detail: err instanceof Error ? err.message : String(err),
             })
             // Clean up orphaned child state and session
-            try { await store.delete(childSessionId) } catch { /* best-effort */ }
-            try { await childSession.destroy() } catch { /* best-effort */ }
+            try { await store.delete(childSessionId) } catch (cleanupErr) {
+              log.debug("spawn_sub_workflow/child state cleanup failed", {
+                detail: cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr),
+              })
+            }
+            try { await childSession.destroy() } catch (cleanupErr) {
+              log.debug("spawn_sub_workflow/child destroy cleanup failed", {
+                detail: cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr),
+              })
+            }
             return `Error: Child session created but parent state update failed: ${err instanceof Error ? err.message : String(err)}`
           }
 
@@ -3406,8 +3649,16 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                 detail: rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr),
               })
             }
-            try { await store.delete(childSessionId) } catch { /* best-effort */ }
-            try { await childSession.destroy() } catch { /* best-effort */ }
+            try { await store.delete(childSessionId) } catch (cleanupErr) {
+              log.debug("spawn_sub_workflow/child state cleanup failed", {
+                detail: cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr),
+              })
+            }
+            try { await childSession.destroy() } catch (cleanupErr) {
+              log.debug("spawn_sub_workflow/child destroy cleanup failed", {
+                detail: cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr),
+              })
+            }
             return `Error: Child workflow state was created but initial prompt failed; rolled back delegation for task "${task.id}": ${err instanceof Error ? err.message : String(err)}`
           }
 
@@ -3445,15 +3696,20 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
           const parsedArgs = AnalyzeTaskBoundaryChangeSchema.safeParse(args)
           if (!parsedArgs.success) return `Error: ${formatZodError(parsedArgs.error)}`
           const result = analyzeTaskBoundaryChange(parsedArgs.data as AnalyzeTaskBoundaryChangeArgs, state)
-          if (!result.success) return `Error: ${result.error}`
+          if (!result.success) return `Error: ${result.error.message}`
           const { analysis } = result
+          const conflictMessages = analysis.conflicts.map((conflict) => conflict.message)
           return (
             `Task boundary analysis for ${analysis.taskId}.\n` +
             `Impacted tasks: ${analysis.impactedTaskIds.join(", ")}.\n` +
             `${analysis.completedTaskIdsToReset.length > 0 ? `completed task(s) to reset: ${analysis.completedTaskIdsToReset.join(", ")}.\n` : ""}` +
-            `${analysis.ownershipConflicts.length > 0 ? `Ownership conflicts: ${analysis.ownershipConflicts.join(", ")}.\n` : ""}` +
-            `Next expected files: ${analysis.nextExpectedFiles.join(", ") || "(none)"}.\n` +
-            `Next expected tests: ${analysis.nextExpectedTests.join(", ") || "(none)"}.`
+            `${conflictMessages.length > 0 ? `Conflicts: ${conflictMessages.join(" | ")}.\n` : ""}` +
+            `Overlapping owned files: ${analysis.overlappingOwnedFiles.join(", ") || "(none)"}.\n` +
+            `Overlapping expected tests: ${analysis.overlappingExpectedTests.join(", ") || "(none)"}.\n` +
+            `Next add files: ${analysis.addFiles.join(", ") || "(none)"}.\n` +
+            `Next remove files: ${analysis.removeFiles.join(", ") || "(none)"}.\n` +
+            `Next add expected tests: ${analysis.addExpectedTests.join(", ") || "(none)"}.\n` +
+            `Next remove expected tests: ${analysis.removeExpectedTests.join(", ") || "(none)"}.`
           )
         },
       }),
@@ -3486,7 +3742,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
           const parsedArgs = ApplyTaskBoundaryChangeSchema.safeParse(args)
           if (!parsedArgs.success) return `Error: ${formatZodError(parsedArgs.error)}`
           const result = applyTaskBoundaryChange(parsedArgs.data as ApplyTaskBoundaryChangeArgs, state)
-          if (!result.success) return `Error: ${result.error}`
+          if (!result.success) return `Error: ${result.error.message}`
 
           await store.update(sessionId, (draft) => {
             draft.implDag = result.updatedNodes
@@ -3495,6 +3751,9 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             draft.phaseState = "DRAFT"
             draft.taskCompletionInProgress = null
             draft.taskReviewCount = 0
+            draft.reviewArtifactHash = null
+            draft.reviewArtifactFiles = []
+            draft.latestReviewResults = null
           })
 
           return result.message
@@ -3574,6 +3833,104 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             ...(parsed.data.force === undefined ? {} : { force: parsed.data.force }),
           })
           return JSON.stringify(result, null, 2)
+        },
+      }),
+
+      guarded_edit: tool({
+        description: "Safely edit one file using exact old/new text after Open Artisan validates the target path against the active phase policy. Use this instead of native apply_patch in guarded phases.",
+        args: {
+          file_path: tool.schema.string().describe("Project-relative or absolute file path to edit."),
+          old_text: tool.schema.string().describe("Exact existing text to replace. Must occur exactly once."),
+          new_text: tool.schema.string().describe("Replacement text."),
+        },
+        async execute(args: { file_path: string; old_text: string; new_text: string }, context: ToolExecuteContext) {
+          const sessionId = resolveSessionId(context)
+          if (!sessionId) return "Error: Could not determine session ID from tool context."
+          const state = store.get(sessionId)
+          if (!state) return "Error: No workflow state for this session."
+          const cwd = context.directory || projectRoot
+          const target = validateGuardedTarget("guarded_edit", state, cwd, args.file_path)
+          if (!target.success) return `Error: ${target.error}`
+          if (args.old_text.length === 0) return "Error: old_text must not be empty."
+          const current = existsSync(target.targetPath) ? await readFile(target.targetPath, "utf-8") : ""
+          const first = current.indexOf(args.old_text)
+          if (first === -1) return `Error: old_text was not found in ${args.file_path}.`
+          if (current.indexOf(args.old_text, first + args.old_text.length) !== -1) return `Error: old_text occurs more than once in ${args.file_path}. Provide a larger unique span.`
+          const next = `${current.slice(0, first)}${args.new_text}${current.slice(first + args.old_text.length)}`
+          const diff = buildUnifiedDiff(current, next, target.displayPath)
+          await mkdir(dirname(target.targetPath), { recursive: true })
+          await writeFile(target.targetPath, next)
+          return buildGuardedChangeSummary("Edited", target.displayPath, [diff])
+        },
+      }),
+
+      guarded_write: tool({
+        description: "Safely create one file after Open Artisan validates the target path against the active phase policy. Use this instead of native apply_patch when creating files in guarded phases.",
+        args: {
+          file_path: tool.schema.string().describe("Project-relative or absolute file path to create."),
+          content: tool.schema.string().describe("Complete file content to write."),
+          overwrite: tool.schema.boolean().optional().describe("Set true to replace an existing file. Defaults to false."),
+        },
+        async execute(args: { file_path: string; content: string; overwrite?: boolean }, context: ToolExecuteContext) {
+          const sessionId = resolveSessionId(context)
+          if (!sessionId) return "Error: Could not determine session ID from tool context."
+          const state = store.get(sessionId)
+          if (!state) return "Error: No workflow state for this session."
+          const cwd = context.directory || projectRoot
+          const target = validateGuardedTarget("guarded_write", state, cwd, args.file_path)
+          if (!target.success) return `Error: ${target.error}`
+          const existed = existsSync(target.targetPath)
+          if (existed && !args.overwrite) return `Error: ${args.file_path} already exists. Set overwrite=true to replace it.`
+          const current = existed ? await readFile(target.targetPath, "utf-8") : null
+          const diff = buildUnifiedDiff(current, args.content, target.displayPath)
+          await mkdir(dirname(target.targetPath), { recursive: true })
+          await writeFile(target.targetPath, args.content)
+          return buildGuardedChangeSummary(existed ? "Wrote" : "Created", target.displayPath, [diff])
+        },
+      }),
+
+      guarded_patch: tool({
+        description: "Safely apply an OpenCode-style patch after Open Artisan validates every target path against the active phase policy. Use this instead of native apply_patch in guarded phases when OpenCode omits patch payloads from hooks.",
+        args: {
+          patch_text: tool.schema.string().describe("OpenCode-style patch text beginning with *** Begin Patch and ending with *** End Patch."),
+        },
+        async execute(args: { patch_text: string }, context: ToolExecuteContext) {
+          const sessionId = resolveSessionId(context)
+          if (!sessionId) return "Error: Could not determine session ID from tool context."
+          const state = store.get(sessionId)
+          if (!state) return "Error: No workflow state for this session."
+          const parsed = parseGuardedPatch(args.patch_text)
+          if (!parsed.success) return `Error: ${parsed.error}`
+          const cwd = context.directory || projectRoot
+          const resolvedTargets = new Map<string, { targetPath: string; displayPath: string }>()
+          for (const filePath of parsed.data.targetPaths) {
+            const target = validateGuardedTarget("guarded_patch", state, cwd, filePath)
+            if (!target.success) return `Error: ${target.error}`
+            resolvedTargets.set(filePath, { targetPath: target.targetPath, displayPath: target.displayPath })
+          }
+          const initialContents = new Map<string, string | null>()
+          for (const [filePath, target] of resolvedTargets) {
+            initialContents.set(filePath, existsSync(target.targetPath) ? await readFile(target.targetPath, "utf-8") : null)
+          }
+          const applied = applyParsedGuardedPatch(parsed.data, initialContents)
+          if (!applied.success) return `Error: ${applied.error}`
+          const diffs: UnifiedDiffSummary[] = []
+          for (const change of applied.data) {
+            const target = resolvedTargets.get(change.path)
+            if (!target) return `Error: Patch produced an untracked change for ${change.path}.`
+            diffs.push(buildUnifiedDiff(change.oldContent, change.newContent, target.displayPath))
+          }
+          for (const change of applied.data) {
+            const target = resolvedTargets.get(change.path)
+            if (!target) return `Error: Patch produced an untracked change for ${change.path}.`
+            if (change.newContent === null) {
+              if (existsSync(target.targetPath)) await unlink(target.targetPath)
+            } else {
+              await mkdir(dirname(target.targetPath), { recursive: true })
+              await writeFile(target.targetPath, change.newContent)
+            }
+          }
+          return buildGuardedChangeSummary("Applied patch to", `${applied.data.length} file(s)`, diffs)
         },
       }),
 

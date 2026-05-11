@@ -60,13 +60,13 @@ class TestPromptHook:
         assert "PLANNING" in result["context"]
 
     def test_defers_bridge_without_selected_project(self, started_bridge, tmp_path):
-        """Auxiliary sessions without project selection still announce session lifecycle but skip prompt building."""
+        """Auxiliary sessions without project selection skip prompt building outside OA projects."""
         clear_session_project_dir("unselected-session")
         hook = create_prompt_hook(started_bridge, "unselected-session", str(tmp_path))
         result = hook()
         assert result == {"context": ""}
-        assert len(started_bridge.get_calls("prompt.build")) == 1
-        assert len(started_bridge.get_calls("lifecycle.sessionCreated")) == 1
+        assert started_bridge.get_calls("prompt.build") == []
+        assert started_bridge.get_calls("lifecycle.sessionCreated") == []
 
     def test_selects_openartisan_fallback_project(self, started_bridge, tmp_path):
         """Hook should bind sessions when the fallback cwd is an Open Artisan project."""
@@ -79,7 +79,7 @@ class TestPromptHook:
         result = hook()
 
         assert result == {"context": "prompt text"}
-        assert get_session_project_dir(session_id).endswith("/open-artisan")
+        assert get_session_project_dir(session_id) == str(tmp_path.resolve())
         clear_session_project_dir(session_id)
 
     def test_uses_default_workflow_state_for_resumed_hermes_session(self, started_bridge, tmp_path):

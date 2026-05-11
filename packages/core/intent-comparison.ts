@@ -170,6 +170,24 @@ function parseIntentComparisonResponse(llmResult: string): IntentComparisonResul
       explanation,
       rawResponse: llmResult,
     }
+  } else if (/\bDIFFERENT\b/.test(response)) {
+    return {
+      classification: "DIFFERENT",
+      explanation: llmResult.trim(),
+      rawResponse: llmResult,
+    }
+  } else if (/\bPARTIAL\b|\bPARTIALLY\b/.test(response)) {
+    return {
+      classification: "PARTIAL",
+      explanation: llmResult.trim(),
+      rawResponse: llmResult,
+    }
+  } else if (/\bFULL\b|\bFULLY\b|\bSAME GOAL\b/.test(response)) {
+    return {
+      classification: "FULL",
+      explanation: llmResult.trim(),
+      rawResponse: llmResult,
+    }
   } else {
     // Unrecognized response format - treat as ERROR for safety
     return {

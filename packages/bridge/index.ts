@@ -16,6 +16,7 @@ export {
   handleSessionDeleted,
 } from "./methods/lifecycle"
 export { handleStateGet, handleStateHealth, resolveRuntimeHealth } from "./methods/state"
+export { handleProgressEmit, handleProgressList } from "./methods/progress"
 export { handleGuardCheck, handleGuardPolicy } from "./methods/guard"
 export { handlePromptBuild, handlePromptCompaction } from "./methods/prompt"
 export { handleMessageProcess } from "./methods/message"

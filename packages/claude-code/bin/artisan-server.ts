@@ -31,6 +31,7 @@ import {
   handleSessionDeleted,
 } from "#bridge/methods/lifecycle"
 import { handleStateGet, handleStateHealth } from "#bridge/methods/state"
+import { handleProgressEmit, handleProgressList } from "#bridge/methods/progress"
 import type { LifecycleInitParams } from "#bridge/protocol"
 import { handleGuardCheck, handleGuardPolicy } from "#bridge/methods/guard"
 import { handlePromptBuild, handlePromptCompaction } from "#bridge/methods/prompt"
@@ -162,6 +163,8 @@ async function main() {
     "lifecycle.sessionDeleted": handleSessionDeleted,
     "state.get": handleStateGet,
     "state.health": handleStateHealth,
+    "progress.emit": handleProgressEmit,
+    "progress.list": handleProgressList,
     "guard.check": handleGuardCheck,
     "guard.policy": handleGuardPolicy,
     "prompt.build": handlePromptBuild,

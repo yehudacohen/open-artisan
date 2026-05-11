@@ -19,6 +19,16 @@ import { tmpdir } from "node:os"
 import { cascadeAutoSkip, type CascadeAutoSkipDeps } from "#core/cascade-auto-skip"
 import { createStateMachine } from "#core/state-machine"
 import type { SessionStateStore, WorkflowState } from "#core/workflow-state-types"
+
+type RuntimeSessionStateStore = SessionStateStore & {
+  get(sessionId: string): WorkflowState | null
+  findByFeatureName(featureName: string): WorkflowState | null
+  findPersistedByFeatureName(featureName: string): Promise<WorkflowState | null>
+  create(sessionId: string): Promise<WorkflowState>
+  update(sessionId: string, mutator: (draft: WorkflowState) => void): Promise<WorkflowState>
+  migrateSession(oldSessionId: string, newSessionId: string): Promise<WorkflowState>
+  delete(sessionId: string): Promise<void>
+}
 import type { Phase } from "#core/workflow-primitives"
 import type { Logger } from "#core/logger"
 import { makeWorkflowState } from "./helpers/workflow-state"
@@ -35,7 +45,7 @@ function freshState(overrides: Partial<WorkflowState> = {}): WorkflowState {
  * Creates an in-memory store backed by a Map. Supports get, update, create,
  * delete, and load. Uses structuredClone for isolation.
  */
-function createMockStore(initialStates?: Map<string, WorkflowState>): SessionStateStore {
+function createMockStore(initialStates?: Map<string, WorkflowState>): RuntimeSessionStateStore {
   const memory = new Map(initialStates ?? new Map<string, WorkflowState>())
 
   return {
@@ -82,7 +92,7 @@ function createMockStore(initialStates?: Map<string, WorkflowState>): SessionSta
       }
       return null
     },
-  }
+  } as unknown as RuntimeSessionStateStore
 }
 
 function createMockLogger(): Logger {

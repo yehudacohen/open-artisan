@@ -74,6 +74,16 @@ export function handleIdle(state: WorkflowState): IdleDecision {
     return { action: "ignore" }
   }
 
+  if (state.phaseState === "REVIEW" && hasReviewerRuntimeFailure(state)) {
+    return {
+      action: "escalate",
+      message:
+        `Workflow stalled because the isolated reviewer/runtime failed during ${state.phase}/REVIEW. ` +
+        `Fix the reviewer/runtime issue, retry the review, or disable Open Artisan before continuing; ` +
+        `do not keep revising the artifact unless the reviewer reported content-specific criteria failures.`,
+    }
+  }
+
   // MODE_SELECT: agent should be presenting options — also expected idle
   if (state.phase === "MODE_SELECT") {
     return { action: "ignore" }
@@ -93,6 +103,13 @@ export function handleIdle(state: WorkflowState): IdleDecision {
     retryCount: nextRetry,
     message: buildRepromptMessage(state.phase, state.phaseState, nextRetry),
   }
+}
+
+function hasReviewerRuntimeFailure(state: WorkflowState): boolean {
+  return (state.latestReviewResults ?? []).some((result) => (
+    /isolated reviewer (?:failed|runtime failed)|reviewer\/runtime/i.test(result.criterion) ||
+    /isolated reviewer (?:failed|runtime failed)|reviewer\/runtime/i.test(result.evidence)
+  ))
 }
 
 // ---------------------------------------------------------------------------

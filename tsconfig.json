@@ -4,13 +4,18 @@
     "module": "ESNext",
     "moduleResolution": "bundler",
     "strict": true,
+    "skipLibCheck": true,
     "noUncheckedIndexedAccess": true,
     "exactOptionalPropertyTypes": true,
     "paths": {
       "#plugin/*": ["./.opencode/plugins/open-artisan/*"],
       "#core/*": ["./packages/core/*"],
       "#bridge/*": ["./packages/bridge/*"],
-      "#claude-code/*": ["./packages/claude-code/*"]
+      "#claude-code/*": ["./packages/claude-code/*"],
+      "@opencode-ai/plugin": ["./node_modules/@opencode-ai/plugin/dist/index.d.ts"],
+      "@opencode-ai/plugin/*": ["./node_modules/@opencode-ai/plugin/dist/*"],
+      "@opencode-ai/sdk": ["./node_modules/@opencode-ai/sdk/dist/index.d.ts"],
+      "@opencode-ai/sdk/*": ["./node_modules/@opencode-ai/sdk/dist/*"]
     }
   },
   "include": [

@@ -523,7 +523,7 @@ function buildSubStateContext(state: WorkflowState, reviewMode: "agent" | "isola
       break
     case "DRAFT":
       lines.push(`You are drafting the ${state.phase} artifact.`)
-      lines.push("When the draft is complete, call `request_review` with `artifact_files`; legacy `artifact_content` is not accepted. For DISCOVERY, PLANNING, and IMPL_PLAN markdown artifacts only, `artifact_markdown` may be used with `artifact_files: []` to materialize the canonical .openartisan file.")
+      lines.push("When the draft is complete, call `request_review` with `artifact_files`; inline artifact content is not accepted. For DISCOVERY, PLANNING, and IMPL_PLAN markdown artifacts, write the canonical .openartisan file first and pass that path in `artifact_files`.")
       lines.push("If you must choose between alternatives, choose one now and record the decision, alternatives, and tradeoffs in the artifact instead of asking the user.")
       lines.push("If this phase is not applicable, submit the appropriate on-disk artifact with a specific pass-through/fast-forward justification so review can approve or reject the skip.")
       lines.push("If you discover a fundamental flaw in an earlier phase's artifact that cannot be addressed here, call `propose_backtrack`.")
@@ -583,15 +583,15 @@ function buildSubStateContext(state: WorkflowState, reviewMode: "agent" | "isola
       break
     case "SKIP_CHECK":
       lines.push("You are in a structural skip-decision state, not ordinary drafting.")
-      lines.push("Resolve whether the phase should advance via `phase_skipped` or enter active work via `scheduling_complete`.")
+      lines.push("Call `scheduling_complete` to enter active work for this phase, or `phase_skipped` only when the phase truly has no artifact work.")
       break
     case "CASCADE_CHECK":
       lines.push("You are in a structural cascade-decision state, not ordinary revision drafting.")
-      lines.push("Resolve whether this cascade step should advance via `cascade_step_skipped` or continue into work via `scheduling_complete`.")
+      lines.push("Call `scheduling_complete` to enter the cascade revision step.")
       break
     case "SCHEDULING":
       lines.push("You are in IMPLEMENTATION/SCHEDULING. Dispatch and lifecycle coordination are in progress; this is not ordinary authoring.")
-      lines.push("The next transition out of this state is `scheduling_complete` once the runnable task or wait condition is established.")
+      lines.push("Call `scheduling_complete` after runnable work has been selected or when implementation can continue without a DAG dispatch.")
       break
     case "TASK_REVIEW":
       lines.push("You are in IMPLEMENTATION/TASK_REVIEW. The completed task is awaiting isolated review.")

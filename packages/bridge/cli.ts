@@ -16,6 +16,7 @@ import {
   handleSessionDeleted,
 } from "./methods/lifecycle"
 import { handleStateGet, handleStateHealth } from "./methods/state"
+import { handleProgressEmit, handleProgressList } from "./methods/progress"
 import { handleGuardCheck, handleGuardPolicy } from "./methods/guard"
 import { handlePromptBuild, handlePromptCompaction } from "./methods/prompt"
 import { handleMessageProcess } from "./methods/message"
@@ -37,6 +38,8 @@ const server = createBridgeServer({
   "lifecycle.sessionDeleted": handleSessionDeleted,
   "state.get": handleStateGet,
   "state.health": handleStateHealth,
+  "progress.emit": handleProgressEmit,
+  "progress.list": handleProgressList,
   "guard.check": handleGuardCheck,
   "guard.policy": handleGuardPolicy,
   "prompt.build": handlePromptBuild,

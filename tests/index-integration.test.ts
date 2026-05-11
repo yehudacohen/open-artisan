@@ -86,12 +86,17 @@ let client: ReturnType<typeof makeMockClient>
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let plugin: any
 let previousStateBackend: string | undefined
+let previousTrace: string | undefined
+let previousIdlePrompts: string | undefined
 
 beforeEach(async () => {
   tempDir = mkdtempSync(join(tmpdir(), "sw-integration-"))
   client = makeMockClient()
   previousStateBackend = process.env["OPENARTISAN_STATE_BACKEND"]
+  previousTrace = process.env["OPENARTISAN_TRACE"]
+  previousIdlePrompts = process.env["OPENARTISAN_IDLE_PROMPTS"]
   process.env["OPENARTISAN_STATE_BACKEND"] = "filesystem"
+  delete process.env["OPENARTISAN_IDLE_PROMPTS"]
 
   // Use the per-test temp project as the plugin directory so feature-name
   // collision checks exercise real persistence without leaking across tests.
@@ -104,8 +109,22 @@ afterEach(() => {
   } else {
     process.env["OPENARTISAN_STATE_BACKEND"] = previousStateBackend
   }
+  if (previousTrace === undefined) {
+    delete process.env["OPENARTISAN_TRACE"]
+  } else {
+    process.env["OPENARTISAN_TRACE"] = previousTrace
+  }
+  if (previousIdlePrompts === undefined) {
+    delete process.env["OPENARTISAN_IDLE_PROMPTS"]
+  } else {
+    process.env["OPENARTISAN_IDLE_PROMPTS"] = previousIdlePrompts
+  }
   rmSync(tempDir, { recursive: true, force: true })
 })
+
+function eventuallyRejects(message: string, ms = 100): Promise<never> {
+  return new Promise((_, reject) => setTimeout(() => reject(new Error(message)), ms))
+}
 
 function planningPassCriteria() {
   return [
@@ -184,11 +203,11 @@ async function advanceGreenfieldToInterfaces(sid: string, featureName: string) {
 // test should fail until the OpenCode wiring lands.
 
 describe("OpenCode integration — structural workflow parity", () => {
-  it("approving PLANNING should land at INTERFACES/SKIP_CHECK in INCREMENTAL mode", async () => {
-    const sid = `int-test-${Date.now()}-planning-skip-check`
+  it("approving PLANNING with implementation-only files should auto-skip structural ceremony", async () => {
+    const sid = `int-test-${Date.now()}-planning-auto-skip`
     await plugin.event({ event: { type: "session.created", properties: { info: { id: sid } } } })
     const ctx = { directory: tempDir, sessionId: sid }
-    await plugin.tool.select_mode.execute({ mode: "INCREMENTAL", feature_name: `skip-check-${Date.now()}` }, ctx)
+    await plugin.tool.select_mode.execute({ mode: "INCREMENTAL", feature_name: `auto-skip-${Date.now()}` }, ctx)
     // Simulate already-approved discovery so planning can be exercised directly.
     await plugin._testStore.update(sid, (d: any) => {
       d.phase = "PLANNING"
@@ -196,9 +215,71 @@ describe("OpenCode integration — structural workflow parity", () => {
       d.mode = "INCREMENTAL"
       d.userGateMessageReceived = true
     })
-    await plugin.tool.submit_feedback.execute({ feedback_text: "approved", feedback_type: "approve", approved_files: [] }, ctx)
+    await plugin.tool.submit_feedback.execute({
+      feedback_text: "approved",
+      feedback_type: "approve",
+      approved_files: ["packages/adapter-hermes/hermes_adapter/continuation_controller.py"],
+    }, ctx)
+    const state = plugin._testStore.get(sid)
+    expect(state?.phase).toBe("IMPLEMENTATION")
+    expect(state?.phaseState).toBe("DRAFT")
+  })
+
+  it("approving PLANNING with interface-classified files should enter INTERFACES/DRAFT", async () => {
+    const sid = `int-test-${Date.now()}-planning-interfaces-draft`
+    await plugin.event({ event: { type: "session.created", properties: { info: { id: sid } } } })
+    const ctx = { directory: tempDir, sessionId: sid }
+    await plugin.tool.select_mode.execute({ mode: "INCREMENTAL", feature_name: `interfaces-draft-${Date.now()}` }, ctx)
+    await plugin._testStore.update(sid, (d: any) => {
+      d.phase = "PLANNING"
+      d.phaseState = "USER_GATE"
+      d.mode = "INCREMENTAL"
+      d.userGateMessageReceived = true
+    })
+
+    await plugin.tool.submit_feedback.execute({
+      feedback_text: "approved",
+      feedback_type: "approve",
+      approved_files: ["packages/adapter-hermes/hermes_adapter/continuation_controller_types.py"],
+    }, ctx)
     const state = plugin._testStore.get(sid)
     expect(state?.phase).toBe("INTERFACES")
+    expect(state?.phaseState).toBe("DRAFT")
+  })
+
+  it("exposes scheduling_complete to resolve INTERFACES/SKIP_CHECK into drafting", async () => {
+    const sid = `int-test-${Date.now()}-scheduling-complete`
+    await plugin.event({ event: { type: "session.created", properties: { info: { id: sid } } } })
+    const ctx = { directory: tempDir, sessionId: sid }
+    await plugin.tool.select_mode.execute({ mode: "INCREMENTAL", feature_name: `structural-complete-${Date.now()}` }, ctx)
+    await plugin._testStore.update(sid, (d: any) => {
+      d.phase = "INTERFACES"
+      d.phaseState = "SKIP_CHECK"
+      d.mode = "INCREMENTAL"
+    })
+
+    const result = await plugin.tool.scheduling_complete.execute({}, ctx)
+    const state = plugin._testStore.get(sid)
+    expect(result).toContain("Structural transition complete")
+    expect(state?.phase).toBe("INTERFACES")
+    expect(state?.phaseState).toBe("DRAFT")
+  })
+
+  it("exposes phase_skipped to resolve INTERFACES/SKIP_CHECK into the next skip check", async () => {
+    const sid = `int-test-${Date.now()}-phase-skipped`
+    await plugin.event({ event: { type: "session.created", properties: { info: { id: sid } } } })
+    const ctx = { directory: tempDir, sessionId: sid }
+    await plugin.tool.select_mode.execute({ mode: "INCREMENTAL", feature_name: `structural-skip-${Date.now()}` }, ctx)
+    await plugin._testStore.update(sid, (d: any) => {
+      d.phase = "INTERFACES"
+      d.phaseState = "SKIP_CHECK"
+      d.mode = "INCREMENTAL"
+    })
+
+    const result = await plugin.tool.phase_skipped.execute({}, ctx)
+    const state = plugin._testStore.get(sid)
+    expect(result).toContain("Structural transition complete")
+    expect(state?.phase).toBe("TESTS")
     expect(state?.phaseState).toBe("SKIP_CHECK")
   })
 
@@ -464,8 +545,9 @@ describe("Plugin shape — returned object has all required keys", () => {
 
   it("exposes file-based request_review args without legacy artifact_content", () => {
     const args = plugin.tool.request_review.args
-    expect(Object.keys(args).sort()).toEqual(["artifact_description", "artifact_files", "artifact_markdown", "summary"])
+    expect(Object.keys(args).sort()).toEqual(["artifact_description", "artifact_files", "summary"])
     expect(args.artifact_content).toBeUndefined()
+    expect(args.artifact_markdown).toBeUndefined()
   })
 
   it("WORKFLOW_TOOL_NAMES contains every callable workflow tool", () => {
@@ -478,6 +560,25 @@ describe("Plugin shape — returned object has all required keys", () => {
 // ---------------------------------------------------------------------------
 
 describe("Event hook — session lifecycle", () => {
+  it("writes trace init diagnostics at plugin startup when tracing is enabled", async () => {
+    process.env["OPENARTISAN_TRACE"] = "1"
+    plugin = await OpenArtisanPlugin({ client, directory: tempDir } as any)
+
+    const tracePath = join(tempDir, ".openartisan", "openartisan-trace.jsonl")
+    expect(existsSync(tracePath)).toBe(true)
+    const events = readFileSync(tracePath, "utf-8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line))
+
+    expect(events.some((entry) =>
+      entry.event === "trace.init" &&
+      entry.traceEnabled === true &&
+      entry.stateDir === join(tempDir, ".openartisan") &&
+      typeof entry.backend === "string"
+    )).toBe(true)
+  })
+
   it("session.created initializes state", async () => {
     const sessionId = `int-test-${Date.now()}-created`
     await plugin.event({
@@ -548,7 +649,7 @@ describe("Event hook — session lifecycle", () => {
     expect(client.session.prompt).not.toHaveBeenCalled()
   })
 
-  it("honors idle events for active workflow sessions when registry active id is stale or inactive", async () => {
+  it("injects idle prompts for active workflow sessions by default", async () => {
     const workflowSessionId = `int-test-${Date.now()}-workflow-idle`
     const inactiveSessionId = `int-test-${Date.now()}-inactive`
 
@@ -573,6 +674,179 @@ describe("Event hook — session lifecycle", () => {
     const promptArg = (client.session.prompt as ReturnType<typeof mock>).mock.calls[0]?.[0]
     expect(promptArg?.path?.id).toBe(workflowSessionId)
     expect(promptArg?.body?.parts?.[0]?.text).toContain("Continue drafting the PLANNING artifact")
+    expect(plugin._testStore.get(workflowSessionId)?.retryCount).toBe(1)
+  })
+
+  it("disables idle prompts when OPENARTISAN_IDLE_PROMPTS is 0", async () => {
+    process.env["OPENARTISAN_IDLE_PROMPTS"] = "0"
+    const workflowSessionId = `int-test-${Date.now()}-workflow-idle-opt-in`
+
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: workflowSessionId } } },
+    })
+    await plugin.tool.select_mode.execute(
+      { mode: "GREENFIELD", feature_name: `workflow-idle-opt-in-${Date.now()}` },
+      { directory: tempDir, sessionId: workflowSessionId },
+    )
+    ;(client.session.prompt as ReturnType<typeof mock>).mockClear()
+
+    await plugin.event({
+      event: { type: "session.idle", properties: { sessionID: workflowSessionId } },
+    })
+
+    expect(client.session.prompt).not.toHaveBeenCalled()
+  })
+
+  it("does not block idle or later chat hooks when durable state updates hang", async () => {
+    process.env["OPENARTISAN_TRACE"] = "1"
+    const sid = `int-test-${Date.now()}-idle-stuck-write`
+
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: sid, agent: "artisan" } } },
+    })
+    await plugin.tool.select_mode.execute(
+      { mode: "GREENFIELD", feature_name: `idle-stuck-write-${Date.now()}` },
+      { directory: tempDir, sessionId: sid, agent: "artisan" },
+    )
+    ;(client.session.prompt as ReturnType<typeof mock>).mockClear()
+
+    const originalUpdate = plugin._testStore.update.bind(plugin._testStore)
+    plugin._testStore.update = () => new Promise(() => {})
+    try {
+      await Promise.race([
+        plugin.event({ event: { type: "session.idle", properties: { sessionID: sid } } }),
+        eventuallyRejects("idle hook did not return"),
+      ])
+
+      await Promise.race([
+        plugin["chat.message"](
+          { sessionID: sid },
+          { message: { sessionID: sid, id: "msg-ping" }, parts: [{ type: "text", text: "ping" }] },
+        ),
+        eventuallyRejects("chat.message hook did not return"),
+      ])
+    } finally {
+      plugin._testStore.update = originalUpdate
+    }
+
+    expect(client.session.prompt).toHaveBeenCalledTimes(1)
+    expect(plugin._testStore.get(sid)?.retryCount).toBe(1)
+    const tracePath = join(tempDir, ".openartisan", "openartisan-trace.jsonl")
+    const events = readFileSync(tracePath, "utf-8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line))
+    expect(events.some((entry) => entry.event === "hook.memoryMutation" && entry.hook === "event" && entry.label === "idle.retryCount")).toBe(true)
+    expect(events.some((entry) => entry.event === "hook.write.timeout")).toBe(false)
+    expect(events.some((entry) => entry.event === "hook.end" && entry.hook === "event" && entry.eventType === "session.idle")).toBe(true)
+    expect(events.some((entry) => entry.event === "hook.end" && entry.hook === "chat.message")).toBe(true)
+  })
+
+  it("injects user-gate routing without durable state updates from the chat hook", async () => {
+    process.env["OPENARTISAN_TRACE"] = "1"
+    const sid = `int-test-${Date.now()}-gate-stuck-write`
+
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: sid, agent: "artisan" } } },
+    })
+    await plugin._testStore.update(sid, (draft: any) => {
+      draft.mode = "GREENFIELD"
+      draft.featureName = "gate-stuck-write"
+      draft.phase = "PLANNING"
+      draft.phaseState = "USER_GATE"
+      draft.activeAgent = "artisan"
+      draft.userGateMessageReceived = false
+    })
+
+    const originalUpdate = plugin._testStore.update.bind(plugin._testStore)
+    plugin._testStore.update = () => new Promise(() => {})
+    const output = {
+      message: { sessionID: sid, id: "msg-gate-stuck-write" },
+      parts: [{ type: "text", text: "approved" }],
+    }
+    try {
+      await Promise.race([
+        plugin["chat.message"]({ sessionID: sid, agent: "artisan" }, output),
+        eventuallyRejects("chat.message hook did not return"),
+      ])
+    } finally {
+      plugin._testStore.update = originalUpdate
+    }
+
+    expect(output.parts).toHaveLength(2)
+    expect(output.parts[0]?.text).toContain("Call `submit_feedback` NOW")
+    expect(plugin._testStore.get(sid).userGateMessageReceived).toBe(true)
+    const tracePath = join(tempDir, ".openartisan", "openartisan-trace.jsonl")
+    const events = readFileSync(tracePath, "utf-8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line))
+    expect(events.some((entry) => entry.event === "hook.memoryMutation" && entry.hook === "chat.message" && entry.label === "chat.userGateReceived")).toBe(true)
+    expect(events.some((entry) => entry.event === "hook.write.timeout")).toBe(false)
+    expect(events.some((entry) => entry.event === "hook.end" && entry.hook === "chat.message" && entry.didMutateOutput === true)).toBe(true)
+  })
+
+  it("writes hook and idle prompt diagnostics to the trace file", async () => {
+    process.env["OPENARTISAN_TRACE"] = "1"
+    const sid = `int-test-${Date.now()}-trace`
+
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: sid, agent: "artisan" } } },
+    })
+    await plugin.tool.select_mode.execute(
+      { mode: "GREENFIELD", feature_name: `trace-${Date.now()}` },
+      { directory: tempDir, sessionId: sid, agent: "artisan" },
+    )
+    await plugin["experimental.chat.system.transform"]({ sessionID: sid, agent: "artisan" }, { system: [] })
+    await plugin.event({ event: { type: "session.idle", properties: { sessionID: sid } } })
+
+    const tracePath = join(tempDir, ".openartisan", "openartisan-trace.jsonl")
+    expect(existsSync(tracePath)).toBe(true)
+    const events = readFileSync(tracePath, "utf-8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line))
+
+    expect(events.some((entry) => entry.event === "hook.start" && entry.hook === "event")).toBe(true)
+    expect(events.some((entry) => entry.event === "hook.end" && entry.hook === "experimental.chat.system.transform" && entry.injected === true)).toBe(true)
+    expect(events.some((entry) => entry.event === "idle.decision" && entry.action === "reprompt")).toBe(true)
+    expect(events.some((entry) => entry.event === "idle.prompt.skipped" && entry.reason === "idle-reprompt")).toBe(false)
+    expect(events.some((entry) => entry.event === "promptExistingSession.start")).toBe(true)
+  })
+
+  it("records swallowed idle reprompt failures in trace", async () => {
+    process.env["OPENARTISAN_IDLE_PROMPTS"] = "1"
+    process.env["OPENARTISAN_TRACE"] = "1"
+    const sid = `int-test-${Date.now()}-trace-idle-failure`
+
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: sid, agent: "artisan" } } },
+    })
+    await plugin.tool.select_mode.execute(
+      { mode: "GREENFIELD", feature_name: `trace-idle-failure-${Date.now()}` },
+      { directory: tempDir, sessionId: sid, agent: "artisan" },
+    )
+    ;(client.session.prompt as ReturnType<typeof mock>).mockImplementationOnce(async () => {
+      throw new Error("synthetic prompt failure")
+    })
+
+    await plugin.event({ event: { type: "session.idle", properties: { sessionID: sid } } })
+
+    const tracePath = join(tempDir, ".openartisan", "openartisan-trace.jsonl")
+    const events = readFileSync(tracePath, "utf-8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line))
+
+    expect(events.some((entry) =>
+      entry.event === "promptExistingSession.end" &&
+      entry.success === false &&
+      entry.error === "synthetic prompt failure"
+    )).toBe(true)
+    expect(events.some((entry) =>
+      entry.event === "idle.reprompt.failed" &&
+      entry.error === "synthetic prompt failure"
+    )).toBe(true)
   })
 })
 
@@ -622,6 +896,88 @@ describe("select_mode tool — full integration", () => {
     )
     expect(result).toContain("INCREMENTAL")
     expect(result).toContain("DISCOVERY")
+  })
+
+  it("resumes an incomplete prior workflow instead of restarting discovery", async () => {
+    const oldSid = `int-test-${Date.now()}-resume-old`
+    await plugin.event({ event: { type: "session.created", properties: { info: { id: oldSid } } } })
+    const oldCtx = { directory: tempDir, sessionId: oldSid }
+    await plugin.tool.select_mode.execute(
+      { mode: "INCREMENTAL", feature_name: "resume-incomplete" },
+      oldCtx,
+    )
+    await plugin.tool.mark_scan_complete.execute({ scan_summary: "scanned" }, oldCtx)
+
+    const newSid = `int-test-${Date.now()}-resume-new`
+    await plugin.event({ event: { type: "session.created", properties: { info: { id: newSid } } } })
+    const newCtx = { directory: tempDir, sessionId: newSid }
+
+    const check = await plugin.tool.check_prior_workflow.execute(
+      { feature_name: "resume-incomplete" },
+      newCtx,
+    )
+    expect(check).toContain("Prior workflow found")
+
+    const result = await plugin.tool.select_mode.execute(
+      { mode: "INCREMENTAL", feature_name: "resume-incomplete" },
+      newCtx,
+    )
+
+    expect(result).toContain("Resuming prior workflow")
+    expect(result).toContain("DISCOVERY/ANALYZE")
+    expect(plugin._testStore.get(newSid).phase).toBe("DISCOVERY")
+    expect(plugin._testStore.get(newSid).phaseState).toBe("ANALYZE")
+  })
+
+  it("adopts persisted prior workflow state when resuming with the same session id", async () => {
+    const sid = `int-test-${Date.now()}-resume-same`
+    await plugin.event({ event: { type: "session.created", properties: { info: { id: sid } } } })
+    const ctx = { directory: tempDir, sessionId: sid }
+    await plugin.tool.select_mode.execute(
+      { mode: "INCREMENTAL", feature_name: "resume-same-session" },
+      ctx,
+    )
+    await plugin.tool.mark_scan_complete.execute({ scan_summary: "scanned" }, ctx)
+
+    plugin = await OpenArtisanPlugin({ client, directory: tempDir } as any)
+    await plugin.event({ event: { type: "session.created", properties: { info: { id: sid } } } })
+
+    const check = await plugin.tool.check_prior_workflow.execute(
+      { feature_name: "resume-same-session" },
+      ctx,
+    )
+    expect(check).toContain("Prior workflow found")
+
+    const result = await plugin.tool.select_mode.execute(
+      { mode: "INCREMENTAL", feature_name: "resume-same-session" },
+      ctx,
+    )
+
+    expect(result).toContain("Workflow already active")
+    expect(plugin._testStore.get(sid).phase).toBe("DISCOVERY")
+    expect(plugin._testStore.get(sid).phaseState).toBe("ANALYZE")
+  })
+
+  it("check_prior_workflow lazily creates session state after plugin restart", async () => {
+    const sid = `int-test-${Date.now()}-check-prior-lazy`
+    await plugin.event({ event: { type: "session.created", properties: { info: { id: sid } } } })
+    const ctx = { directory: tempDir, sessionId: sid }
+    await plugin.tool.select_mode.execute(
+      { mode: "INCREMENTAL", feature_name: "check-prior-lazy-resume" },
+      ctx,
+    )
+    await plugin.tool.mark_scan_complete.execute({ scan_summary: "scanned" }, ctx)
+
+    plugin = await OpenArtisanPlugin({ client, directory: tempDir } as any)
+
+    const check = await plugin.tool.check_prior_workflow.execute(
+      { feature_name: "check-prior-lazy-resume", user_intent: "continue testing resume after restart" },
+      ctx,
+    )
+
+    expect(check).toContain("Prior workflow found")
+    expect(check).not.toContain("Session")
+    expect(plugin._testStore.get(sid).priorWorkflowChecked).toBe(true)
   })
 
   it("switches to a different feature in the same session by parking the current workflow", async () => {
@@ -718,6 +1074,35 @@ describe("tool.execute.before — phase-gated tool restrictions", () => {
     await expect(
       plugin["tool.execute.before"]({ sessionID: sid, tool: "file_write", args: { filePath: "/tmp/test" } }),
     ).rejects.toThrow("blocked")
+  })
+
+  it("records session policy source in tool guard trace entries", async () => {
+    process.env["OPENARTISAN_TRACE"] = "1"
+    const sid = `int-test-${Date.now()}-guard-policy-source`
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: sid } } },
+    })
+    await plugin.tool.select_mode.execute(
+      { mode: "REFACTOR", feature_name: `guard-policy-source-${Date.now()}` },
+      { directory: tempDir, sessionId: sid },
+    )
+
+    await expect(
+      plugin["tool.execute.before"]({ sessionID: sid, tool: "file_write", args: { filePath: "/tmp/test" } }),
+    ).rejects.toThrow("blocked")
+
+    const tracePath = join(tempDir, ".openartisan", "openartisan-trace.jsonl")
+    const events = readFileSync(tracePath, "utf-8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line))
+    expect(events.some((entry) =>
+      entry.event === "hook.end" &&
+      entry.hook === "tool.execute.before" &&
+      entry.tool === "file_write" &&
+      entry.policySource === "session" &&
+      typeof entry.error === "string",
+    )).toBe(true)
   })
 
   it("allows read tools during DISCOVERY/SCAN", async () => {
@@ -970,6 +1355,26 @@ describe("tool.execute.before — phase-gated tool restrictions", () => {
         args: {},
         patchText: "*** Begin Patch\n*** Add File: src/contracts.d.ts\n+export interface Contract {}\n*** End Patch",
       } as any),
+    ).resolves.toBeUndefined()
+  })
+
+  it("allows apply_patch when OpenCode provides patch text on hook output args", async () => {
+    const sid = `int-test-${Date.now()}-guard-output-args-patch`
+    await advanceGreenfieldToInterfaces(sid, `guard-output-args-patch-${Date.now()}`)
+
+    await expect(
+      plugin["tool.execute.before"](
+        {
+          sessionID: sid,
+          tool: "apply_patch",
+          callID: "call_output_args_patch",
+        } as any,
+        {
+          args: {
+            patchText: "*** Begin Patch\n*** Add File: src/contracts.d.ts\n+export interface Contract {}\n*** End Patch",
+          },
+        } as any,
+      ),
     ).resolves.toBeUndefined()
   })
 
@@ -1246,6 +1651,32 @@ describe("experimental.chat.system.transform — injects workflow prompt", () =>
     expect(state.activeAgent).toBe("artisan")
   })
 
+  it("goes dormant for explicit Open Artisan self-repair intent", async () => {
+    const sid = `int-test-${Date.now()}-self-repair-dormant`
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: sid, agent: "artisan" } } },
+    })
+    await plugin.tool.select_mode.execute(
+      { mode: "REFACTOR", feature_name: "self-repair-dormant" },
+      { directory: tempDir, sessionId: sid, agent: "artisan" },
+    )
+
+    await plugin["chat.message"](
+      { sessionID: sid },
+      {
+        message: { sessionID: sid, id: "msg-self-repair" },
+        parts: [{ type: "text", text: "We need to fix Open Artisan itself before continuing." }],
+      },
+    )
+
+    const output = { system: ["original"] }
+    await plugin["experimental.chat.system.transform"]({ sessionID: sid }, output)
+
+    expect(output.system).toEqual(["original"])
+    const state = plugin._testStore.get(sid)
+    expect(state.activeAgent).toBe("build")
+  })
+
   it("resets stalled retry state when the user responds", async () => {
     const sid = `int-test-${Date.now()}-retry-reset-on-user`
     await plugin.event({
@@ -1327,6 +1758,149 @@ describe("experimental.chat.system.transform — injects workflow prompt", () =>
 
     expect(output.system).toEqual(["original"])
     expect(plugin._testStore.get(sid).activeAgent).toBe("build")
+  })
+
+  it("can turn on Open Artisan and record a user-gate approval in the same message", async () => {
+    const sid = `int-test-${Date.now()}-turn-on-approve-gate`
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: sid, agent: "build" } } },
+    })
+    await plugin._testStore.update(sid, (draft: any) => {
+      draft.mode = "INCREMENTAL"
+      draft.featureName = "turn-on-approve-gate"
+      draft.phase = "DISCOVERY"
+      draft.phaseState = "USER_GATE"
+      draft.activeAgent = "build"
+      draft.userGateMessageReceived = false
+    })
+
+    const output = {
+      message: { sessionID: sid, id: "msg-turn-on-approve-gate" },
+      parts: [{ type: "text", text: "turn on open-artisan and approve the user gate" }],
+    }
+    await plugin["chat.message"]({ sessionID: sid, agent: "build" }, output)
+
+    const state = plugin._testStore.get(sid)
+    expect(state.activeAgent).toBe("build-artisan")
+    expect(state.userGateMessageReceived).toBe(true)
+    expect(output.parts[0]?.text).toContain("The user has approved")
+  })
+
+  it("keeps Open Artisan off after an explicit opt-out even when artisan metadata remains", async () => {
+    const sid = `int-test-${Date.now()}-artisan-openartisan-off`
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: sid, agent: "artisan" } } },
+    })
+
+    await plugin.tool.select_mode.execute(
+      { mode: "GREENFIELD", feature_name: "artisan-openartisan-off" },
+      { directory: tempDir, sessionId: sid, agent: "artisan" },
+    )
+
+    await plugin["chat.message"](
+      { sessionID: sid, agent: "artisan" },
+      {
+        message: { sessionID: sid, id: "msg-artisan-openartisan-off" },
+        parts: [{ type: "text", text: "turn off open-artisan first" }],
+      },
+    )
+
+    const output = { system: ["original"] }
+    await plugin["experimental.chat.system.transform"]({ sessionID: sid, agent: "artisan" }, output)
+
+    expect(output.system).toEqual(["original"])
+    expect(plugin._testStore.get(sid).activeAgent).toBe("build")
+  })
+
+  it("suppresses idle reprompts after explicit opt-out even when artisan metadata remains", async () => {
+    const sid = `int-test-${Date.now()}-artisan-off-idle`
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: sid, agent: "artisan" } } },
+    })
+
+    await plugin.tool.select_mode.execute(
+      { mode: "GREENFIELD", feature_name: "artisan-off-idle" },
+      { directory: tempDir, sessionId: sid, agent: "artisan" },
+    )
+
+    await plugin["chat.message"](
+      { sessionID: sid, agent: "artisan" },
+      {
+        message: { sessionID: sid, id: "msg-artisan-off-idle" },
+        parts: [{ type: "text", text: "turn off open-artisan" }],
+      },
+    )
+    ;(client.session.prompt as ReturnType<typeof mock>).mockClear()
+
+    await plugin.event({ event: { type: "session.idle", properties: { sessionID: sid } } })
+
+    expect(client.session.prompt).not.toHaveBeenCalled()
+    expect(plugin._testStore.get(sid).retryCount).toBe(0)
+  })
+
+  it("does not enforce tool guard after explicit opt-out even when artisan metadata remains", async () => {
+    const sid = `int-test-${Date.now()}-artisan-off-tool-guard`
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: sid, agent: "artisan" } } },
+    })
+
+    await plugin.tool.select_mode.execute(
+      { mode: "GREENFIELD", feature_name: "artisan-off-tool-guard" },
+      { directory: tempDir, sessionId: sid, agent: "artisan" },
+    )
+
+    await plugin["chat.message"](
+      { sessionID: sid, agent: "artisan" },
+      {
+        message: { sessionID: sid, id: "msg-artisan-off-tool-guard" },
+        parts: [{ type: "text", text: "open-artisan off" }],
+      },
+    )
+
+    await expect(plugin["tool.execute.before"]({
+      sessionID: sid,
+      agent: "artisan",
+      tool: "write",
+      args: { filePath: "src/runtime.ts", content: "x" },
+    })).resolves.toBeUndefined()
+  })
+
+  it("disables compaction auto-continue at workflow user gates", async () => {
+    const sid = `int-test-${Date.now()}-gate-autocontinue`
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: sid, agent: "artisan" } } },
+    })
+    await plugin.tool.select_mode.execute(
+      { mode: "GREENFIELD", feature_name: "gate-autocontinue" },
+      { directory: tempDir, sessionId: sid, agent: "artisan" },
+    )
+    await plugin._testStore.update(sid, (draft: any) => {
+      draft.phase = "DISCOVERY"
+      draft.phaseState = "USER_GATE"
+      draft.activeAgent = "artisan"
+    })
+
+    const output = { enabled: true }
+    await plugin["experimental.compaction.autocontinue"]({ sessionID: sid }, output)
+
+    expect(output.enabled).toBe(false)
+  })
+
+  it("leaves compaction auto-continue alone for dormant sessions", async () => {
+    const sid = `int-test-${Date.now()}-dormant-autocontinue`
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: sid, agent: "build" } } },
+    })
+    await plugin._testStore.update(sid, (draft: any) => {
+      draft.phase = "DISCOVERY"
+      draft.phaseState = "USER_GATE"
+      draft.activeAgent = "build"
+    })
+
+    const output = { enabled: true }
+    await plugin["experimental.compaction.autocontinue"]({ sessionID: sid }, output)
+
+    expect(output.enabled).toBe(true)
   })
 
   it("ignores disable-workflow text for true artisan sessions", async () => {
@@ -1601,6 +2175,51 @@ describe("robot-artisan autonomy", () => {
 // ---------------------------------------------------------------------------
 
 describe("End-to-end: GREENFIELD happy path through PLANNING", () => {
+  it("keeps REVIEW state when mark_satisfied omits required blocking criteria", async () => {
+    const sid = `int-test-${Date.now()}-insufficient-review-criteria`
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: sid } } },
+    })
+    const ctx = { directory: tempDir, sessionId: sid }
+
+    await plugin.tool.select_mode.execute({ mode: "GREENFIELD", feature_name: "insufficient-review-criteria" }, ctx)
+    await requestPlanningReview(ctx, "insufficient-review-criteria")
+
+    const result = await plugin.tool.mark_satisfied.execute({
+      criteria_met: planningPassCriteria().slice(0, 2),
+    }, ctx)
+
+    expect(result).toContain("Error: Only 2 blocking criteria submitted")
+    const state = plugin._testStore.get(sid)
+    expect(state.phase).toBe("PLANNING")
+    expect(state.phaseState).toBe("REVIEW")
+  })
+
+  it("keeps REVIEW state and surfaces the error when isolated reviewer dispatch fails", async () => {
+    const sid = `int-test-${Date.now()}-reviewer-error`
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: sid } } },
+    })
+    const ctx = { directory: tempDir, sessionId: sid }
+    const featureName = "reviewer-error-feature"
+
+    await plugin.tool.select_mode.execute({ mode: "GREENFIELD", feature_name: featureName }, ctx)
+    await requestPlanningReview(ctx, featureName)
+    ;(client.session.prompt as ReturnType<typeof mock>).mockImplementationOnce(async () => {
+      throw new Error("reviewer runtime unavailable")
+    })
+
+    const result = await plugin.tool.mark_satisfied.execute({ criteria_met: planningPassCriteria() }, ctx)
+
+    expect(result).toContain("Error: Isolated reviewer failed")
+    expect(result).toContain("reviewer runtime unavailable")
+    const state = plugin._testStore.get(sid)
+    expect(state.phase).toBe("PLANNING")
+    expect(state.phaseState).toBe("REVIEW")
+    expect(state.latestReviewResults?.[0]?.criterion).toBe("Isolated reviewer runtime failed")
+    expect(state.latestReviewResults?.[0]?.evidence).toContain("reviewer runtime unavailable")
+  })
+
   it("select_mode → request_review → mark_satisfied → submit_feedback(approve)", async () => {
     const sid = `int-test-${Date.now()}-e2e`
     await plugin.event({
@@ -1686,7 +2305,7 @@ describe("End-to-end: GREENFIELD happy path through PLANNING", () => {
 // ---------------------------------------------------------------------------
 
 describe("userGateMessageReceived — blocks self-approval", () => {
-  it("blocks submit_feedback(approve) when no user message was received", async () => {
+  it("blocks submit_feedback(approve) when no user message text was provided", async () => {
     const sid = `int-test-${Date.now()}-selfapprove`
     await plugin.event({
       event: { type: "session.created", properties: { info: { id: sid } } },
@@ -1704,11 +2323,37 @@ describe("userGateMessageReceived — blocks self-approval", () => {
 
     // Attempt to approve WITHOUT sending a user message first
     const result = await plugin.tool.submit_feedback.execute(
-      { feedback_text: "approved", feedback_type: "approve" },
+      { feedback_text: "", feedback_type: "approve" },
       ctx,
     )
     expect(result).toContain("Error: Waiting for user response")
     expect(result).toContain("you cannot self-approve")
+  })
+
+  it("allows explicit submit_feedback approval text even when chat.message did not mark the gate", async () => {
+    const sid = `int-test-${Date.now()}-approve-text-no-hook`
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: sid, agent: "build" } } },
+    })
+    const ctx = { directory: tempDir, sessionId: sid, agent: "build" }
+
+    await plugin.tool.select_mode.execute({ mode: "GREENFIELD", feature_name: "approve-text-no-hook" }, ctx)
+    await requestPlanningReview(ctx, "approve-text-no-hook")
+    await plugin.tool.mark_satisfied.execute(
+      { criteria_met: planningPassCriteria() },
+      ctx,
+    )
+    await plugin._testStore.update(sid, (draft: any) => {
+      draft.userGateMessageReceived = false
+    })
+
+    const result = await plugin.tool.submit_feedback.execute(
+      { feedback_text: "approved", feedback_type: "approve" },
+      ctx,
+    )
+
+    expect(result).not.toContain("Waiting for user response")
+    expect(plugin._testStore.get(sid).phaseState).not.toBe("USER_GATE")
   })
 
   it("allows submit_feedback(approve) after user message is received", async () => {
@@ -1740,6 +2385,66 @@ describe("userGateMessageReceived — blocks self-approval", () => {
     )
     // Should NOT contain the "no user message" error
     expect(result).not.toContain("no user message")
+  })
+
+  it("records the user gate response in memory before injecting submit_feedback routing", async () => {
+    const sid = `int-test-${Date.now()}-gate-persist-before-inject`
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: sid, agent: "artisan" } } },
+    })
+    await plugin._testStore.update(sid, (draft: any) => {
+      draft.mode = "GREENFIELD"
+      draft.featureName = "gate-persist-before-inject"
+      draft.phase = "DISCOVERY"
+      draft.phaseState = "USER_GATE"
+      draft.activeAgent = "artisan"
+      draft.userGateMessageReceived = false
+    })
+
+    const output = {
+      message: { sessionID: sid, id: "msg-gate-persist-before-inject" },
+      parts: [{ type: "text", text: "approved" }],
+    }
+    await plugin["chat.message"]({ sessionID: sid, agent: "artisan" }, output)
+
+    expect(plugin._testStore.get(sid).userGateMessageReceived).toBe(true)
+    expect(output.parts[0]?.text).toContain("Call `submit_feedback` NOW")
+  })
+
+  it("does not call durable state update when injecting submit_feedback routing", async () => {
+    const sid = `int-test-${Date.now()}-gate-persist-fails`
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: sid, agent: "artisan" } } },
+    })
+    await plugin._testStore.update(sid, (draft: any) => {
+      draft.mode = "GREENFIELD"
+      draft.featureName = "gate-persist-fails"
+      draft.phase = "DISCOVERY"
+      draft.phaseState = "USER_GATE"
+      draft.activeAgent = "artisan"
+      draft.userGateMessageReceived = false
+    })
+
+    const originalUpdate = plugin._testStore.update.bind(plugin._testStore)
+    let updateCalled = false
+    plugin._testStore.update = async () => {
+      updateCalled = true
+      throw new Error("chat hook should not durably update gate state")
+    }
+
+    const output = {
+      message: { sessionID: sid, id: "msg-gate-persist-fails" },
+      parts: [{ type: "text", text: "approved" }],
+    }
+    try {
+      await plugin["chat.message"]({ sessionID: sid, agent: "artisan" }, output)
+    } finally {
+      plugin._testStore.update = originalUpdate
+    }
+
+    expect(updateCalled).toBe(false)
+    expect(plugin._testStore.get(sid).userGateMessageReceived).toBe(true)
+    expect(output.parts[0]?.text).toContain("Call `submit_feedback` NOW")
   })
 
   it("submit_feedback(revise) is NOT blocked by userGateMessageReceived", async () => {
@@ -2266,9 +2971,7 @@ describe("request_review — re-submit at REVIEW state", () => {
     await plugin.event({ event: { type: "session.idle", properties: { sessionID: sid } } })
 
     expect(client.session.prompt).toHaveBeenCalledTimes(1)
-    const promptArg = (client.session.prompt as ReturnType<typeof mock>).mock.calls[0]?.[0]
-    expect(promptArg?.path?.id).toBe(sid)
-    expect(promptArg?.body?.parts?.[0]?.text).toContain("Continue self-reviewing the PLANNING artifact")
+    expect(plugin._testStore.get(sid)?.retryCount).toBe(1)
   })
 
   it("allows request_review at REVIEW state with artifact_files", async () => {
@@ -2337,6 +3040,37 @@ describe("request_review — re-submit at REVIEW state", () => {
     expect(state.phaseState).toBe("REVIEW")
     expect(state.artifactDiskPaths.plan).toBe(planPath)
     expect(state.reviewArtifactHash).not.toBeNull()
+  })
+
+  it("rejects request_review with artifact_markdown", async () => {
+    const sid = `int-test-${Date.now()}-review-files-and-markdown`
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: sid } } },
+    })
+    const ctx = { directory: tempDir, sessionId: sid }
+
+    await plugin.tool.select_mode.execute(
+      { mode: "GREENFIELD", feature_name: "review-files-and-markdown" },
+      ctx,
+    )
+
+    const planPath = join(tempDir, ".openartisan", "review-files-and-markdown", "plan.md")
+    mkdirSync(join(tempDir, ".openartisan", "review-files-and-markdown"), { recursive: true })
+    await Bun.write(planPath, "# Plan\n\nOriginal on-disk plan.")
+
+    const result = await plugin.tool.request_review.execute(
+      {
+        summary: "Plan ready",
+        artifact_description: "Plan doc",
+        artifact_files: [planPath],
+        artifact_markdown: "# Placeholder\n",
+      },
+      ctx,
+    )
+
+    expect(result).toContain("Error")
+    expect(result).toContain("artifact_markdown")
+    expect(await Bun.file(planPath).text()).toContain("Original on-disk plan")
   })
 
   it("resolves relative artifact_files before persisting artifact disk paths", async () => {
@@ -2438,9 +3172,7 @@ describe("request_review — re-submit at REVIEW state", () => {
     await plugin.event({ event: { type: "session.idle", properties: { sessionID: sid } } })
 
     expect(client.session.prompt).toHaveBeenCalledTimes(1)
-    const promptArg = (client.session.prompt as ReturnType<typeof mock>).mock.calls[0]?.[0]
-    expect(promptArg?.path?.id).toBe(sid)
-    expect(promptArg?.body?.parts?.[0]?.text).toContain("Continue self-reviewing the PLANNING artifact")
+    expect(plugin._testStore.get(sid)?.retryCount).toBe(1)
   })
 
   it("clears stale latestReviewResults on request_review resubmission", async () => {

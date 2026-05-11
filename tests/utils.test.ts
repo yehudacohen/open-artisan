@@ -6,7 +6,7 @@
  * - withTimeout: resolves on time, rejects on timeout, clears timer on resolve
  */
 import { describe, expect, it } from "bun:test"
-import { resolveSessionId, withTimeout, getNextActionForState } from "#core/utils"
+import { resolveSessionId, withTimeout, getNextActionForState, extractEphemeralSessionId, extractTextFromPromptResult } from "#core/utils"
 
 // ---------------------------------------------------------------------------
 // resolveSessionId
@@ -31,6 +31,42 @@ describe("resolveSessionId", () => {
 
   it("prefers sessionID over sessionId", () => {
     expect(resolveSessionId({ sessionID: "capital", sessionId: "lower" })).toBe("capital")
+  })
+})
+
+describe("extractEphemeralSessionId", () => {
+  it("extracts data.id from SDK create envelopes", () => {
+    expect(extractEphemeralSessionId({ data: { id: "ses-data" } })).toBe("ses-data")
+  })
+
+  it("extracts nested session id variants from OpenCode create envelopes", () => {
+    expect(extractEphemeralSessionId({ data: { session: { id: "ses-nested" } } })).toBe("ses-nested")
+    expect(extractEphemeralSessionId({ data: { info: { sessionID: "ses-info" } } })).toBe("ses-info")
+    expect(extractEphemeralSessionId({ result: { sessionId: "ses-result" } })).toBe("ses-result")
+  })
+
+  it("extracts event-shaped and array-wrapped session ids", () => {
+    expect(extractEphemeralSessionId({ properties: { info: { id: "ses-event" } } })).toBe("ses-event")
+    expect(extractEphemeralSessionId({ data: [{ session_id: "ses-array" }] })).toBe("ses-array")
+  })
+
+  it("includes a response summary when session id extraction fails", () => {
+    expect(() => extractEphemeralSessionId({ properties: { info: { title: "missing" } } }, "reviewer")).toThrow("reviewer: could not extract session ID from session.create() response:")
+  })
+})
+
+describe("extractTextFromPromptResult", () => {
+  it("extracts text from data.parts prompt envelopes", () => {
+    expect(extractTextFromPromptResult({ data: { parts: [{ type: "text", text: "hello" }] } })).toBe("hello")
+  })
+
+  it("extracts text from nested OpenCode prompt envelopes", () => {
+    expect(extractTextFromPromptResult({ data: { message: { parts: [{ type: "text", text: "nested" }] } } })).toBe("nested")
+    expect(extractTextFromPromptResult({ result: { output: { parts: [{ content: "content text" }] } } })).toBe("content text")
+  })
+
+  it("extracts text from message history arrays", () => {
+    expect(extractTextFromPromptResult({ data: [{ info: { id: "msg-1" }, parts: [{ type: "text", text: "history" }] }] })).toBe("history")
   })
 })
 

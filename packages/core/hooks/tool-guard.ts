@@ -32,10 +32,15 @@ export interface ParallelIsolationAssessment {
 
 // Predicates ---------------------------------------------------------------
 
-const BASH_WRITE_OPS = /(?:>>|>[^&]|\btee\b|\bsed\s+-i\b|\bdd\b.*\bof=|<<-?\s*['"]?[A-Za-z_][A-Za-z0-9_]*['"]?|\b(?:python|python3|node|ruby|perl)\b.*\b(?:writeFile|open\s*\(|File\.write|fs\.write|write\s*\())/
+const BASH_WRITE_OPS = /(?:>>|>[^&]|\btee\b|\bsed\s+-i\b|\bdd\b.*\bof=|<<-?\s*['"]?[A-Za-z_][A-Za-z0-9_]*['"]?|(?:^|[;&|]\s*)(?:touch|mkdir|cp|mv|rm|rmdir|install|chmod|chown|ln|truncate|rsync|patch|cpio|unzip|tar\s+(?:-[A-Za-z]*x[A-Za-z]*|x[A-Za-z]*|--extract)|git\s+(?:add|commit|checkout|restore|reset|clean|mv|rm|apply|am)|(?:curl|wget)\b(?=.*\s(?:-o|-O|--output(?:=|\s)|--output-document(?:=|\s)))|(?:npm|pnpm|yarn|bun)\s+(?:install|add|remove|update|x)|(?:prettier|eslint|ruff|black|isort)\b.*\b(?:--write|--fix|--apply))\b|\b(?:python|python3|node|ruby|perl)\b.*\b(?:writeFile|open\s*\(|File\.write|fs\.write|write\s*\(|write_text\s*\(|write_bytes\s*\(|append_text\s*\(|append_bytes\s*\())/
 
 function readOnlyBash(command: string): boolean {
   return !BASH_WRITE_OPS.test(command)
+}
+
+function noEnvWritingBash(command: string): boolean {
+  if (!/(?:^|[^A-Za-z0-9_-])\.env(?:$|[^A-Za-z0-9_-])/.test(command)) return true
+  return readOnlyBash(command)
 }
 
 export function isEnvFile(path: string): boolean {
@@ -136,8 +141,11 @@ export function normalizeParallelWritablePath(path: string): string | null {
 }
 
 export function extractPatchTargetPaths(patchText: string): string[] {
+  const normalizedPatchText = patchText.includes("\\n") && !patchText.includes("\n")
+    ? patchText.replace(/\\r\\n|\\n/g, "\n")
+    : patchText
   const paths: string[] = []
-  for (const line of patchText.split(/\r?\n/)) {
+  for (const line of normalizedPatchText.split(/\r?\n/)) {
     const artisanPatchMatch = line.match(/^\*\*\*\s+(?:Add File|Update File|Delete File|Move to):\s+(.+)\s*$/)
     const gitPatchMatch = line.match(/^diff --git\s+a\/(.+?)\s+b\/(.+?)\s*$/)
     const unifiedPatchMatch = line.match(/^\+\+\+\s+(?:b\/)?(.+)\s*$/)
@@ -149,17 +157,39 @@ export function extractPatchTargetPaths(patchText: string): string[] {
   return Array.from(new Set(paths))
 }
 
-export function extractWriteToolPaths(args: unknown): string[] {
+function looksLikePatchText(value: string): boolean {
+  return value.includes("***") || value.includes("diff --git") || value.includes("+++")
+}
+
+function parseJsonLikeToolPayload(value: string): unknown | null {
+  const trimmed = value.trim()
+  if (!trimmed.startsWith("{") && !trimmed.startsWith("[") && !trimmed.startsWith('"')) return null
+  try {
+    return JSON.parse(trimmed)
+  } catch {
+    return null
+  }
+}
+
+export function extractWriteToolPaths(args: unknown, seen = new WeakSet<object>()): string[] {
   if (!args) return []
   if (typeof args === "string") {
-    return args.includes("***") || args.includes("diff --git") || args.includes("+++")
-      ? extractPatchTargetPaths(args)
-      : []
+    const parsed = parseJsonLikeToolPayload(args)
+    if (parsed !== null && parsed !== args) {
+      const parsedPaths = extractWriteToolPaths(parsed, seen)
+      if (parsedPaths.length > 0) return parsedPaths
+    }
+    return looksLikePatchText(args) ? extractPatchTargetPaths(args) : []
   }
   if (Array.isArray(args)) {
-    return Array.from(new Set(args.flatMap((item) => extractWriteToolPaths(item))))
+    if (seen.has(args)) return []
+    seen.add(args)
+    return Array.from(new Set(args.flatMap((item) => extractWriteToolPaths(item, seen))))
   }
   if (typeof args !== "object") return []
+
+  if (seen.has(args)) return []
+  seen.add(args)
 
   const record = args as Record<string, unknown>
   const directKeys = ["filePath", "file_path", "path", "file", "filename", "file_name", "target", "destination"]
@@ -168,15 +198,18 @@ export function extractWriteToolPaths(args: unknown): string[] {
     const value = record[key]
     if (typeof value === "string" && value.trim().length > 0) paths.push(value.trim().replace(/^['"]|['"]$/g, ""))
   }
-  for (const key of ["patchText", "patch_text", "patch"]) {
+  for (const key of ["patchText", "patch_text", "patch", "diff", "content", "text", "value"]) {
     const value = record[key]
-    if (typeof value === "string" && (value.includes("***") || value.includes("diff --git") || value.includes("+++"))) {
+    if (typeof value === "string" && looksLikePatchText(value)) {
       paths.push(...extractPatchTargetPaths(value))
     }
   }
-  for (const key of ["input", "args", "parameters", "payload", "body", "toolCall"]) {
-    const value = record[key]
-    if (value && typeof value === "object") paths.push(...extractWriteToolPaths(value))
+  for (const value of Object.values(record)) {
+    if (typeof value === "string") {
+      if (looksLikePatchText(value)) paths.push(...extractPatchTargetPaths(value))
+    } else if (value && typeof value === "object") {
+      paths.push(...extractWriteToolPaths(value, seen))
+    }
   }
   return Array.from(new Set(paths))
 }
@@ -535,6 +568,7 @@ export function getPhaseToolPolicy(
       return {
         blocked: [],
         writePathPredicate: (filePath: string) => !isEnvFile(filePath),
+        bashCommandPredicate: noEnvWritingBash,
         allowedDescription: "Implementation phase (GREENFIELD/REFACTOR): any file may be written except .env files.",
       }
     }

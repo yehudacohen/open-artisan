@@ -3,8 +3,9 @@
  *
  * PGlite file databases are expensive to open and sensitive to concurrent access.
  * This module keeps those constraints behind a provider-specific handle: callers
- * get serialized operations, a shared per-path Kysely connection, and explicit
- * disposal semantics without duplicating lifecycle state in each repository.
+ * get serialized operations, a shared per-path Kysely connection while the
+ * handle is active, operation-scoped physical locking, and explicit disposal
+ * semantics without duplicating lifecycle state in each repository.
  */
 
 import { mkdir } from "node:fs/promises"
@@ -14,7 +15,7 @@ import { PGlite } from "@electric-sql/pglite"
 import { Kysely } from "kysely"
 import { PGliteDialect } from "kysely-pglite-dialect"
 
-import { runWithPGliteAccessQueue, type PGliteAccessQueue } from "./pglite-access-queue"
+import { acquirePhysicalPGliteLock, runWithPGliteAccessQueue, type PGliteAccessQueue } from "./pglite-access-queue"
 import { tracePGlite } from "./pglite-trace"
 
 interface SharedPGliteConnectionEntry {
@@ -149,10 +150,15 @@ export function createPGliteDatabaseHandle<Database>(options: PGliteDatabaseHand
       try {
         return await runQueued(options.databasePath, async () => {
           tracePGlite("handle.operation.enter", { operationId, databasePath: options.databasePath, pendingOperations, label })
-          const connection = await getConnection()
-          const result = await operation(connection.db)
-          tracePGlite("handle.operation.done", { operationId, databasePath: options.databasePath, durationMs: Date.now() - startedAt, label })
-          return result
+          const releasePhysicalLock = await acquirePhysicalPGliteLock(options.databasePath, operationId)
+          try {
+            const connection = await getConnection()
+            const result = await operation(connection.db)
+            tracePGlite("handle.operation.done", { operationId, databasePath: options.databasePath, durationMs: Date.now() - startedAt, label })
+            return result
+          } finally {
+            await releasePhysicalLock()
+          }
         })
       } finally {
         pendingOperations--

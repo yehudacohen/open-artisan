@@ -418,7 +418,7 @@ The cascade depth >= 3 criterion is the only deterministic trigger. The other th
 
 ### 10.1 Schema Versioning
 
-Workflow state is persisted through the `StateBackend` abstraction. The default runtime backend stores canonical records in the PGlite repository (`.openartisan/open-artisan.db`) and exposes legacy JSON projections for compatibility; the filesystem backend remains an explicit fallback. The schema version (currently v24) is stamped on every state object. On load/import, states with prior versions are migrated forward using safe defaults. States with future versions are discarded.
+Workflow state is persisted through the `StateBackend` abstraction. The default runtime backend stores canonical records in the PGlite repository under `.openartisan/workflow-db/` and exposes legacy JSON projections for compatibility; the filesystem backend remains an explicit fallback. The schema version (currently v24) is stamped on every state object. On load/import, states with prior versions are migrated forward using safe defaults. States with future versions are discarded.
 
 ### 10.2 WorkflowState Fields (Schema v24)
 
@@ -571,7 +571,7 @@ In INCREMENTAL mode, the reviewer must validate that the file allowlist covers a
 | `select_mode` | MODE_SELECT | Choose workflow mode + feature name |
 | `mark_scan_complete` | DISCOVERY/SCAN | Signal scan phase complete |
 | `mark_analyze_complete` | DISCOVERY/ANALYZE | Signal analysis complete |
-| `request_review` | */DRAFT, */CONVENTIONS, */REVISE, */REVIEW | Submit artifacts for review. `artifact_files` is the review source of truth; markdown phases may use `artifact_markdown` with `artifact_files: []` to materialize `.openartisan/<feature>/{conventions.md,plan.md,impl-plan.md}`. Source phases use real project files. IMPLEMENTATION files are accumulated automatically from DAG and can be supplemented with `artifact_files`. At REVIEW: re-submits updated files and resets iteration count when content changed. |
+| `request_review` | */DRAFT, */CONVENTIONS, */REVISE, */REVIEW | Submit artifacts for review. `artifact_files` is the review source of truth and must list on-disk files. Markdown phases write `.openartisan/<feature>/{conventions.md,plan.md,impl-plan.md}` before review and submit that path. Source phases use real project files. IMPLEMENTATION files are accumulated automatically from DAG and can be supplemented with `artifact_files`. At REVIEW: re-submits updated files and resets iteration count when content changed. |
 | `mark_satisfied` | */REVIEW | OpenCode/self-review compatibility path for submitting criteria assessment. Bridge adapters use isolated reviewer subprocesses and `submit_phase_review`. Uses `state.reviewArtifactFiles` for reviewer paths (v22). |
 | `submit_feedback` | */USER_GATE, */ESCAPE_HATCH | Route user feedback (approve or revise). At ESCAPE_HATCH: accept drift, provide alternative direction, start new direction, or abort. |
 | `mark_task_complete` | IMPLEMENTATION/DRAFT, IMPLEMENTATION/REVISE | Complete a DAG task (triggers per-task review). Accumulates the task's `expectedFiles` into `state.reviewArtifactFiles` for the final implementation reviewer. |
@@ -666,7 +666,7 @@ When OpenCode compacts the conversation, the `experimental.session.compacting` h
 - **All 8 tool `execute()` handlers** are wrapped by `wrapToolMap`/`safeToolExecute`. Uncaught exceptions (e.g. from `store.update()` validation failures or disk I/O errors) are converted to `"Error: ..."` strings returned to the agent, instead of propagating as unhandled rejections.
 - **`store.update()` in `finally` blocks** (`mark_task_complete`, `submit_feedback`) has inner try/catch to prevent cleanup errors from replacing original exceptions.
 
-**Persistent error log:** All errors and warnings are appended to `.opencode/openartisan-errors.log` as JSON lines (`{ts, level, message, detail?, sessionId?}`). This file survives agent recovery and can be inspected after the fact for post-mortem tracing. The logger never throws on write failure (best-effort).
+**Persistent error log:** All errors and warnings are appended to `.openartisan/openartisan-errors.log` as JSON lines (`{ts, level, message, detail?, sessionId?}`). This file survives agent recovery and can be inspected after the fact for post-mortem tracing. The logger never throws on write failure (best-effort).
 
 ---
 
@@ -951,9 +951,9 @@ tests/
 **Verification:** `bun run verify:all` runs generated contract checks, TypeScript, whitespace checks, root/package/PGlite tests, and Hermes Python tests.
 
 **Runtime artifacts** (in target project directory):
-- `.openartisan/open-artisan.db` — default PGlite runtime database for workflow state, task graph, artifacts, leases, reviews, and roadmap projections.
+- `.openartisan/workflow-db/` — default PGlite runtime data directory for workflow state, task graph, artifacts, leases, reviews, and roadmap projections.
 - `.openartisan/<featureName>/workflow-state.json` — filesystem fallback / legacy compatibility projection. Sub-workflow projections nest further under `.openartisan/<parentFeature>/sub/<childFeature>/`.
-- `.opencode/openartisan-errors.log` — persistent error/warning log (JSON lines, append-only)
+- `.openartisan/openartisan-errors.log` — persistent error/warning log (JSON lines, append-only)
 
 ---
 

@@ -122,12 +122,18 @@ Workflow tools registered in the `open-artisan` toolset via `ctx.register_tool()
 | `oa_check_prior_workflow` | `check_prior_workflow` | Check for prior state |
 | `oa_resolve_human_gate` | `resolve_human_gate` | Set human gate on task |
 | `oa_propose_backtrack` | `propose_backtrack` | Go back to earlier phase |
-| `oa_spawn_sub_workflow` | `spawn_sub_workflow` | Delegate task to child |
+| `oa_propose_direct_application` | `propose_direct_application` | Propose and structurally apply a small safe patch without full workflow ceremony |
 | `oa_query_parent_workflow` | `query_parent_workflow` | Read parent state |
 | `oa_query_child_workflow` | `query_child_workflow` | Read child state |
 | `oa_state` | `state.get` | Show current workflow state |
 
 All handlers return JSON strings (Hermes handler contract). The `oa_` prefix avoids collisions with built-in tools. Toolset name: `"open-artisan"`.
+
+### Direct Application Fast Path
+
+For small/simple tasks where the full phased workflow is too heavy, call `oa_propose_direct_application` with a concrete unified diff, affected files, and a short safety rationale. Open Artisan applies the patch only if the core structural approver accepts it as narrow and safe.
+
+This is not a bypass: normal write tools remain guarded, active workflows are rejected, `.env`/workflow state/lockfiles are blocked, and broad or risky patches must use the full workflow.
 
 ### Guard Wrappers (`guard_wrappers.py`)
 

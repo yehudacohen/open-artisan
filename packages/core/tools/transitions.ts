@@ -18,7 +18,7 @@ import type {
 import type { WorkflowState } from "../workflow-state-types"
 import type { StateMachine } from "../state-machine-types"
 import type { MarkSatisfiedArgs } from "../review-types"
-import type { AnalyzeTaskBoundaryChangeArgs, ApplyTaskBoundaryChangeArgs } from "../tool-types"
+import type { AnalyzeTaskBoundaryChangeArgs, ApplyTaskBoundaryChangeArgs, TaskBoundaryChangeAnalysis as PublicTaskBoundaryChangeAnalysis, TaskBoundaryChangeAnalysisResult, TaskBoundaryChangeApplyResult, TaskBoundaryChangeConflict, TaskBoundaryChangeError } from "../tool-types"
 import { evaluateMarkSatisfied, countExpectedBlockingCriteria, type MarkSatisfiedResult } from "./mark-satisfied"
 import { processMarkScanComplete } from "./mark-scan-complete"
 import { processMarkAnalyzeComplete } from "./mark-analyze-complete"
@@ -45,8 +45,8 @@ export function computeRequestReviewTransition(
   if (state.phaseState === "REVIEW") {
     return { success: false, error: "request_review resubmission does not use a state-machine transition." }
   }
-  if (state.phaseState !== "DRAFT" && state.phaseState !== "CONVENTIONS" && state.phaseState !== "REVISE") {
-    return { success: false, error: `request_review can only be called in DRAFT, CONVENTIONS, REVISE, or REVIEW state (current: ${state.phase}/${state.phaseState}).` }
+  if (state.phaseState !== "DRAFT" && state.phaseState !== "REDRAFT" && state.phaseState !== "CONVENTIONS" && state.phaseState !== "REVISE") {
+    return { success: false, error: `request_review can only be called in DRAFT, REDRAFT, CONVENTIONS, REVISE, or REVIEW state (current: ${state.phase}/${state.phaseState}).` }
   }
   const event: WorkflowEvent = state.phaseState === "REVISE" ? "revision_complete" : "draft_complete"
   const outcome = sm.transition(state.phase, state.phaseState, event, state.mode)
@@ -379,8 +379,12 @@ export function computeProposeBacktrackTransition(
   state: WorkflowState,
   now = Date.now(),
 ): { success: true; transition: ProposeBacktrackTransition } | { success: false; error: string } {
-  if (state.phaseState !== "DRAFT" && state.phaseState !== "REVISE") {
-    return { success: false, error: `propose_backtrack can only be called from DRAFT or REVISE state (current: ${state.phase}/${state.phaseState}).` }
+  const isBacktrackAuthoringState =
+    state.phaseState === "DRAFT" ||
+    state.phaseState === "REVISE" ||
+    (state.phase === "IMPLEMENTATION" && state.phaseState === "TASK_REVISE")
+  if (!isBacktrackAuthoringState) {
+    return { success: false, error: `propose_backtrack can only be called from DRAFT, REVISE, or IMPLEMENTATION/TASK_REVISE state (current: ${state.phase}/${state.phaseState}).` }
   }
   if (state.phase === "MODE_SELECT" || state.phase === "DISCOVERY" || state.phase === "DONE") {
     return { success: false, error: `propose_backtrack cannot be called from ${state.phase} — there is no earlier phase to backtrack to.` }
@@ -425,14 +429,12 @@ export function computeProposeBacktrackTransition(
 // Task boundary revision analysis/apply
 // ---------------------------------------------------------------------------
 
-export interface TaskBoundaryChangeAnalysis {
-  taskId: string
-  impactedTaskIds: string[]
-  completedTaskIdsToReset: string[]
-  ownershipConflicts: string[]
-  nextExpectedFiles: string[]
-  nextExpectedTests: string[]
-  message: string
+function buildTaskBoundaryChangeError(
+  code: TaskBoundaryChangeError["code"],
+  message: string,
+  error: string = message,
+): TaskBoundaryChangeError {
+  return { code, message, error }
 }
 
 function uniqueStrings(values: string[] | undefined): string[] {
@@ -465,87 +467,158 @@ function collectDownstreamTaskIds(implDag: NonNullable<WorkflowState["implDag"]>
 export function analyzeTaskBoundaryChange(
   args: AnalyzeTaskBoundaryChangeArgs,
   state: WorkflowState,
-): { success: true; analysis: TaskBoundaryChangeAnalysis } | { success: false; error: string } {
+): TaskBoundaryChangeAnalysisResult {
   if (state.phase !== "IMPLEMENTATION") {
-    return { success: false, error: `Task boundary changes can only be analyzed during IMPLEMENTATION (current: ${state.phase}).` }
+    return {
+      success: false,
+      error: buildTaskBoundaryChangeError(
+        "TASK_BOUNDARY_CHANGE_NOT_ALLOWED",
+        `Task boundary changes can only be analyzed during IMPLEMENTATION (current: ${state.phase}).`,
+      ),
+    }
   }
   if (!state.implDag || state.implDag.length === 0) {
-    return { success: false, error: "No implementation DAG found to analyze." }
+    return {
+      success: false,
+      error: buildTaskBoundaryChangeError(
+        "TASK_BOUNDARY_CHANGE_NOT_ALLOWED",
+        "No implementation DAG found to analyze.",
+      ),
+    }
   }
   if (!args.task_id?.trim()) {
-    return { success: false, error: "task_id is required." }
+    return {
+      success: false,
+      error: buildTaskBoundaryChangeError(
+        "TASK_BOUNDARY_CHANGE_INVALID_ARGS",
+        "task_id is required.",
+      ),
+    }
   }
   if (!args.reason?.trim() || args.reason.trim().length < 20) {
-    return { success: false, error: "reason must be at least 20 characters." }
+    return {
+      success: false,
+      error: buildTaskBoundaryChangeError(
+        "TASK_BOUNDARY_CHANGE_INVALID_ARGS",
+        "reason must be at least 20 characters.",
+      ),
+    }
   }
 
   const target = state.implDag.find((task) => task.id === args.task_id)
   if (!target) {
-    return { success: false, error: `Task "${args.task_id}" not found in the implementation DAG.` }
+    return {
+      success: false,
+      error: buildTaskBoundaryChangeError(
+        "TASK_BOUNDARY_CHANGE_INVALID_ARGS",
+        `Task "${args.task_id}" not found in the implementation DAG.`,
+      ),
+    }
   }
 
-  const nextExpectedFiles = computeRevisedList(target.expectedFiles, args.add_files, args.remove_files)
-  const nextExpectedTests = computeRevisedList(target.expectedTests, args.add_expected_tests, args.remove_expected_tests)
+  const addFiles = uniqueStrings(args.add_files)
+  const removeFiles = uniqueStrings(args.remove_files)
+  const addExpectedTests = uniqueStrings(args.add_expected_tests)
+  const removeExpectedTests = uniqueStrings(args.remove_expected_tests)
+  const nextExpectedFiles = computeRevisedList(target.expectedFiles, addFiles, removeFiles)
+  const nextExpectedTests = computeRevisedList(target.expectedTests, addExpectedTests, removeExpectedTests)
 
+  let preservesAllowlist = true
   if (state.mode === "INCREMENTAL") {
     const allowlist = new Set(state.fileAllowlist)
     const disallowedFiles = nextExpectedFiles.filter((file) => !allowlist.has(file))
     const disallowedTests = nextExpectedTests.filter((file) => !allowlist.has(file))
     if (disallowedFiles.length > 0 || disallowedTests.length > 0) {
-      const detailParts: string[] = []
-      if (disallowedFiles.length > 0) detailParts.push(`files: ${disallowedFiles.join(", ")}`)
-      if (disallowedTests.length > 0) detailParts.push(`tests: ${disallowedTests.join(", ")}`)
+      preservesAllowlist = false
+      const allowlistConflict: TaskBoundaryChangeConflict = {
+        kind: "allowlist-violation",
+        message:
+          `Proposed boundary change exceeds the approved INCREMENTAL allowlist.` +
+          `${disallowedFiles.length > 0 ? ` files: ${disallowedFiles.join(", ")}.` : ""}` +
+          `${disallowedTests.length > 0 ? ` tests: ${disallowedTests.join(", ")}.` : ""}`,
+        ...(disallowedFiles.length > 0 ? { filePaths: disallowedFiles as PublicTaskBoundaryChangeAnalysis["overlappingOwnedFiles"] } : {}),
+        ...(disallowedTests.length > 0 ? { expectedTests: disallowedTests as PublicTaskBoundaryChangeAnalysis["overlappingExpectedTests"] } : {}),
+      }
       return {
         success: false,
-        error:
-          `Proposed boundary change exceeds the approved INCREMENTAL allowlist (${detailParts.join("; ")}). ` +
-          `Revise PLANNING/IMPL_PLAN or request an allowlist change before applying this boundary update.`,
+        error: buildTaskBoundaryChangeError(
+          "TASK_BOUNDARY_CHANGE_CONFLICT",
+          `${allowlistConflict.message} Revise PLANNING/IMPL_PLAN or request an allowlist change before applying this boundary update.`,
+        ),
       }
     }
   }
 
   const impacted = new Set<string>([target.id])
-  const ownershipConflicts = new Set<string>()
-  const addedFiles = uniqueStrings(args.add_files)
-  const addedTests = uniqueStrings(args.add_expected_tests)
+  const overlappingOwnedFiles = new Set<string>()
+  const overlappingExpectedTests = new Set<string>()
+  const conflicts: TaskBoundaryChangeConflict[] = []
 
   for (const task of state.implDag) {
     if (task.id === target.id) continue
-    const overlappingFiles = addedFiles.filter((file) => (task.expectedFiles ?? []).includes(file))
-    const overlappingTests = addedTests.filter((file) => (task.expectedTests ?? []).includes(file))
-    if (overlappingFiles.length === 0 && overlappingTests.length === 0) continue
+    const taskOverlappingFiles = addFiles.filter((file) => (task.expectedFiles ?? []).includes(file))
+    const taskOverlappingTests = addExpectedTests.filter((file) => (task.expectedTests ?? []).includes(file))
+    if (taskOverlappingFiles.length === 0 && taskOverlappingTests.length === 0) continue
     impacted.add(task.id)
-    for (const file of overlappingFiles) ownershipConflicts.add(`${task.id}:file:${file}`)
-    for (const file of overlappingTests) ownershipConflicts.add(`${task.id}:test:${file}`)
+
+    if (taskOverlappingFiles.length > 0) {
+      taskOverlappingFiles.forEach((file) => overlappingOwnedFiles.add(file))
+      conflicts.push({
+        kind: "file-overlap",
+        message: `Task "${task.id}" already owns file(s): ${taskOverlappingFiles.join(", ")}.`,
+        taskIds: [target.id, task.id],
+        filePaths: taskOverlappingFiles as PublicTaskBoundaryChangeAnalysis["overlappingOwnedFiles"],
+      })
+    }
+    if (taskOverlappingTests.length > 0) {
+      taskOverlappingTests.forEach((file) => overlappingExpectedTests.add(file))
+      conflicts.push({
+        kind: "expected-test-overlap",
+        message: `Task "${task.id}" already expects test file(s): ${taskOverlappingTests.join(", ")}.`,
+        taskIds: [target.id, task.id],
+        expectedTests: taskOverlappingTests as PublicTaskBoundaryChangeAnalysis["overlappingExpectedTests"],
+      })
+    }
   }
 
   const downstream = collectDownstreamTaskIds(state.implDag, impacted)
-  const completedTaskIdsToReset = Array.from(downstream).filter((taskId) => {
+  const impactedTaskIds = Array.from(downstream)
+  const completedTaskIdsToReset = impactedTaskIds.filter((taskId) => {
     const task = state.implDag?.find((candidate) => candidate.id === taskId)
     return task?.status === "complete"
   })
-
-  const impactedTaskIds = Array.from(downstream)
-  return {
-    success: true,
-    analysis: {
-      taskId: target.id,
-      impactedTaskIds,
-      completedTaskIdsToReset,
-      ownershipConflicts: Array.from(ownershipConflicts),
-      nextExpectedFiles,
-      nextExpectedTests,
-      message:
-        `Boundary analysis for ${target.id}: impacted tasks=${impactedTaskIds.join(", ") || target.id}; ` +
-        `${completedTaskIdsToReset.length > 0 ? `completed tasks to reset=${completedTaskIdsToReset.join(", ")}` : "no completed tasks need reset"}.`,
-    },
+  if (completedTaskIdsToReset.length > 0) {
+    conflicts.push({
+      kind: "completed-task-reset-required",
+      message: `Completed task(s) must be reset: ${completedTaskIdsToReset.join(", ")}.`,
+      taskIds: completedTaskIdsToReset,
+    })
   }
+
+  const preservesParallelism = overlappingOwnedFiles.size === 0 && overlappingExpectedTests.size === 0
+  const analysis: PublicTaskBoundaryChangeAnalysis = {
+    taskId: target.id,
+    impactedTaskIds,
+    completedTaskIdsToReset,
+    overlappingOwnedFiles: Array.from(overlappingOwnedFiles) as PublicTaskBoundaryChangeAnalysis["overlappingOwnedFiles"],
+    overlappingExpectedTests: Array.from(overlappingExpectedTests) as PublicTaskBoundaryChangeAnalysis["overlappingExpectedTests"],
+    addFiles: addFiles as PublicTaskBoundaryChangeAnalysis["addFiles"],
+    removeFiles: removeFiles as PublicTaskBoundaryChangeAnalysis["removeFiles"],
+    addExpectedTests: addExpectedTests as PublicTaskBoundaryChangeAnalysis["addExpectedTests"],
+    removeExpectedTests: removeExpectedTests as PublicTaskBoundaryChangeAnalysis["removeExpectedTests"],
+    preservesAllowlist,
+    preservesDependencyOrdering: true,
+    preservesParallelism,
+    conflicts,
+    rationale: args.reason,
+  }
+  return { success: true, analysis }
 }
 
 export function applyTaskBoundaryChange(
   args: ApplyTaskBoundaryChangeArgs,
   state: WorkflowState,
-): { success: true; updatedNodes: NonNullable<WorkflowState["implDag"]>; message: string } | { success: false; error: string } {
+): TaskBoundaryChangeApplyResult {
   const analyzed = analyzeTaskBoundaryChange(args, state)
   if (!analyzed.success) return analyzed
 
@@ -553,27 +626,56 @@ export function applyTaskBoundaryChange(
   const expectedImpacted = uniqueStrings(args.expected_impacted_tasks)
   if (expectedImpacted.length > 0) {
     const actual = new Set(analysis.impactedTaskIds)
-    if (expectedImpacted.some((taskId) => !actual.has(taskId)) || analysis.impactedTaskIds.some((taskId) => !expectedImpacted.includes(taskId))) {
-      return { success: false, error: `Impacted task acknowledgement mismatch. Expected: ${expectedImpacted.join(", ")}. Actual: ${analysis.impactedTaskIds.join(", ")}.` }
+    const mismatch =
+      expectedImpacted.some((taskId) => !actual.has(taskId)) ||
+      analysis.impactedTaskIds.some((taskId) => !expectedImpacted.includes(taskId))
+    if (mismatch) {
+      return {
+        success: false,
+        error: buildTaskBoundaryChangeError(
+          "TASK_BOUNDARY_CHANGE_ACKNOWLEDGEMENT_MISMATCH",
+          `Impacted task acknowledgement mismatch. Expected: ${expectedImpacted.join(", ")}. Actual: ${analysis.impactedTaskIds.join(", ")}.`,
+        ),
+      }
     }
   }
 
   const expectedReset = uniqueStrings(args.expected_reset_tasks)
   if (expectedReset.length > 0) {
     const actual = new Set(analysis.completedTaskIdsToReset)
-    if (expectedReset.some((taskId) => !actual.has(taskId)) || analysis.completedTaskIdsToReset.some((taskId) => !expectedReset.includes(taskId))) {
-      return { success: false, error: `Reset task acknowledgement mismatch. Expected: ${expectedReset.join(", ")}. Actual: ${analysis.completedTaskIdsToReset.join(", ")}.` }
+    const mismatch =
+      expectedReset.some((taskId) => !actual.has(taskId)) ||
+      analysis.completedTaskIdsToReset.some((taskId) => !expectedReset.includes(taskId))
+    if (mismatch) {
+      return {
+        success: false,
+        error: buildTaskBoundaryChangeError(
+          "TASK_BOUNDARY_CHANGE_ACKNOWLEDGEMENT_MISMATCH",
+          `Reset task acknowledgement mismatch. Expected: ${expectedReset.join(", ")}. Actual: ${analysis.completedTaskIdsToReset.join(", ")}.`,
+        ),
+      }
     }
   }
 
   const addFiles = new Set(uniqueStrings(args.add_files))
   const addTests = new Set(uniqueStrings(args.add_expected_tests))
+  const targetTask = state.implDag!.find((task) => task.id === analysis.taskId)
+  const targetNextExpectedFiles = computeRevisedList(
+    targetTask?.expectedFiles,
+    args.add_files,
+    args.remove_files,
+  )
+  const targetNextExpectedTests = computeRevisedList(
+    targetTask?.expectedTests,
+    args.add_expected_tests,
+    args.remove_expected_tests,
+  )
   const updatedNodes = state.implDag!.map((task) => {
     if (task.id === analysis.taskId) {
       return {
         ...task,
-        expectedFiles: analysis.nextExpectedFiles,
-        expectedTests: analysis.nextExpectedTests,
+        expectedFiles: targetNextExpectedFiles,
+        expectedTests: targetNextExpectedTests,
       }
     }
 
@@ -590,6 +692,7 @@ export function applyTaskBoundaryChange(
 
   return {
     success: true,
+    analysis,
     updatedNodes,
     message:
       `Task boundary change applied to ${analysis.taskId}. ` +

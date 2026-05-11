@@ -17,6 +17,7 @@ import type { Orchestrator } from "./orchestrator-types"
 import type { SubagentDispatcher } from "./subagent-dispatcher"
 import type { Logger, NotificationSink } from "./logger"
 import type { OpenArtisanServices } from "./open-artisan-services"
+import type { DiagnosticTrace } from "./diagnostic-trace"
 
 /**
  * All shared dependencies needed by tool and hook handlers.
@@ -29,6 +30,7 @@ export interface EngineContext {
   subagentDispatcher: SubagentDispatcher
   log: Logger
   notify: NotificationSink
+  trace: DiagnosticTrace
   graph: ArtifactGraph
   /** Optional DB-backed services when the runtime is configured with the unified DB backend. */
   openArtisanServices?: OpenArtisanServices
@@ -42,7 +44,7 @@ export interface EngineContext {
    * an already-running session. Platform-specific — the adapter provides
    * the implementation.
    */
-  promptExistingSession(sessionId: string, text: string): Promise<void>
+  promptExistingSession(sessionId: string, text: string, opts?: { reason?: string; caller?: string }): Promise<void>
 
   // ── Mutable session tracking ────────────────────────────────────────
 

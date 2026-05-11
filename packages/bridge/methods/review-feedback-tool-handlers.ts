@@ -10,12 +10,14 @@ import { SESSION_NOT_FOUND } from "../protocol"
 import type { WorkflowState } from "../../core/workflow-state-types"
 import type { ToolHandler } from "./tool-handler-types"
 import { PHASE_TO_ARTIFACT } from "../../core/artifacts"
-import { writeArtifact } from "../../core/artifact-store"
 import { validateFileBasedReviewArtifacts } from "../../core/tools/file-artifact-validation"
+import { validatePlannedReviewedInterfaceArtifacts } from "../../core/tools/planning-interface-artifacts"
+import { extractApprovedFileAllowlist } from "../../core/tools/plan-allowlist"
 import { parseToolArgs } from "../../core/tool-args"
 import { MarkSatisfiedToolSchema, RequestReviewToolSchema } from "../../core/schemas"
 import { computeMarkSatisfiedTransition, computeRequestReviewTransition } from "../../core/tools/transitions"
 import { createImplDAG } from "../../core/dag"
+import { parseImplPlan, validateExecutableImplPlan } from "../../core/impl-plan-parser"
 
 function requireState(ctx: BridgeContext, sessionId: string): WorkflowState {
   const state = ctx.engine!.store.get(sessionId)
@@ -72,6 +74,88 @@ function classifyReviewResubmission(previousHash: string | null, nextHash: strin
   return previousHash === nextHash ? "unchanged" : "changed"
 }
 
+function resolveReviewFile(file: string, cwd: string): string {
+  return file.startsWith("/") ? file : resolve(cwd, file)
+}
+
+function deriveImplPlanExecutableAllowlist(state: WorkflowState, cwd: string): string[] {
+  if (state.mode !== "INCREMENTAL" || state.fileAllowlist.length > 0) return state.fileAllowlist
+  const planPath = state.artifactDiskPaths.plan
+  if (!planPath) return state.fileAllowlist
+  try {
+    return extractApprovedFileAllowlist(readFileSync(planPath, "utf-8"), cwd)
+  } catch {
+    return state.fileAllowlist
+  }
+}
+
+function validateImplPlanExecutableContract(state: WorkflowState, planContent: string, cwd: string): string[] {
+  const errors: string[] = []
+  const parseCheck = parseImplPlan(planContent)
+  if (!parseCheck.success) {
+    errors.push(`Failed to parse implementation plan into DAG: ${parseCheck.errors.join("; ")}`)
+  }
+  errors.push(...validateExecutableImplPlan(
+    planContent,
+    state.mode,
+    deriveImplPlanExecutableAllowlist(state, cwd),
+    cwd,
+  ))
+  return errors
+}
+
+function readImplPlanReviewArtifact(state: WorkflowState, cwd: string, artifactFiles?: string[]): { source: string; content: string } | { error: string } {
+  const source = artifactFiles?.[0] ?? state.reviewArtifactFiles[0] ?? state.artifactDiskPaths.impl_plan
+  if (!source) return { error: "IMPL_PLAN review requires a concrete impl-plan.md artifact file." }
+  const resolvedPath = resolveReviewFile(source, cwd)
+  try {
+    return { source: resolvedPath, content: readFileSync(resolvedPath, "utf-8") }
+  } catch (error) {
+    return { error: `Unable to read IMPL_PLAN artifact ${resolvedPath}: ${error instanceof Error ? error.message : String(error)}` }
+  }
+}
+
+function validateImplPlanReviewArtifact(state: WorkflowState, cwd: string, artifactFiles?: string[]): string | null {
+  if (state.phase !== "IMPL_PLAN") return null
+  const artifact = readImplPlanReviewArtifact(state, cwd, artifactFiles)
+  if ("error" in artifact) return artifact.error
+  const errors = validateImplPlanExecutableContract(state, artifact.content, cwd)
+  if (errors.length === 0) return null
+  return `${artifact.source}: ${errors.join("; ")}`
+}
+
+function validatePlanningReviewArtifact(state: WorkflowState, cwd: string, artifactFiles?: string[]): string | null {
+  if (state.phase !== "PLANNING") return null
+  const source = artifactFiles?.[0] ?? state.reviewArtifactFiles[0] ?? state.artifactDiskPaths.plan
+  if (!source) return "PLANNING review requires a concrete plan.md artifact file."
+  const resolvedPath = resolveReviewFile(source, cwd)
+  let content: string
+  try {
+    content = readFileSync(resolvedPath, "utf-8")
+  } catch (error) {
+    return `Unable to read PLANNING artifact ${resolvedPath}: ${error instanceof Error ? error.message : String(error)}`
+  }
+  const errors = validatePlannedReviewedInterfaceArtifacts(content)
+  if (errors.length === 0) return null
+  return `${resolvedPath}: ${errors.join("; ")}`
+}
+
+export function buildImplPlanExecutableContractFailureCriterion(state: WorkflowState, cwd: string): {
+  criterion: string
+  met: boolean
+  evidence: string
+  severity: "blocking"
+} | null {
+  const error = validateImplPlanReviewArtifact(state, cwd)
+  if (!error) return null
+  return {
+    criterion: "IMPL_PLAN executable-contract validation",
+    met: false,
+    evidence: error,
+    severity: "blocking",
+  }
+}
+
 export const handleMarkSatisfied: ToolHandler = async (args, toolCtx, ctx) => {
   if (ctx.capabilities.selfReview !== "agent-only") {
     return subagentError("mark_satisfied", "the self-review subagent (SubagentDispatcher)")
@@ -93,6 +177,8 @@ export const handleMarkSatisfied: ToolHandler = async (args, toolCtx, ctx) => {
     ...(item.severity !== undefined ? { severity: item.severity } : {}),
     ...(item.score !== undefined ? { score: item.score } : {}),
   }))
+  const implPlanContractFailure = buildImplPlanExecutableContractFailureCriterion(state, toolCtx.directory)
+  if (implPlanContractFailure) criteria.push(implPlanContractFailure)
   const result = computeMarkSatisfiedTransition(criteria, state, ctx.engine!.sm)
   if (!result.success) return `Error: ${result.error}`
   const t = result.transition
@@ -113,12 +199,15 @@ export const handleRequestReview: ToolHandler = async (args, toolCtx, ctx) => {
   const { store } = ctx.engine!
   const state = requireState(ctx, toolCtx.sessionId)
 
-  const validReviewStates = new Set(["DRAFT", "CONVENTIONS", "REVISE", "REVIEW"])
+  const validReviewStates = new Set(["DRAFT", "REDRAFT", "CONVENTIONS", "REVISE", "REVIEW"])
   if (!validReviewStates.has(state.phaseState)) {
-    return `Error: request_review can only be called in DRAFT, CONVENTIONS, REVISE, or REVIEW state (current: ${state.phase}/${state.phaseState}).`
+    return `Error: request_review can only be called in DRAFT, REDRAFT, CONVENTIONS, REVISE, or REVIEW state (current: ${state.phase}/${state.phaseState}).`
   }
   if (Object.prototype.hasOwnProperty.call(args, "artifact_content")) {
     return "Error: request_review no longer accepts artifact_content; write the artifact to disk and pass artifact_files instead."
+  }
+  if (Object.prototype.hasOwnProperty.call(args, "artifact_markdown")) {
+    return "Error: request_review no longer accepts artifact_markdown; write the markdown artifact to disk and pass artifact_files instead."
   }
   const parsedArgs = parseToolArgs(RequestReviewToolSchema, args)
   if (!parsedArgs.success) return `Error: ${parsedArgs.error}`
@@ -128,13 +217,6 @@ export const handleRequestReview: ToolHandler = async (args, toolCtx, ctx) => {
       file.startsWith("/") ? file : resolve(toolCtx.directory, file),
     )
     const artifactKey = PHASE_TO_ARTIFACT[state.phase]
-    const artifactMarkdown = parsedArgs.data.artifact_markdown
-    if (artifactMarkdown?.trim()) {
-      if (!artifactKey || !["DISCOVERY", "PLANNING", "IMPL_PLAN"].includes(state.phase)) {
-        return "Error: artifact_markdown is only supported for DISCOVERY, PLANNING, and IMPL_PLAN markdown artifacts."
-      }
-      artifactFiles = [await writeArtifact(toolCtx.directory, artifactKey, artifactMarkdown, state.featureName)]
-    }
     if (artifactFiles.length === 0) {
       return "Error: request_review at REVIEW state requires artifact_files so the review source of truth can be updated."
     }
@@ -146,6 +228,14 @@ export const handleRequestReview: ToolHandler = async (args, toolCtx, ctx) => {
       featureName: state.featureName,
     })
     if (artifactValidationError) return `Error: ${artifactValidationError}`
+    const planningContractError = validatePlanningReviewArtifact(state, toolCtx.directory, artifactFiles)
+    if (planningContractError) {
+      return `Error: PLANNING review failed interface-artifact validation: ${planningContractError}. Fix the plan so reviewed INTERFACES artifacts are phase-legal, or label non-interface files as supporting dependencies before re-submitting request_review.`
+    }
+    const implPlanContractError = validateImplPlanReviewArtifact(state, toolCtx.directory, artifactFiles)
+    if (implPlanContractError) {
+      return `Error: IMPL_PLAN review failed executable-contract validation: ${implPlanContractError}. Fix the plan metadata and re-submit request_review with corrected artifact_files.`
+    }
 
     const artifactDiskPath = artifactKey && artifactKey !== "implementation" ? artifactFiles[0] ?? null : null
     const reviewHash = artifactFilesHash(artifactFiles, toolCtx.directory)
@@ -172,17 +262,15 @@ export const handleRequestReview: ToolHandler = async (args, toolCtx, ctx) => {
     const dag = createImplDAG(Array.from(state.implDag))
     if (!dag.isComplete()) {
       const tasks = Array.from(dag.tasks)
-      const agentIncomplete = tasks.filter((task) =>
-        task.status !== "complete" && task.status !== "aborted" && task.status !== "human-gated",
-      )
+      const agentIncomplete = tasks.filter((task) => task.status !== "complete" && task.status !== "aborted")
       if (agentIncomplete.length > 0) {
         const complete = tasks.filter((task) => task.status === "complete").length
         const pendingList = agentIncomplete.map((task) => `  - ${task.id}: ${task.description} (${task.status})`).join("\n")
         return (
           `Error: Cannot request review — ${complete}/${tasks.length} DAG tasks are complete. ` +
-          "All agent tasks must be completed via `mark_task_complete` before requesting review.\n\n" +
-          `**Remaining agent tasks:**\n${pendingList}\n\n` +
-          "Complete the current task and call `mark_task_complete`, then continue with the remaining tasks."
+          "All DAG tasks must be complete or explicitly aborted before requesting final implementation review.\n\n" +
+          `**Remaining tasks:**\n${pendingList}\n\n` +
+          "Complete agent tasks with `mark_task_complete`; resolve human-gated tasks before requesting final review."
         )
       }
     }
@@ -196,13 +284,6 @@ export const handleRequestReview: ToolHandler = async (args, toolCtx, ctx) => {
   let artifactFiles = parsedArgs.data.artifact_files.map((file) =>
     file.startsWith("/") ? file : resolve(toolCtx.directory, file),
   )
-  const artifactMarkdown = parsedArgs.data.artifact_markdown
-  if (artifactMarkdown?.trim()) {
-    if (!artifactKey || !["DISCOVERY", "PLANNING", "IMPL_PLAN"].includes(state.phase)) {
-      return "Error: artifact_markdown is only supported for DISCOVERY, PLANNING, and IMPL_PLAN markdown artifacts."
-    }
-    artifactFiles = [await writeArtifact(toolCtx.directory, artifactKey, artifactMarkdown, state.featureName)]
-  }
   const artifactValidationError = validateFileBasedReviewArtifacts({
     phase: state.phase,
     artifactFiles,
@@ -210,6 +291,14 @@ export const handleRequestReview: ToolHandler = async (args, toolCtx, ctx) => {
     featureName: state.featureName,
   })
   if (artifactValidationError) return `Error: ${artifactValidationError}`
+  const planningContractError = validatePlanningReviewArtifact(state, toolCtx.directory, artifactFiles)
+  if (planningContractError) {
+    return `Error: PLANNING review failed interface-artifact validation: ${planningContractError}. Fix the plan so reviewed INTERFACES artifacts are phase-legal, or label non-interface files as supporting dependencies before re-submitting request_review.`
+  }
+  const implPlanContractError = validateImplPlanReviewArtifact(state, toolCtx.directory, artifactFiles)
+  if (implPlanContractError) {
+    return `Error: IMPL_PLAN review failed executable-contract validation: ${implPlanContractError}. Fix the plan metadata and re-submit request_review with corrected artifact_files.`
+  }
   const artifactDiskPath = artifactKey && artifactKey !== "implementation" ? artifactFiles[0] ?? null : null
   const reviewHash = artifactFilesHash(artifactFiles, toolCtx.directory)
 
@@ -218,6 +307,7 @@ export const handleRequestReview: ToolHandler = async (args, toolCtx, ctx) => {
     draft.phaseState = t.nextPhaseState
     draft.retryCount = 0
     draft.latestReviewResults = null
+    draft.backtrackContext = null
     draft.reviewArtifactHash = null
     if (artifactDiskPath && artifactKey) {
       draft.artifactDiskPaths[artifactKey] = artifactDiskPath

@@ -12,11 +12,15 @@ import logging
 import os
 from typing import Any
 
-from . import continuation
+from . import continuation, continuation_controller
 from .types import BridgeClient, BridgeError, HermesContext, make_error_response
 from .constants import WORKFLOW_TOOLS, OA_STATE_SCHEMA, TOOLSET_NAME
 from .session_projects import (
     discover_openartisan_projects,
+    get_active_session_id,
+    get_last_session_context,
+    get_last_user_message,
+    has_explicit_session_project,
     is_openartisan_project,
     resolve_project_dir,
     set_session_project_dir,
@@ -24,6 +28,54 @@ from .session_projects import (
 
 
 logger = logging.getLogger(__name__)
+
+_SESSION_LOCAL_WORKFLOW_TOOLS = {"check_prior_workflow", "select_mode"}
+_MAX_POST_TOOL_STRUCTURAL_STEPS = 6
+
+
+def _resolve_tool_session_id(kwargs: dict[str, Any], default_session_id: str) -> str:
+    explicit = kwargs.get("session_id")
+    if isinstance(explicit, str) and explicit:
+        return explicit
+    if default_session_id and default_session_id != "default":
+        return default_session_id
+    active = get_active_session_id()
+    if active:
+        return active
+    return default_session_id or "default"
+
+
+def _extract_current_user_text(kwargs: dict[str, Any]) -> str | None:
+    for key in ("user_task", "user_message", "message", "prompt", "input"):
+        value = kwargs.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _record_user_gate_message_if_needed(
+    bridge: BridgeClient,
+    session_id: str,
+    state: dict[str, Any],
+    kwargs: dict[str, Any],
+) -> None:
+    if state.get("phaseState") not in {"USER_GATE", "ESCAPE_HATCH", "HUMAN_GATE"}:
+        return
+    if state.get("userGateMessageReceived") is True:
+        return
+    user_text = _extract_current_user_text(kwargs)
+    if not user_text:
+        user_text = get_last_user_message(session_id)
+    if not user_text:
+        return
+    bridge.call(
+        "message.process",
+        {
+            "sessionId": session_id,
+            "parts": [{"type": "text", "text": user_text}],
+            "source": "user",
+        },
+    )
 
 
 def ensure_workflow_session(
@@ -45,6 +97,69 @@ def _state_payload(result: Any) -> dict[str, Any]:
     if isinstance(result, dict):
         return result
     return {}
+
+
+def _runtime_health_payload(result: Any) -> dict[str, Any]:
+    if isinstance(result, dict) and isinstance(result.get("runtimeHealth"), dict):
+        return result["runtimeHealth"]
+    return {}
+
+
+def _state_get_with_health(bridge: BridgeClient, session_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    result = bridge.call("state.get", {"sessionId": session_id, "includeRuntimeHealth": True})
+    return _state_payload(result), _runtime_health_payload(result)
+
+
+def _fallback_next_action(state: dict[str, Any]) -> dict[str, Any]:
+    phase = str(state.get("phase") or "MODE_SELECT")
+    phase_state = str(state.get("phaseState") or "DRAFT")
+    if phase == "DONE":
+        return {"nextAction": "stop_done", "shouldContinue": False, "requiresAdapterAction": False, "stopReason": "workflow is complete"}
+    if phase_state == "USER_GATE":
+        return {"nextAction": "stop_user_gate", "shouldContinue": False, "requiresAdapterAction": False, "stopReason": f"awaiting user gate at {phase}"}
+    if phase_state == "HUMAN_GATE":
+        return {"nextAction": "stop_human_gate", "shouldContinue": False, "requiresAdapterAction": False, "stopReason": f"awaiting human gate at {phase}"}
+    if phase_state == "ESCAPE_HATCH":
+        return {"nextAction": "stop_escape_hatch", "shouldContinue": False, "requiresAdapterAction": False, "stopReason": f"escape hatch at {phase}"}
+    if phase == "IMPLEMENTATION" and phase_state == "TASK_REVIEW":
+        return {"nextAction": "adapter_drain", "shouldContinue": True, "requiresAdapterAction": True, "continuationMessage": "Dispatch isolated task review."}
+    if phase_state == "REVIEW":
+        return {"nextAction": "adapter_drain", "shouldContinue": True, "requiresAdapterAction": True, "continuationMessage": f"Dispatch isolated phase review for {phase}."}
+    if phase_state in {"DRAFT", "REDRAFT", "REVISE"} or (phase == "IMPLEMENTATION" and phase_state == "TASK_REVISE"):
+        return {
+            "nextAction": "author_continue",
+            "shouldContinue": True,
+            "requiresAdapterAction": False,
+            "continuationMessage": f"Continue authoring {phase}/{phase_state}. Do not stop until a real user gate or runtime error.",
+        }
+    return {"nextAction": "stop_error", "shouldContinue": False, "requiresAdapterAction": False, "stopReason": f"No continuation rule for {phase}/{phase_state}"}
+
+
+def _next_action(health: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+    if isinstance(health.get("nextAction"), str):
+        return health
+    return _fallback_next_action(state)
+
+
+def _recent_progress_events(
+    bridge: BridgeClient,
+    session_id: str,
+    current_state: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    try:
+        result = bridge.call("progress.list", {"sessionId": session_id, "limit": 50})
+    except Exception:
+        logger.debug("progress.list failed for session %s", session_id, exc_info=True)
+        return []
+    if not isinstance(result, dict) or not isinstance(result.get("events"), list):
+        return []
+    events = [event for event in result["events"] if isinstance(event, dict)]
+    phase = current_state.get("phase") if isinstance(current_state, dict) else None
+    if isinstance(phase, str) and phase:
+        current_phase_events = [event for event in events if event.get("phase") == phase]
+        if current_phase_events:
+            events = current_phase_events
+    return events[-20:]
 
 
 def _resolve_workflow_session_state(
@@ -83,6 +198,12 @@ def _build_session_context(kwargs: dict[str, Any]) -> dict[str, Any]:
     return continuation.build_session_context(kwargs)
 
 
+def _build_session_context_for_session(session_id: str, kwargs: dict[str, Any]) -> dict[str, Any]:
+    current = continuation.build_session_context(kwargs)
+    stored = get_last_session_context(session_id) or {}
+    return {**stored, **current}
+
+
 def _resolve_agent_name(kwargs: dict[str, Any]) -> str:
     agent = kwargs.get("agent")
     if isinstance(agent, str) and agent.strip():
@@ -90,75 +211,159 @@ def _resolve_agent_name(kwargs: dict[str, Any]) -> str:
     return "hermes"
 
 
-def _idle_decision_after_tool(bridge: BridgeClient, session_id: str) -> dict[str, Any] | None:
-    fallback_ignore: dict[str, Any] | None = None
-    candidate_session_ids = [session_id]
-    if session_id != "default":
-        candidate_session_ids.append("default")
-
-    for candidate_session_id in candidate_session_ids:
-        try:
-            result = bridge.call("idle.check", {"sessionId": candidate_session_id})
-        except Exception as e:
-            logger.debug("post-tool idle.check failed for session %s: %s", candidate_session_id, e)
-            continue
-        if not isinstance(result, dict):
-            continue
-        if result.get("action") in {"reprompt", "escalate"}:
-            if candidate_session_id != session_id:
-                logger.info(
-                    "Using fallback workflow session %s for post-tool continuation of Hermes session %s",
-                    candidate_session_id,
-                    session_id,
-                )
-            return result
-        if fallback_ignore is None and result.get("action") == "ignore":
-            fallback_ignore = result
-    return fallback_ignore
-
-
-def _maybe_continue_after_workflow_tool(
+def _continue_authoring_from_state(
     bridge: BridgeClient,
     session_id: str,
     project_dir: str,
     kwargs: dict[str, Any],
-    workflow_state: dict[str, Any] | None = None,
-) -> dict[str, Any] | None:
-    decision = _idle_decision_after_tool(bridge, session_id)
-    if not isinstance(decision, dict) or decision.get("action") != "reprompt":
-        return decision
-
+    state: dict[str, Any],
+    action: dict[str, Any],
+) -> dict[str, Any]:
+    message = str(action.get("continuationMessage") or "Continue the Open Artisan workflow until the next real user gate or runtime error.")
     try:
-        request = continuation.build_continuation_request(
-            session_id=session_id,
-            project_dir=project_dir,
-            agent=_resolve_agent_name(kwargs),
-            idle_decision=decision,
-            session_context=_build_session_context(kwargs),
-            workflow_state=workflow_state or {},
+        controller = continuation_controller.create_continuation_controller(
+            state_dir=os.path.join(project_dir, ".openartisan")
         )
-        outcome = continuation.execute_continuation(
-            request,
-            continuation.NativeSessionDirectContinuationRunner(),
-            continuation.GatewayBackgroundContinuationHandoff(),
+        outcome = controller.continue_authoring(
+            {
+                "bridge": bridge,
+                "authorSessionId": session_id,
+                "workflowSessionId": session_id,
+                "projectDir": project_dir,
+                "agent": _resolve_agent_name(kwargs),
+                "source": "post_tool",
+                "message": message,
+                "sessionContext": _build_session_context_for_session(session_id, kwargs),
+                "workflowState": state,
+                "runtimeHealth": action,
+            }
         )
     except Exception as e:
-        logger.warning("Post-tool autonomous continuation failed for session %s: %s", session_id, e)
-        return {"action": "reprompt", "continuation": "failed", "error": str(e)}
+        logger.warning("Structural autonomous continuation failed for session %s: %s", session_id, e)
+        return {"action": "author_continue", "continuation": "failed", "error": str(e)}
 
-    if outcome.get("kind") in {"continued", "handoff_requested"}:
+    if outcome.get("kind") in {"continued", "handoff_requested", "duplicate_suppressed"}:
         logger.info(
-            "Post-tool autonomous continuation outcome for session %s: %s",
+            "Structural autonomous continuation outcome for session %s: %s",
             session_id,
             outcome.get("detail", outcome.get("kind", "continued")),
         )
     else:
         logger.warning(
-            "Post-tool autonomous continuation did not proceed for session %s: %s",
+            "Structural autonomous continuation did not proceed for session %s: %s",
             session_id,
             outcome.get("detail", outcome.get("kind", "blocked")),
         )
-    return {"action": "reprompt", "continuation": outcome}
+    return {"action": "author_continue", "continuation": outcome}
+
+
+def _advance_after_workflow_tool(
+    bridge: BridgeClient,
+    author_session_id: str,
+    workflow_session_id: str,
+    project_dir: str,
+    kwargs: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Advance through structural non-user states after a workflow tool returns.
+
+    Adapter-owned states are drained synchronously. Authoring states launch a
+    continuation worker and return; that worker will repeat this same structural
+    check after any follow-up workflow tool calls.
+    """
+    last_state: dict[str, Any] | None = None
+    for _ in range(_MAX_POST_TOOL_STRUCTURAL_STEPS):
+        state, health = _state_get_with_health(bridge, workflow_session_id)
+        if not state:
+            return {"action": "stop_error", "error": "workflow state unavailable"}
+        last_state = state
+        action = _next_action(health, state)
+        next_action = action.get("nextAction")
+
+        if next_action == "adapter_drain":
+            drained_state = _drain_adapter_actions(bridge, workflow_session_id, project_dir)
+            if drained_state == state:
+                return {"action": "adapter_drain", "state": state}
+            continue
+
+        if next_action == "author_continue":
+            return _continue_authoring_from_state(
+                bridge,
+                author_session_id,
+                project_dir,
+                kwargs,
+                state,
+                action,
+            )
+
+        return {"action": next_action, "stopReason": action.get("stopReason"), "state": state}
+
+    logger.warning(
+        "Stopped structural post-tool advancement for session %s after %s step(s); last state=%s/%s",
+        workflow_session_id,
+        _MAX_POST_TOOL_STRUCTURAL_STEPS,
+        (last_state or {}).get("phase"),
+        (last_state or {}).get("phaseState"),
+    )
+    return {"action": "stop_error", "error": "structural post-tool advancement limit reached", "state": last_state or {}}
+
+
+def _drain_adapter_actions(
+    bridge: BridgeClient,
+    session_id: str,
+    project_dir: str,
+    *,
+    max_iterations: int = 3,
+) -> dict[str, Any] | None:
+    """Run bridge-required adapter actions without waiting for another LLM turn.
+
+    Workflow tools can move state into gates that only the adapter can satisfy,
+    such as IMPLEMENTATION/TASK_REVIEW or phase REVIEW. Hermes may not issue a
+    follow-up pre_llm_call after a tool response, so drain those actions here.
+    """
+    latest_state: dict[str, Any] | None = None
+    dispatched_actions: set[tuple[str, str, str]] = set()
+    for _ in range(max_iterations):
+        state = bridge.call("state.get", {"sessionId": session_id})
+        if not isinstance(state, dict):
+            return latest_state
+        latest_state = state
+
+        if state.get("taskCompletionInProgress") or state.get("phaseState") == "TASK_REVIEW":
+            action_key = (
+                "task-review",
+                str(state.get("phase", "")),
+                str(state.get("taskCompletionInProgress") or state.get("currentTaskId") or "pending"),
+            )
+            if action_key in dispatched_actions:
+                return state
+            dispatched_actions.add(action_key)
+            from .prompt_hook import _dispatch_task_review
+
+            _dispatch_task_review(bridge, session_id, state, project_dir)
+            continue
+
+        if state.get("phaseState") == "REVIEW":
+            action_key = (
+                "phase-review",
+                str(state.get("phase", "")),
+                str(state.get("phaseState", "")),
+            )
+            if action_key in dispatched_actions:
+                return state
+            dispatched_actions.add(action_key)
+            from .prompt_hook import dispatch_phase_review
+
+            dispatch_phase_review(bridge, session_id, state, project_dir)
+            continue
+
+        return state
+
+    logger.warning(
+        "Stopped draining adapter actions for session %s after %s iteration(s)",
+        session_id,
+        max_iterations,
+    )
+    return latest_state
 
 
 def register_workflow_tools(
@@ -210,9 +415,9 @@ def register_workflow_tools(
         },
         handler=lambda args, **kwargs: _handle_oa_state(
             bridge,
-            str(kwargs.get("session_id") or default_session_id),
-            str(kwargs.get("cwd") or os.getcwd()),
-        ),
+                _resolve_tool_session_id(kwargs, default_session_id),
+                str(kwargs.get("cwd") or os.getcwd()),
+            ),
         description=OA_STATE_SCHEMA.get("description", "Show current workflow state."),
     )
 
@@ -247,7 +452,7 @@ def register_workflow_tools(
         },
         handler=lambda args, **kwargs: _handle_select_project(
             bridge,
-            str(kwargs.get("session_id") or default_session_id),
+            _resolve_tool_session_id(kwargs, default_session_id),
             args,
         ),
         description="Bind this session to an Open Artisan project directory.",
@@ -263,7 +468,7 @@ def register_workflow_tools(
         },
         handler=lambda args, **kwargs: _handle_recover_bridge(
             bridge,
-            str(kwargs.get("session_id") or default_session_id),
+            _resolve_tool_session_id(kwargs, default_session_id),
             str(kwargs.get("cwd") or os.getcwd()),
         ),
         description="Recover from stale Open Artisan bridge metadata without supervisor filesystem cleanup.",
@@ -305,22 +510,31 @@ def _handle_workflow_tool(
             if not isinstance(tool_args, dict):
                 raise TypeError("args must be a dict")
         else:
-            session_id = str(kwargs.get("session_id") or default_session_id)
+            session_id = _resolve_tool_session_id(kwargs, default_session_id)
             project_dir = resolve_project_dir(session_id, str(kwargs.get("cwd") or os.getcwd()))
             tool_args = args
 
         ensure_workflow_session(bridge, session_id, project_dir)
-        workflow_session_id, state_result = _resolve_workflow_session_state(
-            bridge,
-            session_id,
-        )
-        if bridge_tool_name in {"mark_satisfied", "submit_task_review", "submit_phase_review"}:
-            state = _state_payload(state_result)
-            if bridge_tool_name != "mark_satisfied" or (isinstance(state, dict) and state.get("phaseState") == "REVIEW"):
-                return make_error_response(
-                    f"oa_{bridge_tool_name} is reserved for isolated reviewers. "
-                    "Wait for the adapter hook to submit the review result."
-                )
+        if bridge_tool_name in _SESSION_LOCAL_WORKFLOW_TOOLS:
+            workflow_session_id = session_id
+            state_result = bridge.call("state.get", {"sessionId": session_id})
+        else:
+            workflow_session_id, state_result = _resolve_workflow_session_state(
+                bridge,
+                session_id,
+            )
+        if bridge_tool_name in {"mark_satisfied", "submit_task_review", "submit_phase_review", "submit_auto_approve"}:
+            return make_error_response(
+                f"oa_{bridge_tool_name} is reserved for isolated reviewers. "
+                "Wait for the adapter hook to submit the review result."
+            )
+        if bridge_tool_name == "submit_feedback":
+            _record_user_gate_message_if_needed(
+                bridge,
+                workflow_session_id,
+                _state_payload(state_result),
+                kwargs,
+            )
         result = bridge.call(
             "tool.execute",
             {
@@ -332,22 +546,13 @@ def _handle_workflow_tool(
                 },
             },
         )
-        if bridge_tool_name == "request_review":
-            state = bridge.call("state.get", {"sessionId": workflow_session_id})
-            if isinstance(state, dict) and state.get("phaseState") == "REVIEW":
-                # request_review can move the workflow into REVIEW in the middle of
-                # a tool-use turn. Hermes pre_llm_call will not fire again until the
-                # next model turn, so dispatch the isolated phase reviewer here too.
-                from .prompt_hook import dispatch_phase_review
-
-                dispatch_phase_review(bridge, workflow_session_id, state, project_dir)
-        if bridge_tool_name != "mark_satisfied":
-            _maybe_continue_after_workflow_tool(
+        if not (isinstance(result, str) and result.startswith("Error:")):
+            _advance_after_workflow_tool(
                 bridge,
                 session_id,
+                workflow_session_id,
                 project_dir,
                 kwargs,
-                _state_payload(state_result),
             )
         if isinstance(result, str):
             return result
@@ -375,17 +580,41 @@ def _handle_oa_state(
     try:
         effective_project_dir = resolve_project_dir(session_id, project_dir or os.getcwd())
         ensure_workflow_session(bridge, session_id, effective_project_dir)
-        workflow_session_id, result = _resolve_workflow_session_state(
-            bridge,
-            session_id or "default",
-            include_runtime_health=True,
+        requested_session_id = session_id or "default"
+        if has_explicit_session_project(requested_session_id):
+            workflow_session_id = requested_session_id
+            result = bridge.call(
+                "state.get",
+                {"sessionId": workflow_session_id, "includeRuntimeHealth": True},
+            )
+        else:
+            workflow_session_id, result = _resolve_workflow_session_state(
+                bridge,
+                requested_session_id,
+                include_runtime_health=True,
+            )
+        current_state = _state_payload(result)
+        needs_adapter_action = (
+            bool(current_state.get("taskCompletionInProgress"))
+            or current_state.get("phaseState") in {"TASK_REVIEW", "REVIEW"}
         )
+        if needs_adapter_action and _drain_adapter_actions(bridge, workflow_session_id, effective_project_dir) is not None:
+            result = bridge.call(
+                "state.get",
+                {"sessionId": workflow_session_id, "includeRuntimeHealth": True},
+            )
+            current_state = _state_payload(result)
         if result is None:
             return make_error_response("No active workflow session.")
+        progress_events = _recent_progress_events(bridge, workflow_session_id, current_state)
         if isinstance(result, dict) and isinstance(result.get("state"), dict):
             merged = dict(result["state"])
             merged["runtimeHealth"] = result.get("runtimeHealth")
+            if progress_events:
+                merged["recentProgress"] = progress_events
             return json.dumps(merged, indent=2)
+        if isinstance(result, dict) and progress_events:
+            result = {**result, "recentProgress": progress_events}
         return json.dumps(result, indent=2)
     except BridgeError as e:
         return make_error_response(f"Bridge communication failed: {e}")
@@ -417,7 +646,7 @@ def _handle_select_project(
             f"Directory is not an Open Artisan project (missing .openartisan/): {resolved}"
         )
 
-    selected = set_session_project_dir(session_id, resolved)
+    selected = set_session_project_dir(session_id, resolved, explicit=True)
     bridge.start(selected)
     ensure_workflow_session(bridge, session_id, selected)
     return json.dumps(

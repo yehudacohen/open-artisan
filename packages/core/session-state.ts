@@ -25,6 +25,7 @@ import {
 import type { StateBackend } from "./state-backend-types"
 import { readDecisionInput, nextSchedulerDecisionForInput } from "./scheduler"
 import { extractApprovedFileAllowlist } from "./tools/plan-allowlist"
+import { SESSION_STORE_OPERATION_TIMEOUT_ENV, SESSION_STORE_OPERATION_TIMEOUT_MS } from "./constants"
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -255,6 +256,21 @@ function repairStateInconsistencies(state: WorkflowState): void {
     ? state.implDag.find((task) => task.id === state.currentTaskId) ?? null
     : null
   if (
+    state.phase === "IMPLEMENTATION" &&
+    state.phaseState === "TASK_REVISE" &&
+    currentTask?.status === "pending"
+  ) {
+    currentTask.status = "in-flight"
+  }
+  if (
+    state.phase === "IMPLEMENTATION" &&
+    state.phaseState === "TASK_REVIEW" &&
+    state.currentTaskId !== null &&
+    state.taskCompletionInProgress === null
+  ) {
+    state.taskCompletionInProgress = state.currentTaskId
+  }
+  if (
     currentTask &&
     (currentTask.status === "complete" || currentTask.status === "aborted") &&
     state.taskCompletionInProgress !== state.currentTaskId
@@ -292,24 +308,24 @@ function repairStateInconsistencies(state: WorkflowState): void {
 /**
  * Validate and migrate a raw state value. Returns the state if valid, null otherwise.
  */
-function validateAndMigrate(value: unknown): WorkflowState | null {
-  if (!isValidState(value)) return null
+function validateAndMigrate(value: unknown): { state: WorkflowState | null; error?: string } {
+  if (!isValidState(value)) return { state: null, error: "state is missing a supported schemaVersion or sessionId" }
   migrateState(value as unknown as Record<string, unknown>)
   repairStateInconsistencies(value as WorkflowState)
-  const validationError = validateWorkflowState(value)
-  if (validationError) return null
-  return value
+  const validation = validateWorkflowState(value as WorkflowState, { format: "structured" })
+  if (!validation.success) return { state: null, error: validation.error.message }
+  return { state: value as WorkflowState }
 }
 
-export function parseAndMigrateWorkflowStateJson(json: string): { state: WorkflowState | null; changed: boolean } {
+export function parseAndMigrateWorkflowStateJson(json: string): { state: WorkflowState | null; changed: boolean; error?: string } {
   try {
     const parsed = JSON.parse(json) as unknown
     const before = JSON.stringify(parsed)
-    const state = validateAndMigrate(parsed)
-    if (!state) return { state: null, changed: false }
+    const { state, error } = validateAndMigrate(parsed)
+    if (!state) return { state: null, changed: false, ...(error ? { error } : {}) }
     return { state, changed: JSON.stringify(state) !== before }
-  } catch {
-    return { state: null, changed: false }
+  } catch (error) {
+    return { state: null, changed: false, error: `invalid JSON: ${error instanceof Error ? error.message : String(error)}` }
   }
 }
 
@@ -330,15 +346,25 @@ function parseAndMigrate(json: string): WorkflowState | null {
  * Used by the status-writer to update the status file on every transition.
  */
 export type PostUpdateCallback = (state: WorkflowState, projectDir: string) => void
+export type SessionStateStoreTraceCallback = (event: string, fields?: Record<string, string | number | boolean | null>) => void
 
 /** Project directory, set by the plugin entry point. Used by the post-update hook. */
 let _projectDir: string | null = null
 /** Post-update callback, set by the plugin entry point. */
 let _postUpdateCallback: PostUpdateCallback | null = null
+let _traceCallback: SessionStateStoreTraceCallback | null = null
 
 export function setPostUpdateHook(callback: PostUpdateCallback, projectDir: string): void {
   _postUpdateCallback = callback
   _projectDir = projectDir
+}
+
+export function setSessionStateStoreTrace(callback: SessionStateStoreTraceCallback | null): void {
+  _traceCallback = callback
+}
+
+function traceStore(event: string, fields?: Record<string, string | number | boolean | null>): void {
+  try { _traceCallback?.(event, fields) } catch { /* non-fatal diagnostics */ }
 }
 
 /**
@@ -367,9 +393,31 @@ export function createSessionStateStore(backend: StateBackend): SessionStateStor
     return state?.featureName ?? sessionId
   }
 
+  function storeOperationTimeoutMs(): number {
+    const raw = process.env[SESSION_STORE_OPERATION_TIMEOUT_ENV]
+    const parsed = raw ? Number(raw) : NaN
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : SESSION_STORE_OPERATION_TIMEOUT_MS
+  }
+
+  function boundedStoreOperation<T>(key: string, work: () => Promise<T>): Promise<T> {
+    const timeoutMs = storeOperationTimeoutMs()
+    return new Promise<T>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        traceStore("store.operation.timeout", { key, timeoutMs })
+        reject(new Error(`Session state operation for "${key}" timed out after ${timeoutMs}ms`))
+      }, timeoutMs)
+      work().then(
+        (value) => { clearTimeout(timer); resolve(value) },
+        (error) => { clearTimeout(timer); reject(error) },
+      )
+    })
+  }
+
   function acquireInProcessLock(key: string, work: () => Promise<unknown>): Promise<unknown> {
     const current = locks.get(key) ?? Promise.resolve()
-    const next = current.then(work, work) // always proceed even if previous rejected
+    const waitForPrevious = boundedStoreOperation(`${key}:previous`, () => current.then(() => undefined, () => undefined))
+      .catch(() => undefined)
+    const next = waitForPrevious.then(() => boundedStoreOperation(key, work))
     locks.set(key, next)
     return next
   }
@@ -402,6 +450,35 @@ export function createSessionStateStore(backend: StateBackend): SessionStateStor
     if (!state.featureName) return
     const { release } = await backend.lock(state.featureName)
     try {
+      await assertFeatureClaimAvailable(state.featureName, state.sessionId)
+      await backend.write(state.featureName, JSON.stringify(state, null, 2))
+    } finally {
+      await release()
+    }
+  }
+
+  async function assertFeatureClaimAvailable(featureName: string, sessionId: string): Promise<void> {
+    const raw = await backend.read(featureName)
+    if (!raw) return
+    const { state: existing } = parseAndMigrateWorkflowStateJson(raw)
+    if (existing && existing.sessionId !== sessionId && existing.phase !== "MODE_SELECT") {
+      throw new Error(`Feature "${featureName}" is already used by session "${existing.sessionId}"`)
+    }
+  }
+
+  async function persistMigratedState(state: WorkflowState, oldSessionId: string): Promise<void> {
+    if (!state.featureName) return
+    const validation = validateWorkflowState(state, { format: "structured" })
+    if (!validation.success) throw new Error(validation.error.message)
+    const { release } = await backend.lock(state.featureName)
+    try {
+      const raw = await backend.read(state.featureName)
+      if (raw) {
+        const { state: existing } = parseAndMigrateWorkflowStateJson(raw)
+        if (existing && existing.sessionId !== oldSessionId && existing.sessionId !== state.sessionId && existing.phase !== "MODE_SELECT") {
+          throw new Error(`Feature "${state.featureName}" is already used by session "${existing.sessionId}"`)
+        }
+      }
       await backend.write(state.featureName, JSON.stringify(state, null, 2))
     } finally {
       await release()
@@ -423,18 +500,20 @@ export function createSessionStateStore(backend: StateBackend): SessionStateStor
     },
 
     async findPersistedByFeatureName(featureName: string): Promise<WorkflowState | null> {
-      for (const state of memory.values()) {
-        if (state.featureName === featureName) {
-          return cloneState(state)
+      return boundedStoreOperation(`findPersistedByFeatureName:${featureName}`, async () => {
+        for (const state of memory.values()) {
+          if (state.featureName === featureName) {
+            return cloneState(state)
+          }
         }
-      }
 
-      const raw = await backend.read(featureName)
-      if (!raw) return null
+        const raw = await backend.read(featureName)
+        if (!raw) return null
 
-      const state = parseAndMigrate(raw)
-      if (!state || state.featureName !== featureName) return null
-      return cloneState(state)
+        const state = parseAndMigrate(raw)
+        if (!state || state.featureName !== featureName) return null
+        return cloneState(state)
+      })
     },
 
     async create(sessionId: string): Promise<WorkflowState> {
@@ -475,23 +554,27 @@ export function createSessionStateStore(backend: StateBackend): SessionStateStor
             const draft = cloneState(latest)
             mutator(draft)
 
-            const validationError = validateWorkflowState(draft)
-            if (validationError) {
-              throw new Error(`State mutation produced invalid state for session "${sessionId}": ${String(validationError)}`)
+            const validation = validateWorkflowState(draft, { format: "structured" })
+            if (!validation.success) {
+              throw new Error(`State mutation produced invalid state for session "${sessionId}": ${validation.error.message}`)
             }
 
-            if (draft.featureName && draft.featureName !== current.featureName) {
-              const { release: releaseNewFeature } = await backend.lock(draft.featureName)
-              try {
-                await backend.write(draft.featureName, JSON.stringify(draft, null, 2))
-              } finally {
-                await releaseNewFeature()
+            if (draft.featureName !== current.featureName) {
+              if (current.phase !== "MODE_SELECT") {
+                throw new Error("Changing featureName for an already persisted workflow is not supported; start or resume the target feature instead.")
               }
+              if (draft.featureName) {
+                const { release: releaseNewFeature } = await backend.lock(draft.featureName)
+                try {
+                  await assertFeatureClaimAvailable(draft.featureName, sessionId)
+                  await backend.write(draft.featureName, JSON.stringify(draft, null, 2))
+                } finally {
+                  await releaseNewFeature()
+                }
+              }
+              await backend.remove(current.featureName)
             } else if (draft.featureName) {
               await backend.write(draft.featureName, JSON.stringify(draft, null, 2))
-            }
-            if (draft.featureName !== current.featureName) {
-              await backend.remove(current.featureName)
             }
             memory.set(sessionId, draft)
             if (_postUpdateCallback && _projectDir) {
@@ -508,9 +591,9 @@ export function createSessionStateStore(backend: StateBackend): SessionStateStor
         mutator(draft)
 
         // G4: Validate invariants before persisting
-        const validationError = validateWorkflowState(draft)
-        if (validationError) {
-          throw new Error(`State mutation produced invalid state for session "${sessionId}": ${String(validationError)}`)
+        const validation = validateWorkflowState(draft, { format: "structured" })
+        if (!validation.success) {
+          throw new Error(`State mutation produced invalid state for session "${sessionId}": ${validation.error.message}`)
         }
 
         if (!current.featureName && draft.featureName) {
@@ -530,35 +613,56 @@ export function createSessionStateStore(backend: StateBackend): SessionStateStor
     },
 
     async load(): Promise<StoreLoadResult | StoreLoadError> {
-      try {
+      return boundedStoreOperation("load", async () => {
+        const loadStartedAt = Date.now()
+        traceStore("store.load.start")
+        try {
         // G5: Clear in-memory store before populating — prevents stale session resurrection
         memory.clear()
         locks.clear()
 
         // Load all persisted states from the backend
+        const listStartedAt = Date.now()
+        traceStore("store.load.backend-list.start")
         const features = await backend.list()
+        traceStore("store.load.backend-list.end", { count: features.length, durationMs: Date.now() - listStartedAt })
+        const skipped: Array<{ featureName: string; reason: string }> = []
         for (const featureName of features) {
+          const readStartedAt = Date.now()
+          traceStore("store.load.backend-read.start", { featureName })
           const raw = await backend.read(featureName)
+          traceStore("store.load.backend-read.end", { featureName, found: raw !== null, durationMs: Date.now() - readStartedAt })
           if (!raw) continue
-          const { state, changed } = parseAndMigrateWorkflowStateJson(raw)
+          const { state, changed, error } = parseAndMigrateWorkflowStateJson(raw)
           // Guard: state.featureName must match the backend key. If it doesn't,
           // the data is inconsistent and loading it would cause writes to go to
           // a different location, orphaning this entry.
           if (state && state.featureName === featureName) {
             memory.set(state.sessionId, state)
             if (changed) {
+              const persistStartedAt = Date.now()
+              traceStore("store.load.persist-migrated.start", { featureName })
               await persistState(state)
+              traceStore("store.load.persist-migrated.end", { featureName, durationMs: Date.now() - persistStartedAt })
             }
+          } else {
+            skipped.push({
+              featureName,
+              reason: state ? `state.featureName "${state.featureName}" does not match backend key` : (error ?? "state failed validation or migration"),
+            })
           }
         }
 
-        return { success: true, count: memory.size }
-      } catch (err) {
-        return {
-          success: false,
-          error: err instanceof Error ? err.message : String(err),
+          traceStore("store.load.end", { success: true, count: memory.size, skipped: skipped.length, durationMs: Date.now() - loadStartedAt })
+          return { success: true, count: memory.size, ...(skipped.length > 0 ? { skipped } : {}) }
+        } catch (err) {
+          traceStore("store.load.end", { success: false, durationMs: Date.now() - loadStartedAt })
+          return {
+            success: false,
+            error: err instanceof Error ? err.message : String(err),
+          }
         }
-      }
+      })
     },
 
     async migrateSession(oldSessionId: string, newSessionId: string): Promise<WorkflowState> {
@@ -593,8 +697,11 @@ export function createSessionStateStore(backend: StateBackend): SessionStateStor
           memory.delete(newSessionId)
         }
         memory.set(newSessionId, migrated)
-        // Persist under the same featureName (file doesn't move, just sessionId changes)
-        await persistState(migrated)
+        // Persist under the same featureName (file doesn't move, just sessionId changes).
+        // A migration is the one legitimate case where the persisted feature owner
+        // is expected to be the old session ID, so bypass the normal claim check
+        // while still rejecting unrelated active owners.
+        await persistMigratedState(migrated, oldSessionId)
         if (_postUpdateCallback && _projectDir) {
           try { _postUpdateCallback(migrated, _projectDir) } catch { /* non-fatal */ }
         }

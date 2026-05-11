@@ -122,7 +122,9 @@ class TestSetup:
 
         env_path = tmp_path / profile_name / ".env"
         assert env_path.is_file()
-        assert "OPENARTISAN_BRIDGE_CLI=/tmp/bridge/cli.ts" in env_path.read_text()
+        env = env_path.read_text()
+        assert "OPENARTISAN_BRIDGE_CLI=/tmp/bridge/cli.ts" in env
+        assert f"OPENARTISAN_PROJECT_DIR={tmp_path.resolve()}" in env
 
     def test_installs_plugin_root_shim(self, tmp_path):
         profile_name = "oa-profile"
@@ -147,24 +149,21 @@ class TestSetup:
 class TestAutoApprovalDispatch:
     """Tests for _dispatch_auto_approve in prompt_hook.py."""
 
-    def test_calls_message_process_before_approve(self, started_bridge):
-        """Should call message.process before dispatching auto-approval."""
+    def test_does_not_spoof_user_message_before_approve(self, started_bridge):
+        """Auto-approval should not mark USER_GATE as if the user responded."""
         from hermes_adapter.prompt_hook import _dispatch_auto_approve
 
-        started_bridge.set_response("message.process", None)
         started_bridge.set_response("task.getAutoApproveContext", None)  # skip dispatch
 
         _dispatch_auto_approve(started_bridge, "s1", "/tmp/project")
 
         msg_calls = started_bridge.get_calls("message.process")
-        assert len(msg_calls) == 1
-        assert msg_calls[0][1]["sessionId"] == "s1"
+        assert len(msg_calls) == 0
 
     def test_skips_when_no_approve_context(self, started_bridge):
         """Should skip dispatch when getAutoApproveContext returns None."""
         from hermes_adapter.prompt_hook import _dispatch_auto_approve
 
-        started_bridge.set_response("message.process", None)
         started_bridge.set_response("task.getAutoApproveContext", None)
 
         _dispatch_auto_approve(started_bridge, "s1", "/tmp/project")
@@ -178,9 +177,8 @@ class TestAutoApprovalDispatch:
         from hermes_adapter.prompt_hook import _dispatch_auto_approve
         from unittest.mock import MagicMock
 
-        started_bridge.set_response("message.process", None)
         started_bridge.set_response(
-            "task.getAutoApproveContext", "Review this artifact..."
+            "task.getAutoApproveContext", "Review this artifact...\nOPEN_ARTISAN_REVIEW_TOKEN: abc123"
         )
         started_bridge.set_response("tool.execute", "ok")
 
@@ -197,13 +195,13 @@ class TestAutoApprovalDispatch:
         tool_calls = started_bridge.get_calls("tool.execute")
         assert len(tool_calls) == 1
         assert tool_calls[0][1]["name"] == "submit_auto_approve"
+        assert tool_calls[0][1]["context"]["invocation"] == "auto-approver"
 
     def test_handles_subprocess_failure_gracefully(self, started_bridge):
         """Should not crash if subprocess fails."""
         from hermes_adapter.prompt_hook import _dispatch_auto_approve
         import subprocess
 
-        started_bridge.set_response("message.process", None)
         started_bridge.set_response("task.getAutoApproveContext", "Review prompt")
 
         with patch(

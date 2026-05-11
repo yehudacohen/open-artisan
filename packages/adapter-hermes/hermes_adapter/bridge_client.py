@@ -49,6 +49,10 @@ _NO_RESPONSE_SOCKET_METHODS = {"lifecycle.sessionCreated", "lifecycle.sessionDel
 _SOCKET_RECOVERY_LIMIT = 1
 
 
+def _is_uninitialized_bridge_error(error: BaseException) -> bool:
+    return "Bridge not initialized. Call lifecycle.init first" in str(error)
+
+
 def _persistence_payload_from_env() -> dict[str, Any] | None:
     kind = os.environ.get("OPENARTISAN_STATE_BACKEND") or os.environ.get(
         "OPENARTISAN_PERSISTENCE"
@@ -174,12 +178,63 @@ class StdioBridgeClient:
             self._set_transport_mode("uninitialized")
         self._reset_runtime_tracking()
 
+    def _stop_local_process(self) -> None:
+        if self._process is None:
+            return
+        try:
+            self._process.terminate()
+            self._process.wait(timeout=2)
+        except (OSError, subprocess.TimeoutExpired):
+            try:
+                self._process.kill()
+            except OSError:
+                pass
+        self._process = None
+
+    def _live_shared_bridge_unhealthy_error(
+        self, socket_path: str, error: BaseException
+    ) -> BridgeError:
+        return BridgeError(
+            "Live shared bridge is unhealthy; refusing to spawn a local bridge "
+            "because the live bridge may hold the Open Artisan PGlite database lock. "
+            f"Shared socket: {socket_path}. Probe error: {error}. "
+            "Restart or recover the shared bridge, then retry.",
+            recoverable=True,
+        )
+
     def _probe_shared_bridge(self) -> None:
         if not self._socket_path:
             raise self._socket_error(
                 "lifecycle.ping", "socket is not configured", recoverable=False
             )
         self._send_socket_rpc("lifecycle.ping", {})
+        health = self._send_socket_rpc("state.health", {"sessionId": "default"})
+        if not isinstance(health, dict):
+            raise self._socket_error(
+                "state.health", "health response was not an object", recoverable=True
+            )
+        if health.get("initialized") is not True:
+            raise self._socket_error(
+                "state.health", "bridge engine is not initialized", recoverable=True
+            )
+        if self._project_dir and health.get("projectDir") != self._project_dir:
+            raise self._socket_error(
+                "state.health",
+                (
+                    "bridge project mismatch: expected "
+                    f"{self._project_dir}, got {health.get('projectDir')}"
+                ),
+                recoverable=True,
+            )
+        if self._state_dir and health.get("stateDir") != self._state_dir:
+            raise self._socket_error(
+                "state.health",
+                (
+                    "bridge state directory mismatch: expected "
+                    f"{self._state_dir}, got {health.get('stateDir')}"
+                ),
+                recoverable=True,
+            )
 
     def start(self, project_dir: str) -> None:
         """Attach to an existing shared bridge when possible, otherwise spawn one.
@@ -219,13 +274,10 @@ class StdioBridgeClient:
                     )
                     return
                 except BridgeError as e:
-                    logger.warning(
-                        "Shared bridge probe failed, spawning local bridge fallback: %s",
-                        e,
-                    )
+                    logger.warning("Shared bridge probe failed: %s", e)
                     self._log_health_transition("recovering", str(e))
                     self._clear_shared_bridge_attachment()
-                    self._takeover_after_unreachable_shared_bridge = True
+                    raise self._live_shared_bridge_unhealthy_error(socket_path, e) from e
         elif discovery.get("kind") == "stale_bridge_state":
             self._takeover_after_unreachable_shared_bridge = True
 
@@ -246,8 +298,24 @@ class StdioBridgeClient:
             result = self._send_rpc("lifecycle.init", payload)
         except BridgeError as e:
             if self._should_take_over_bridge(e):
-                result = self._retry_with_bridge_takeover(payload, e)
+                process_to_replace = self._process
+                self._process = None
+                if process_to_replace is not None:
+                    try:
+                        process_to_replace.terminate()
+                        process_to_replace.wait(timeout=2)
+                    except (OSError, subprocess.TimeoutExpired):
+                        try:
+                            process_to_replace.kill()
+                        except OSError:
+                            pass
+                try:
+                    result = self._retry_with_bridge_takeover(payload, e)
+                except BridgeError:
+                    self._stop_local_process()
+                    raise
             else:
+                self._stop_local_process()
                 raise
         if result != "ready":
             logger.warning("Bridge init returned unexpected result: %s", result)
@@ -296,11 +364,34 @@ class StdioBridgeClient:
                         "Bridge subprocess died and reconnect failed", recoverable=True
                     )
 
-        return self._send_rpc(method, params or {})
+        try:
+            return self._send_rpc(method, params or {})
+        except BridgeError as e:
+            if not _is_uninitialized_bridge_error(e) or not self._project_dir:
+                raise
+            self._log_health_transition("recovering", str(e))
+            if self._process is not None:
+                try:
+                    self._process.terminate()
+                    self._process.wait(timeout=2)
+                except (OSError, subprocess.TimeoutExpired):
+                    try:
+                        self._process.kill()
+                    except OSError:
+                        pass
+                self._process = None
+            self.start(self._project_dir)
+            if self._socket_path:
+                return self._send_socket_rpc(method, params or {})
+            return self._send_rpc(method, params or {})
 
     def ensure_started(self, project_dir: str) -> None:
         """Ensure the bridge subprocess is running for a project directory."""
+        if self._project_dir and self._project_dir != project_dir:
+            self.start(project_dir)
+            return
         self._project_dir = project_dir
+        self._state_dir = f"{project_dir}/{DEFAULT_STATE_DIR_NAME}"
         if self._socket_path:
             try:
                 self._probe_shared_bridge()

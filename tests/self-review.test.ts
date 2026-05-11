@@ -37,6 +37,27 @@ function makeDispatcher(responseText: string): SubagentDispatcher & { _promptMoc
   }
 }
 
+function makeDispatcherSequence(responseTexts: string[]): SubagentDispatcher & { _promptMock: ReturnType<typeof mock>; _destroyMock: ReturnType<typeof mock>; _createMock: ReturnType<typeof mock> } {
+  let index = 0
+  const promptMock = mock(async () => {
+    const response = responseTexts[Math.min(index, responseTexts.length - 1)] ?? ""
+    index++
+    return response
+  })
+  const destroyMock = mock(async () => {})
+  const createMock = mock(async () => ({
+    id: `mock-review-session-${index}`,
+    prompt: promptMock,
+    destroy: destroyMock,
+  }))
+  return {
+    createSession: createMock,
+    _promptMock: promptMock,
+    _destroyMock: destroyMock,
+    _createMock: createMock,
+  }
+}
+
 function makeDispatcherThrows(): SubagentDispatcher & { _destroyMock: ReturnType<typeof mock> } {
   const destroyMock = mock(async () => {})
   const promptMock = mock(async () => { throw new Error("Network error during review") })
@@ -357,6 +378,55 @@ describe("dispatchSelfReview — response shape variants", () => {
   })
 })
 
+describe("dispatchSelfReview — invalid JSON recovery", () => {
+  it("retries once with a JSON-only repair prompt when reviewer returns prose", async () => {
+    const dispatcher = makeDispatcherSequence([
+      "* All criteria look good, but this is not JSON.",
+      makeReviewResponse(),
+    ])
+
+    const result = await dispatchSelfReview(dispatcher, BASE_REQ)
+
+    expect(result.success).toBe(true)
+    expect(dispatcher._createMock).toHaveBeenCalledTimes(2)
+    expect(dispatcher._promptMock).toHaveBeenCalledTimes(2)
+    const repairPrompt = dispatcher._promptMock.mock.calls[1]?.[0] as string
+    expect(repairPrompt).toContain("not valid JSON")
+    expect(repairPrompt).toContain("Return ONLY a valid JSON object")
+  })
+
+  it("requests JSON schema structured output for review and repair prompts", async () => {
+    const dispatcher = makeDispatcherSequence([
+      "* First invalid reviewer response.",
+      makeReviewResponse(),
+    ])
+
+    const result = await dispatchSelfReview(dispatcher, BASE_REQ)
+
+    expect(result.success).toBe(true)
+    const firstOptions = dispatcher._promptMock.mock.calls[0]?.[1] as any
+    const repairOptions = dispatcher._promptMock.mock.calls[1]?.[1] as any
+    expect(firstOptions?.responseFormat?.type).toBe("json_schema")
+    expect(firstOptions?.responseFormat?.schema?.required).toContain("criteria_results")
+    expect(repairOptions?.responseFormat?.type).toBe("json_schema")
+  })
+
+  it("returns an actionable snippet when reviewer JSON repair also fails", async () => {
+    const dispatcher = makeDispatcherSequence([
+      "* First invalid reviewer response.",
+      "Still not JSON.",
+    ])
+
+    const result = await dispatchSelfReview(dispatcher, BASE_REQ)
+
+    expect(result.success).toBe(false)
+    if (result.success) return
+    expect(selfReviewErrorText(result)).toContain("Reviewer returned invalid JSON")
+    expect(selfReviewErrorText(result)).toContain("Output snippet")
+    expect(selfReviewErrorText(result)).toContain("JSON repair failed")
+  })
+})
+
 // ---------------------------------------------------------------------------
 // Prompt construction — passes context through to session.prompt
 // ---------------------------------------------------------------------------
@@ -379,6 +449,14 @@ describe("dispatchSelfReview — prompt construction", () => {
     const dispatcher = makeDispatcher(makeReviewResponse())
     await dispatchSelfReview(dispatcher, { ...BASE_REQ, artifactPaths: ["/workspace/interfaces.ts"] })
     expect(getPromptText(dispatcher)).toContain("/workspace/interfaces.ts")
+  })
+
+  it("instructs reviewers not to fail unrelated legacy APIs in mixed files", async () => {
+    const dispatcher = makeDispatcher(makeReviewResponse())
+    await dispatchSelfReview(dispatcher, { ...BASE_REQ, phase: "INTERFACES", artifactPaths: ["/workspace/workflow-state-types.ts"] })
+    const prompt = getPromptText(dispatcher)
+    expect(prompt).toContain("unrelated legacy APIs")
+    expect(prompt).toContain("do not fail unrelated pre-existing APIs")
   })
 
   it("instructs reviewers to reject markdown artifacts for file-based phases", async () => {
@@ -455,32 +533,8 @@ describe("dispatchSelfReview — timeout", () => {
 // Artifact content for in-memory phases
 // ---------------------------------------------------------------------------
 
-describe("dispatchSelfReview — artifactContent for in-memory phases", () => {
-  it("includes artifact content in prompt when artifactPaths is empty", async () => {
-    const capturedPrompts: string[] = []
-    const capturingDispatcher: SubagentDispatcher = {
-      createSession: mock(async () => ({
-        id: "content-session",
-        prompt: mock(async (text: string) => { capturedPrompts.push(text); return makeReviewResponse() }),
-        destroy: mock(async () => {}),
-      })),
-    }
-
-    await dispatchSelfReview(capturingDispatcher, {
-      phase: "PLANNING",
-      mode: "GREENFIELD",
-      artifactPaths: [],
-      criteriaText: "1. Plan covers all requirements",
-      artifactContent: "## My Plan\nThis is the full plan text.",
-    })
-
-    expect(capturedPrompts.length).toBe(1)
-    expect(capturedPrompts[0]).toContain("in-memory document")
-    expect(capturedPrompts[0]).toContain("## My Plan")
-    expect(capturedPrompts[0]).toContain("This is the full plan text.")
-  })
-
-  it("uses file paths when provided, even if artifactContent is also set", async () => {
+describe("dispatchSelfReview — file artifact paths", () => {
+  it("uses file paths as the review source of truth", async () => {
     const capturedPrompts: string[] = []
     const capturingDispatcher: SubagentDispatcher = {
       createSession: mock(async () => ({
@@ -495,11 +549,9 @@ describe("dispatchSelfReview — artifactContent for in-memory phases", () => {
       mode: "GREENFIELD",
       artifactPaths: ["/workspace/src/types.ts"],
       criteriaText: "1. Types defined",
-      artifactContent: "should not appear",
     })
 
     expect(capturedPrompts[0]).toContain("types.ts")
-    expect(capturedPrompts[0]).not.toContain("should not appear")
   })
 
   it("shows graceful fallback when no paths and no content", async () => {

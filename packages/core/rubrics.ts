@@ -266,6 +266,7 @@ ${structuralGate}
 6. Data model described — key entities, relationships, constraints, lifecycle
 7. Integration points identified — external systems, APIs, databases, filesystem interactions. For adapters or plugins that wrap an existing protocol: enumerate every protocol method/event and confirm each is either handled or explicitly out of scope with justification. Cross-reference the protocol spec or reference implementations to avoid silent omissions
 8. Deployment & infrastructure addressed — how the feature reaches production (infrastructure provisioning, credentials/secrets, environment configuration, CI/CD changes, DNS/routing). If no deployment is needed, this must be explicitly stated with justification. Plans that produce working code but ignore deployment are incomplete.
+Reviewed INTERFACES artifact path requirement: if the plan names files for INTERFACES review, each reviewed artifact must be an interface/type/schema file that the INTERFACES phase can accept. Supporting implementation dependencies may be listed separately as context, but they must not be presented as reviewed INTERFACES artifacts.
 ${allowlistBlock}
 [If the artifact is a pass-through:] Does the justification for why this phase is low-value hold up? Is the reason specific and verifiable, not vague? Would a reasonable engineer agree? Is the agent being lazy?
 No functionality duplicated from existing codebase or installed dependencies, and no well-supported open source package overlooked for the problem being solved. If building custom, justification must be stated explicitly.
@@ -315,13 +316,13 @@ ${structuralGate}
 
 **Blocking criteria (must all pass to advance):**
 1. Reviewed artifacts are real runnable test/spec files in the project test/source tree — not markdown test plans and not files under .openartisan/
-2. At least one test per interface method/function
-3. Happy path tested for each operation
+2. Coverage maps to each approved interface method/function, structural state/event, protocol method, or runtime seam named by the approved artifacts. For framework/runtime work, seam-level tests against state machines, bridge methods, adapter hooks, plugin entry points, or workflow tools satisfy this criterion even when the seam is not a single exported interface method.
+3. Happy path tested for each operation or approved runtime movement
 4. Edge cases covered where applicable — empty input, maximum values, null/undefined, boundary conditions. Do not require irrelevant edge classes; score N/A as satisfied when the artifact or approved plan explains why they do not apply.
 5. Failure modes tested where applicable — invalid data, network errors, auth failures, timeouts. Do not require network/auth/timeout tests for local-only features that introduce no network, auth, or timeout behavior; instead verify the relevant failure modes named by the interfaces/plan.
-6. Tests are expected to FAIL — no implementation has leaked in (verify by inspecting imports and logic)
-7. Test descriptions map directly to interface specifications
-8. Tests import from interfaces, not from implementations
+6. Target-state tests for not-yet-implemented behavior are expected to FAIL before implementation and must not include leaked implementation logic. Characterization, regression, executable seam, and mixed target-state/characterization suites are valid when the approved plan/interfaces call for preserving existing runtime behavior; those tests may pass before implementation and must not be failed merely because they are executable today.
+7. Test descriptions map directly to approved interface specifications, structural workflow vocabulary, protocol contracts, or runtime seam behavior.
+8. Tests exercise approved public contracts or runtime seams rather than private helper-only paths. Prefer importing from interface modules when the approved artifact is a pure API/type interface. For framework/runtime features, importing owner modules such as state machines, bridge handlers, adapter hooks, plugin entry points, or workflow tools is acceptable when those modules are the approved executable seam under test.
 [If the artifact is a pass-through:] Does the justification for why this phase is low-value hold up? Is the reason specific and verifiable, not vague? Would a reasonable engineer agree? Is the agent being lazy?
 
 ${qualityBlock}

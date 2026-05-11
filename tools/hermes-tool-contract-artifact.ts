@@ -1,10 +1,10 @@
-import { MCP_TOOL_CONTRACTS } from "../packages/core/tool-contracts"
+import { HERMES_AUTHOR_TOOL_CONTRACTS } from "../packages/core/tool-contracts"
 import { toJsonSchema } from "../packages/core/schemas"
 
 export const HERMES_TOOL_CONTRACTS_OUTPUT_PATH = "packages/adapter-hermes/hermes_adapter/tool_contracts.json"
 
 export function buildHermesToolContractsArtifact(): string {
-  const contracts = MCP_TOOL_CONTRACTS.map((contract) => ({
+  const contracts = HERMES_AUTHOR_TOOL_CONTRACTS.map((contract) => ({
     hermes_name: contract.mcpName ?? `oa_${contract.name}`,
     bridge_name: contract.name,
     description: contract.description,
@@ -14,5 +14,5 @@ export function buildHermesToolContractsArtifact(): string {
 }
 
 export function hermesToolContractCount(): number {
-  return MCP_TOOL_CONTRACTS.length
+  return HERMES_AUTHOR_TOOL_CONTRACTS.length
 }

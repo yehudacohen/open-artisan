@@ -10,7 +10,7 @@ import {
 } from "#core/schemas"
 
 describe("shared tool schemas", () => {
-  it("allows request_review markdown materialization with an empty artifact file list", () => {
+  it("rejects request_review markdown materialization with an empty artifact file list", () => {
     const parsed = RequestReviewToolSchema.safeParse({
       summary: "Conventions",
       artifact_description: "Conventions doc",
@@ -18,7 +18,7 @@ describe("shared tool schemas", () => {
       artifact_markdown: "# Conventions\n",
     })
 
-    expect(parsed.success).toBe(true)
+    expect(parsed.success).toBe(false)
   })
 
   it("still rejects request_review calls that provide no review source", () => {
@@ -38,7 +38,7 @@ describe("shared tool schemas", () => {
     }
 
     expect(schema.required).toContain("artifact_files")
-    expect(schema.properties?.artifact_files?.minItems).toBeUndefined()
+    expect(schema.properties?.artifact_files?.minItems).toBe(1)
   })
 
   it("requires absolute paths for task boundary file changes", () => {

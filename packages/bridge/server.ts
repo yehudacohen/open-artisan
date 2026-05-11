@@ -17,10 +17,11 @@ import type { OpenArtisanServices } from "../core/open-artisan-services"
 import type pino from "pino"
 import { NOT_INITIALIZED } from "./protocol"
 import { validateBridgeMethodParams } from "./protocol-validation"
+import { BRIDGE_MAX_STDIO_REQUEST_CHARS } from "../core/constants"
 
 export interface ReviewSubmissionTokenRecord {
   sessionId: string
-  kind: "task" | "phase"
+  kind: "task" | "phase" | "auto-approve"
   subject: string
   expiresAt: number
   artifactHash?: string
@@ -167,7 +168,7 @@ export function createBridgeEngine(
   }
 
   // Methods that don't require initialization
-  const INIT_FREE = new Set(["lifecycle.init", "lifecycle.ping", "lifecycle.shutdown"])
+  const INIT_FREE = new Set(["lifecycle.init", "lifecycle.ping", "lifecycle.shutdown", "state.health"])
 
   // Create the JSON-RPC server from the library
   const rpcServer = new JSONRPCServer()
@@ -245,14 +246,35 @@ export function createBridgeServer(
   function start() {
     const rl = createInterface({ input, crlfDelay: Infinity })
 
+    function writeResponse(response: string): void {
+      try {
+        output.write(response + "\n", (error) => {
+          if (error) engine.ctx.shuttingDown = true
+        })
+      } catch {
+        engine.ctx.shuttingDown = true
+      }
+    }
+
     rl.on("line", async (line: string) => {
       if (engine.ctx.shuttingDown) return
       const trimmed = line.trim()
       if (!trimmed) return
 
-      const response = await engine.receiveJSON(trimmed)
-      if (response) {
-        output.write(response + "\n")
+      if (trimmed.length > BRIDGE_MAX_STDIO_REQUEST_CHARS) {
+        writeResponse(JSON.stringify({ jsonrpc: "2.0", error: { code: -32000, message: "JSON-RPC request exceeds maximum size" }, id: null }))
+        return
+      }
+
+      try {
+        const response = await engine.receiveJSON(trimmed)
+        if (response) writeResponse(response)
+      } catch (error) {
+        writeResponse(JSON.stringify({
+          jsonrpc: "2.0",
+          error: { code: -32603, message: error instanceof Error ? error.message : String(error) },
+          id: null,
+        }))
       }
     })
 

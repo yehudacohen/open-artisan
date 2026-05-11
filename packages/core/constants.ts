@@ -118,6 +118,9 @@ export const REVIEW_SUBMISSION_TOKEN_BYTES = 32
 /** Maximum lifetime for an issued bridge reviewer submission token (ms). */
 export const REVIEW_SUBMISSION_TOKEN_TTL_MS = 15 * 60 * 1000
 
+/** Maximum JSON-RPC stdio request line length accepted by the bridge. */
+export const BRIDGE_MAX_STDIO_REQUEST_CHARS = 1_048_576
+
 /**
  * Maximum number of times the agent can call mark_task_complete for the same
  * task before per-task review is bypassed. Prevents infinite review loops when
@@ -241,6 +244,16 @@ export const DB_OPERATION_LEASE_POLL_MS = 50
 export const DB_OPERATION_LEASE_MS = 300_000
 
 /**
+ * Timeout for one SessionStateStore operation (ms).
+ * Prevents a wedged backend read/write/lock from poisoning the in-process
+ * per-feature promise chain and blocking later hooks or workflow tools.
+ */
+export const SESSION_STORE_OPERATION_TIMEOUT_MS = 35_000
+
+/** Environment variable override for SessionStateStore operation timeout. */
+export const SESSION_STORE_OPERATION_TIMEOUT_ENV = "OPENARTISAN_SESSION_STORE_OPERATION_TIMEOUT_MS"
+
+/**
  * Renew DB operation leases halfway through their configured duration.
  */
 export const DB_OPERATION_LEASE_RENEWAL_DIVISOR = 2
@@ -249,6 +262,21 @@ export const DB_OPERATION_LEASE_RENEWAL_DIVISOR = 2
  * Minimum DB lease renewal interval; keeps very short test leases renewable.
  */
 export const DB_OPERATION_LEASE_MIN_RENEWAL_MS = 1
+
+/** Timeout for the physical PGlite operation lock (ms). */
+export const PGLITE_FILE_LOCK_TIMEOUT_MS = 30_000
+
+/** Polling interval while waiting for the physical PGlite operation lock (ms). */
+export const PGLITE_FILE_LOCK_POLL_MS = 50
+
+/** Stale physical PGlite lock age after which a lock file may be reclaimed (ms). */
+export const PGLITE_FILE_LOCK_STALE_MS = 600_000
+
+/** Timeout for waiting behind a prior in-process PGlite queue operation (ms). */
+export const PGLITE_QUEUE_WAIT_TIMEOUT_MS = 35_000
+
+/** Environment variable override for PGlite queue wait timeout. */
+export const PGLITE_QUEUE_WAIT_TIMEOUT_ENV = "OPENARTISAN_PGLITE_QUEUE_WAIT_TIMEOUT_MS"
 
 // ---------------------------------------------------------------------------
 // Sub-workflows

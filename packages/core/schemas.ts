@@ -55,6 +55,65 @@ const AbsoluteFilePathSchema = z.string().min(1).refine((path) => path.startsWit
   message: "must be an absolute file path",
 })
 
+const NonEmptyTrimmedUserTextSchema = z.string().trim().min(1)
+
+/**
+ * Zod contract for the persisted real-world acceptance scenario captured from PLANNING.
+ * Mirrors `ScenarioSufficiencyContext` in workflow-state-types.ts.
+ */
+export const ScenarioSufficiencyContextSchema = z.object({
+  scenario: NonEmptyTrimmedUserTextSchema,
+  requiredCapabilities: z.array(NonEmptyTrimmedUserTextSchema).min(1),
+  acceptanceChecks: z.array(NonEmptyTrimmedUserTextSchema).min(1),
+  explicitNonGoals: z.array(NonEmptyTrimmedUserTextSchema),
+  sourceArtifactPath: AbsoluteFilePathSchema,
+  capturedAtPhase: z.literal("PLANNING"),
+}).strict()
+
+export const ScenarioSufficiencyValidationCodeSchema = z.enum([
+  "SCENARIO_SECTION_MISSING",
+  "SCENARIO_PROSE_MISSING",
+  "REQUIRED_CAPABILITIES_MISSING",
+  "ACCEPTANCE_CHECKS_MISSING",
+  "EXPLICIT_NON_GOALS_MISSING",
+  "SOURCE_ARTIFACT_PATH_INVALID",
+])
+
+export const ScenarioSufficiencyValidationErrorSchema = z.object({
+  code: ScenarioSufficiencyValidationCodeSchema,
+  message: z.string().min(1),
+  sourceArtifactPath: z.string().min(1),
+}).strict()
+
+export const ScenarioSufficiencyParseResultSchema = z.discriminatedUnion("success", [
+  z.object({ success: z.literal(true), scenario: ScenarioSufficiencyContextSchema }).strict(),
+  z.object({ success: z.literal(false), errors: z.array(ScenarioSufficiencyValidationErrorSchema).min(1) }).strict(),
+])
+
+export const ScenarioSufficiencyPromptBlockOptionsSchema = z.object({
+  heading: z.string().min(1).optional(),
+  includeSourcePath: z.boolean().optional(),
+}).strict()
+
+export const ScenarioSufficiencyPromptBlockResultSchema = z.discriminatedUnion("success", [
+  z.object({ success: z.literal(true), block: z.string().nullable() }).strict(),
+  z.object({ success: z.literal(false), errors: z.array(ScenarioSufficiencyValidationErrorSchema).min(1) }).strict(),
+])
+
+export const ScenarioSufficiencyLogEventSchema = z.enum([
+  "scenario.section_missing",
+  "scenario.validation_failed",
+  "scenario.captured",
+  "scenario.prompt_block_omitted",
+])
+
+export const ScenarioSufficiencyLogEventPayloadSchema = z.object({
+  event: ScenarioSufficiencyLogEventSchema,
+  sourceArtifactPath: z.string().min(1).optional(),
+  errorCodes: z.array(ScenarioSufficiencyValidationCodeSchema).optional(),
+  scenarioTextLogged: z.literal(false),
+}).strict()
+
 export const AnalyzeTaskBoundaryChangeSchema = z.object({
   task_id: z.string().min(1),
   add_files: z.array(AbsoluteFilePathSchema).optional(),
@@ -65,8 +124,8 @@ export const AnalyzeTaskBoundaryChangeSchema = z.object({
 }).strict()
 
 export const ApplyTaskBoundaryChangeSchema = AnalyzeTaskBoundaryChangeSchema.extend({
-  expected_impacted_tasks: z.array(z.string()).optional(),
-  expected_reset_tasks: z.array(z.string()).optional(),
+  expected_impacted_tasks: z.array(z.string()),
+  expected_reset_tasks: z.array(z.string()),
 })
 
 export const RoutePatchSuggestionsSchema = z.object({}).strict()
@@ -82,6 +141,30 @@ export const ApplyPatchSuggestionSchema = z.object({
   patch_suggestion_id: z.string().min(1),
   force: z.boolean().optional(),
   applied_by: z.enum(["agent", "orchestrator", "user"]).optional(),
+}).strict()
+
+export const GuardedEditSchema = z.object({
+  file_path: z.string().min(1),
+  old_text: z.string().min(1),
+  new_text: z.string(),
+}).strict()
+
+export const GuardedWriteSchema = z.object({
+  file_path: z.string().min(1),
+  content: z.string(),
+  overwrite: z.boolean().optional(),
+}).strict()
+
+export const GuardedPatchSchema = z.object({
+  patch_text: z.string().min(1),
+}).strict()
+
+export const ProposeDirectApplicationSchema = z.object({
+  summary: z.string().min(1),
+  why_safe: z.string().min(1),
+  affected_files: z.array(z.string().min(1)).min(1).max(3),
+  patch: z.string().min(1).max(20_000),
+  verification_command: z.string().optional(),
 }).strict()
 
 export const ArtifactKeySchema = z.enum(["design", "conventions", "plan", "interfaces", "tests", "impl_plan", "implementation"])
@@ -117,17 +200,8 @@ export const SelectModeToolSchema = z.object({
 export const RequestReviewToolSchema = z.object({
   summary: z.string().min(1),
   artifact_description: z.string().min(1),
-  artifact_files: z.array(z.string()),
-  artifact_markdown: z.string().optional(),
-}).strict().superRefine((value, ctx) => {
-  if (value.artifact_files.length === 0 && !value.artifact_markdown?.trim()) {
-    ctx.addIssue({
-      code: "custom",
-      path: ["artifact_files"],
-      message: "artifact_files must list at least one file unless artifact_markdown is provided for a markdown phase",
-    })
-  }
-})
+  artifact_files: z.array(z.string()).min(1, "artifact_files must list at least one on-disk artifact file"),
+}).strict()
 
 export const MarkSatisfiedToolSchema = z.object({
   criteria_met: z.array(z.object({
@@ -154,7 +228,11 @@ export const MarkTaskCompleteToolSchema = z.object({
 
 export const MarkScanCompleteToolSchema = z.object({ scan_summary: z.string() }).strict()
 export const MarkAnalyzeCompleteToolSchema = z.object({ analysis_summary: z.string() }).strict()
-export const CheckPriorWorkflowToolSchema = z.object({ feature_name: z.string().min(1) }).strict()
+export const CheckPriorWorkflowToolSchema = z.object({
+  feature_name: z.string().min(1),
+  user_intent: z.string().optional(),
+}).strict()
+export const StructuralTransitionToolSchema = z.object({}).strict()
 
 export const ProposeBacktrackToolSchema = z.object({
   target_phase: z.string().min(1),
@@ -187,7 +265,10 @@ export const SubmitPhaseReviewToolSchema = z.object({
   review_error: z.string().nullable().optional(),
   review_token: z.string().min(1),
 }).strict()
-export const SubmitAutoApproveToolSchema = z.object({ review_output: z.string().min(1) }).strict()
+export const SubmitAutoApproveToolSchema = z.object({
+  review_output: z.string().min(1),
+  review_token: z.string().min(1),
+}).strict()
 export const ResetTaskToolSchema = z.object({
   task_id: z.string().optional(),
   task_ids: z.array(z.string()).optional(),
@@ -215,6 +296,12 @@ export const RoadmapDeriveExecutionSliceToolSchema = z.object({
 }).strict()
 
 export type LifecycleInitParamsFromSchema = z.infer<typeof LifecycleInitParamsSchema>
+export type ScenarioSufficiencyContextFromSchema = z.infer<typeof ScenarioSufficiencyContextSchema>
+export type ScenarioSufficiencyValidationErrorFromSchema = z.infer<typeof ScenarioSufficiencyValidationErrorSchema>
+export type ScenarioSufficiencyParseResultFromSchema = z.infer<typeof ScenarioSufficiencyParseResultSchema>
+export type ScenarioSufficiencyPromptBlockOptionsFromSchema = z.infer<typeof ScenarioSufficiencyPromptBlockOptionsSchema>
+export type ScenarioSufficiencyPromptBlockResultFromSchema = z.infer<typeof ScenarioSufficiencyPromptBlockResultSchema>
+export type ScenarioSufficiencyLogEventPayloadFromSchema = z.infer<typeof ScenarioSufficiencyLogEventPayloadSchema>
 export type TaskReviewOutput = z.infer<typeof TaskReviewOutputSchema>
 export type ReportDriftToolInput = z.infer<typeof ReportDriftToolSchema>
 export type PlanDriftRepairToolInput = z.infer<typeof PlanDriftRepairToolSchema>

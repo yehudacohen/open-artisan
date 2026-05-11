@@ -35,4 +35,16 @@ describe("Bridge method param validation", () => {
     const params = { arbitrary: true }
     expect(validateBridgeMethodParams("internal.method", params)).toBe(params)
   })
+
+  it("preserves guard.check apply_patch top-level payload fields", () => {
+    const params = validateBridgeMethodParams("guard.check", {
+      toolName: "apply_patch",
+      sessionId: "s1",
+      args: "{\"patchText\":\"*** Begin Patch\\n*** Add File: src/contracts.d.ts\\n*** End Patch\"}",
+      patchText: "*** Begin Patch\n*** Add File: src/contracts.d.ts\n*** End Patch",
+    }) as Record<string, unknown>
+
+    expect(params.args).toBeString()
+    expect(params.patchText).toContain("src/contracts.d.ts")
+  })
 })

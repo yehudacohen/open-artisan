@@ -112,6 +112,13 @@ export const SELF_REVIEW_TIMEOUT_MS = 300_000
  */
 export const TASK_REVIEW_TIMEOUT_MS = 180_000
 
+/**
+ * Maximum wall-clock time for an isolated change-proposal reviewer (ms).
+ * Change proposals are routing decisions, not full artifact reviews, so they
+ * share the per-task review timeout rather than the longer phase-review budget.
+ */
+export const CHANGE_PROPOSAL_REVIEW_TIMEOUT_MS = 180_000
+
 /** Number of random bytes in one-time bridge reviewer submission tokens. */
 export const REVIEW_SUBMISSION_TOKEN_BYTES = 32
 

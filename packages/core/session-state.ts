@@ -75,6 +75,7 @@ function freshState(sessionId: string): WorkflowState {
     childWorkflows: [],
     concurrency: { maxParallelTasks: 1 },
     reviewArtifactFiles: [],
+    realWorldAcceptanceScenario: null,
   }
 }
 
@@ -178,6 +179,8 @@ function migrateState(migrated: Record<string, unknown>): void {
   migrated["backtrackContext"] ??= null
   // v23 → v24: add approved source artifact file provenance.
   migrated["approvedArtifactFiles"] ??= {}
+  // v24 → v25: add persisted scenario sufficiency context.
+  migrated["realWorldAcceptanceScenario"] ??= null
   // retryCount is transient — reset on load so the idle handler starts fresh.
   // If the agent was stuck before a restart, it deserves a clean retry budget.
   migrated["retryCount"] = 0

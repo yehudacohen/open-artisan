@@ -543,7 +543,7 @@ export function analyzeTaskBoundaryChange(
         success: false,
         error: buildTaskBoundaryChangeError(
           "TASK_BOUNDARY_CHANGE_CONFLICT",
-          `${allowlistConflict.message} Revise PLANNING/IMPL_PLAN or request an allowlist change before applying this boundary update.`,
+          `${allowlistConflict.message} Call propose_change with the blocked files and failing evidence so an isolated reviewer can route this to PLANNING allowlist repair, IMPL_PLAN repair, or rejection before applying this boundary update.`,
         ),
       }
     }

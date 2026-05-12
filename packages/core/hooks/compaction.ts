@@ -9,6 +9,7 @@ import { existsSync } from "node:fs"
 import type { WorkflowState } from "../workflow-state-types"
 import { MAX_CONVENTIONS_CHARS, MAX_REPORT_CHARS } from "../constants"
 import { getNextActionForState } from "../utils"
+import { buildScenarioSufficiencyPromptBlock } from "../scenario-sufficiency"
 
 export interface CompactionContextOptions {
   reviewMode?: "agent" | "isolated"
@@ -81,6 +82,16 @@ export function buildCompactionContext(state: WorkflowState, options: Compaction
   if (state.intentBaseline) {
     lines.push("### Original Intent (User's Request)")
     lines.push(state.intentBaseline)
+    lines.push("")
+  }
+
+  const scenarioBlock = buildScenarioSufficiencyPromptBlock(state.realWorldAcceptanceScenario, {
+    heading: "Real-World Acceptance Scenario",
+    includeSourcePath: true,
+  })
+  if (scenarioBlock.success && scenarioBlock.block) {
+    lines.push("### Scenario Sufficiency Context")
+    lines.push(scenarioBlock.block)
     lines.push("")
   }
 

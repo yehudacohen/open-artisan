@@ -25,6 +25,8 @@ import { withTimeout, extractJsonFromText } from "./utils"
 import { SELF_REVIEW_TIMEOUT_MS } from "./constants"
 import { buildSelfReviewStructuralGate } from "./rubrics"
 import { countExpectedBlockingCriteria } from "./tools/mark-satisfied"
+import { buildScenarioSufficiencyPromptBlock } from "./scenario-sufficiency"
+import type { ScenarioSufficiencyContext } from "./workflow-state-types"
 
 // ---------------------------------------------------------------------------
 // Prompt builder
@@ -64,6 +66,8 @@ export interface SelfReviewRequest {
   intentBaseline?: string | null
   /** Recent user feedback/revision history that may supersede older artifact details. */
   feedbackHistory?: Array<{ phase: Phase; feedback: string; timestamp: number }>
+  /** Captured PLANNING scenario used as a sufficiency lens for downstream review. */
+  realWorldAcceptanceScenario?: ScenarioSufficiencyContext | null
 }
 
 export function buildReviewPrompt(req: SelfReviewRequest): string {
@@ -166,6 +170,18 @@ export function buildReviewPrompt(req: SelfReviewRequest): string {
     for (const entry of recentFeedback) {
       lines.push(`- **${entry.phase}**: ${entry.feedback}`)
     }
+    lines.push("")
+  }
+
+  const scenarioBlock = buildScenarioSufficiencyPromptBlock(req.realWorldAcceptanceScenario ?? null, {
+    heading: "Real-World Acceptance Scenario",
+    includeSourcePath: true,
+  })
+  if (scenarioBlock.success && scenarioBlock.block) {
+    lines.push("## Scenario Sufficiency Review Lens")
+    lines.push("Use this to evaluate Vision alignment and whether the artifact preserves the user's required capabilities and acceptance checks.")
+    lines.push("")
+    lines.push(scenarioBlock.block)
     lines.push("")
   }
 

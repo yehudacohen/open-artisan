@@ -6,6 +6,10 @@
  * the review process.
  */
 import type { RequestReviewArgs } from "../review-types"
+import { readFileSync } from "node:fs"
+import { parseRealWorldAcceptanceScenario } from "../scenario-sufficiency"
+import type { ScenarioSufficiencyContext } from "../workflow-state-types"
+import type { Phase } from "../workflow-primitives"
 
 export const REQUEST_REVIEW_DESCRIPTION = `
 Call this tool when you have completed the current draft and are ready for review.
@@ -44,6 +48,48 @@ only call it when the artifact is ready for critical evaluation.
 export interface RequestReviewResult {
   responseMessage: string
   phaseInstructions: string
+}
+
+export type PlanningScenarioCaptureResult =
+  | { success: true; scenario: ScenarioSufficiencyContext | null }
+  | { success: false; error: string }
+
+export function capturePlanningScenarioForRequestReview(input: {
+  phase: Phase
+  artifactFiles: string[]
+}): PlanningScenarioCaptureResult {
+  if (input.phase !== "PLANNING") return { success: true, scenario: null }
+
+  const sourceArtifactPath = input.artifactFiles[0]
+  if (!sourceArtifactPath) {
+    return {
+      success: false,
+      error: "PLANNING request_review requires a planning artifact file before scenario validation can run.",
+    }
+  }
+
+  let markdown: string
+  try {
+    markdown = readFileSync(sourceArtifactPath, "utf-8")
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error)
+    return {
+      success: false,
+      error: `PLANNING request_review could not read the planning artifact for scenario validation: ${detail}`,
+    }
+  }
+
+  const parsed = parseRealWorldAcceptanceScenario(markdown, sourceArtifactPath)
+  if (!parsed.success) {
+    const codes = parsed.errors.map((validationError) => validationError.code).join(", ")
+    const messages = parsed.errors.map((validationError) => validationError.message).join(" ")
+    return {
+      success: false,
+      error: `PLANNING request_review requires a valid ## Real-World Acceptance Scenario section. ${messages} Validation codes: ${codes}.`,
+    }
+  }
+
+  return { success: true, scenario: parsed.scenario }
 }
 
 /**

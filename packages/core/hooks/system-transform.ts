@@ -20,6 +20,7 @@ import { createImplDAG } from "../dag"
 import { nextSchedulerDecision } from "../scheduler"
 import { getPhaseToolPolicy } from "./tool-guard"
 import { countExpectedBlockingCriteria } from "../tools/mark-satisfied"
+import { buildScenarioSufficiencyPromptBlock } from "../scenario-sufficiency"
 import {
   buildPhaseAcceptanceCriteria,
   getAcceptanceCriteria as getSharedAcceptanceCriteria,
@@ -150,6 +151,14 @@ function buildStateHeader(state: WorkflowState): string {
     lines.push("- If you are unsure between viable approaches, make the best decision yourself; do not stop to ask the user unless human action or credentials are required.")
     lines.push("- Document the decision explicitly in the current artifact, including the alternatives considered and the tradeoffs/risks.")
     lines.push("- Carry that decision summary forward so it can be reported at USER_GATE with the artifact approval request.")
+    lines.push("")
+  }
+
+  const scenarioBlock = buildScenarioSufficiencyPromptBlock(state.realWorldAcceptanceScenario, {
+    heading: "Real-World Acceptance Scenario",
+  })
+  if (scenarioBlock.success && scenarioBlock.block) {
+    lines.push(scenarioBlock.block)
     lines.push("")
   }
 
@@ -376,6 +385,14 @@ export function buildSubagentContext(parentState: WorkflowState): string {
         : parentState.conventions
       lines.push(text)
     }
+    lines.push("")
+  }
+
+  const scenarioBlock = buildScenarioSufficiencyPromptBlock(parentState.realWorldAcceptanceScenario, {
+    heading: "Real-World Acceptance Scenario",
+  })
+  if (scenarioBlock.success && scenarioBlock.block) {
+    lines.push(scenarioBlock.block)
     lines.push("")
   }
 

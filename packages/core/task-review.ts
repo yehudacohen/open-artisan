@@ -37,6 +37,8 @@ import { withTimeout, extractJsonFromText } from "./utils"
 import { TASK_REVIEW_TIMEOUT_MS } from "./constants"
 import { buildTaskReviewRubric, getTaskReviewCheckCountLabel } from "./rubrics"
 import { TaskReviewOutputSchema, formatZodError } from "./schemas"
+import { buildScenarioSufficiencyPromptBlock } from "./scenario-sufficiency"
+import type { ScenarioSufficiencyContext } from "./workflow-state-types"
 
 // ---------------------------------------------------------------------------
 // Types
@@ -105,6 +107,8 @@ export interface TaskReviewRequest {
   stateDir?: string
   /** Dirty worktree observations classified before review. Informational unless task-owned. */
   worktreeObservations?: DbWorktreeObservation[]
+  /** Captured PLANNING scenario used as a sufficiency lens for task review. */
+  realWorldAcceptanceScenario?: ScenarioSufficiencyContext | null
 }
 
 export interface TaskReviewScores {
@@ -222,6 +226,18 @@ export function buildTaskReviewPrompt(req: TaskReviewRequest): string {
       lines.push(`Read the conventions document at \`${conventionsPath}\` and verify the implementation follows them.`)
       lines.push("")
     }
+  }
+
+  const scenarioBlock = buildScenarioSufficiencyPromptBlock(req.realWorldAcceptanceScenario ?? null, {
+    heading: "Real-World Acceptance Scenario",
+    includeSourcePath: true,
+  })
+  if (scenarioBlock.success && scenarioBlock.block) {
+    lines.push("## Scenario Sufficiency")
+    lines.push("Verify this task remains sufficient for the captured real-world scenario, required capabilities, and acceptance checks.")
+    lines.push("")
+    lines.push(scenarioBlock.block)
+    lines.push("")
   }
 
   // Adjacent tasks — for integration seam checking

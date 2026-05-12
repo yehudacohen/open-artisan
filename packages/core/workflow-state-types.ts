@@ -288,7 +288,7 @@ export interface WorkflowState {
    * Structured real-world acceptance scenario captured from the PLANNING artifact.
    * null before capture and for migrated workflows that have not re-submitted planning.
    */
-  realWorldAcceptanceScenario?: ScenarioSufficiencyContext | null
+  realWorldAcceptanceScenario: ScenarioSufficiencyContext | null
 
   /**
    * The ID of the task currently being executed by the agent in the IMPLEMENTATION phase.
@@ -1056,7 +1056,10 @@ export function validateWorkflowStateResult(state: WorkflowState): WorkflowState
   if (state.discoveryReport !== null && typeof state.discoveryReport !== "string") {
     return { success: false, error: workflowStateValidationError(`discoveryReport must be null or a string, got ${typeof state.discoveryReport}`) }
   }
-  if (state.realWorldAcceptanceScenario != null) {
+  if (!("realWorldAcceptanceScenario" in state) || state.realWorldAcceptanceScenario === undefined) {
+    return { success: false, error: workflowStateValidationError(`realWorldAcceptanceScenario must be present as null or an object`) }
+  }
+  if (state.realWorldAcceptanceScenario !== null) {
     const scenario = state.realWorldAcceptanceScenario
     if (typeof scenario !== "object" || Array.isArray(scenario)) {
       return { success: false, error: workflowStateValidationError(`realWorldAcceptanceScenario must be null or an object, got ${typeof scenario}`) }

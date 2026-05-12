@@ -117,11 +117,6 @@ function shouldForceWorkflowDormant(text: string): boolean {
   ].some((phrase) => normalized.includes(phrase))
 }
 
-function explicitlyNamesOpenArtisan(text: string): boolean {
-  const normalized = text.toLowerCase()
-  return normalized.includes("open artisan") || normalized.includes("open-artisan") || normalized.includes("openartisan")
-}
-
 function shouldActivateWorkflow(text: string): boolean {
   const normalized = text.toLowerCase()
   return [
@@ -511,7 +506,7 @@ export function createPluginHooks({
         if (
           textContent &&
           shouldForceWorkflowDormant(textContent) &&
-          (!isArtisanLockedSession(refreshedState, detectedAgent) || explicitlyNamesOpenArtisan(textContent))
+          !isArtisanLockedSession(refreshedState, detectedAgent)
         ) {
           markDormantSession(sessionId)
           mutateHookMemory(hook, sessionId, "chat.forceDormant", (draft) => {

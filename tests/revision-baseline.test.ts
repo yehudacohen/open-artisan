@@ -63,6 +63,7 @@ function makeState(overrides: Partial<WorkflowState> = {}): WorkflowState {
     childWorkflows: [],
     concurrency: { maxParallelTasks: 1 },
     reviewArtifactFiles: [],
+    realWorldAcceptanceScenario: null,
     ...overrides,
   }
 }

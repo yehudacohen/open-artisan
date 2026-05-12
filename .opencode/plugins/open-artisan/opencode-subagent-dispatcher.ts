@@ -24,6 +24,8 @@ const WORKFLOW_TOOL_DENYLIST: Record<string, false> = {
   resolve_human_gate: false,
   request_review: false,
   submit_feedback: false,
+  propose_change: false,
+  disable_open_artisan: false,
   propose_backtrack: false,
   spawn_sub_workflow: false,
   query_parent_workflow: false,

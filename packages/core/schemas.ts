@@ -114,6 +114,43 @@ export const ScenarioSufficiencyLogEventPayloadSchema = z.object({
   scenarioTextLogged: z.literal(false),
 }).strict()
 
+export const ReviewedFileRoleSchema = z.enum(["contract-only", "mixed-contract-module", "executable-implementation"])
+
+export const MixedContractModuleApprovalSchema = z.object({
+  filePath: AbsoluteFilePathSchema,
+  publicContractSurface: z.array(z.string().min(1)).min(1),
+  executableBehaviorInScope: z.array(z.string().min(1)),
+  approvedInPlan: z.literal(true),
+}).strict()
+
+export const CriterionSeveritySchema = z.enum(["blocking", "suggestion", "design-invariant"])
+
+export const ReviewCriterionDefinitionSchema = z.object({
+  id: z.string().min(1),
+  text: z.string().min(1),
+  severity: CriterionSeveritySchema,
+  qualityDimension: z.string().min(1).optional(),
+}).strict()
+
+export const CriterionResultSchema = z.object({
+  criterionId: z.string().min(1).optional(),
+  criterion_id: z.string().min(1).optional(),
+  criterion: z.string().min(1),
+  met: z.boolean(),
+  evidence: z.string().min(1),
+  severity: CriterionSeveritySchema,
+  score: z.number().optional(),
+}).strict()
+
+export const GitCheckpointSkippedSchema = z.object({
+  success: z.literal(true),
+  skipped: z.literal(true),
+  reason: z.literal("not-a-git-repository"),
+  tag: z.null(),
+  commitHash: z.null(),
+  warnings: z.array(z.string().min(1)).min(1),
+}).strict()
+
 export const AnalyzeTaskBoundaryChangeSchema = z.object({
   task_id: z.string().min(1),
   add_files: z.array(AbsoluteFilePathSchema).optional(),
@@ -167,6 +204,39 @@ export const ProposeDirectApplicationSchema = z.object({
   verification_command: z.string().optional(),
 }).strict()
 
+export const ChangeProposalRouteSchema = z.enum([
+  "current-task-fix",
+  "task-boundary-change",
+  "planning-allowlist-revision",
+  "impl-plan-revision",
+  "backtrack",
+  "defer-final-review",
+  "reject-out-of-scope",
+  "ask-user",
+])
+
+export const ChangeProposalToolSchema = z.object({
+  summary: z.string().min(1),
+  why_needed: z.string().min(1),
+  affected_files: z.array(z.string().min(1)).optional(),
+  failing_command: z.string().min(1).optional(),
+  failing_output: z.string().min(1).optional(),
+  task_ids: z.array(z.string().min(1)).optional(),
+  artifact_keys: z.array(z.string().min(1)).optional(),
+}).strict()
+
+export const ChangeProposalReviewOutputSchema = z.object({
+  approved: z.boolean(),
+  route: ChangeProposalRouteSchema,
+  confidence: z.enum(["high", "medium", "low"]),
+  reason: z.string().min(1),
+  required_actions: z.array(z.string().min(1)).default([]),
+  allowed_files: z.array(z.string().min(1)).default([]),
+  rejected_files: z.array(z.string().min(1)).default([]),
+}).strict()
+
+export const DisableOpenArtisanToolSchema = z.object({}).strict()
+
 export const ArtifactKeySchema = z.enum(["design", "conventions", "plan", "interfaces", "tests", "impl_plan", "implementation"])
 export const DriftScopeSchema = z.enum(["current-task", "current-phase", "workflow", "roadmap"])
 export const DriftRepairStrategySchema = z.enum(["minimal", "safe-auto", "ask-first"])
@@ -205,6 +275,8 @@ export const RequestReviewToolSchema = z.object({
 
 export const MarkSatisfiedToolSchema = z.object({
   criteria_met: z.array(z.object({
+    criterionId: z.string().min(1).optional(),
+    criterion_id: z.string().min(1).optional(),
     criterion: z.string(),
     met: z.boolean(),
     evidence: z.string(),
@@ -302,7 +374,14 @@ export type ScenarioSufficiencyParseResultFromSchema = z.infer<typeof ScenarioSu
 export type ScenarioSufficiencyPromptBlockOptionsFromSchema = z.infer<typeof ScenarioSufficiencyPromptBlockOptionsSchema>
 export type ScenarioSufficiencyPromptBlockResultFromSchema = z.infer<typeof ScenarioSufficiencyPromptBlockResultSchema>
 export type ScenarioSufficiencyLogEventPayloadFromSchema = z.infer<typeof ScenarioSufficiencyLogEventPayloadSchema>
+export type MixedContractModuleApprovalFromSchema = z.infer<typeof MixedContractModuleApprovalSchema>
+export type ReviewCriterionDefinitionFromSchema = z.infer<typeof ReviewCriterionDefinitionSchema>
+export type CriterionResultFromSchema = z.infer<typeof CriterionResultSchema>
+export type GitCheckpointSkippedFromSchema = z.infer<typeof GitCheckpointSkippedSchema>
 export type TaskReviewOutput = z.infer<typeof TaskReviewOutputSchema>
+export type ChangeProposalToolInput = z.infer<typeof ChangeProposalToolSchema>
+export type ChangeProposalReviewOutput = z.infer<typeof ChangeProposalReviewOutputSchema>
+export type DisableOpenArtisanToolInput = z.infer<typeof DisableOpenArtisanToolSchema>
 export type ReportDriftToolInput = z.infer<typeof ReportDriftToolSchema>
 export type PlanDriftRepairToolInput = z.infer<typeof PlanDriftRepairToolSchema>
 export type ApplyDriftRepairToolInput = z.infer<typeof ApplyDriftRepairToolSchema>

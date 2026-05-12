@@ -232,6 +232,7 @@ function freshWorkflowState(sessionId: string): WorkflowState {
     childWorkflows: [],
     concurrency: { maxParallelTasks: 1 },
     reviewArtifactFiles: [],
+    realWorldAcceptanceScenario: null,
   }
 }
 
@@ -1650,6 +1651,9 @@ export function createPGliteOpenArtisanRepository(
         state.phase = workflow.phase
         state.phaseState = workflow.phaseState
         state.featureName = workflow.featureName
+        if (!("realWorldAcceptanceScenario" in state) || state.realWorldAcceptanceScenario === undefined) {
+          state.realWorldAcceptanceScenario = null
+        }
         const artifactRows = await schemaDb.selectFrom("artifacts").selectAll().where("workflow_id", "=", workflow.id).execute()
         for (const artifactRow of artifactRows) {
           const artifact = rowRecord<DbArtifact>(artifactRow)

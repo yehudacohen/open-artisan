@@ -193,6 +193,7 @@ ${fullCriteria.replace(/^### Acceptance Criteria/m, "### Criteria")}`
 export function buildPhaseAcceptanceCriteria(phase: Phase, mode: WorkflowMode | null, designDocPath?: string | null): string | null {
   const qualityBlock = getQualityCriteria(phase)
   const structuralGate = getPhaseStructuralGate(phase)
+  const scenarioSufficiencyCriterion = "Scenario sufficiency — after PLANNING, artifacts must preserve the captured real-world acceptance scenario, required capabilities, and acceptance checks; deviations must be explicit and justified."
 
   switch (phase) {
     case "DISCOVERY":
@@ -298,6 +299,7 @@ ${structuralGate}
 6. Naming is consistent with the plan's terminology throughout
 7. Consistent error handling pattern across all interfaces
 8. CRUD operations: for every data model, create/read/update/delete operations are specified (where applicable)
+9. ${scenarioSufficiencyCriterion}
 [If the artifact is a pass-through:] Does the justification for why this phase is low-value hold up? Is the reason specific and verifiable, not vague? Would a reasonable engineer agree? Is the agent being lazy?
 
 ${qualityBlock}
@@ -323,6 +325,7 @@ ${structuralGate}
 6. Target-state tests for not-yet-implemented behavior are expected to FAIL before implementation and must not include leaked implementation logic. Characterization, regression, executable seam, and mixed target-state/characterization suites are valid when the approved plan/interfaces call for preserving existing runtime behavior; those tests may pass before implementation and must not be failed merely because they are executable today.
 7. Test descriptions map directly to approved interface specifications, structural workflow vocabulary, protocol contracts, or runtime seam behavior.
 8. Tests exercise approved public contracts or runtime seams rather than private helper-only paths. Prefer importing from interface modules when the approved artifact is a pure API/type interface. For framework/runtime features, importing owner modules such as state machines, bridge handlers, adapter hooks, plugin entry points, or workflow tools is acceptable when those modules are the approved executable seam under test.
+9. ${scenarioSufficiencyCriterion}
 [If the artifact is a pass-through:] Does the justification for why this phase is low-value hold up? Is the reason specific and verifiable, not vague? Would a reasonable engineer agree? Is the agent being lazy?
 
 ${qualityBlock}
@@ -351,6 +354,7 @@ ${structuralGate}
 6. Deployment tasks present — if the approved plan includes deployment/infrastructure requirements, the DAG must include corresponding human-gate tasks for provisioning and credentials, and integration tasks that verify deployment. A DAG that implements all code but omits deployment is incomplete.
 7. Integration seams covered — for every pair of tasks with a dependency edge, the handoff is explicitly owned. Check: who creates/configures the shared resource (queue, table, DI binding, config entry)? Who writes the glue code that connects producer to consumer? If the answer is ambiguous or "the other task," add an explicit integration task or expand one of the existing tasks to own it. No task should assume adjacent tasks handle boundary wiring.
 8. Protocol/API completeness — for adapter, plugin, or integration projects: every method, event, or lifecycle hook in the target protocol that affects correctness must be accounted for. Cross-reference the protocol definition (API docs, reference implementations, or protocol spec) and verify no required calls are omitted. If a protocol method used by reference implementations is intentionally skipped, the omission must be explicitly justified (e.g. "compaction not needed because X manages context internally"). Uncaught omissions here become structural bugs that surface late.
+9. ${scenarioSufficiencyCriterion}
 [If the artifact is a pass-through:] Does the justification for why this phase is low-value hold up? Is the reason specific and verifiable, not vague? Would a reasonable engineer agree? Is the agent being lazy?
 
 ${qualityBlock}
@@ -389,6 +393,7 @@ ${structuralGate}
  14. Autonomous runtime claims must be operationally true — if the implementation claims an agent/plugin/runtime can continue work autonomously, it must keep progressing between runnable non-gated states without requiring manual reinvocation, and stop only at truthful gates, explicit safety stops, or real runtime failures. If autonomy depends on a specific launch or resume path, that path must be documented and verified.
  15. Dogfooding/runtime verification present for integration-heavy work — for adapter, plugin, bridge, session, or multi-client runtime changes, review must include evidence from the actual execution surface being changed (for example the real driver plugin/session path, fresh process attach/resume behavior, or gateway delivery path), not only unit seams or mocked helpers.
  16. Docs and shipped runtime behavior are aligned after revise cycles — if implementation changed the runtime architecture, class names, launch path, or operational semantics, all user/developer docs and gap-analysis docs must describe the currently shipped behavior, not an earlier draft or transitional design.
+ 17. ${scenarioSufficiencyCriterion}
  [If the artifact is a pass-through:] Does the justification for why this phase is low-value hold up? Is the reason specific and verifiable, not vague? Would a reasonable engineer agree? Is the agent being lazy?
 
 ${qualityBlock}
@@ -471,9 +476,14 @@ export function buildTaskReviewRubric(input: { taskCategory?: TaskCategory; hasA
   lines.push("   task changes are reachable through the real entry point that owns the behavior. A helper,")
   lines.push("   registry entry, adapter method, or bridge path that is not connected to its caller fails review.")
 
+  lines.push("")
+  lines.push("9. **Scenario sufficiency gate.** If a real-world acceptance scenario was captured during")
+  lines.push("   PLANNING, verify this task remains sufficient for the scenario, preserves required")
+  lines.push("   capabilities, and satisfies acceptance checks. Flag unexplained drift from the scenario.")
+
   if (input.hasAdjacentTasks) {
     lines.push("")
-    lines.push("9. **Integration seam check.** Review the boundaries between this task and its adjacent tasks")
+    lines.push("10. **Integration seam check.** Review the boundaries between this task and its adjacent tasks")
     lines.push("   (listed in the \"Adjacent Tasks\" section above). For each boundary, verify:")
     lines.push("   - **Shared resources are configured:** If this task produces or consumes a shared resource")
     lines.push("     (queue, database table, config entry, DI binding, environment variable), verify the resource")

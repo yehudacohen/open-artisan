@@ -8,6 +8,8 @@ import type { Phase, WorkflowMode } from "./types"
  * Review criterion evaluation contract shared by self-review, rebuttal, and reviewer outputs.
  */
 export interface CriterionResult {
+  /** Stable criterion identifier. Prefer this for matching when present. */
+  criterionId?: string
   criterion: string
   met: boolean
   evidence: string
@@ -105,6 +107,10 @@ export type RebuttalResult = RebuttalSuccess | RebuttalError
 
 export interface MarkSatisfiedArgs {
   criteria_met: Array<{
+    /** Stable criterion identifier in core camelCase form. */
+    criterionId?: string
+    /** Stable criterion identifier in reviewer/JSON wire format. */
+    criterion_id?: string
     criterion: string
     met: boolean
     evidence: string

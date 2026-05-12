@@ -1674,7 +1674,7 @@ describe("experimental.chat.system.transform — injects workflow prompt", () =>
     expect(state.activeAgent).toBe("artisan")
   })
 
-  it("goes dormant for explicit Open Artisan self-repair intent", async () => {
+  it("does not go dormant for explicit Open Artisan self-repair intent in artisan mode", async () => {
     const sid = `int-test-${Date.now()}-self-repair-dormant`
     await plugin.event({
       event: { type: "session.created", properties: { info: { id: sid, agent: "artisan" } } },
@@ -1695,9 +1695,9 @@ describe("experimental.chat.system.transform — injects workflow prompt", () =>
     const output = { system: ["original"] }
     await plugin["experimental.chat.system.transform"]({ sessionID: sid }, output)
 
-    expect(output.system).toEqual(["original"])
+    expect(output.system.length).toBeGreaterThan(1)
     const state = plugin._testStore.get(sid)
-    expect(state.activeAgent).toBe("build")
+    expect(state.activeAgent).toBe("artisan")
   })
 
   it("resets stalled retry state when the user responds", async () => {
@@ -1809,7 +1809,7 @@ describe("experimental.chat.system.transform — injects workflow prompt", () =>
     expect(output.parts[0]?.text).toContain("The user has approved")
   })
 
-  it("keeps Open Artisan off after an explicit opt-out even when artisan metadata remains", async () => {
+  it("rejects disable_open_artisan in artisan mode", async () => {
     const sid = `int-test-${Date.now()}-artisan-openartisan-off`
     await plugin.event({
       event: { type: "session.created", properties: { info: { id: sid, agent: "artisan" } } },
@@ -1820,72 +1820,48 @@ describe("experimental.chat.system.transform — injects workflow prompt", () =>
       { directory: tempDir, sessionId: sid, agent: "artisan" },
     )
 
-    await plugin["chat.message"](
-      { sessionID: sid, agent: "artisan" },
-      {
-        message: { sessionID: sid, id: "msg-artisan-openartisan-off" },
-        parts: [{ type: "text", text: "turn off open-artisan first" }],
-      },
-    )
+    const result = await plugin.tool.disable_open_artisan.execute({}, { directory: tempDir, sessionId: sid, agent: "artisan" })
 
-    const output = { system: ["original"] }
-    await plugin["experimental.chat.system.transform"]({ sessionID: sid, agent: "artisan" }, output)
-
-    expect(output.system).toEqual(["original"])
-    expect(plugin._testStore.get(sid).activeAgent).toBe("build")
+    expect(result).toContain("not available in artisan or robot-artisan modes")
+    expect(plugin._testStore.get(sid).activeAgent).toBe("artisan")
   })
 
-  it("suppresses idle reprompts after explicit opt-out even when artisan metadata remains", async () => {
+  it("rejects disable_open_artisan in robot-artisan mode", async () => {
     const sid = `int-test-${Date.now()}-artisan-off-idle`
     await plugin.event({
-      event: { type: "session.created", properties: { info: { id: sid, agent: "artisan" } } },
+      event: { type: "session.created", properties: { info: { id: sid, agent: "robot-artisan" } } },
     })
 
     await plugin.tool.select_mode.execute(
       { mode: "GREENFIELD", feature_name: "artisan-off-idle" },
-      { directory: tempDir, sessionId: sid, agent: "artisan" },
+      { directory: tempDir, sessionId: sid, agent: "robot-artisan" },
     )
 
-    await plugin["chat.message"](
-      { sessionID: sid, agent: "artisan" },
-      {
-        message: { sessionID: sid, id: "msg-artisan-off-idle" },
-        parts: [{ type: "text", text: "turn off open-artisan" }],
-      },
-    )
-    ;(client.session.prompt as ReturnType<typeof mock>).mockClear()
+    const result = await plugin.tool.disable_open_artisan.execute({}, { directory: tempDir, sessionId: sid, agent: "robot-artisan" })
 
-    await plugin.event({ event: { type: "session.idle", properties: { sessionID: sid } } })
-
-    expect(client.session.prompt).not.toHaveBeenCalled()
-    expect(plugin._testStore.get(sid).retryCount).toBe(0)
+    expect(result).toContain("not available in artisan or robot-artisan modes")
+    expect(plugin._testStore.get(sid).activeAgent).toBe("robot-artisan")
   })
 
-  it("does not enforce tool guard after explicit opt-out even when artisan metadata remains", async () => {
+  it("disable_open_artisan makes an opted-in build session dormant", async () => {
     const sid = `int-test-${Date.now()}-artisan-off-tool-guard`
     await plugin.event({
-      event: { type: "session.created", properties: { info: { id: sid, agent: "artisan" } } },
+      event: { type: "session.created", properties: { info: { id: sid, agent: "build" } } },
     })
 
-    await plugin.tool.select_mode.execute(
-      { mode: "GREENFIELD", feature_name: "artisan-off-tool-guard" },
-      { directory: tempDir, sessionId: sid, agent: "artisan" },
-    )
-
     await plugin["chat.message"](
-      { sessionID: sid, agent: "artisan" },
+      { sessionID: sid, agent: "build" },
       {
-        message: { sessionID: sid, id: "msg-artisan-off-tool-guard" },
-        parts: [{ type: "text", text: "open-artisan off" }],
+        message: { sessionID: sid, id: "msg-build-tool-opt-in" },
+        parts: [{ type: "text", text: "Use Open Artisan for this task." }],
       },
     )
+    expect(plugin._testStore.get(sid).activeAgent).toBe("build-artisan")
 
-    await expect(plugin["tool.execute.before"]({
-      sessionID: sid,
-      agent: "artisan",
-      tool: "write",
-      args: { filePath: "src/runtime.ts", content: "x" },
-    })).resolves.toBeUndefined()
+    const result = await plugin.tool.disable_open_artisan.execute({}, { directory: tempDir, sessionId: sid, agent: "build" })
+
+    expect(result).toContain("Open Artisan disabled")
+    expect(plugin._testStore.get(sid).activeAgent).toBe("build")
   })
 
   it("disables compaction auto-continue at workflow user gates", async () => {

@@ -1,5 +1,6 @@
 export interface GitCheckpointSuccess {
   success: true
+  skipped?: false
   tag: string
   commitHash: string
   /**
@@ -9,6 +10,15 @@ export interface GitCheckpointSuccess {
   warnings?: string[]
 }
 
+export interface GitCheckpointSkipped {
+  success: true
+  skipped: true
+  reason: "not-a-git-repository"
+  tag: null
+  commitHash: null
+  warnings: string[]
+}
+
 export interface GitCheckpointError {
   success: false
   error: string
@@ -16,4 +26,4 @@ export interface GitCheckpointError {
   message?: string
 }
 
-export type GitCheckpointResult = GitCheckpointSuccess | GitCheckpointError
+export type GitCheckpointResult = GitCheckpointSuccess | GitCheckpointSkipped | GitCheckpointError

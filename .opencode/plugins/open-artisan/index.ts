@@ -36,6 +36,7 @@ import { handleToolExecute } from "../../../packages/bridge/methods/tool-execute
 import { createSessionRegistry } from "../../../packages/core/session-registry"
 import { createStateMachine } from "../../../packages/core/state-machine"
 import { detectActiveAgent, ensureState, wrapExecuteMap } from "../../../packages/core/tool-runtime"
+import { extractAgentName, normalizeAgentName } from "../../../packages/core/agent-policy"
 import { createGitCheckpoint } from "../../../packages/core/hooks/git-checkpoint"
 import { detectMode } from "../../../packages/core/mode-detect"
 import { createDiagnosticTrace } from "../../../packages/core/diagnostic-trace"
@@ -54,7 +55,7 @@ import { WORKFLOW_TOOL_NAMES } from "../../../packages/core/workflow-tool-names"
 // Tool handlers
 import { parseSelectModeArgs, buildSelectModeResponse } from "../../../packages/core/tools/select-mode"
 import { evaluateMarkSatisfied, countExpectedBlockingCriteria } from "../../../packages/core/tools/mark-satisfied"
-import { processRequestReview } from "../../../packages/core/tools/request-review"
+import { capturePlanningScenarioForRequestReview, processRequestReview } from "../../../packages/core/tools/request-review"
 import { buildSelfApprovalBlockedMessage, buildSubmitFeedbackClarificationMessage, findReviewedArtifactFilesOutsideAllowlist, findUnresolvedHumanGates, materializeImplPlanDag, normalizeApprovalFilePaths, processSubmitFeedback, resolveSubmitFeedbackHumanGates, stripWorkflowRoutingNotes, validateSubmitFeedbackGate, validateSubmitFeedbackImplPlanApproval } from "../../../packages/core/tools/submit-feedback"
 import { processMarkTaskComplete, validateMarkTaskCompletePhase } from "../../../packages/core/tools/mark-task-complete"
 import { processSpawnSubWorkflow, SPAWN_SUB_WORKFLOW_DESCRIPTION } from "../../../packages/core/tools/spawn-sub-workflow"
@@ -92,8 +93,9 @@ import {
 } from "../../../packages/core/runtime-persistence"
 import { routePatchSuggestions } from "../../../packages/core/patch-suggestion-routing"
 import { applyPatchSuggestionToWorktree } from "../../../packages/core/patch-suggestion-application"
-import { AnalyzeTaskBoundaryChangeSchema, ApplyDriftRepairToolSchema, ApplyPatchSuggestionSchema, ApplyTaskBoundaryChangeSchema, PlanDriftRepairToolSchema, ReportDriftToolSchema, ResolvePatchSuggestionSchema, formatZodError } from "../../../packages/core/schemas"
+import { AnalyzeTaskBoundaryChangeSchema, ApplyDriftRepairToolSchema, ApplyPatchSuggestionSchema, ApplyTaskBoundaryChangeSchema, ChangeProposalToolSchema, DisableOpenArtisanToolSchema, PlanDriftRepairToolSchema, ReportDriftToolSchema, ResolvePatchSuggestionSchema, formatZodError } from "../../../packages/core/schemas"
 import { buildDriftRepairPlan, buildRepairToolCall, buildWorkflowDriftReport, type DriftRepairPlan, type DriftReport, type DriftToolCallPlan } from "../../../packages/core/drift"
+import { dispatchChangeProposalReview } from "../../../packages/core/change-proposal"
 import { captureRevisionBaseline, hasArtifactChanged } from "../../../packages/core/revision-baseline"
 import { writeStatusFile } from "../../../packages/core/status-writer"
 import { deriveReviewFileAllowlist, extractApprovedFileAllowlist } from "../../../packages/core/tools/plan-allowlist"
@@ -1420,6 +1422,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                 ...(Object.keys(state.approvedArtifacts).length > 0 ? { approvedArtifacts: state.approvedArtifacts } : {}),
                 ...(Object.keys(state.artifactDiskPaths).length > 0 ? { artifactDiskPaths: state.artifactDiskPaths } : {}),
                 ...(Object.keys(state.approvedArtifactFiles ?? {}).length > 0 ? { approvedArtifactFiles: state.approvedArtifactFiles ?? {} } : {}),
+                realWorldAcceptanceScenario: state.realWorldAcceptanceScenario,
               })
             } catch (reviewErr) {
               // dispatchSelfReview should never throw (returns SelfReviewError),
@@ -1968,6 +1971,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                   artifactDiskPaths: state.artifactDiskPaths,
                   ...(adjacentTasks.length > 0 ? { adjacentTasks } : {}),
                   ...(worktreeObservations.length > 0 ? { worktreeObservations } : {}),
+                  realWorldAcceptanceScenario: state.realWorldAcceptanceScenario,
                   stateDir,
                 })
               } catch (reviewErr) {
@@ -2439,7 +2443,10 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             if (planningContractError) {
               return `Error: PLANNING review failed interface-artifact validation: ${planningContractError}. Fix the plan so reviewed INTERFACES artifacts are phase-legal, or label non-interface files as supporting dependencies before re-submitting request_review.`
             }
-
+            const scenarioCapture = capturePlanningScenarioForRequestReview({
+              phase: state.phase,
+              artifactFiles,
+            })
             let artifactDiskPath: string | null = null
             const artifactKey = PHASE_TO_ARTIFACT[state.phase]
             const previousArtifactPath = artifactKey ? (state.artifactDiskPaths[artifactKey] ?? null) : null
@@ -2465,6 +2472,9 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
               }
               if (artifactDiskPath) {
                 if (artifactKey) draft.artifactDiskPaths[artifactKey] = artifactDiskPath
+              }
+              if (scenarioCapture.success && scenarioCapture.scenario) {
+                draft.realWorldAcceptanceScenario = scenarioCapture.scenario
               }
               draft.reviewArtifactFiles = artifactFiles
             })
@@ -2571,6 +2581,11 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
           if (planningContractError) {
             return `Error: PLANNING review failed interface-artifact validation: ${planningContractError}. Fix the plan so reviewed INTERFACES artifacts are phase-legal, or label non-interface files as supporting dependencies before re-submitting request_review.`
           }
+          const scenarioCapture = capturePlanningScenarioForRequestReview({
+            phase: state.phase,
+            artifactFiles,
+          })
+          if (!scenarioCapture.success) return `Error: ${scenarioCapture.error}`
 
           const outcome = { nextPhase: t.nextPhase, nextPhaseState: t.nextPhaseState }
 
@@ -2597,6 +2612,9 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             if (artifactDiskPath) {
               const artifactKey = PHASE_TO_ARTIFACT[state.phase]
               if (artifactKey) draft.artifactDiskPaths[artifactKey] = artifactDiskPath
+            }
+            if (scenarioCapture.scenario) {
+              draft.realWorldAcceptanceScenario = scenarioCapture.scenario
             }
             draft.reviewArtifactFiles = artifactFiles
           })
@@ -3811,6 +3829,62 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
           const updated = await runtimeBackend.services.patchSuggestions.updateStatus(patchArgs.patch_suggestion_id, status, now)
           if (!updated.ok) return `Error: ${updated.error.message}`
           return JSON.stringify({ ok: true, value: updated.value }, null, 2)
+        },
+      }),
+
+      propose_change: tool({
+        description:
+          "Ask an isolated reviewer to classify a needed scope, boundary, allowlist, or artifact change before repairing it.",
+        args: {
+          summary: tool.schema.string().describe("Brief summary of the proposed change or discovered mismatch."),
+          why_needed: tool.schema.string().describe("Evidence explaining why the change appears necessary."),
+          affected_files: tool.schema.array(tool.schema.string()).optional().describe("Files that would need to be created, modified, or re-scoped."),
+          failing_command: tool.schema.string().optional().describe("Command that exposed the need for this change, if any."),
+          failing_output: tool.schema.string().optional().describe("Relevant failing output, sanitized and concise."),
+          task_ids: tool.schema.array(tool.schema.string()).optional().describe("Implementation DAG task IDs affected by the proposal."),
+          artifact_keys: tool.schema.array(tool.schema.string()).optional().describe("Artifact keys affected by the proposal."),
+        },
+        async execute(args: Record<string, unknown>, context: ToolExecuteContext) {
+          const parsed = ChangeProposalToolSchema.safeParse(args)
+          if (!parsed.success) return `Error: ${formatZodError(parsed.error)}`
+          const sessionId = resolveSessionId(context)
+          if (!sessionId) return "Error: Could not determine session ID from tool context."
+          const { store, notify, subagentDispatcher } = ctx
+          const state = await ensureState(store, sessionId, notify)
+          await detectActiveAgent(store, sessionId, context)
+          const result = await dispatchChangeProposalReview(subagentDispatcher, {
+            proposal: parsed.data,
+            state,
+            cwd: context.directory || projectRoot,
+            ...(sessionId != null ? { parentSessionId: sessionId } : {}),
+            ...(state.sessionModel != null ? { parentModel: state.sessionModel } : {}),
+          })
+          if (!result.success) return `Error: Change proposal review failed: ${result.error}`
+          return JSON.stringify({ ok: true, value: result.decision }, null, 2)
+        },
+      }),
+
+      disable_open_artisan: tool({
+        description: "Disable Open Artisan for an opted-in build-mode OpenCode session. Not available in artisan or robot-artisan modes.",
+        args: {},
+        async execute(args: Record<string, unknown>, context: ToolExecuteContext) {
+          const parsed = DisableOpenArtisanToolSchema.safeParse(args)
+          if (!parsed.success) return `Error: ${formatZodError(parsed.error)}`
+          const sessionId = resolveSessionId(context)
+          if (!sessionId) return "Error: Could not determine session ID from tool context."
+          const { store, notify } = ctx
+          const state = await ensureState(store, sessionId, notify)
+          const detectedAgent = normalizeAgentName(extractAgentName(context))
+          const persistedAgent = normalizeAgentName(state.activeAgent)
+          if (detectedAgent === "artisan" || detectedAgent === "robot-artisan" || persistedAgent === "artisan" || persistedAgent === "robot-artisan") {
+            return "Error: disable_open_artisan is not available in artisan or robot-artisan modes. Switch to a normal build session to work without Open Artisan."
+          }
+          await store.update(sessionId, (draft) => {
+            draft.activeAgent = "build"
+            draft.retryCount = 0
+            draft.userGateMessageReceived = false
+          })
+          return "Open Artisan disabled for this build-mode session. The plugin remains installed, but workflow prompts and guards are dormant for this session."
         },
       }),
 

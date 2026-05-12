@@ -102,6 +102,7 @@ export function generateWorkflowTemplate(config: TemplateConfig): string {
   lines.push("")
   lines.push("### DRAFT")
   lines.push(`Do the work for this phase. When done, call ${tn("request_review")}.`)
+  lines.push("For PLANNING artifacts, include a `## Real-World Acceptance Scenario` section with `### Scenario`, `### Required Capabilities`, `### Acceptance Checks`, and `### Explicit Non-Goals` before calling request review.")
   lines.push("")
   lines.push("### REVIEW")
   lines.push(`Stop authoring and let the adapter dispatch an isolated reviewer. Do NOT call ${tn("mark_satisfied")}; bridge adapters submit isolated reviews through adapter-only review submission.`)

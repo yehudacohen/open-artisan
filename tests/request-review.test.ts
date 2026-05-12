@@ -2,6 +2,10 @@
  * Tests for processRequestReview.
  */
 import { describe, expect, it } from "bun:test"
+import { mkdtemp, rm, writeFile } from "node:fs/promises"
+import { join } from "node:path"
+import { tmpdir } from "node:os"
+import { validateFileBasedReviewArtifacts } from "#core/tools/file-artifact-validation"
 import { processRequestReview } from "#core/tools/request-review"
 
 function requestReviewArgs(overrides: { summary: string; artifact_description: string }) {
@@ -94,5 +98,47 @@ describe("processRequestReview — phase instructions", () => {
     }))
     // Ensures the review instructions emphasize file reading
     expect(result.phaseInstructions.toLowerCase()).toContain("read")
+  })
+})
+
+describe("validateFileBasedReviewArtifacts — mixed contract modules", () => {
+  it("accepts an approved mixed contract module during INTERFACES", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "oa-request-review-"))
+    try {
+      const contractsPath = join(dir, "contracts.ts")
+      await writeFile(contractsPath, "export interface Contract { id: string }\nexport const ContractSchema = {}\n")
+
+      const error = validateFileBasedReviewArtifacts({
+        phase: "INTERFACES",
+        artifactFiles: [contractsPath],
+        mixedContractModules: [{
+          filePath: contractsPath,
+          publicContractSurface: ["Contract", "ContractSchema"],
+          executableBehaviorInScope: ["schema construction"],
+          approvedInPlan: true,
+        }],
+      } as any)
+
+      expect(error).toBeNull()
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("rejects unapproved executable implementation files during INTERFACES", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "oa-request-review-"))
+    try {
+      const implementationPath = join(dir, "runtime.ts")
+      await writeFile(implementationPath, "export function run() { return true }\n")
+
+      const error = validateFileBasedReviewArtifacts({
+        phase: "INTERFACES",
+        artifactFiles: [implementationPath],
+      })
+
+      expect(error).toContain("only accepts interface/type/schema files")
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
   })
 })

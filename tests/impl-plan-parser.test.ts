@@ -116,6 +116,26 @@ describe("parseImplPlan — happy path", () => {
     expect(task.expectedFiles).toEqual(["src/a.ts", "src/b.ts"])
     expect(task.expectedTests).toEqual(["tests/a.test.ts", "tests/b.test.ts"])
   })
+
+  it("accepts documented task-001 heading and required metadata example", () => {
+    const plan = `
+## Task task-001: Add parser-backed prompt schema
+**Dependencies:** none
+**Expected tests:** tests/system-transform.test.ts
+**Files:** packages/core/impl-plan-parser.ts, packages/core/prompts/impl-plan.txt
+**Complexity:** small
+**Category:** standalone
+
+Expose accepted parser expectations in prompts.
+`
+    const result = parseImplPlan(plan)
+    if (!result.success) throw new Error(result.errors.join("; "))
+    const task = Array.from(result.dag.tasks)[0]!
+    expect(task.id).toBe("task-001")
+    expect(task.expectedTests).toEqual(["tests/system-transform.test.ts"])
+    expect(task.expectedFiles).toEqual(["packages/core/impl-plan-parser.ts", "packages/core/prompts/impl-plan.txt"])
+    expect(task.category).toBe("standalone")
+  })
 })
 
 describe("parseImplPlan — ignores non-task section headings", () => {

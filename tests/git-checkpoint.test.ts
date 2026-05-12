@@ -5,7 +5,7 @@
  * - Basic commit + tag creation
  * - Tag format: workflow/<phase>-v<approvalCount>
  * - No-op when working tree is clean (tag only)
- * - Not a git repo → failure
+ * - Not a git repo → skipped success
  * - INCREMENTAL mode allowlist warnings
  * - featureName scoping (.openartisan/<feature>/ only)
  * - expectedFiles: stages only listed files, warns about unstaged dirty files
@@ -94,16 +94,20 @@ describe("createGitCheckpoint — success cases", () => {
 // ---------------------------------------------------------------------------
 
 describe("createGitCheckpoint — failure cases", () => {
-  it("returns failure when directory is not a git repo", async () => {
+  it("returns skipped success when directory is not a git repo", async () => {
     const nonGitDir = await mkdtemp(join(tmpdir(), "non-git-"))
     try {
       const result = await createGitCheckpoint(
         { cwd: nonGitDir },
         { phase: "PLANNING", approvalCount: 1 },
       )
-      expect(result.success).toBe(false)
-      if (result.success) return
-      expect(result.error).toBeTruthy()
+      expect(result.success).toBe(true)
+      if (!result.success) return
+      expect(result.skipped).toBe(true)
+      expect(result.reason).toBe("not-a-git-repository")
+      expect(result.tag).toBeNull()
+      expect(result.commitHash).toBeNull()
+      expect(result.warnings.join("\n")).toContain("not a git repository")
     } finally {
       await rm(nonGitDir, { recursive: true, force: true })
     }
@@ -192,6 +196,20 @@ describe("createGitCheckpoint — no-changes tag behavior (H4 fix)", () => {
     expect(tags.trim()).toBe("workflow/tests-v1")
     const tagType = git(["cat-file", "-t", "refs/tags/workflow/tests-v1"], tmpDir)
     expect(tagType.trim()).toBe("tag")
+  })
+
+  it("returns failure for real git command failures inside a git repository", async () => {
+    await writeFile(join(tmpDir, ".git", "index.lock"), "simulated concurrent git operation")
+    await writeFile(join(tmpDir, "README.md"), "# Test\nmodified while git is locked")
+
+    const result = await createGitCheckpoint(
+      { cwd: tmpDir },
+      { phase: "PLANNING", approvalCount: 7 },
+    )
+
+    expect(result.success).toBe(false)
+    if (result.success) return
+    expect(result.error).toContain("git")
   })
 })
 

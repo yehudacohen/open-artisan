@@ -18,8 +18,10 @@ import { tmpdir } from "node:os"
 // resolved via the test shim at #opencode-ai/plugin.
 import { OpenArtisanPlugin, WORKFLOW_TOOL_NAMES } from "#plugin/index"
 import { resolveSessionId } from "#core/utils"
+import { parseReviewResult } from "#core/self-review"
 import { OPENCODE_TOOL_CONTRACTS, WORKFLOW_TOOL_CONTRACTS } from "#core/tool-contracts"
 import { toJsonSchema } from "#core/schemas"
+import { TOOL_HANDLERS } from "#bridge/methods/tool-execute"
 import type { TaskNode } from "#core/dag"
 
 // ---------------------------------------------------------------------------
@@ -2318,6 +2320,51 @@ describe("End-to-end: GREENFIELD happy path through PLANNING", () => {
         sfResult.toLowerCase().includes("advance"),
       ).toBe(true)
     }
+  })
+
+  it("approval advances with a skipped checkpoint warning in a non-git workspace", async () => {
+    const sid = `int-test-${Date.now()}-non-git-checkpoint-approval`
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: sid } } },
+    })
+    const ctx = { directory: tempDir, sessionId: sid }
+    const featureName = "non-git-checkpoint-approval"
+
+    await plugin.tool.select_mode.execute({ mode: "GREENFIELD", feature_name: featureName }, ctx)
+    await requestPlanningReview(ctx, featureName)
+    await plugin.tool.mark_satisfied.execute({ criteria_met: planningPassCriteria() }, ctx)
+    await plugin["chat.message"](
+      { sessionID: sid },
+      { message: { sessionID: sid }, parts: [{ type: "text", text: "approved" }] },
+    )
+
+    const result = await plugin.tool.submit_feedback.execute(
+      { feedback_text: "approved", feedback_type: "approve" },
+      ctx,
+    )
+
+    expect(result).not.toContain("Git checkpoint failed")
+    expect(result.toLowerCase()).toContain("checkpoint")
+    expect(result.toLowerCase()).toContain("skipped")
+    const state = plugin._testStore.get(sid)
+    expect(state.phase).toBe("INTERFACES")
+  })
+})
+
+describe("bridge review protocol compatibility", () => {
+  it("keeps submit_phase_review wired and criterion_id parseable for bridge reviewers", () => {
+    expect(TOOL_HANDLERS.submit_phase_review).toBeFunction()
+
+    const parsed = parseReviewResult(JSON.stringify({
+      satisfied: true,
+      criteria_results: [
+        { criterion_id: "planning.scope-boundaries", criterion: "Scope boundaries display text", met: true, evidence: "ok", severity: "blocking" },
+      ],
+    }))
+
+    expect(parsed.success).toBe(true)
+    if (!parsed.success) return
+    expect(parsed.criteriaResults[0]?.criterionId).toBe("planning.scope-boundaries")
   })
 })
 

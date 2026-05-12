@@ -125,6 +125,25 @@ describe("buildWorkflowSystemPrompt — DRAFT sub-state", () => {
     expect(prompt).toContain("alternatives considered")
     expect(prompt).toContain("tradeoffs/risks")
   })
+
+  it("surfaces Planning scenario parser headings before review", () => {
+    const prompt = buildWorkflowSystemPrompt(makeState({ phase: "PLANNING", phaseState: "DRAFT" }))
+
+    expect(prompt).toContain("## Real-World Acceptance Scenario")
+    expect(prompt).toContain("### Required Capabilities")
+    expect(prompt).toContain("### Acceptance Checks")
+    expect(prompt).toContain("### Explicit Non-Goals")
+  })
+
+  it("surfaces IMPL_PLAN task parser expectations before review", () => {
+    const prompt = buildWorkflowSystemPrompt(makeState({ phase: "IMPL_PLAN", phaseState: "DRAFT" }))
+
+    expect(prompt).toContain("## Task task-001")
+    expect(prompt).toContain("**Dependencies:**")
+    expect(prompt).toContain("**Expected tests:**")
+    expect(prompt).toContain("**Files:**")
+    expect(prompt).toContain("**Category:**")
+  })
 })
 
 describe("buildWorkflowSystemPrompt — REVIEW sub-state", () => {

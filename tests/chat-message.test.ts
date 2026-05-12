@@ -72,6 +72,23 @@ describe("processUserMessage — at USER_GATE, approval signals", () => {
       expect(result.feedbackType).toBe("approve")
     })
   }
+
+  it("routes approval plus a meta follow-up as approval", () => {
+    const state = makeState({ phaseState: "USER_GATE" })
+    const result = processUserMessage(state, [{ type: "text", text: "approved. then, how did Open Artisan feel?" }])
+
+    expect(result.intercepted).toBe(true)
+    expect(result.feedbackType).toBe("approve")
+    expect((result as any).route).toMatchObject({
+      kind: "approve-with-meta",
+      feedbackType: "approve",
+      decisionText: "approved",
+      metaText: "then, how did Open Artisan feel?",
+    })
+    expect((result as any).route.reason).toContain("meta")
+    expect(result.parts[0]?.text).toContain("submit_feedback")
+    expect(result.parts[0]?.text).toContain("follow-up")
+  })
 })
 
 describe("processUserMessage — ambiguous approval phrases are treated as feedback", () => {
@@ -82,6 +99,7 @@ describe("processUserMessage — ambiguous approval phrases are treated as feedb
     "approved, but I have one concern",
     "approved, please fix the missing test",
     "yes, but add logging first",
+    "approved, but please fix the allowlist",
   ]
 
   for (const msg of ambiguousMessages) {
@@ -122,6 +140,7 @@ describe("processUserMessage — at USER_GATE, review clarification", () => {
     "have we implemented all the implementation tasks? How has your experience with open-artisan been?",
     "Did all tests pass?",
     "How was your experience with Open Artisan?",
+    "how did Open Artisan feel?",
     "Do you think this design is right?",
     "Can you update me on progress?",
     "What changed since the last review?",

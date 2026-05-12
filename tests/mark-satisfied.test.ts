@@ -32,6 +32,30 @@ describe("evaluateMarkSatisfied — all criteria met", () => {
     expect(result.passed).toBe(true)
     expect(result.responseMessage).toContain("3")
   })
+
+  it("preserves stable criterion IDs when provided", () => {
+    const result = evaluateMarkSatisfied({
+      criteria_met: [
+        { criterionId: "planning.scope-boundaries", criterion: "Scope boundaries explicit", met: true, evidence: "section present" },
+      ],
+    })
+
+    expect(result.passed).toBe(true)
+    expect(result.unmetCriteria).toHaveLength(0)
+  })
+})
+
+describe("evaluateMarkSatisfied — stable criterion IDs", () => {
+  it("maps wire-format criterion_id onto criterionId in failed results", () => {
+    const result = evaluateMarkSatisfied({
+      criteria_met: [
+        { criterion_id: "planning.allowlist-adequacy", criterion: "Display text may change", met: false, evidence: "missing test file", severity: "blocking" },
+      ],
+    })
+
+    expect(result.passed).toBe(false)
+    expect(result.unmetCriteria[0]?.criterionId).toBe("planning.allowlist-adequacy")
+  })
 })
 
 describe("evaluateMarkSatisfied — blocking criteria unmet", () => {

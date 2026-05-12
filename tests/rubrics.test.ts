@@ -71,6 +71,22 @@ describe("shared rubrics", () => {
     expect(criteria).toContain("Supporting implementation dependencies may be listed separately")
   })
 
+  it("includes stable criterion IDs in phase criteria", () => {
+    const criteria = buildPhaseAcceptanceCriteria("PLANNING", "INCREMENTAL")
+
+    expect(criteria).toContain("planning.scope-boundaries")
+    expect(criteria).toContain("planning.allowlist-adequacy")
+    expect(criteria).toContain("quality.design-excellence")
+  })
+
+  it("clarifies INTERFACES review scope for mixed contract modules", () => {
+    const criteria = buildPhaseAcceptanceCriteria("INTERFACES", "INCREMENTAL")
+
+    expect(criteria).toContain("public contract shape")
+    expect(criteria).toContain("mixed contract module")
+    expect(criteria).toContain("executable behavior")
+  })
+
   it("shares structural wiring language between task prompt preview and task reviewer", () => {
     const promptPreview = buildTaskImplementationRubricPreview()
     const reviewerRubric = buildTaskReviewRubric({ taskCategory: "standalone", hasAdjacentTasks: true })

@@ -136,6 +136,20 @@ describe("dispatchSelfReview — all criteria met", () => {
     expect(first.severity).toBe("blocking")
   })
 
+  it("preserves reviewer criterion_id as criterionId", async () => {
+    const dispatcher = makeDispatcher(JSON.stringify({
+      satisfied: true,
+      criteria_results: [
+        { criterion_id: "planning.scope-boundaries", criterion: "Scope boundaries explicit", met: true, evidence: "section exists", severity: "blocking" },
+      ],
+    }))
+    const result = await dispatchSelfReview(dispatcher, BASE_REQ)
+
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    expect(result.criteriaResults[0]?.criterionId).toBe("planning.scope-boundaries")
+  })
+
   it("uses ephemeral session: create() and delete() each called once", async () => {
     const dispatcher = makeDispatcher(makeReviewResponse())
     await dispatchSelfReview(dispatcher, BASE_REQ)

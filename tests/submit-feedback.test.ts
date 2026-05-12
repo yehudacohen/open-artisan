@@ -66,6 +66,16 @@ describe("processSubmitFeedback — approve path", () => {
     expect(result.responseMessage).toContain("do not stop")
     expect(result.responseMessage).toContain("wait for user input")
   })
+
+  it("does not silently approve approval-plus-revision text", () => {
+    const result = processSubmitFeedback({
+      feedback_text: "approved, but please fix the allowlist",
+      feedback_type: "approve",
+    })
+
+    expect(result.feedbackType).toBe("revise")
+    expect(result.responseMessage.toLowerCase()).toContain("revision")
+  })
 })
 
 describe("isUserGateMetaFeedback", () => {
@@ -75,6 +85,10 @@ describe("isUserGateMetaFeedback", () => {
 
   it("does not classify real change requests as meta feedback", () => {
     expect(isUserGateMetaFeedback("Can you add section on authentication?")).toBe(false)
+  })
+
+  it("classifies exact Open Artisan feel questions as meta feedback", () => {
+    expect(isUserGateMetaFeedback("how did Open Artisan feel?")).toBe(true)
   })
 })
 

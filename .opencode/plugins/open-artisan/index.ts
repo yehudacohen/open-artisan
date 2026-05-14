@@ -886,6 +886,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
               draft.taskReviewCount = 0
               draft.pendingFeedback = null
               draft.revisionBaseline = null
+              draft.revisionAutoSkipBlockedReason = null
               draft.reviewArtifactFiles = []
             })
             log.info("Auto-reset DONE -> MODE_SELECT for fresh workflow", { detail: `session=${sessionId}` })
@@ -2861,6 +2862,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                 draft.phaseState = "REVISE"
                 draft.pendingRevisionSteps = remainingSteps
                 draft.revisionBaseline = nextBaseline
+                draft.revisionAutoSkipBlockedReason = nextStep.autoSkipBlockedReason ?? null
                 draft.retryCount = 0
                 draft.iterationCount = 0
                 draft.userGateMessageReceived = false
@@ -2872,8 +2874,10 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
 
               // Deterministic auto-skip: check if this step (and subsequent steps)
               // can be skipped because no artifact changes are needed.
-              const skipMsg = await cascadeAutoSkip({ store, sm, log }, sessionId, context.directory || process.cwd())
-              if (skipMsg) return skipMsg + approvalWarning
+              if (!nextStep.autoSkipBlockedReason) {
+                const skipMsg = await cascadeAutoSkip({ store, sm, log }, sessionId, context.directory || process.cwd())
+                if (skipMsg) return skipMsg + approvalWarning
+              }
 
               // Next step needs work — tell the agent to proceed
               const updatedState = store.get(sessionId)
@@ -3043,6 +3047,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
               // Reset after approval — the next USER_GATE starts fresh.
               draft.userGateMessageReceived = false
               draft.reviewArtifactHash = null
+              draft.revisionAutoSkipBlockedReason = null
               if (!isFinalImplementationApproval) {
                 draft.latestReviewResults = null
               }
@@ -3295,6 +3300,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
               draft.phaseState = effectivePhaseState
               draft.pendingRevisionSteps = handlerOutcome.pendingRevisionSteps
               draft.revisionBaseline = revisionBaseline
+              draft.revisionAutoSkipBlockedReason = handlerOutcome.autoSkipBlockedReason ?? null
               draft.reviewArtifactHash = null
               draft.latestReviewResults = null
               // Reset artifact file tracking: revision may reorder DAG tasks or change
@@ -3349,7 +3355,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             // subsequent steps) can be skipped because no changes are needed.
             // This prevents the agent from ever seeing no-op cascade phases
             // where tool guards would block it.
-            if (handlerOutcome.pendingRevisionSteps.length > 0 || revisionBaseline) {
+            if (!handlerOutcome.autoSkipBlockedReason && (handlerOutcome.pendingRevisionSteps.length > 0 || revisionBaseline)) {
               const skipMsg = await cascadeAutoSkip({ store, sm, log }, sessionId, context.directory || process.cwd())
               if (skipMsg) return skipMsg
             }
@@ -3485,6 +3491,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             draft.phaseState = effectivePhaseState
             draft.pendingRevisionSteps = outcome.pendingRevisionSteps
             draft.revisionBaseline = revisionBaseline
+            draft.revisionAutoSkipBlockedReason = outcome.autoSkipBlockedReason ?? null
             draft.retryCount = 0
             // Reset artifact file tracking when changing phase (backtrack)
             draft.reviewArtifactFiles = []
@@ -3523,7 +3530,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
           })
 
           // Cascade auto-skip: check if pending steps can be skipped
-          if (outcome.pendingRevisionSteps.length > 0 || revisionBaseline) {
+          if (!outcome.autoSkipBlockedReason && (outcome.pendingRevisionSteps.length > 0 || revisionBaseline)) {
             const skipMsg = await cascadeAutoSkip({ store, sm, log }, sessionId, context.directory || process.cwd())
             if (skipMsg) return skipMsg
           }

@@ -99,7 +99,14 @@ export async function createGitCheckpoint(
     // allowlist (which uses absolute paths).
     const rootResult = gitExec(["rev-parse", "--show-toplevel"], cwd, { nothrow: true })
     if (rootResult.exitCode !== 0) {
-      return { success: false, error: "Not a git repository" }
+      return {
+        success: true,
+        skipped: true,
+        reason: "not-a-git-repository",
+        tag: null,
+        commitHash: null,
+        warnings: ["Git checkpoint skipped: not a git repository."],
+      }
     }
     const repoRoot = rootResult.stdout
 
@@ -149,7 +156,7 @@ export async function createGitCheckpoint(
     } else {
       // Legacy fallback: stage all artifacts + all tracked modifications
       gitExec(["add", "-A", artifactPath], cwd, { nothrow: true })
-      gitExec(["add", "-u"], cwd, { nothrow: true })
+      gitExec(["add", "-u"], cwd)
     }
 
     // Check if there's anything staged to commit

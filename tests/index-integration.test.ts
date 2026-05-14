@@ -22,6 +22,7 @@ import { parseReviewResult } from "#core/self-review"
 import { OPENCODE_TOOL_CONTRACTS, WORKFLOW_TOOL_CONTRACTS } from "#core/tool-contracts"
 import { toJsonSchema } from "#core/schemas"
 import { TOOL_HANDLERS } from "#bridge/methods/tool-execute"
+import { MAX_IDLE_RETRIES } from "#core/constants"
 import type { TaskNode } from "#core/dag"
 
 // ---------------------------------------------------------------------------
@@ -700,6 +701,55 @@ describe("Event hook — session lifecycle", () => {
     expect(promptArg?.path?.id).toBe(workflowSessionId)
     expect(promptArg?.body?.parts?.[0]?.text).toContain("Continue drafting the PLANNING artifact")
     expect(plugin._testStore.get(workflowSessionId)?.retryCount).toBe(1)
+  })
+
+  it("does not inject idle prompts when the idle event came from user escape", async () => {
+    const workflowSessionId = `int-test-${Date.now()}-workflow-escape-idle`
+
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: workflowSessionId } } },
+    })
+    await plugin.tool.select_mode.execute(
+      { mode: "GREENFIELD", feature_name: `workflow-escape-idle-${Date.now()}` },
+      { directory: tempDir, sessionId: workflowSessionId },
+    )
+
+    ;(client.session.prompt as ReturnType<typeof mock>).mockClear()
+
+    await plugin.event({
+      event: { type: "session.idle", properties: { sessionID: workflowSessionId, reason: "user-escape" } },
+    })
+
+    expect(client.session.prompt).not.toHaveBeenCalled()
+    expect(plugin._testStore.get(workflowSessionId)?.retryCount).toBe(0)
+  })
+
+  it("auto-disables Open Artisan instead of escalating a stuck build-artisan session", async () => {
+    const sid = `int-test-${Date.now()}-build-artisan-stuck`
+
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: sid, agent: "build-artisan" } } },
+    })
+    await plugin.tool.select_mode.execute(
+      { mode: "GREENFIELD", feature_name: `build-artisan-stuck-${Date.now()}` },
+      { directory: tempDir, sessionId: sid, agent: "build-artisan" },
+    )
+    await plugin._testStore.update(sid, (draft: any) => {
+      draft.activeAgent = "build-artisan"
+      draft.retryCount = MAX_IDLE_RETRIES
+    })
+
+    ;(client.session.prompt as ReturnType<typeof mock>).mockClear()
+
+    await plugin.event({ event: { type: "session.idle", properties: { sessionID: sid } } })
+
+    expect(client.session.prompt).not.toHaveBeenCalled()
+    const state = plugin._testStore.get(sid)
+    expect(state?.activeAgent).toBe("build")
+    expect(state?.retryCount).toBe(0)
+
+    await plugin.event({ event: { type: "session.idle", properties: { sessionID: sid } } })
+    expect(client.session.prompt).not.toHaveBeenCalled()
   })
 
   it("disables idle prompts when OPENARTISAN_IDLE_PROMPTS is 0", async () => {
@@ -2241,6 +2291,30 @@ describe("End-to-end: GREENFIELD happy path through PLANNING", () => {
     const state = plugin._testStore.get(sid)
     expect(state.phase).toBe("PLANNING")
     expect(state.phaseState).toBe("USER_GATE")
+  })
+
+  it("keeps REVIEW state when isolated reviewer times out", async () => {
+    const sid = `int-test-${Date.now()}-reviewer-timeout-blocks`
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: sid } } },
+    })
+    const ctx = { directory: tempDir, sessionId: sid }
+    const featureName = "reviewer-timeout-blocks"
+
+    await plugin.tool.select_mode.execute({ mode: "GREENFIELD", feature_name: featureName }, ctx)
+    await requestPlanningReview(ctx, featureName)
+    ;(client.session.prompt as ReturnType<typeof mock>).mockImplementationOnce(async () => {
+      throw new Error("timeout: self-review timed out after 300000ms")
+    })
+
+    const result = await plugin.tool.mark_satisfied.execute({ criteria_met: planningPassCriteria() }, ctx)
+
+    expect(result).toContain("Error: Isolated reviewer failed")
+    expect(result).toContain("timed out")
+    const state = plugin._testStore.get(sid)
+    expect(state.phase).toBe("PLANNING")
+    expect(state.phaseState).toBe("REVIEW")
+    expect(state.latestReviewResults?.[0]?.criterion).toBe("Isolated reviewer runtime failed")
   })
 
   it("select_mode → request_review → mark_satisfied → submit_feedback(approve)", async () => {

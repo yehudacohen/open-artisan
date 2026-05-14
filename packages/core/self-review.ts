@@ -306,6 +306,8 @@ export function parseReviewResult(raw: string): SelfReviewResult {
   const parsed = JSON.parse(raw) as {
     satisfied: boolean
     criteria_results: Array<{
+      criterion_id?: string
+      criterionId?: string
       criterion: string
       met: boolean
       evidence: string
@@ -329,6 +331,7 @@ export function parseReviewResult(raw: string): SelfReviewResult {
       ? "design-invariant"
       : c.severity === "suggestion" ? "suggestion" : "blocking"
     return {
+      ...(c.criterionId ?? c.criterion_id ? { criterionId: c.criterionId ?? c.criterion_id } : {}),
       criterion: criterionText || "unknown",
       met,
       evidence: (isQuality && score !== undefined)

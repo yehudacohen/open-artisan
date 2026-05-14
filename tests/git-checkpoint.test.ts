@@ -104,6 +104,7 @@ describe("createGitCheckpoint — failure cases", () => {
       expect(result.success).toBe(true)
       if (!result.success) return
       expect(result.skipped).toBe(true)
+      if (result.skipped !== true) return
       expect(result.reason).toBe("not-a-git-repository")
       expect(result.tag).toBeNull()
       expect(result.commitHash).toBeNull()

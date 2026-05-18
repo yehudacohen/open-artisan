@@ -19,7 +19,7 @@ import type { WorkflowState } from "../workflow-state-types"
 import type { StateMachine } from "../state-machine-types"
 import type { MarkSatisfiedArgs } from "../review-types"
 import type { AnalyzeTaskBoundaryChangeArgs, ApplyTaskBoundaryChangeArgs, TaskBoundaryChangeAnalysis as PublicTaskBoundaryChangeAnalysis, TaskBoundaryChangeAnalysisResult, TaskBoundaryChangeApplyResult, TaskBoundaryChangeConflict, TaskBoundaryChangeError } from "../tool-types"
-import { evaluateMarkSatisfied, countExpectedBlockingCriteria, type MarkSatisfiedResult } from "./mark-satisfied"
+import { evaluateMarkSatisfied, countExpectedBlockingCriteria, countSubmittedBlockingCriteria, type MarkSatisfiedResult } from "./mark-satisfied"
 import { processMarkScanComplete } from "./mark-scan-complete"
 import { processMarkAnalyzeComplete } from "./mark-analyze-complete"
 import { getAcceptanceCriteria } from "../hooks/system-transform"
@@ -27,6 +27,7 @@ import { PHASE_TO_ARTIFACT } from "../artifacts"
 import { MAX_REVIEW_ITERATIONS, MAX_FEEDBACK_CHARS, PHASE_ORDER } from "../constants"
 import type { MarkAnalyzeCompleteArgs } from "./mark-analyze-complete"
 import type { MarkScanCompleteArgs } from "./mark-scan-complete"
+import { normalizeWorkflowPaths } from "../path-normalization"
 
 // ---------------------------------------------------------------------------
 // request_review — shared draft/revision completion transition
@@ -179,10 +180,7 @@ export function computeMarkSatisfiedTransition(
   // Same pattern as the empty criteria check above: malformed tool calls must not
   // trigger state transitions (self_review_fail → REVISE).
   if (expectedBlocking > 0) {
-    const submittedBlockingCount = criteriaMet.filter((c) => {
-      const sev = c.severity ?? "blocking"
-      return sev === "blocking" || sev === "design-invariant"
-    }).length
+    const submittedBlockingCount = countSubmittedBlockingCriteria(criteriaMet)
     if (submittedBlockingCount < expectedBlocking) {
       return {
         success: false,
@@ -405,9 +403,12 @@ export function computeProposeBacktrackTransition(
     if (artifactKey) clearedArtifactKeys.push(artifactKey)
   }
 
-  // Clear impl DAG when backtracking from or past IMPLEMENTATION
+  // Preserve implementation DAG history on backtracks. Completed tasks are
+  // fast-forwarded as immutable audit records; revised IMPL_PLAN approvals add
+  // future corrective tasks instead of clearing or rewriting prior work.
   const implPlanIdx = PHASE_ORDER.indexOf("IMPL_PLAN")
-  const clearImplDag = state.phase === "IMPLEMENTATION" || targetIdx <= implPlanIdx
+  const hasCompletedTasks = Boolean(state.implDag?.some((task) => task.status === "complete"))
+  const clearImplDag = !hasCompletedTasks && (state.phase === "IMPLEMENTATION" || targetIdx <= implPlanIdx)
 
   return {
     success: true,
@@ -441,10 +442,14 @@ function uniqueStrings(values: string[] | undefined): string[] {
   return Array.from(new Set((values ?? []).map((value) => value.trim()).filter(Boolean)))
 }
 
-function computeRevisedList(existing: string[] | undefined, add: string[] | undefined, remove: string[] | undefined): string[] {
-  const next = new Set(existing ?? [])
-  for (const value of uniqueStrings(remove)) next.delete(value)
-  for (const value of uniqueStrings(add)) next.add(value)
+function uniquePathStrings(values: string[] | undefined, cwd?: string): string[] {
+  return cwd ? normalizeWorkflowPaths(values, cwd) : uniqueStrings(values)
+}
+
+function computeRevisedPathList(existing: string[] | undefined, add: string[] | undefined, remove: string[] | undefined, cwd?: string): string[] {
+  const next = new Set(uniquePathStrings(existing, cwd))
+  for (const value of uniquePathStrings(remove, cwd)) next.delete(value)
+  for (const value of uniquePathStrings(add, cwd)) next.add(value)
   return Array.from(next)
 }
 
@@ -467,6 +472,7 @@ function collectDownstreamTaskIds(implDag: NonNullable<WorkflowState["implDag"]>
 export function analyzeTaskBoundaryChange(
   args: AnalyzeTaskBoundaryChangeArgs,
   state: WorkflowState,
+  cwd?: string,
 ): TaskBoundaryChangeAnalysisResult {
   if (state.phase !== "IMPLEMENTATION") {
     return {
@@ -516,16 +522,16 @@ export function analyzeTaskBoundaryChange(
     }
   }
 
-  const addFiles = uniqueStrings(args.add_files)
-  const removeFiles = uniqueStrings(args.remove_files)
-  const addExpectedTests = uniqueStrings(args.add_expected_tests)
-  const removeExpectedTests = uniqueStrings(args.remove_expected_tests)
-  const nextExpectedFiles = computeRevisedList(target.expectedFiles, addFiles, removeFiles)
-  const nextExpectedTests = computeRevisedList(target.expectedTests, addExpectedTests, removeExpectedTests)
+  const addFiles = uniquePathStrings(args.add_files, cwd)
+  const removeFiles = uniquePathStrings(args.remove_files, cwd)
+  const addExpectedTests = uniquePathStrings(args.add_expected_tests, cwd)
+  const removeExpectedTests = uniquePathStrings(args.remove_expected_tests, cwd)
+  const nextExpectedFiles = computeRevisedPathList(target.expectedFiles, addFiles, removeFiles, cwd)
+  const nextExpectedTests = computeRevisedPathList(target.expectedTests, addExpectedTests, removeExpectedTests, cwd)
 
   let preservesAllowlist = true
   if (state.mode === "INCREMENTAL") {
-    const allowlist = new Set(state.fileAllowlist)
+    const allowlist = new Set(uniquePathStrings(state.fileAllowlist, cwd))
     const disallowedFiles = nextExpectedFiles.filter((file) => !allowlist.has(file))
     const disallowedTests = nextExpectedTests.filter((file) => !allowlist.has(file))
     if (disallowedFiles.length > 0 || disallowedTests.length > 0) {
@@ -543,7 +549,7 @@ export function analyzeTaskBoundaryChange(
         success: false,
         error: buildTaskBoundaryChangeError(
           "TASK_BOUNDARY_CHANGE_CONFLICT",
-          `${allowlistConflict.message} Call propose_change with the blocked files and failing evidence so an isolated reviewer can route this to PLANNING allowlist repair, IMPL_PLAN repair, or rejection before applying this boundary update.`,
+          `${allowlistConflict.message} This is the global INCREMENTAL allowlist gate, not the task-boundary gate. If the user has approved these files for the active task, call approve_current_task_scope_expansion to update both the allowlist and task boundary atomically; otherwise route it as a planning scope decision.`,
         ),
       }
     }
@@ -556,8 +562,10 @@ export function analyzeTaskBoundaryChange(
 
   for (const task of state.implDag) {
     if (task.id === target.id) continue
-    const taskOverlappingFiles = addFiles.filter((file) => (task.expectedFiles ?? []).includes(file))
-    const taskOverlappingTests = addExpectedTests.filter((file) => (task.expectedTests ?? []).includes(file))
+    const taskExpectedFiles = uniquePathStrings(task.expectedFiles, cwd)
+    const taskExpectedTests = uniquePathStrings(task.expectedTests, cwd)
+    const taskOverlappingFiles = addFiles.filter((file) => taskExpectedFiles.includes(file))
+    const taskOverlappingTests = addExpectedTests.filter((file) => taskExpectedTests.includes(file))
     if (taskOverlappingFiles.length === 0 && taskOverlappingTests.length === 0) continue
     impacted.add(task.id)
 
@@ -590,7 +598,7 @@ export function analyzeTaskBoundaryChange(
   if (completedTaskIdsToReset.length > 0) {
     conflicts.push({
       kind: "completed-task-reset-required",
-      message: `Completed task(s) must be reset: ${completedTaskIdsToReset.join(", ")}.`,
+      message: `Completed task(s) are impacted and must be preserved with future corrective work: ${completedTaskIdsToReset.join(", ")}.`,
       taskIds: completedTaskIdsToReset,
     })
   }
@@ -618,8 +626,9 @@ export function analyzeTaskBoundaryChange(
 export function applyTaskBoundaryChange(
   args: ApplyTaskBoundaryChangeArgs,
   state: WorkflowState,
+  cwd?: string,
 ): TaskBoundaryChangeApplyResult {
-  const analyzed = analyzeTaskBoundaryChange(args, state)
+  const analyzed = analyzeTaskBoundaryChange(args, state, cwd)
   if (!analyzed.success) return analyzed
 
   const { analysis } = analyzed
@@ -641,6 +650,15 @@ export function applyTaskBoundaryChange(
   }
 
   const expectedReset = uniqueStrings(args.expected_reset_tasks)
+  if (analysis.completedTaskIdsToReset.length > 0) {
+    return {
+      success: false,
+      error: buildTaskBoundaryChangeError(
+        "TASK_BOUNDARY_CHANGE_CONFLICT",
+        `Completed task(s) cannot be reset by task-boundary repair: ${analysis.completedTaskIdsToReset.join(", ")}. Add a future corrective, revert, or superseding task in the IMPL_PLAN instead.`,
+      ),
+    }
+  }
   if (expectedReset.length > 0) {
     const actual = new Set(analysis.completedTaskIdsToReset)
     const mismatch =
@@ -657,18 +675,20 @@ export function applyTaskBoundaryChange(
     }
   }
 
-  const addFiles = new Set(uniqueStrings(args.add_files))
-  const addTests = new Set(uniqueStrings(args.add_expected_tests))
+  const addFiles = new Set(uniquePathStrings(args.add_files, cwd))
+  const addTests = new Set(uniquePathStrings(args.add_expected_tests, cwd))
   const targetTask = state.implDag!.find((task) => task.id === analysis.taskId)
-  const targetNextExpectedFiles = computeRevisedList(
+  const targetNextExpectedFiles = computeRevisedPathList(
     targetTask?.expectedFiles,
     args.add_files,
     args.remove_files,
+    cwd,
   )
-  const targetNextExpectedTests = computeRevisedList(
+  const targetNextExpectedTests = computeRevisedPathList(
     targetTask?.expectedTests,
     args.add_expected_tests,
     args.remove_expected_tests,
+    cwd,
   )
   const updatedNodes = state.implDag!.map((task) => {
     if (task.id === analysis.taskId) {
@@ -679,8 +699,8 @@ export function applyTaskBoundaryChange(
       }
     }
 
-    const nextTaskExpectedFiles = (task.expectedFiles ?? []).filter((file) => !addFiles.has(file))
-    const nextTaskExpectedTests = (task.expectedTests ?? []).filter((file) => !addTests.has(file))
+    const nextTaskExpectedFiles = uniquePathStrings(task.expectedFiles, cwd).filter((file) => !addFiles.has(file))
+    const nextTaskExpectedTests = uniquePathStrings(task.expectedTests, cwd).filter((file) => !addTests.has(file))
     const nextStatus = analysis.completedTaskIdsToReset.includes(task.id) ? "pending" : task.status
     return {
       ...task,

@@ -84,7 +84,8 @@ Rules:
 - Only flag drift that would cause a downstream task to build on WRONG assumptions.
 - When in doubt, report NO drift.  False positives (unnecessary updates) waste time.
 
-IMPORTANT: You MUST reply with ONLY a valid JSON object:
+Preferred submission path: if the \`submit_task_drift_review_result\` tool is available, call it exactly once with the drift verdict instead of replying with text.
+If that tool is unavailable, you MUST reply with ONLY a valid JSON object:
 {
   "drift_detected": true | false,
   "updated_descriptions": { "<task_id>": "<new description incorporating the deviation>", ... },
@@ -110,7 +111,7 @@ async function ephemeralDriftCheckPrompt(
     ...(parentModel ? { model: parentModel } : {}),
   })
   try {
-    return await session.prompt(prompt)
+    return await session.prompt(prompt, { submissionTool: { name: "submit_task_drift_review_result" } })
   } finally {
     await session.destroy()
   }

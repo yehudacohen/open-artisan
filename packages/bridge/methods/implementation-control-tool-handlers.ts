@@ -181,6 +181,14 @@ export const handleResetTask: ToolHandler = async (args, toolCtx, ctx) => {
     }
   }
 
+  const completedResetIds = ids.filter((id) => state.implDag?.find((task) => task.id === id)?.status === "complete")
+  if (completedResetIds.length > 0) {
+    return (
+      `Error: Completed task(s) cannot be reset: ${completedResetIds.join(", ")}. ` +
+      `Completed tasks are fast-forwarded as immutable audit records; add a future corrective, revert, or superseding IMPL_PLAN task instead.`
+    )
+  }
+
   const resetSet = new Set(ids)
   for (const node of state.implDag) {
     if (resetSet.has(node.id)) continue

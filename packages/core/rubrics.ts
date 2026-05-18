@@ -74,7 +74,8 @@ function getQualityCriteria(phase: Phase): string {
   ]
   let n = 1
   for (const [dim, desc] of Object.entries(dims)) {
-    lines.push(`${n}. [Q] **${dim}** — ${desc}`)
+    const id = `quality.${dim.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}`
+    lines.push(`${n}. [Q] **${dim}** [id: ${id}] — ${desc}`)
     n++
   }
 
@@ -247,7 +248,7 @@ ${qualityBlock}
     case "PLANNING": {
       const designBlock = designDocPath ? getDesignInvariantCriteria("PLANNING", designDocPath) : ""
       const allowlistBlock = mode === "INCREMENTAL"
-        ? "9. [INCREMENTAL] Allowlist adequacy reviewed — the approved file allowlist covers every file named by the plan, every component/seam the plan says will change, and every likely implementation/test file needed for those changes. Missing plausible files for stated work is blocking unless the plan explicitly narrows that work out of scope."
+        ? "9. [INCREMENTAL] Candidate allowlist adequacy reviewed [id: planning.allowlist-adequacy] — the PLANNING artifact's proposed/candidate file allowlist covers every file named by the plan, every component/seam the plan says will change, and every likely implementation/test file needed for those changes. During PLANNING review, do not require candidate files to already be present in the active approved allowlist; user approval of this PLANNING artifact is what promotes the candidate allowlist to active state. Missing plausible files from the candidate allowlist for stated work is blocking unless the plan explicitly narrows that work out of scope."
         : ""
       return `### Acceptance Criteria — Plan
 
@@ -259,8 +260,8 @@ ${designDocPath ? "For [D] design-invariant criteria, these are BINARY (met/not 
 ${structuralGate}
 
 **Blocking criteria (must all pass to advance):**
-1. All user requirements explicitly addressed — nothing from the original request is omitted. If a design document or detailed spec exists, the plan must include its substantive content (specific requirements, formulas, interaction sequences, data schemas, constraints), not merely reference the spec by name. A plan that says "details in the spec" without capturing those details is incomplete.
-2. Scope boundaries explicit — what is in scope AND what is explicitly out of scope
+1. All user requirements explicitly addressed [id: planning.user-requirements] — nothing from the original request is omitted. If a design document or detailed spec exists, the plan must include its substantive content (specific requirements, formulas, interaction sequences, data schemas, constraints), not merely reference the spec by name. A plan that says "details in the spec" without capturing those details is incomplete.
+2. Scope boundaries explicit [id: planning.scope-boundaries] — what is in scope AND what is explicitly out of scope
 3. Architecture described — components, communication patterns, data flow
 4. Error and failure cases specified — what can fail, how failures surface, recovery strategy
 5. No "TBD" items — every ambiguity has been resolved with an explicit decision
@@ -292,6 +293,7 @@ ${structuralGate}
 
 **Blocking criteria (must all pass to advance):**
 1. Reviewed artifacts are real interface/type/schema files in the project source tree — not markdown planning/design documents and not files under .openartisan/
+   Mixed contract module rule: when a reviewed file contains both public contract shape and executable behavior, the review must evaluate only the public contract shape unless executable behavior was explicitly approved in the plan; mixed contract module executable behavior belongs to TESTS/IMPLEMENTATION review.
 2. Every function/method has input types, output types, and error types — no \`any\`, no missing types
 3. Every data model has all fields, their types, optional vs required, and relationships
 4. Every enum is fully defined with all valid values

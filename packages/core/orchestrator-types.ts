@@ -60,6 +60,12 @@ export interface RevisionStep {
   phase: Phase
   phaseState: "REVISE" | "DRAFT" | "REDRAFT"
   instructions: string
+  /**
+   * When set, deterministic cascade auto-skip must not skip this step even if
+   * the artifact diff is currently empty. Used for scope-changing feedback
+   * where the absence of a diff is evidence that required work has not happened.
+   */
+  autoSkipBlockedReason?: string
 }
 
 export interface OrchestratorPlanResult {
@@ -71,8 +77,23 @@ export interface OrchestratorPlanResult {
    * strategic → escape hatch is presented to the user before proceeding.
    * backtrack → route to an earlier phase's REDRAFT state (scope change detected).
    * Callers MUST use this field rather than re-deriving from revisionSteps.length.
-   */
+  */
   classification: "tactical" | "strategic" | "backtrack"
+  /** Optional divergence trigger surfaced for deterministic routing guards. */
+  triggerCriterion?: OrchestratorDivergeSuccess["triggerCriterion"]
+}
+
+export function getAutoSkipBlockedReasonForClassification(input: {
+  classification: "tactical" | "strategic" | "backtrack"
+  triggerCriterion?: OrchestratorDivergeSuccess["triggerCriterion"]
+}): string | null {
+  if (input.classification === "backtrack") {
+    return "scope-changing backtrack requires explicit artifact updates"
+  }
+  if (input.triggerCriterion === "scope_expansion") {
+    return "scope expansion requires explicit artifact updates"
+  }
+  return null
 }
 
 /**

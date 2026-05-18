@@ -60,8 +60,16 @@ import { createImplDAG } from "./dag"
  *        request_review artifact_files remain the downstream source of truth.
  *   v25: added realWorldAcceptanceScenario, a structured scenario sufficiency
  *        contract captured from PLANNING artifacts and consumed by later prompts/reviews.
+ *   v26: added revisionAutoSkipBlockedReason to prevent deterministic auto-skip
+ *        from bypassing scope-changing revision work.
+ *   v27: added pendingAllowlistExpansions for typed, user-visible INCREMENTAL
+ *        allowlist repair requests.
+ *   v28: added toolFailureHistory for duplicate tooling-defect suppression and
+ *        maintainer-ready incident summaries.
+ *   v29: added verificationCommands to implDag TaskNode so runnable commands are
+ *        stored separately from allowlist-checked expected test file paths.
  */
-export const SCHEMA_VERSION = 25
+export const SCHEMA_VERSION = 29
 
 /**
  * Runtime concurrency policy for nested or delegated workflow execution.
@@ -72,6 +80,33 @@ export interface WorkflowConcurrency {
 }
 
 export type UserAuthoredText = string
+
+export interface PendingAllowlistExpansion {
+  files: string[]
+  reason: UserAuthoredText
+  sourceArtifact: ArtifactKey
+  requestedAtPhase: Phase
+  requestedAt: number
+}
+
+export type WorkflowToolFailureCategory =
+  | "reviewer-infrastructure"
+  | "tooling"
+  | "contradictory-state"
+  | "guard-block"
+
+export interface WorkflowToolFailureEntry {
+  fingerprint: string
+  category: WorkflowToolFailureCategory
+  toolName: string
+  message: string
+  count: number
+  firstSeenAt: number
+  lastSeenAt: number
+  phase: Phase
+  phaseState: PhaseState
+  taskId?: string
+}
 
 /**
  * Persisted real-world acceptance scenario captured from the approved PLANNING artifact.
@@ -340,6 +375,25 @@ export interface WorkflowState {
    * Only set when escapePending is true. Cleared after the plan is executed or aborted.
    */
   pendingRevisionSteps: RevisionStep[] | null
+
+  /**
+   * When set, deterministic revision/cascade auto-skip is disabled for the
+   * current REVISE step. This preserves the revision baseline diff gate while
+   * making scope-changing feedback impossible to skip as a no-op.
+   */
+  revisionAutoSkipBlockedReason: string | null
+
+  /**
+   * Typed allowlist expansion requests awaiting explicit user/planning approval.
+   * These replace reviewer-text extraction for common out-of-allowlist boundary repairs.
+   */
+  pendingAllowlistExpansions: PendingAllowlistExpansion[]
+
+  /**
+   * Compact rolling history of workflow/tooling failures, keyed by fingerprint.
+   * Used to suppress duplicate reviewer/tool defects and generate incident summaries.
+   */
+  toolFailureHistory: WorkflowToolFailureEntry[]
 
   /**
    * True when a real user message has been received while in USER_GATE state.
@@ -822,6 +876,16 @@ export function validateWorkflowStateResult(state: WorkflowState): WorkflowState
       if (!Array.isArray(node.expectedTests)) {
         return { success: false, error: workflowStateValidationError(`implDag task "${node.id}" missing required "expectedTests" array`) }
       }
+      if (node.verificationCommands !== undefined && node.verificationCommands !== null) {
+        if (!Array.isArray(node.verificationCommands)) {
+          return { success: false, error: workflowStateValidationError(`implDag task "${node.id}" verificationCommands must be an array`) }
+        }
+        for (let j = 0; j < node.verificationCommands.length; j++) {
+          if (typeof node.verificationCommands[j] !== "string") {
+            return { success: false, error: workflowStateValidationError(`implDag task "${node.id}" verificationCommands[${j}] must be a string`) }
+          }
+        }
+      }
       const validStatuses = ["pending", "in-flight", "complete", "aborted", "human-gated", "delegated"]
       if (typeof node.status !== "string" || !validStatuses.includes(node.status)) {
         return { success: false, error: workflowStateValidationError(`implDag task "${node.id}" has invalid status "${node.status}"`) }
@@ -892,6 +956,72 @@ export function validateWorkflowStateResult(state: WorkflowState): WorkflowState
   }
   if (state.pendingRevisionSteps !== null && !Array.isArray(state.pendingRevisionSteps)) {
     return { success: false, error: workflowStateValidationError(`pendingRevisionSteps must be null or an array, got ${typeof state.pendingRevisionSteps}`) }
+  }
+  if (state.revisionAutoSkipBlockedReason !== null && state.revisionAutoSkipBlockedReason !== undefined && typeof state.revisionAutoSkipBlockedReason !== "string") {
+    return { success: false, error: workflowStateValidationError(`revisionAutoSkipBlockedReason must be null or a string, got ${typeof state.revisionAutoSkipBlockedReason}`) }
+  }
+  if (!Array.isArray(state.pendingAllowlistExpansions)) {
+    return { success: false, error: workflowStateValidationError(`pendingAllowlistExpansions must be an array, got ${typeof state.pendingAllowlistExpansions}`) }
+  }
+  for (let i = 0; i < state.pendingAllowlistExpansions.length; i++) {
+    const entry = state.pendingAllowlistExpansions[i]
+    if (!entry || typeof entry !== "object") {
+      return { success: false, error: workflowStateValidationError(`pendingAllowlistExpansions[${i}] must be an object`) }
+    }
+    if (!Array.isArray(entry.files) || entry.files.length === 0 || entry.files.some((file) => typeof file !== "string" || !file.startsWith("/"))) {
+      return { success: false, error: workflowStateValidationError(`pendingAllowlistExpansions[${i}].files must be non-empty absolute paths`) }
+    }
+    if (typeof entry.reason !== "string" || entry.reason.trim().length === 0) {
+      return { success: false, error: workflowStateValidationError(`pendingAllowlistExpansions[${i}].reason must be non-empty`) }
+    }
+    const validArtifacts: ArtifactKey[] = ["design", "conventions", "plan", "interfaces", "tests", "impl_plan", "implementation"]
+    if (!validArtifacts.includes(entry.sourceArtifact)) {
+      return { success: false, error: workflowStateValidationError(`pendingAllowlistExpansions[${i}].sourceArtifact must be a valid artifact key`) }
+    }
+    if (!validPhases.includes(entry.requestedAtPhase)) {
+      return { success: false, error: workflowStateValidationError(`pendingAllowlistExpansions[${i}].requestedAtPhase must be a valid phase`) }
+    }
+    if (typeof entry.requestedAt !== "number" || entry.requestedAt < 0 || !Number.isFinite(entry.requestedAt)) {
+      return { success: false, error: workflowStateValidationError(`pendingAllowlistExpansions[${i}].requestedAt must be a non-negative number`) }
+    }
+  }
+  if (!Array.isArray(state.toolFailureHistory)) {
+    return { success: false, error: workflowStateValidationError(`toolFailureHistory must be an array, got ${typeof state.toolFailureHistory}`) }
+  }
+  for (let i = 0; i < state.toolFailureHistory.length; i++) {
+    const entry = state.toolFailureHistory[i]
+    if (!entry || typeof entry !== "object") {
+      return { success: false, error: workflowStateValidationError(`toolFailureHistory[${i}] must be an object`) }
+    }
+    if (typeof entry.fingerprint !== "string" || entry.fingerprint.length === 0) {
+      return { success: false, error: workflowStateValidationError(`toolFailureHistory[${i}].fingerprint must be a non-empty string`) }
+    }
+    const validToolFailureCategories: WorkflowToolFailureCategory[] = ["reviewer-infrastructure", "tooling", "contradictory-state", "guard-block"]
+    if (typeof entry.category !== "string" || !validToolFailureCategories.includes(entry.category as WorkflowToolFailureCategory)) {
+      return { success: false, error: workflowStateValidationError(`toolFailureHistory[${i}].category must be one of ${validToolFailureCategories.join(", ")}`) }
+    }
+    if (typeof entry.toolName !== "string" || entry.toolName.length === 0) {
+      return { success: false, error: workflowStateValidationError(`toolFailureHistory[${i}].toolName must be a non-empty string`) }
+    }
+    if (typeof entry.message !== "string") {
+      return { success: false, error: workflowStateValidationError(`toolFailureHistory[${i}].message must be a string`) }
+    }
+    if (typeof entry.count !== "number" || entry.count < 1 || !Number.isInteger(entry.count)) {
+      return { success: false, error: workflowStateValidationError(`toolFailureHistory[${i}].count must be a positive integer`) }
+    }
+    if (typeof entry.firstSeenAt !== "number" || entry.firstSeenAt < 0 || !Number.isFinite(entry.firstSeenAt) || typeof entry.lastSeenAt !== "number" || entry.lastSeenAt < 0 || !Number.isFinite(entry.lastSeenAt)) {
+      return { success: false, error: workflowStateValidationError(`toolFailureHistory[${i}] timestamps must be non-negative finite numbers`) }
+    }
+    if (!validPhases.includes(entry.phase)) {
+      return { success: false, error: workflowStateValidationError(`toolFailureHistory[${i}].phase must be a valid phase`) }
+    }
+    const entryValidStates = VALID_PHASE_STATES[entry.phase]
+    if (!entryValidStates.includes(entry.phaseState)) {
+      return { success: false, error: workflowStateValidationError(`toolFailureHistory[${i}].phaseState "${entry.phaseState}" is not valid for phase "${entry.phase}"`) }
+    }
+    if (entry.taskId !== undefined && (typeof entry.taskId !== "string" || entry.taskId.length === 0)) {
+      return { success: false, error: workflowStateValidationError(`toolFailureHistory[${i}].taskId must be a non-empty string when present`) }
+    }
   }
   // M1: Cross-field invariant — escapePending requires pendingRevisionSteps
   if (state.escapePending && (state.pendingRevisionSteps === null || state.pendingRevisionSteps.length === 0)) {

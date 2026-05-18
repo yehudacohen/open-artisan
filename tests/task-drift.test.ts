@@ -33,24 +33,26 @@ function makeDispatcher(overrides?: {
   promptText?: string
   createThrows?: boolean
   promptThrows?: boolean
-}): SubagentDispatcher & { _createMock: ReturnType<typeof mock> } {
+}): SubagentDispatcher & { _createMock: ReturnType<typeof mock>; _promptMock: ReturnType<typeof mock> } {
   const defaultText = overrides?.promptText ?? JSON.stringify({
     drift_detected: false,
     updated_descriptions: {},
     reasoning: "No drift detected",
   })
+  const promptMock = overrides?.promptThrows
+    ? mock(async () => { throw new Error("prompt failed") })
+    : mock(async () => defaultText)
   const createMock = overrides?.createThrows
     ? mock(async () => { throw new Error("create failed") })
     : mock(async () => ({
         id: "mock-drift-session",
-        prompt: overrides?.promptThrows
-          ? mock(async () => { throw new Error("prompt failed") })
-          : mock(async () => defaultText),
+        prompt: promptMock,
         destroy: mock(async () => {}),
       }))
   return {
     createSession: createMock,
     _createMock: createMock,
+    _promptMock: promptMock,
   }
 }
 
@@ -151,6 +153,12 @@ describe("dispatchDriftCheck — session lifecycle", () => {
     }))
     const createCall = dispatcher._createMock.mock.calls[0]
     expect((createCall as any)?.[0]?.model).toEqual({ modelID: "claude-3", providerID: "anthropic" })
+  })
+
+  it("requests structured tool submission for drift checks", async () => {
+    const dispatcher = makeDispatcher()
+    await dispatchDriftCheck(dispatcher, makeRequest())
+    expect(dispatcher._promptMock.mock.calls[0]?.[1]).toEqual({ submissionTool: { name: "submit_task_drift_review_result" } })
   })
 })
 

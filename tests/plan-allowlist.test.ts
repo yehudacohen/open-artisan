@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test"
 import { join } from "node:path"
 
-import { extractApprovedFileAllowlist } from "#core/tools/plan-allowlist"
+import { deriveReviewFileAllowlist, extractApprovedFileAllowlist } from "#core/tools/plan-allowlist"
 
 describe("extractApprovedFileAllowlist", () => {
   it("extracts a full requested replacement allowlist section", () => {
@@ -79,5 +79,45 @@ This rationale mentions \`packages/not-a-listed-file.ts\` but is not part of the
       join(cwd, "packages/bridge/methods/task-boundary-tool-handlers.ts"),
       join(cwd, "packages/bridge/methods/tool-execute.ts"),
     ])
+  })
+
+  it("extracts proposed planning approval allowlist headings", () => {
+    const cwd = "/repo"
+    const plan = `# Plan
+
+## Proposed PLANNING approval allowlist
+
+- \`packages/core/self-review.ts\`
+- \`tests/self-review.test.ts\`
+`
+
+    expect(extractApprovedFileAllowlist(plan, cwd)).toEqual([
+      join(cwd, "packages/core/self-review.ts"),
+      join(cwd, "tests/self-review.test.ts"),
+    ])
+  })
+})
+
+describe("deriveReviewFileAllowlist", () => {
+  it("uses pending PLANNING plan-origin allowlist requests before stale active allowlist", () => {
+    const result = deriveReviewFileAllowlist({
+      phase: "PLANNING",
+      mode: "INCREMENTAL",
+      artifactPaths: ["/repo/missing-plan.md"],
+      fallbackAllowlist: ["/repo/stale.ts"],
+      cwd: "/repo",
+      pendingAllowlistExpansions: [{
+        files: ["/repo/packages/core/self-review.ts", "/repo/tests/self-review.test.ts"],
+        reason: "Plan proposes the replacement allowlist for approval.",
+        sourceArtifact: "plan",
+        requestedAtPhase: "PLANNING",
+        requestedAt: 1,
+      }],
+    })
+
+    expect(result).toEqual({
+      allowlist: ["/repo/packages/core/self-review.ts", "/repo/tests/self-review.test.ts"],
+      source: "planning-artifact",
+    })
   })
 })

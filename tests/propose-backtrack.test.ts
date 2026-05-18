@@ -28,6 +28,7 @@ function makeState(overrides: Partial<WorkflowState> = {}): WorkflowState {
 function makeOrchestrator(overrides?: {
   revisionSteps?: RevisionStep[]
   classification?: "tactical" | "strategic" | "backtrack"
+  triggerCriterion?: OrchestratorPlanResult["triggerCriterion"]
   throws?: boolean
 }): Orchestrator {
   return {
@@ -43,6 +44,7 @@ function makeOrchestrator(overrides?: {
           },
         ],
         classification: overrides?.classification ?? "backtrack",
+        ...(overrides?.triggerCriterion ? { triggerCriterion: overrides.triggerCriterion } : {}),
       }
     }),
   }
@@ -251,6 +253,77 @@ describe("propose_backtrack — orchestrator routing", () => {
     expect(result.pendingRevisionSteps).toHaveLength(1)
     expect(result.pendingRevisionSteps[0]?.artifact).toBe("interfaces")
     expect(result.message).toContain("Strategic revision approved")
+  })
+
+  it("blocks auto-skip for reviewer-classified scope expansion", async () => {
+    const state = makeState({ phase: "IMPL_PLAN", phaseState: "REVISE" })
+    const orchestrator = makeOrchestrator({
+      classification: "strategic",
+      triggerCriterion: "scope_expansion",
+      revisionSteps: [
+        { artifact: "plan", phase: "PLANNING", phaseState: "REVISE", instructions: "Expand the plan scope." },
+        { artifact: "interfaces", phase: "INTERFACES", phaseState: "REVISE", instructions: "Update interfaces." },
+        { artifact: "tests", phase: "TESTS", phaseState: "REVISE", instructions: "Update tests." },
+      ],
+    })
+
+    const result = await handleProposeBacktrack(
+      { target_phase: "PLANNING", reason: "The classified change requires upstream artifact revision before implementation can proceed." },
+      state,
+      orchestrator,
+    )
+
+    expect(result.action).toBe("execute")
+    if (result.action !== "execute") throw new Error("unreachable")
+    expect(result.targetPhase).toBe("PLANNING")
+    expect(result.targetPhaseState).toBe("REVISE")
+    expect(result.autoSkipBlockedReason).toContain("scope expansion")
+    expect(result.pendingRevisionSteps.every((step) => step.autoSkipBlockedReason === result.autoSkipBlockedReason)).toBe(true)
+  })
+
+  it("does not infer auto-skip policy from feedback text without reviewer classification", async () => {
+    const state = makeState({ phase: "IMPLEMENTATION", phaseState: "TASK_REVISE" })
+    const orchestrator = makeOrchestrator({
+      classification: "strategic",
+      revisionSteps: [
+        { artifact: "plan", phase: "PLANNING", phaseState: "REVISE", instructions: "Recheck plan wording." },
+        { artifact: "tests", phase: "TESTS", phaseState: "REVISE", instructions: "Recheck tests." },
+      ],
+    })
+
+    const result = await handleProposeBacktrack(
+      { target_phase: "PLANNING", reason: "The feedback mentions new files, new tests, and allowlist widening, but classifier did not mark scope expansion." },
+      state,
+      orchestrator,
+    )
+
+    expect(result.action).toBe("execute")
+    if (result.action !== "execute") throw new Error("unreachable")
+    expect(result.autoSkipBlockedReason).toBeUndefined()
+    expect(result.pendingRevisionSteps.some((step) => step.autoSkipBlockedReason)).toBe(false)
+  })
+
+  it("blocks auto-skip when orchestrator reports scope_expansion trigger", async () => {
+    const state = makeState({ phase: "IMPLEMENTATION", phaseState: "TASK_REVISE" })
+    const orchestrator = makeOrchestrator({
+      classification: "strategic",
+      triggerCriterion: "scope_expansion",
+      revisionSteps: [
+        { artifact: "plan", phase: "PLANNING", phaseState: "REVISE", instructions: "Update scope." },
+        { artifact: "impl_plan", phase: "IMPL_PLAN", phaseState: "REVISE", instructions: "Update implementation plan." },
+      ],
+    })
+
+    const result = await handleProposeBacktrack(
+      { target_phase: "PLANNING", reason: "The earlier artifact needs upstream repair before implementation can proceed." },
+      state,
+      orchestrator,
+    )
+
+    expect(result.action).toBe("execute")
+    if (result.action !== "execute") throw new Error("unreachable")
+    expect(result.autoSkipBlockedReason).toContain("scope expansion")
+    expect(result.pendingRevisionSteps[0]?.autoSkipBlockedReason).toBe(result.autoSkipBlockedReason)
   })
 
   it("rejects tactical — agent should fix in-place", async () => {

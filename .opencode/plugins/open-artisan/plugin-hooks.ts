@@ -147,6 +147,23 @@ function shouldInjectIdlePrompts(): boolean {
   return !["0", "false", "off"].includes(value ?? "")
 }
 
+function isUserEscapeIdleEvent(event: SessionEvent): boolean {
+  const properties = event.properties ?? {}
+  const escapeSignals = new Set(["escaped", "escape", "aborted", "abort", "cancelled", "canceled", "interrupted", "interrupt", "stopped", "stop"])
+  for (const [key, value] of Object.entries(properties)) {
+    const normalizedKey = key.toLowerCase()
+    if (typeof value === "boolean" && value && escapeSignals.has(normalizedKey)) return true
+    if (typeof value !== "string") continue
+    const normalizedValue = value.toLowerCase()
+    const keyCanCarryStopReason = /esc|escape|abort|cancel|interrupt/.test(normalizedKey) ||
+      ["reason", "cause", "status", "state", "action", "source"].includes(normalizedKey)
+    if (keyCanCarryStopReason && /\b(user[-_ ]?)?(esc|escape|abort|cancel|cancelled|canceled|interrupt|interrupted|stop|stopped)\b/.test(normalizedValue)) {
+      return true
+    }
+  }
+  return false
+}
+
 export function createPluginHooks({
   ctx,
   projectRoot,
@@ -306,6 +323,11 @@ export function createPluginHooks({
           hookSessionId = sessionId
           if (!sessionId) return
 
+          if (isUserEscapeIdleEvent(event)) {
+            ctx.trace.record("idle.prompt.skipped", { sessionId, reason: "user-escape" })
+            return
+          }
+
           const state = store.get(sessionId)
           if (!state) return
           if (isDormantSession(sessionId)) return
@@ -385,6 +407,23 @@ export function createPluginHooks({
             nextRetryCount: decision.action === "reprompt" ? decision.retryCount : undefined,
           })
           if (decision.action === "ignore") return
+
+          if (decision.action === "disable") {
+            log.warn("Open Artisan auto-disabled after build-mode idle stall", { sessionId, detail: decision.message })
+            try {
+              notify.toast("Open Artisan Disabled", decision.message, "warning")
+            } catch {
+              // ignore
+            }
+            markDormantSession(sessionId)
+            mutateHookMemory(hook, sessionId, "idle.buildModeAutoDisable", (draft) => {
+              draft.activeAgent = "build"
+              draft.retryCount = 0
+              draft.userGateMessageReceived = false
+            })
+            ctx.trace.record("idle.prompt.skipped", { sessionId, reason: "build-mode-auto-disable" })
+            return
+          }
 
           if (decision.action === "escalate") {
             log.warn(`Idle escalation: agent stopped ${state.retryCount} times at ${state.phase}/${state.phaseState}`, { sessionId })
@@ -536,6 +575,7 @@ export function createPluginHooks({
             draft.taskReviewCount = 0
             draft.pendingFeedback = null
             draft.revisionBaseline = null
+            draft.revisionAutoSkipBlockedReason = null
             draft.reviewArtifactFiles = []
             draft.userMessages = textContent ? [textContent] : []
           })

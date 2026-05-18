@@ -21,10 +21,11 @@
 import type { ArtifactKey, Phase, WorkflowMode } from "./workflow-primitives"
 import type { CriterionResult, RebuttalRequest, RebuttalResult, SelfReviewResult } from "./review-types"
 import type { SubagentDispatcher } from "./subagent-dispatcher"
+import { decodeSubagentToolSubmission } from "./subagent-dispatcher"
 import { withTimeout, extractJsonFromText } from "./utils"
 import { SELF_REVIEW_TIMEOUT_MS } from "./constants"
 import { buildSelfReviewStructuralGate } from "./rubrics"
-import { countExpectedBlockingCriteria } from "./tools/mark-satisfied"
+import { countExpectedBlockingCriteria, countSubmittedBlockingCriteria, normalizeCriterionSeverity } from "./tools/mark-satisfied"
 import { buildScenarioSufficiencyPromptBlock } from "./scenario-sufficiency"
 import type { ScenarioSufficiencyContext } from "./workflow-state-types"
 
@@ -68,12 +69,15 @@ export interface SelfReviewRequest {
   feedbackHistory?: Array<{ phase: Phase; feedback: string; timestamp: number }>
   /** Captured PLANNING scenario used as a sufficiency lens for downstream review. */
   realWorldAcceptanceScenario?: ScenarioSufficiencyContext | null
+  /** Require adapter-captured reviewer tool submissions instead of JSON text fallback. */
+  requireToolSubmission?: boolean
 }
 
 export function buildReviewPrompt(req: SelfReviewRequest): string {
   const lines: string[] = []
 
-  lines.push("CRITICAL OUTPUT CONTRACT: your final response must be ONLY one valid JSON object. Do not include markdown, headings, bullets, code fences, preamble, or analysis outside JSON string fields.")
+  lines.push("CRITICAL OUTPUT CONTRACT: if the `submit_phase_review_result` tool is available, call it exactly once with your assessment fields and do not reply with text/prose.")
+  lines.push("If that tool is unavailable, your final response must be ONLY one valid JSON object. Do not include markdown, headings, bullets, code fences, preamble, or analysis outside JSON string fields.")
   lines.push("")
   lines.push(`You are reviewing the **${req.phase}** artifact produced by the workflow.`)
   lines.push("")
@@ -140,13 +144,23 @@ export function buildReviewPrompt(req: SelfReviewRequest): string {
   lines.push("## Acceptance Criteria")
   lines.push(req.criteriaText)
   const expectedBlockingCount = countExpectedBlockingCriteria(req.criteriaText)
+  const expectedCriteria = extractExpectedBlockingCriteria(req.criteriaText)
   if (expectedBlockingCount > 0) {
     lines.push("")
     lines.push(
       `Required criteria count: return at least ${expectedBlockingCount} blocking/design-invariant entries in ` +
       "`criteria_results`. This count includes the numbered blocking criteria AND every [Q] quality criterion. " +
-      "Do not collapse multiple criteria into one entry.",
+      "Do not collapse multiple criteria into one entry. Do not return only failed criteria.",
     )
+    if (expectedCriteria.length > 0) {
+      lines.push("")
+      lines.push("## Full Required Blocking/Quality Checklist")
+      lines.push("Your `criteria_results` MUST include one entry for EACH checklist item below, in addition to any extra blocking finding you add. Include entries that are met. Do not replace this checklist with only the criteria you think failed.")
+      lines.push("")
+      expectedCriteria.forEach((criterion, index) => {
+        lines.push(`${index + 1}. ${criterion}`)
+      })
+    }
   }
   lines.push("")
   lines.push(buildSelfReviewStructuralGate(req.phase))
@@ -222,6 +236,7 @@ export function buildReviewPrompt(req: SelfReviewRequest): string {
     if (req.phase === "PLANNING" && req.mode === "INCREMENTAL" && req.fileAllowlistSource === "planning-artifact") {
       lines.push("This is the candidate replacement allowlist proposed by the current PLANNING artifact under review.")
       lines.push("Evaluate allowlist adequacy against this candidate allowlist, not against any stale active allowlist from before the planning revision/backtrack.")
+      lines.push("Do not fail the PLANNING artifact merely because candidate files are not already in the active approved allowlist; PLANNING approval is the step that will make this candidate allowlist active.")
     } else {
       lines.push("The file allowlist governs which phases can be executed in INCREMENTAL mode.")
       lines.push("Verify it includes all files needed for unfinished phases, considering what is already approved.")
@@ -239,7 +254,7 @@ export function buildReviewPrompt(req: SelfReviewRequest): string {
       }
     }
     lines.push("")
-    lines.push("Allowlist adequacy rule (blocking): If the allowlist omits files needed for unfinished phases (e.g. TESTS or IMPL_PLAN), add a blocking criterion named `Allowlist adequacy` and mark it unmet with evidence.")
+    lines.push("Allowlist adequacy rule (blocking): If the allowlist omits files needed for unfinished phases (e.g. TESTS or IMPL_PLAN), add a blocking criterion named `Allowlist adequacy` and mark it unmet with evidence IN ADDITION TO returning every checklist criterion above. Never return only allowlist findings.")
     lines.push("If the relevant phases are already complete and unchanged, you may mark allowlist adequacy as met.")
     lines.push("")
   }
@@ -247,6 +262,7 @@ export function buildReviewPrompt(req: SelfReviewRequest): string {
   lines.push("## Instructions")
   lines.push("1. Read every artifact file listed above before forming any opinion.")
   lines.push("2. Evaluate each acceptance criterion independently.")
+  lines.push("2a. Return every required blocking/design-invariant/[Q] checklist item in `criteria_results`, including criteria that are met. Returning only failed criteria is invalid reviewer output.")
   lines.push("3. Scope findings to the reviewed artifact for this phase. In mixed legacy files, do not fail unrelated pre-existing APIs unless the current artifact changes, depends on, or claims them.")
   lines.push("4. Reconcile criteria against the latest approved user direction. If older plans or prior artifacts conflict with newer feedback, treat the newer feedback as authoritative unless a design-invariant criterion explicitly says otherwise.")
   lines.push("5. Do not require concrete fields, files, APIs, or behavior that were explicitly rejected or superseded by recent user feedback. Mark only real gaps against the current approved intent.")
@@ -255,7 +271,8 @@ export function buildReviewPrompt(req: SelfReviewRequest): string {
   lines.push("8. Use the full 1-10 range honestly. Reward excellence just as clearly as you punish flaws; do not compress scores into a narrow band.")
   lines.push("9. Scoring guide: 1-2 = fundamentally broken, 3-4 = major gaps, 5-6 = mixed/adequate but clearly incomplete, 7-8 = strong with meaningful improvement still needed, 9 = excellent and ready to advance, 10 = exceptional work that materially exceeds the normal quality bar for this phase.")
   lines.push("10. Set `satisfied` to true ONLY if ALL blocking criteria are met AND ALL [Q] scores are >= 9.")
-  lines.push("11. Return your assessment as a JSON object. IMPORTANT: reply with ONLY the JSON — no preamble, no explanation.")
+  lines.push("11. Required submission path when available: if the `submit_phase_review_result` tool is available, call it exactly once with your assessment fields instead of replying with text. The tool validates the structured payload.")
+  lines.push("12. If that tool is unavailable, return your assessment as a JSON object. IMPORTANT: reply with ONLY the JSON — no preamble, no explanation.")
   lines.push("")
   lines.push("The JSON must match this structure:")
   lines.push("```json")
@@ -271,6 +288,18 @@ export function buildReviewPrompt(req: SelfReviewRequest): string {
   return lines.join("\n")
 }
 
+export function extractExpectedBlockingCriteria(criteriaText: string | null): string[] {
+  if (!criteriaText) return []
+  const blockingSection = criteriaText.split(/\*\*Suggestion criteria/i)[0] ?? criteriaText
+  const criteria: string[] = []
+  for (const line of blockingSection.split("\n")) {
+    const match = line.match(/^\s*\d+\.\s+(.+)$/)
+    if (!match?.[1]) continue
+    criteria.push(match[1].trim())
+  }
+  return criteria
+}
+
 // ---------------------------------------------------------------------------
 // Ephemeral session helper — uses SubagentDispatcher for platform abstraction
 // ---------------------------------------------------------------------------
@@ -281,6 +310,8 @@ async function ephemeralReviewPrompt(
   parentSessionId?: string,
   parentModel?: string | { modelID: string; providerID?: string },
   title = "workflow-review",
+  submissionToolName = "submit_phase_review_result",
+  requireToolSubmission = false,
 ): Promise<string> {
   const session = await dispatcher.createSession({
     title,
@@ -289,10 +320,14 @@ async function ephemeralReviewPrompt(
     ...(parentModel ? { model: parentModel } : {}),
   })
   try {
-    // OpenCode currently persists prompt format metadata into message history;
-    // the json_schema request shape breaks history polling fallback before text
-    // extraction can recover. The prompt and JSON repair path still enforce JSON.
-    return await session.prompt(prompt)
+    const submissionTool = requireToolSubmission
+      ? { name: submissionToolName, required: true }
+      : { name: submissionToolName }
+    const raw = await session.prompt(prompt, { submissionTool })
+    if (!requireToolSubmission) return raw
+    const decoded = decodeSubagentToolSubmission(raw, submissionToolName)
+    if (!decoded.success) throw new Error(decoded.error)
+    return decoded.payload
   } finally {
     await session.destroy()
   }
@@ -318,18 +353,13 @@ export function parseReviewResult(raw: string): SelfReviewResult {
 
   const criteriaResults: CriterionResult[] = (parsed.criteria_results ?? []).map((c) => {
     const criterionText = c.criterion ?? ""
-    const isQuality = criterionText.startsWith("[Q]")
-    const isDesignInvariant = criterionText.startsWith("[D]")
+    const isQuality = /^\s*\[Q\]/i.test(criterionText)
     const score = typeof c.score === "number" ? c.score : undefined
     // For [Q] criteria with a score, derive `met` from score threshold (same logic as mark-satisfied.ts)
     const met = (isQuality && score !== undefined)
       ? score >= 9
       : (c.met ?? false)
-    // Determine severity: [D] = design-invariant (blocking + non-rebuttable),
-    // [S] = suggestion, everything else = blocking
-    const severity: CriterionResult["severity"] = isDesignInvariant
-      ? "design-invariant"
-      : c.severity === "suggestion" ? "suggestion" : "blocking"
+    const severity = normalizeCriterionSeverity({ criterion: criterionText, severity: c.severity })
     return {
       ...(c.criterionId ?? c.criterion_id ? { criterionId: c.criterionId ?? c.criterion_id } : {}),
       criterion: criterionText || "unknown",
@@ -354,7 +384,8 @@ export function parseReviewResult(raw: string): SelfReviewResult {
 
 function buildJsonRepairPrompt(rawText: string): string {
   return [
-    "CRITICAL OUTPUT CONTRACT: return ONLY one valid JSON object. Do not include markdown, headings, bullets, code fences, preamble, or analysis outside JSON string fields.",
+    "CRITICAL OUTPUT CONTRACT: if the `submit_phase_review_result` tool is available, call it exactly once with the corrected review fields and do not reply with text.",
+    "If that tool is unavailable, return ONLY one valid JSON object. Do not include markdown, headings, bullets, code fences, preamble, or analysis outside JSON string fields.",
     "",
     "Your previous review response was not valid JSON.",
     "Return ONLY a valid JSON object matching this exact schema. Do not include markdown, bullets, code fences, or commentary.",
@@ -372,6 +403,47 @@ function buildJsonRepairPrompt(rawText: string): string {
     summarizeReviewerText(rawText),
     "```",
   ].join("\n")
+}
+
+function buildIncompleteCriteriaRepairPrompt(req: SelfReviewRequest, rawText: string, submitted: number, expected: number): string {
+  const expectedCriteria = extractExpectedBlockingCriteria(req.criteriaText)
+  const lines: string[] = []
+  lines.push("CRITICAL OUTPUT CONTRACT: if the `submit_phase_review_result` tool is available, call it exactly once with the corrected full review fields and do not reply with text.")
+  lines.push("If that tool is unavailable, return ONLY one valid JSON object. Do not include markdown, headings, bullets, code fences, preamble, or analysis outside JSON string fields.")
+  lines.push("")
+  lines.push(`Your previous review output was incomplete: it returned only ${submitted} blocking/design-invariant criteria, but this ${req.phase} review requires ${expected}.`)
+  lines.push("You must return one `criteria_results` entry for EVERY required blocking/design-invariant/[Q] criterion, including criteria that are met. Do not return only failed criteria or only allowlist findings.")
+  lines.push("")
+  if (expectedCriteria.length > 0) {
+    lines.push("## Full Required Checklist To Echo")
+    expectedCriteria.forEach((criterion, index) => {
+      lines.push(`${index + 1}. ${criterion}`)
+    })
+    lines.push("")
+  }
+  lines.push("## Acceptance Criteria")
+  lines.push(req.criteriaText)
+  lines.push("")
+  lines.push("Previous incomplete response:")
+  lines.push("```")
+  lines.push(summarizeReviewerText(rawText))
+  lines.push("```")
+  lines.push("")
+  lines.push("Return the corrected full review now.")
+  return lines.join("\n")
+}
+
+function incompleteCriteriaReason(req: SelfReviewRequest, result: SelfReviewResult): { message: string; submitted: number; expected: number } | null {
+  if (!result.success) return null
+  const expected = countExpectedBlockingCriteria(req.criteriaText)
+  if (expected <= 0) return null
+  const submitted = countSubmittedBlockingCriteria(result.criteriaResults)
+  if (submitted >= expected) return null
+  return {
+    submitted,
+    expected,
+    message: `Reviewer returned only ${submitted} blocking criteria, but ${req.phase} requires ${expected}. The isolated reviewer output was incomplete.`,
+  }
 }
 
 function summarizeReviewerText(text: string): string {
@@ -412,23 +484,52 @@ export async function dispatchSelfReview(
     const featureSlug = req.featureName ? ` (${req.featureName})` : ""
     const title = `Review: ${req.phase}${featureSlug}`
     const text = await withTimeout(
-      ephemeralReviewPrompt(dispatcher, prompt, req.parentSessionId, req.parentModel, title),
+      ephemeralReviewPrompt(dispatcher, prompt, req.parentSessionId, req.parentModel, title, "submit_phase_review_result", req.requireToolSubmission === true),
       SELF_REVIEW_TIMEOUT_MS,
       "self-review",
     )
     const parsed = parseReviewText(text)
-    if (parsed.success) return parsed
+    const incomplete = incompleteCriteriaReason(req, parsed)
+    if (parsed.success && !incomplete) return parsed
+    if (parsed.success && incomplete) {
+      const repairedText = await withTimeout(
+        ephemeralReviewPrompt(dispatcher, buildIncompleteCriteriaRepairPrompt(req, text, incomplete.submitted, incomplete.expected), req.parentSessionId, req.parentModel, `${title} criteria repair`, "submit_phase_review_result", req.requireToolSubmission === true),
+        SELF_REVIEW_TIMEOUT_MS,
+        "self-review-criteria-repair",
+      )
+      const repaired = parseReviewText(repairedText)
+      const repairedIncomplete = incompleteCriteriaReason(req, repaired)
+      if (repaired.success && !repairedIncomplete) return repaired
+      let repairError: string
+      if (repaired.success) {
+        repairError = repairedIncomplete?.message ?? "reviewer still returned incomplete criteria"
+      } else {
+        repairError = repaired.error
+      }
+      return {
+        success: false,
+        error: `${incomplete.message} Criteria repair failed: ${repairError}`,
+      }
+    }
 
     const repairedText = await withTimeout(
-      ephemeralReviewPrompt(dispatcher, buildJsonRepairPrompt(text), req.parentSessionId, req.parentModel, `${title} JSON repair`),
+      ephemeralReviewPrompt(dispatcher, buildJsonRepairPrompt(text), req.parentSessionId, req.parentModel, `${title} JSON repair`, "submit_phase_review_result", req.requireToolSubmission === true),
       SELF_REVIEW_TIMEOUT_MS,
       "self-review-json-repair",
     )
     const repaired = parseReviewText(repairedText)
-    if (repaired.success) return repaired
+    const repairedIncomplete = incompleteCriteriaReason(req, repaired)
+    if (repaired.success && !repairedIncomplete) return repaired
+    let repairError: string
+    if (repaired.success) {
+      repairError = repairedIncomplete?.message ?? "reviewer still returned incomplete criteria"
+    } else {
+      repairError = repaired.error
+    }
+    const parsedError = parsed.success ? "reviewer returned incomplete criteria" : parsed.error
     return {
       success: false,
-      error: `${parsed.error}. JSON repair failed: ${repaired.error}`,
+      error: `${parsedError}. JSON repair failed: ${repairError}`,
     }
   } catch (err) {
     const errorMsg = err instanceof Error ? err.message : String(err)
@@ -494,9 +595,10 @@ export function buildRebuttalPrompt(req: RebuttalRequest): string {
   lines.push("3. An INVALID counterargument includes: 'we'll fix it later', 'it's good enough', or vague dismissals.")
   lines.push("4. If you accept the rebuttal, revise the score to >= 9. If you reject it, keep the original score.")
   lines.push("5. Be fair but rigorous — accept valid scope arguments, reject handwaving.")
-  lines.push("6. Return ONLY the disputed criteria (not all criteria) with your revised assessment.")
+  lines.push("6. Preferred submission path: if the `submit_rebuttal_review_result` tool is available, call it exactly once with the disputed criteria instead of replying with text.")
+  lines.push("7. If that tool is unavailable, return ONLY the disputed criteria (not all criteria) with your revised assessment.")
   lines.push("")
-  lines.push("Return your assessment as a JSON object. IMPORTANT: reply with ONLY the JSON — no preamble.")
+  lines.push("JSON fallback: return your assessment as a JSON object. IMPORTANT: reply with ONLY the JSON — no preamble.")
   lines.push("```json")
   lines.push(JSON.stringify({
     criteria_results: [
@@ -532,7 +634,7 @@ export async function dispatchRebuttal(
     const featureSlug = req.featureName ? ` (${req.featureName})` : ""
     const title = `Rebuttal: ${req.phase}${featureSlug}`
     const rawText = await withTimeout(
-      ephemeralReviewPrompt(dispatcher, prompt, req.parentSessionId, req.parentModel, title),
+      ephemeralReviewPrompt(dispatcher, prompt, req.parentSessionId, req.parentModel, title, "submit_rebuttal_review_result"),
       SELF_REVIEW_TIMEOUT_MS,
       "rebuttal",
     )

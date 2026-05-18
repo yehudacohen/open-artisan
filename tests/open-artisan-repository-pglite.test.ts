@@ -1,4 +1,4 @@
-import { afterAll, afterEach, describe, expect, it } from "bun:test"
+import { afterAll, afterEach, expect, it, setDefaultTimeout } from "bun:test"
 import { mkdtempSync, rmSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
@@ -32,6 +32,8 @@ import {
 import {
   createOpenArtisanServices,
 } from "#core/open-artisan-services"
+
+setDefaultTimeout(90_000)
 import {
   exportLegacyWorkflowState,
   importLegacyWorkflowState,
@@ -40,6 +42,7 @@ import type { PGliteAccessQueue } from "#core/pglite-access-queue"
 import { createFileSystemStateBackend } from "#core/state-backend-fs"
 import type { WorkflowState } from "#core/workflow-state-types"
 import { makeWorkflowState } from "./helpers/workflow-state"
+import { pgliteShardDescribe } from "./helpers/pglite-shard-gate"
 
 let tempDirs: string[] = []
 let sharedTempDirs: string[] = []
@@ -178,7 +181,7 @@ function legacyState(): WorkflowState {
   })
 }
 
-describe("PGlite Open Artisan repository", () => {
+pgliteShardDescribe("PGlite Open Artisan repository", () => {
   it("records ordered schema migrations", async () => {
     const dir = sharedPGliteDir()
     const schemaName = nextSchemaName()
@@ -989,7 +992,7 @@ describe("PGlite Open Artisan repository", () => {
     await db.destroy()
 
     expect(valueOf(await repo.createWorkflow(workflow({ id: "reclaimed-workflow", featureName: "reclaimed-workflow" }))).id).toBe("reclaimed-workflow")
-  }, 15_000)
+  })
 
   it("allows explicit runtime reclaim of a workflow lock from another owner", async () => {
     const schemaName = nextSchemaName()

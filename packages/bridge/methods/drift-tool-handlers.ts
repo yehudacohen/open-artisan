@@ -67,6 +67,7 @@ export function createDriftToolHandlers(executeDriftToolCall: DriftToolExecutor)
     const report = buildWorkflowDriftReport({
       workflowId,
       state,
+      cwd: toolCtx.directory,
       ...(parsedArgs.data.scope === undefined ? {} : { scope: parsedArgs.data.scope }),
       ...(parsedArgs.data.drifted_artifact_keys === undefined ? {} : { artifactKeys: parsedArgs.data.drifted_artifact_keys }),
       ...(parsedArgs.data.task_ids === undefined ? {} : { taskIds: parsedArgs.data.task_ids }),

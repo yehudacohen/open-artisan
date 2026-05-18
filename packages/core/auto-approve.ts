@@ -139,7 +139,8 @@ export function buildAutoApprovePrompt(req: AutoApproveRequest): string {
   lines.push("")
   lines.push("## Response Format")
   lines.push("")
-  lines.push("Respond with a JSON block (and nothing else):")
+  lines.push("Preferred submission path: if the `submit_auto_approve_result` tool is available, call it exactly once with the approval decision instead of replying with text.")
+  lines.push("If that tool is unavailable, respond with a JSON block (and nothing else):")
   lines.push("```json")
   lines.push(JSON.stringify({
     approve: true,
@@ -176,7 +177,7 @@ async function ephemeralAutoApprovePrompt(
     ...(parentModel ? { model: parentModel } : {}),
   })
   try {
-    return await session.prompt(prompt)
+    return await session.prompt(prompt, { submissionTool: { name: "submit_auto_approve_result" } })
   } finally {
     await session.destroy()
   }
@@ -187,7 +188,7 @@ async function ephemeralAutoApprovePrompt(
 // ---------------------------------------------------------------------------
 
 export function parseAutoApproveResult(raw: string): AutoApproveResult {
-  let parsed: { approve: boolean; confidence: number; reasoning: string; feedback?: string }
+  let parsed: { approve: boolean; confidence: number | string; reasoning: string; feedback?: string }
   try {
     const json = extractJsonFromText(raw)
     parsed = JSON.parse(json)
@@ -208,17 +209,18 @@ export function parseAutoApproveResult(raw: string): AutoApproveResult {
   if (typeof parsed.approve !== "boolean") {
     return { success: false, error: "Missing or invalid 'approve' field in auto-approver response" }
   }
-  if (typeof parsed.confidence !== "number" || parsed.confidence < 0 || parsed.confidence > 1) {
+  const confidence = typeof parsed.confidence === "string" ? Number(parsed.confidence) : parsed.confidence
+  if (typeof confidence !== "number" || !Number.isFinite(confidence) || confidence < 0 || confidence > 1) {
     return { success: false, error: `Invalid 'confidence' value: ${parsed.confidence} (must be 0.0-1.0)` }
   }
 
   // Override approve based on confidence threshold — don't trust the model's self-assessment
-  const shouldApprove = parsed.confidence >= AUTO_APPROVE_CONFIDENCE_THRESHOLD
+  const shouldApprove = confidence >= AUTO_APPROVE_CONFIDENCE_THRESHOLD
 
   return {
     success: true,
     approve: shouldApprove,
-    confidence: parsed.confidence,
+    confidence,
     reasoning: parsed.reasoning ?? "",
     ...(shouldApprove ? {} : { feedback: parsed.feedback ?? parsed.reasoning ?? "Revision needed" }),
   }

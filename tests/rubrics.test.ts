@@ -79,6 +79,14 @@ describe("shared rubrics", () => {
     expect(criteria).toContain("quality.design-excellence")
   })
 
+  it("treats PLANNING allowlists as candidate approval artifacts", () => {
+    const criteria = buildPhaseAcceptanceCriteria("PLANNING", "INCREMENTAL")
+
+    expect(criteria).toContain("proposed/candidate file allowlist")
+    expect(criteria).toContain("do not require candidate files to already be present")
+    expect(criteria).toContain("promotes the candidate allowlist to active state")
+  })
+
   it("clarifies INTERFACES review scope for mixed contract modules", () => {
     const criteria = buildPhaseAcceptanceCriteria("INTERFACES", "INCREMENTAL")
 

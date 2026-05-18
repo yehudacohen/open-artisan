@@ -12,8 +12,9 @@
  * - Severity defaults: unknown severity treated as "blocking"
  */
 import { describe, expect, it, mock } from "bun:test"
-import { dispatchSelfReview, dispatchRebuttal, buildRebuttalPrompt, buildReviewPrompt } from "#core/self-review"
+import { dispatchSelfReview, dispatchRebuttal, buildRebuttalPrompt, buildReviewPrompt, extractExpectedBlockingCriteria } from "#core/self-review"
 import type { SelfReviewRequest } from "#core/self-review"
+import { encodeSubagentToolSubmission } from "#core/subagent-dispatcher"
 import type { SubagentDispatcher, SubagentSession } from "#core/subagent-dispatcher"
 import type { CriterionResult, RebuttalRequest } from "#core/review-types"
 
@@ -140,6 +141,7 @@ describe("dispatchSelfReview — all criteria met", () => {
     const dispatcher = makeDispatcher(JSON.stringify({
       satisfied: true,
       criteria_results: [
+        { criterion_id: "planning.user-requirements", criterion: "All requirements addressed", met: true, evidence: "section exists", severity: "blocking" },
         { criterion_id: "planning.scope-boundaries", criterion: "Scope boundaries explicit", met: true, evidence: "section exists", severity: "blocking" },
       ],
     }))
@@ -147,7 +149,7 @@ describe("dispatchSelfReview — all criteria met", () => {
 
     expect(result.success).toBe(true)
     if (!result.success) return
-    expect(result.criteriaResults[0]?.criterionId).toBe("planning.scope-boundaries")
+    expect(result.criteriaResults.some((criterion) => criterion.criterionId === "planning.scope-boundaries")).toBe(true)
   })
 
   it("uses ephemeral session: create() and delete() each called once", async () => {
@@ -158,11 +160,11 @@ describe("dispatchSelfReview — all criteria met", () => {
     expect(dispatcher._destroyMock.mock.calls).toHaveLength(1)
   })
 
-  it("does not request adapter-level JSON schema formatting", async () => {
+  it("requests reviewer tool submission when the adapter supports it", async () => {
     const dispatcher = makeDispatcher(makeReviewResponse())
     await dispatchSelfReview(dispatcher, BASE_REQ)
 
-    expect(dispatcher._promptMock.mock.calls[0]?.[1]).toBeUndefined()
+    expect(dispatcher._promptMock.mock.calls[0]?.[1]).toEqual({ submissionTool: { name: "submit_phase_review_result" } })
   })
 })
 
@@ -340,6 +342,7 @@ describe("dispatchSelfReview — suggestion criteria are non-blocking", () => {
       satisfied: true,
       criteria: [
         { criterion: "All requirements addressed", met: true, evidence: "all present", severity: "blocking" },
+        { criterion: "Scope boundaries explicit", met: true, evidence: "boundaries listed", severity: "blocking" },
         { criterion: "Rationale documented", met: false, evidence: "no rationale section", severity: "suggestion" },
       ],
     })
@@ -366,6 +369,7 @@ describe("dispatchSelfReview — unknown severity defaults to blocking", () => {
       satisfied: true,
       criteria_results: [
         { criterion: "A criterion", met: false, evidence: "no evidence", severity: "unknown-value" },
+        { criterion: "Second criterion", met: true, evidence: "ok", severity: "blocking" },
       ],
     })
     const dispatcher = makeDispatcher(resp)
@@ -439,6 +443,28 @@ describe("dispatchSelfReview — response shape variants", () => {
 })
 
 describe("dispatchSelfReview — invalid JSON recovery", () => {
+  it("rejects assistant text without JSON repair when tool submission is required", async () => {
+    const dispatcher = makeDispatcher("**Evaluating deployment plans**\nThis is prose, not a tool call.")
+
+    const result = await dispatchSelfReview(dispatcher, { ...BASE_REQ, requireToolSubmission: true })
+
+    expect(result.success).toBe(false)
+    if (result.success) return
+    expect(selfReviewErrorText(result)).toContain("Expected submit_phase_review_result tool submission")
+    expect(selfReviewErrorText(result)).not.toContain("Reviewer returned invalid JSON")
+    expect(dispatcher._promptMock).toHaveBeenCalledTimes(1)
+  })
+
+  it("accepts encoded reviewer tool submissions when tool submission is required", async () => {
+    const dispatcher = makeDispatcher(encodeSubagentToolSubmission("submit_phase_review_result", makeReviewResponse()))
+
+    const result = await dispatchSelfReview(dispatcher, { ...BASE_REQ, requireToolSubmission: true })
+
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    expect(result.satisfied).toBe(true)
+  })
+
   it("retries once with a JSON-only repair prompt when reviewer returns prose", async () => {
     const dispatcher = makeDispatcherSequence([
       "* All criteria look good, but this is not JSON.",
@@ -455,7 +481,7 @@ describe("dispatchSelfReview — invalid JSON recovery", () => {
     expect(repairPrompt).toContain("Return ONLY a valid JSON object")
   })
 
-  it("does not request adapter-level JSON schema formatting for review or repair prompts", async () => {
+  it("requests reviewer tool submission without adapter-level JSON schema formatting for review or repair prompts", async () => {
     const dispatcher = makeDispatcherSequence([
       "* First invalid reviewer response.",
       makeReviewResponse(),
@@ -466,8 +492,10 @@ describe("dispatchSelfReview — invalid JSON recovery", () => {
     expect(result.success).toBe(true)
     const firstOptions = dispatcher._promptMock.mock.calls[0]?.[1] as any
     const repairOptions = dispatcher._promptMock.mock.calls[1]?.[1] as any
-    expect(firstOptions).toBeUndefined()
-    expect(repairOptions).toBeUndefined()
+    expect(firstOptions).toEqual({ submissionTool: { name: "submit_phase_review_result" } })
+    expect(repairOptions).toEqual({ submissionTool: { name: "submit_phase_review_result" } })
+    expect(firstOptions?.responseFormat).toBeUndefined()
+    expect(repairOptions?.responseFormat).toBeUndefined()
   })
 
   it("returns an actionable snippet when reviewer JSON repair also fails", async () => {
@@ -533,6 +561,38 @@ describe("dispatchSelfReview — prompt construction", () => {
     expect(getPromptText(dispatcher)).toContain("Must have tests")
   })
 
+  it("includes a full required checklist and forbids failed-only reviewer output", async () => {
+    const criteria = `**Blocking criteria (must all pass to advance):**
+1. First standard criterion
+2. [Q] Quality criterion
+
+**Suggestion criteria (non-blocking):**
+1. Optional suggestion`
+    const dispatcher = makeDispatcher(makeReviewResponse())
+    await dispatchSelfReview(dispatcher, { ...BASE_REQ, criteriaText: criteria })
+    const prompt = getPromptText(dispatcher)
+
+    expect(prompt).toContain("Full Required Blocking/Quality Checklist")
+    expect(prompt).toContain("First standard criterion")
+    expect(prompt).toContain("[Q] Quality criterion")
+    expect(prompt).toContain("Do not return only failed criteria")
+  })
+
+  it("tells PLANNING reviewers candidate allowlists do not need to be active yet", async () => {
+    const dispatcher = makeDispatcher(makeReviewResponse())
+    await dispatchSelfReview(dispatcher, {
+      ...BASE_REQ,
+      mode: "INCREMENTAL",
+      fileAllowlist: ["/workspace/packages/core/self-review.ts"],
+      fileAllowlistSource: "planning-artifact",
+    })
+    const prompt = getPromptText(dispatcher)
+
+    expect(prompt).toContain("candidate replacement allowlist")
+    expect(prompt).toContain("not against any stale active allowlist")
+    expect(prompt).toContain("Do not fail the PLANNING artifact merely because candidate files are not already in the active approved allowlist")
+  })
+
   it("includes upstream summary in the prompt when provided", async () => {
     const dispatcher = makeDispatcher(makeReviewResponse())
     await dispatchSelfReview(dispatcher, { ...BASE_REQ, upstreamSummary: "Conventions: use tabs" })
@@ -556,15 +616,58 @@ describe("dispatchSelfReview — prompt construction", () => {
 // ---------------------------------------------------------------------------
 
 describe("dispatchSelfReview — empty criteria list", () => {
-  it("returns satisfied=true when criteria_results is empty (nothing to fail)", async () => {
+  it("rejects empty criteria_results after incomplete-output repair also fails", async () => {
     const resp = JSON.stringify({ satisfied: true, criteria_results: [] })
     const dispatcher = makeDispatcher(resp)
     const result = await dispatchSelfReview(dispatcher, BASE_REQ)
 
+    expect(result.success).toBe(false)
+    if (result.success) return
+    expect(result.error).toContain("Reviewer returned only 0 blocking criteria")
+    expect(result.error).toContain("Criteria repair failed")
+  })
+
+  it("repairs incomplete reviewer output by prompting for the full criteria checklist", async () => {
+    const incomplete = JSON.stringify({
+      satisfied: false,
+      criteria_results: [
+        { criterion: "Allowlist adequacy", met: false, evidence: "candidate allowlist incomplete", severity: "blocking" },
+      ],
+    })
+    const repaired = JSON.stringify({
+      satisfied: true,
+      criteria_results: [
+        { criterion: "All requirements addressed", met: true, evidence: "plan.md:10", severity: "blocking" },
+        { criterion: "Scope boundaries explicit", met: true, evidence: "plan.md:22", severity: "blocking" },
+      ],
+    })
+    const dispatcher = makeDispatcherSequence([incomplete, repaired])
+
+    const result = await dispatchSelfReview(dispatcher, BASE_REQ)
+
     expect(result.success).toBe(true)
     if (!result.success) return
-    expect(result.satisfied).toBe(true)
-    expect(result.criteriaResults).toHaveLength(0)
+    expect(result.criteriaResults).toHaveLength(2)
+    expect(dispatcher._promptMock.mock.calls).toHaveLength(2)
+    const repairPrompt = dispatcher._promptMock.mock.calls[1]?.[0] as string
+    expect(repairPrompt).toContain("previous review output was incomplete")
+    expect(repairPrompt).toContain("Full Required Checklist To Echo")
+  })
+})
+
+describe("extractExpectedBlockingCriteria", () => {
+  it("extracts numbered blocking and quality criteria before suggestions", () => {
+    const criteria = `**Blocking criteria (must all pass to advance):**
+1. Standard criterion
+2. [Q] Quality criterion
+
+**Suggestion criteria (non-blocking):**
+1. Optional suggestion`
+
+    expect(extractExpectedBlockingCriteria(criteria)).toEqual([
+      "Standard criterion",
+      "[Q] Quality criterion",
+    ])
   })
 })
 
@@ -826,6 +929,7 @@ describe("dispatchRebuttal — session lifecycle", () => {
     await dispatchRebuttal(dispatcher, BASE_REBUTTAL_REQ)
 
     expect(dispatcher._destroyMock.mock.calls).toHaveLength(1)
+    expect(dispatcher._promptMock.mock.calls[0]?.[1]).toEqual({ submissionTool: { name: "submit_rebuttal_review_result" } })
   })
 })
 

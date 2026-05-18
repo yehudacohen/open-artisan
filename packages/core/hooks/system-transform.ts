@@ -70,6 +70,43 @@ function getPhasePromptFilename(phase: Phase, mode: WorkflowMode | null): string
   }
 }
 
+function buildParserGuidance(phase: Phase, phaseState: PhaseState): string | null {
+  if (phaseState !== "DRAFT" && phaseState !== "REVISE") return null
+  if (phase === "PLANNING") {
+    return `### Required Planning Parser Sections
+
+Include this exact scenario section shape in the planning artifact so downstream review can preserve the real-world acceptance context:
+
+## Real-World Acceptance Scenario
+
+### Scenario
+Describe the user's concrete workflow.
+
+### Required Capabilities
+- Capability the finished work must provide
+
+### Acceptance Checks
+- User-visible check that proves the capability works
+
+### Explicit Non-Goals
+- Scope boundary that should not be implemented`
+  }
+  if (phase === "IMPL_PLAN") {
+    return `### Required IMPL_PLAN Parser Shape
+
+Use this task metadata shape so the implementation DAG parser can create deterministic task boundaries:
+
+## Task task-001: Short task title
+**Dependencies:** none
+**Expected tests:** tests/example.test.ts
+**Verification commands:** bun test tests/example.test.ts, bun run typecheck
+**Files:** src/example.ts
+**Category:** standalone
+**Complexity:** small`
+  }
+  return null
+}
+
 // ---------------------------------------------------------------------------
 // State header builder
 // ---------------------------------------------------------------------------
@@ -256,6 +293,8 @@ export function buildWorkflowSystemPrompt(state: WorkflowState, options: Workflo
   if (promptFile) {
     blocks.push(loadPrompt(promptFile))
   }
+  const parserGuidance = buildParserGuidance(state.phase, state.phaseState)
+  if (parserGuidance) blocks.push(parserGuidance)
 
   // 2b. Design document constraint block (if a design doc is tracked)
   const designDocPath = state.artifactDiskPaths?.design ?? null
@@ -426,8 +465,9 @@ export function buildSubagentContext(parentState: WorkflowState): string {
         t.status === "human-gated" ? "HUMAN-GATED" :
         "PENDING"
       const tests = t.expectedTests.length > 0 ? t.expectedTests.join(", ") : "—"
+      const commands = (t.verificationCommands ?? []).length > 0 ? ` Commands: ${(t.verificationCommands ?? []).join(", ")}` : ""
       const desc = t.description.length > 80 ? t.description.slice(0, 77) + "..." : t.description
-      lines.push(`| ${t.id} | ${statusIcon} | ${desc} | ${tests} |`)
+      lines.push(`| ${t.id} | ${statusIcon} | ${desc} | ${tests}${commands} |`)
     }
     lines.push("")
   }

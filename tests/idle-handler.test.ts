@@ -97,6 +97,24 @@ describe("handleIdle — reprompt for active states", () => {
     expect(decision.message).toContain("do not keep revising the artifact")
   })
 
+  it("disables build-artisan on reviewer runtime failure instead of reprompting", () => {
+    const state = makeState({
+      phase: "IMPLEMENTATION",
+      phaseState: "REVIEW",
+      activeAgent: "build-artisan",
+      retryCount: 0,
+      latestReviewResults: [{
+        criterion: "Isolated reviewer runtime failed",
+        met: false,
+        evidence: "self-review timed out",
+      }],
+    })
+    const decision = handleIdle(state)
+    expect(decision.action).toBe("disable")
+    if (decision.action !== "disable") return
+    expect(decision.message).toContain("build mode stalled")
+  })
+
   it("reprompts in REVIEW state on second idle", () => {
     const state = makeState({ phaseState: "REVIEW", retryCount: 1 })
     const decision = handleIdle(state)
@@ -168,6 +186,12 @@ describe("handleIdle — escalate after MAX_IDLE_RETRIES", () => {
     const state = makeState({ phaseState: "DRAFT", retryCount: MAX_IDLE_RETRIES })
     const decision = handleIdle(state)
     expect(decision.action).toBe("escalate")
+  })
+
+  it("disables build-artisan instead of escalating when retryCount reaches the limit", () => {
+    const state = makeState({ activeAgent: "build-artisan", phaseState: "DRAFT", retryCount: MAX_IDLE_RETRIES })
+    const decision = handleIdle(state)
+    expect(decision.action).toBe("disable")
   })
 
   it("still reprompts when retryCount === MAX_IDLE_RETRIES - 1", () => {

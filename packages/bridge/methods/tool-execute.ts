@@ -26,49 +26,48 @@ import { handleQueryChildWorkflow, handleQueryParentWorkflow } from "./query-wor
 import { handleAnalyzeTaskBoundaryChange, handleApplyTaskBoundaryChange } from "./task-boundary-tool-handlers"
 import { handleCheckPriorWorkflow, handleResetTask, handleResolveHumanGate } from "./implementation-control-tool-handlers"
 import { createAutoApproveToolHandlers } from "./auto-approve-tool-handlers"
-import { artifactFilesHash, buildImplPlanExecutableContractFailureCriterion, handleMarkSatisfied, handleRequestReview } from "./review-feedback-tool-handlers"
+import { handleSubmitPhaseReview, handleSubmitTaskReview, taskReviewArtifactHash } from "./review-submission-tool-handlers"
+import { issueReviewSubmissionToken } from "./review-submission-tokens"
+import { artifactFilesHash, handleMarkSatisfied, handleRequestReview } from "./review-feedback-tool-handlers"
 import { handleSubmitFeedback } from "./feedback-tool-handlers"
+import { recordAllowlistExpansionRequest } from "../../core/tools/allowlist-expansion"
+import { approveCurrentTaskScopeExpansion } from "../../core/tools/current-task-scope"
+import { repairCurrentTaskBoundaryFromImplPlan } from "../../core/tools/impl-plan-boundary-repair"
+import { buildIncidentSummary } from "../../core/tool-failure-history"
 
-import { createHash, randomBytes } from "node:crypto"
+import { createHash } from "node:crypto"
 import { resolve } from "node:path"
 import { readFileSync } from "node:fs"
 import { parseSelectModeArgs } from "../../core/tools/select-mode"
 import { processMarkTaskComplete, validateMarkTaskCompletePhase } from "../../core/tools/mark-task-complete"
-import { buildAdjacentTasksForTask, buildTaskReviewAcceptancePlan, buildTaskReviewPrompt, parseTaskReviewResult } from "../../core/task-review"
-import type { TaskReviewSuccess } from "../../core/task-review"
-import { buildReviewPrompt, parseReviewResult } from "../../core/self-review"
-import { MAX_TASK_REVIEW_ITERATIONS, REVIEW_SUBMISSION_TOKEN_BYTES, REVIEW_SUBMISSION_TOKEN_TTL_MS } from "../../core/constants"
+import { buildAdjacentTasksForTask, buildTaskReviewPrompt } from "../../core/task-review"
+import { buildReviewPrompt } from "../../core/self-review"
 import {
   computeMarkScanCompleteTransition,
-  computeMarkSatisfiedTransition,
   computeMarkAnalyzeCompleteTransition,
   computeProposeBacktrackTransition,
 } from "../../core/tools/transitions"
 import { PHASE_TO_ARTIFACT } from "../../core/artifacts"
-import { applyDispatch, nextSchedulerDecisionForInput, readDecisionInput } from "../../core/scheduler"
-import { buildInvalidPhaseReviewJsonReason, normalizePhaseReviewOutput } from "../../core/phase-review"
 import { buildWorkflowSwitchMessage, parkCurrentWorkflowSession } from "../../core/session-switch"
 import type { DbAgentLease } from "../../core/open-artisan-repository"
 import { getAcceptanceCriteria } from "../../core/hooks/system-transform"
 import { resolveArtifactPaths } from "../../core/tools/artifact-paths"
-import { extractJsonFromText } from "../../core/utils"
-import { countExpectedBlockingCriteria } from "../../core/tools/mark-satisfied"
 import { deriveReviewFileAllowlist } from "../../core/tools/plan-allowlist"
 import {
   MarkAnalyzeCompleteToolSchema,
   MarkScanCompleteToolSchema,
   MarkTaskCompleteToolSchema,
+  ApproveCurrentTaskScopeExpansionToolSchema,
   ProposeBacktrackToolSchema,
-  SubmitPhaseReviewToolSchema,
-  SubmitTaskReviewToolSchema,
+  RequestAllowlistExpansionToolSchema,
+  RepairCurrentTaskBoundaryFromImplPlanToolSchema,
+  SummarizeWorkflowIncidentToolSchema,
   StructuralTransitionToolSchema,
 } from "../../core/schemas"
 import { parseToolArgs } from "../../core/tool-args"
 import {
   loadWorkflowFileClaims,
-  persistPhaseReviewResult,
   persistTaskDispatchClaims,
-  persistTaskReviewResult,
   persistWorktreeObservations,
   workflowDbId,
 } from "../../core/runtime-persistence"
@@ -85,6 +84,57 @@ function requireState(ctx: BridgeContext, sessionId: string): WorkflowState {
     throw new JSONRPCErrorException(`Session "${sessionId}" not found`, SESSION_NOT_FOUND)
   }
   return state
+}
+
+const handleRequestAllowlistExpansion: ToolHandler = async (args, toolCtx, ctx) => {
+  const state = requireState(ctx, toolCtx.sessionId)
+  const parsed = parseToolArgs(RequestAllowlistExpansionToolSchema, args)
+  if (!parsed.success) return `Error: ${parsed.error}`
+  let message = ""
+  await ctx.engine!.store.update(toolCtx.sessionId, (draft) => {
+    const result = recordAllowlistExpansionRequest(draft, parsed.data, toolCtx.directory)
+    message = result.success ? result.message : `Error: ${result.error}`
+  })
+  return message || `Error: Failed to record allowlist expansion for ${state.phase}.`
+}
+
+const handleApproveCurrentTaskScopeExpansion: ToolHandler = async (args, toolCtx, ctx) => {
+  requireState(ctx, toolCtx.sessionId)
+  const parsed = parseToolArgs(ApproveCurrentTaskScopeExpansionToolSchema, args)
+  if (!parsed.success) return `Error: ${parsed.error}`
+  let message = ""
+  await ctx.engine!.store.update(toolCtx.sessionId, (draft) => {
+    const result = approveCurrentTaskScopeExpansion(draft, parsed.data, toolCtx.directory)
+    message = result.success ? result.message : `Error: ${result.error}`
+  })
+  return message
+}
+
+const handleRepairCurrentTaskBoundaryFromImplPlan: ToolHandler = async (args, toolCtx, ctx) => {
+  const state = requireState(ctx, toolCtx.sessionId)
+  const parsed = parseToolArgs(RepairCurrentTaskBoundaryFromImplPlanToolSchema, args)
+  if (!parsed.success) return `Error: ${parsed.error}`
+  const implPlanPath = state.artifactDiskPaths.impl_plan
+  if (!implPlanPath) return "Error: No approved IMPL_PLAN artifact path is recorded."
+  let planContent = ""
+  try {
+    planContent = readFileSync(implPlanPath, "utf-8")
+  } catch (error) {
+    return `Error: Could not read approved IMPL_PLAN artifact at ${implPlanPath}: ${error instanceof Error ? error.message : String(error)}`
+  }
+  let message = ""
+  await ctx.engine!.store.update(toolCtx.sessionId, (draft) => {
+    const repairArgs = parsed.data.task_id ? { task_id: parsed.data.task_id, reason: parsed.data.reason } : { reason: parsed.data.reason }
+    const result = repairCurrentTaskBoundaryFromImplPlan(draft, planContent, toolCtx.directory, repairArgs)
+    message = result.success ? result.message : `Error: ${result.error}`
+  })
+  return message
+}
+
+const handleSummarizeWorkflowIncident: ToolHandler = async (args, toolCtx, ctx) => {
+  const parsed = parseToolArgs(SummarizeWorkflowIncidentToolSchema, args)
+  if (!parsed.success) return `Error: ${parsed.error}`
+  return buildIncidentSummary(requireState(ctx, toolCtx.sessionId))
 }
 
 function subagentError(toolName: string, feature: string): string {
@@ -104,15 +154,6 @@ function agentKindFromSession(agent: string | null | undefined): DbAgentLease["a
   return "other"
 }
 
-async function persistCurrentTaskClaim(
-  services: OpenArtisanServices | null | undefined,
-  state: WorkflowState | null | undefined,
-  sessionId: string,
-): Promise<void> {
-  if (!state?.currentTaskId) return
-  await persistTaskDispatchClaims(services, state, state.currentTaskId, sessionId, agentKindFromSession(state.activeAgent))
-}
-
 function buildApprovedArtifactMarker(
   state: WorkflowState,
   artifactKey: ArtifactKey,
@@ -129,193 +170,8 @@ function buildApprovedArtifactMarker(
   return `approved-at-${Date.now()}`
 }
 
-function buildRuntimeSchedulerDecision(state: {
-  implDag: import("../../core/dag").TaskNode[] | null
-  concurrency: { maxParallelTasks: number }
-}) {
-  const input = readDecisionInput({ implDag: state.implDag, concurrency: state.concurrency })
-  const evaluation = nextSchedulerDecisionForInput(input)
-  return { evaluation, fallbackDecision: evaluation.decision }
-}
-
-function formatSchedulerDecisionMessage(decision: ReturnType<typeof buildRuntimeSchedulerDecision>["fallbackDecision"]): string {
-  switch (decision.action) {
-    case "dispatch":
-      return decision.prompt
-    case "dispatch-batch":
-      return `Ready to dispatch ${decision.tasks.length} task(s).`
-    case "complete":
-    case "blocked":
-    case "awaiting-human":
-    case "error":
-      return decision.message
-  }
-}
-
 function buildTaskReviewPendingMessage(taskId: string, implementationSummary: string): string {
   return `Task "${taskId}" marked complete.\nSummary: ${implementationSummary}`
-}
-
-function buildTaskReviewResolvedMessage(
-  taskId: string,
-  implDag: import("../../core/dag").TaskNode[] | null,
-  concurrency: { maxParallelTasks: number },
-): string {
-  const { evaluation, fallbackDecision } = buildRuntimeSchedulerDecision({ implDag, concurrency })
-
-  if (fallbackDecision.action === "dispatch") {
-    return (
-      `**Next task ready:**\n${fallbackDecision.prompt}`
-    )
-  }
-
-  if (fallbackDecision.action === "complete") {
-    return `**All DAG tasks complete.** ${fallbackDecision.message}`
-  }
-
-  return `**${formatSchedulerDecisionMessage(fallbackDecision)}**`
-}
-
-function buildLatestTaskReviewResults(taskId: string, review: TaskReviewSuccess): WorkflowState["latestReviewResults"] {
-  const results: NonNullable<WorkflowState["latestReviewResults"]> = [{
-    criterion: `Task ${taskId} isolated review verdict`,
-    met: review.passed,
-    evidence: review.reasoning || (review.passed ? "Reviewer accepted the completed task." : "Reviewer rejected the completed task."),
-  }]
-
-  review.issues.forEach((issue, index) => {
-    results.push({
-      criterion: `Task ${taskId} review issue ${index + 1}`,
-      met: false,
-      evidence: issue,
-    })
-  })
-
-  if (review.scores) {
-    results.push({
-      criterion: `Task ${taskId} code quality score`,
-      met: review.scores.code_quality >= 8,
-      evidence: `Code quality score ${review.scores.code_quality}/10`,
-      score: `${review.scores.code_quality}/10`,
-    })
-    results.push({
-      criterion: `Task ${taskId} error handling score`,
-      met: review.scores.error_handling >= 8,
-      evidence: `Error handling score ${review.scores.error_handling}/10`,
-      score: `${review.scores.error_handling}/10`,
-    })
-  }
-
-  return results
-}
-
-function isTaskReviewRuntimeFailure(review: TaskReviewSuccess): boolean {
-  return review.issues.some((issue) =>
-    issue.startsWith("Review dispatch failed:") || issue.includes("ISOLATED_REVIEW_FAILED:"),
-  )
-}
-
-function transitionOrThrow(
-  state: WorkflowState,
-  event: WorkflowEvent,
-  ctx: BridgeContext,
-): { phase: WorkflowState["phase"]; phaseState: WorkflowState["phaseState"] } {
-  const outcome = ctx.engine!.sm.transition(state.phase, state.phaseState, event, state.mode)
-  if (!outcome.ok) throw new Error(outcome.message)
-  return { phase: outcome.nextPhase, phaseState: outcome.nextPhaseState }
-}
-
-function nextImplementationAuthoringState(
-  state: WorkflowState,
-  plan: ReturnType<typeof buildTaskReviewAcceptancePlan>,
-  ctx: BridgeContext,
-): { phase: WorkflowState["phase"]; phaseState: WorkflowState["phaseState"] } {
-  const afterReview = transitionOrThrow(state, "task_review_pass", ctx)
-  if (plan.schedulerDecision.action === "dispatch" || plan.schedulerDecision.action === "complete") {
-    const schedulingState = { ...state, phase: afterReview.phase, phaseState: afterReview.phaseState }
-    return transitionOrThrow(schedulingState, "scheduling_complete", ctx)
-  }
-  return {
-    phase: afterReview.phase,
-    phaseState: plan.nextPhaseState ?? afterReview.phaseState,
-  }
-}
-
-function applyTaskReviewAcceptance(
-  draft: WorkflowState,
-  plan: ReturnType<typeof buildTaskReviewAcceptancePlan>,
-  nextState: { phase: WorkflowState["phase"]; phaseState: WorkflowState["phaseState"] },
-): void {
-  const existing = new Set(draft.reviewArtifactFiles)
-  for (const f of plan.completedTaskFiles) {
-    if (!existing.has(f)) draft.reviewArtifactFiles.push(f)
-  }
-  draft.phase = nextState.phase
-  draft.phaseState = nextState.phaseState
-  draft.currentTaskId = plan.nextTaskId
-  if (plan.nextTaskId) {
-    draft.implDag = applyDispatch(draft, plan.nextTaskId)
-  }
-  if (plan.resetUserGateMessage) {
-    draft.userGateMessageReceived = false
-  }
-  draft.taskCompletionInProgress = null
-  draft.taskReviewCount = 0
-}
-
-function cleanupExpiredReviewTokens(ctx: BridgeContext): void {
-  const tokens = ctx.reviewSubmissionTokens
-  if (!tokens) return
-  const now = Date.now()
-  for (const [token, record] of tokens.entries()) {
-    if (record.expiresAt <= now) tokens.delete(token)
-  }
-}
-
-function issueReviewSubmissionToken(
-  ctx: BridgeContext,
-  sessionId: string,
-  kind: "task" | "phase" | "auto-approve",
-  subject: string,
-  artifactHash?: string | null,
-): string {
-  cleanupExpiredReviewTokens(ctx)
-  const token = randomBytes(REVIEW_SUBMISSION_TOKEN_BYTES).toString("hex")
-  const tokens = ctx.reviewSubmissionTokens ?? new Map()
-  tokens.set(token, {
-    sessionId,
-    kind,
-    subject,
-    expiresAt: Date.now() + REVIEW_SUBMISSION_TOKEN_TTL_MS,
-    ...(artifactHash ? { artifactHash } : {}),
-  })
-  ctx.reviewSubmissionTokens = tokens
-  return token
-}
-
-function consumeReviewSubmissionToken(
-  ctx: BridgeContext,
-  token: string,
-  sessionId: string,
-  kind: "task" | "phase" | "auto-approve",
-  subject: string,
-  consume = true,
-): { error: string | null; artifactHash: string | null } {
-  cleanupExpiredReviewTokens(ctx)
-  const record = ctx.reviewSubmissionTokens?.get(token)
-  if (!record) return { error: "Invalid or expired isolated reviewer token. Request a fresh review context and retry.", artifactHash: null }
-  if (record.sessionId !== sessionId || record.kind !== kind || record.subject !== subject) {
-    return { error: "Isolated reviewer token does not match the pending review. Request a fresh review context and retry.", artifactHash: null }
-  }
-  if (consume) ctx.reviewSubmissionTokens?.delete(token)
-  return { error: null, artifactHash: record.artifactHash ?? null }
-}
-
-function taskReviewArtifactHash(state: WorkflowState, taskId: string, directory: string): string | null {
-  const task = state.implDag?.find((candidate) => candidate.id === taskId)
-  if (!task) return null
-  const files = [...(task.expectedFiles ?? []), ...(task.expectedTests ?? [])]
-  return artifactFilesHash(files, directory)
 }
 
 function appendReviewerTokenInstruction(prompt: string, token: string): string {
@@ -394,6 +250,7 @@ function buildPhaseReviewContext(
     artifactPaths,
     fallbackAllowlist: state.fileAllowlist,
     cwd: directory,
+    pendingAllowlistExpansions: state.pendingAllowlistExpansions,
   })
 
   const conventionsPath = state.artifactDiskPaths["conventions"]
@@ -414,33 +271,6 @@ function buildPhaseReviewContext(
     ...(Object.keys(state.artifactDiskPaths).length > 0 ? { artifactDiskPaths: state.artifactDiskPaths } : {}),
     ...(Object.keys(state.approvedArtifactFiles ?? {}).length > 0 ? { approvedArtifactFiles: state.approvedArtifactFiles ?? {} } : {}),
   })
-}
-
-function buildReviewerFailureCriteria(state: WorkflowState, reason: string) {
-  const criteriaText = getAcceptanceCriteria(state.phase, state.phaseState, state.mode, state.artifactDiskPaths?.design ?? null)
-  const expectedCount = Math.max(countExpectedBlockingCriteria(criteriaText), 1)
-  return Array.from({ length: expectedCount }, (_, i) => ({
-    criterion: `Isolated reviewer failed to evaluate criterion ${i + 1}`,
-    met: false,
-    evidence: `Isolated phase review failed: ${reason}. The artifact must be revised or review infrastructure fixed before approval.`,
-    severity: "blocking" as const,
-  }))
-}
-
-function countSubmittedBlockingCriteria(criteria: Array<{ severity?: "blocking" | "suggestion" | "design-invariant" }>): number {
-  return criteria.filter((criterion) => {
-    const severity = criterion.severity ?? "blocking"
-    return severity === "blocking" || severity === "design-invariant"
-  }).length
-}
-
-function buildIncompletePhaseReviewReason(state: WorkflowState, submittedBlockingCount: number, reviewOutput: string): string | null {
-  if (submittedBlockingCount === 0) return null
-  const criteriaText = getAcceptanceCriteria(state.phase, state.phaseState, state.mode, state.artifactDiskPaths?.design ?? null)
-  const expectedBlockingCount = countExpectedBlockingCriteria(criteriaText)
-  if (expectedBlockingCount <= 0 || submittedBlockingCount >= expectedBlockingCount) return null
-  const excerpt = reviewOutput.length > 500 ? `${reviewOutput.slice(0, 500)}...` : reviewOutput
-  return `Reviewer returned only ${submittedBlockingCount} blocking criteria, but ${state.phase} requires ${expectedBlockingCount}. The isolated reviewer output was incomplete; raw output: ${excerpt}`
 }
 
 // ---------------------------------------------------------------------------
@@ -602,7 +432,6 @@ const handleMarkTaskComplete: ToolHandler = async (args, toolCtx, ctx) => {
     draft.implDag = result.updatedNodes
     draft.currentTaskId = parsedArgs.data.task_id
     draft.taskCompletionInProgress = parsedArgs.data.task_id
-    draft.taskReviewCount = (draft.taskReviewCount ?? 0) + 1
     draft.latestReviewResults = null
     draft.phaseState = "TASK_REVIEW"
   })
@@ -626,192 +455,6 @@ const handleMarkTaskComplete: ToolHandler = async (args, toolCtx, ctx) => {
     "\n\n**Per-task review required.** The adapter hook must request isolated review context and submit the reviewer result. " +
     "Do not call `submit_task_review` from the authoring conversation."
   )
-}
-
-// ---- submit_task_review ----
-
-const handleSubmitTaskReview: ToolHandler = async (args, toolCtx, ctx) => {
-  const { store } = ctx.engine!
-  const state = requireState(ctx, toolCtx.sessionId)
-
-  const recoveredTaskId = state.taskCompletionInProgress ?? (state.phase === "IMPLEMENTATION" && state.phaseState === "TASK_REVIEW" ? state.currentTaskId : null)
-  if (!recoveredTaskId) {
-    return "Error: No task review is pending. Call mark_task_complete first."
-  }
-
-  const parsedArgs = parseToolArgs(SubmitTaskReviewToolSchema, args)
-  if (!parsedArgs.success) return `Error: ${parsedArgs.error}`
-  const reviewOutput = parsedArgs.data.review_output.trim()
-
-  const taskId = recoveredTaskId
-  const review = parseTaskReviewResult(reviewOutput)
-
-  // Parse failure — don't accept, ask agent to retry
-  if (!review.success) {
-    return `Error: Failed to parse review output: ${review.error}. Re-run the isolated reviewer and submit again.`
-  }
-  const tokenResult = consumeReviewSubmissionToken(ctx, parsedArgs.data.review_token, toolCtx.sessionId, "task", taskId, false)
-  if (tokenResult.error) return `Error: ${tokenResult.error}`
-  const currentTaskHash = taskReviewArtifactHash(state, taskId, toolCtx.directory)
-  if (tokenResult.artifactHash && (!currentTaskHash || tokenResult.artifactHash !== currentTaskHash)) {
-    return (
-      "Error: The task files changed after isolated task review context was issued. " +
-      "Request a fresh task review context and retry."
-    )
-  }
-  ctx.reviewSubmissionTokens?.delete(parsedArgs.data.review_token)
-  await persistTaskReviewResult(ctx.openArtisanServices, state, taskId, review, reviewOutput)
-  const latestTaskReviewResults = buildLatestTaskReviewResults(taskId, review)
-  const reviewRuntimeFailure = isTaskReviewRuntimeFailure(review)
-
-  // Check iteration cap — force accept after MAX_TASK_REVIEW_ITERATIONS
-  const hitCap = !reviewRuntimeFailure && state.taskReviewCount >= MAX_TASK_REVIEW_ITERATIONS
-  if (hitCap && !review.passed) {
-    const acceptancePlan = buildTaskReviewAcceptancePlan({ implDag: state.implDag, concurrency: state.concurrency, taskId })
-    const nextMessage = buildTaskReviewResolvedMessage(taskId, state.implDag, state.concurrency)
-    const nextState = nextImplementationAuthoringState(state, acceptancePlan, ctx)
-    await store.update(toolCtx.sessionId, (draft) => {
-      applyTaskReviewAcceptance(draft, acceptancePlan, nextState)
-      draft.latestReviewResults = latestTaskReviewResults
-    })
-    await persistCurrentTaskClaim(ctx.openArtisanServices, store.get(toolCtx.sessionId), toolCtx.sessionId)
-    return (
-      `Task "${taskId}" force-accepted after ${MAX_TASK_REVIEW_ITERATIONS} review iterations. ` +
-      `Issues will be caught in the full implementation review.\n\n${nextMessage}`
-    )
-  }
-
-  if (review.passed) {
-    const acceptancePlan = buildTaskReviewAcceptancePlan({ implDag: state.implDag, concurrency: state.concurrency, taskId })
-    const nextMessage = buildTaskReviewResolvedMessage(taskId, state.implDag, state.concurrency)
-    const nextState = nextImplementationAuthoringState(state, acceptancePlan, ctx)
-    await store.update(toolCtx.sessionId, (draft) => {
-      applyTaskReviewAcceptance(draft, acceptancePlan, nextState)
-      draft.latestReviewResults = latestTaskReviewResults
-    })
-    await persistCurrentTaskClaim(ctx.openArtisanServices, store.get(toolCtx.sessionId), toolCtx.sessionId)
-    return `Task "${taskId}" review passed.\n\n${nextMessage}`
-  }
-
-  // Review failed — revert task status and return issues
-  const failedState = transitionOrThrow(state, "task_review_fail", ctx)
-  await store.update(toolCtx.sessionId, (draft) => {
-    const task = draft.implDag?.find((t) => t.id === taskId)
-    if (task) task.status = "in-flight"
-    draft.phase = failedState.phase
-    draft.phaseState = failedState.phaseState
-    draft.currentTaskId = taskId
-    draft.taskCompletionInProgress = null
-    draft.taskReviewCount = reviewRuntimeFailure
-      ? Math.max((draft.taskReviewCount ?? 1) - 1, 0)
-      : Math.max(draft.taskReviewCount ?? 0, 1)
-    draft.latestReviewResults = latestTaskReviewResults
-  })
-
-  const issuesList = review.issues.map((i) => `  - ${i}`).join("\n")
-  if (reviewRuntimeFailure) {
-    return (
-      `Task "${taskId}" isolated review runtime FAILED. ${review.issues.length} issue(s) found:\n${issuesList}\n\n` +
-      `${review.reasoning ? `Reviewer runtime reasoning: ${review.reasoning}\n\n` : ""}` +
-      "Do not change implementation code for this runtime failure. Fix the reviewer/runtime path and call mark_task_complete again."
-    )
-  }
-  return (
-    `Task "${taskId}" review FAILED. ${review.issues.length} issue(s) found:\n${issuesList}\n\n` +
-    `${review.reasoning ? `Reviewer reasoning: ${review.reasoning}\n\n` : ""}` +
-    `Fix the issues and call mark_task_complete again. ` +
-    `(Review iteration ${state.taskReviewCount + 1}/${MAX_TASK_REVIEW_ITERATIONS})`
-  )
-}
-
-// ---- submit_phase_review ----
-
-const handleSubmitPhaseReview: ToolHandler = async (args, toolCtx, ctx) => {
-  const { store } = ctx.engine!
-  const state = requireState(ctx, toolCtx.sessionId)
-
-  if (state.phaseState !== "REVIEW") {
-    return `Error: submit_phase_review can only be called in REVIEW state (current: ${state.phase}/${state.phaseState}).`
-  }
-
-  const parsedArgs = parseToolArgs(SubmitPhaseReviewToolSchema, args)
-  if (!parsedArgs.success) return `Error: ${parsedArgs.error}`
-  const normalizedPhaseReviewInput = {
-    ...(parsedArgs.data.review_stdout !== undefined ? { stdout: parsedArgs.data.review_stdout } : {}),
-    ...(parsedArgs.data.review_stderr !== undefined ? { stderr: parsedArgs.data.review_stderr } : {}),
-    ...(parsedArgs.data.review_exit_code !== undefined ? { exitCode: parsedArgs.data.review_exit_code } : {}),
-    ...(parsedArgs.data.review_error !== undefined ? { error: parsedArgs.data.review_error } : {}),
-  }
-  const reviewOutput = parsedArgs.data.review_output?.trim() || normalizePhaseReviewOutput(normalizedPhaseReviewInput).trim()
-  if (!reviewOutput) {
-    return "Error: review_output is required. Pass the raw output from the isolated phase reviewer."
-  }
-  const currentArtifactHash = artifactFilesHash(state.reviewArtifactFiles, toolCtx.directory)
-  if (state.reviewArtifactHash && (!currentArtifactHash || state.reviewArtifactHash !== currentArtifactHash)) {
-    return (
-      "Error: The artifact changed after it was submitted for review. " +
-      "Call `request_review` again so the reviewer evaluates the current artifact instead of stale content."
-    )
-  }
-  let rawCriteria: Array<{
-    criterion: string; met: boolean; evidence: string;
-    severity?: "blocking" | "suggestion" | "design-invariant"; score?: string | number
-  }>
-  if (reviewOutput.startsWith("ISOLATED_PHASE_REVIEW_FAILED:")) {
-    rawCriteria = buildReviewerFailureCriteria(state, reviewOutput)
-  } else try {
-    const parsed = parseReviewResult(extractJsonFromText(reviewOutput))
-    if (!parsed.success) {
-      rawCriteria = buildReviewerFailureCriteria(state, parsed.error)
-    } else {
-      rawCriteria = parsed.criteriaResults.map((criterion) => ({
-        criterion: criterion.criterion,
-        met: criterion.met,
-        evidence: criterion.evidence,
-        ...(criterion.severity ? { severity: criterion.severity } : {}),
-        ...(typeof criterion.score === "number" ? { score: criterion.score } : {}),
-      }))
-      const incompleteReason = buildIncompletePhaseReviewReason(state, countSubmittedBlockingCriteria(rawCriteria), reviewOutput)
-      if (incompleteReason) rawCriteria = buildReviewerFailureCriteria(state, incompleteReason)
-    }
-  } catch (err) {
-    rawCriteria = buildReviewerFailureCriteria(state, buildInvalidPhaseReviewJsonReason(reviewOutput, err))
-  }
-  const implPlanContractFailure = buildImplPlanExecutableContractFailureCriterion(state, toolCtx.directory)
-  if (implPlanContractFailure) rawCriteria.push(implPlanContractFailure)
-
-  const result = computeMarkSatisfiedTransition(rawCriteria, state, ctx.engine!.sm)
-  if (!result.success) return `Error: ${result.error}`
-  const tokenResult = consumeReviewSubmissionToken(ctx, parsedArgs.data.review_token, toolCtx.sessionId, "phase", state.phase, false)
-  if (tokenResult.error) return `Error: ${tokenResult.error}`
-  const currentPhaseHash = artifactFilesHash(state.reviewArtifactFiles, toolCtx.directory)
-  if (tokenResult.artifactHash && (!currentPhaseHash || tokenResult.artifactHash !== currentPhaseHash)) {
-    return (
-      "Error: The phase artifact files changed after isolated review context was issued. " +
-      "Request a fresh phase review context and retry."
-    )
-  }
-  ctx.reviewSubmissionTokens?.delete(parsedArgs.data.review_token)
-  await persistPhaseReviewResult(ctx.openArtisanServices, state, rawCriteria.map((criterion) => ({
-    criterion: criterion.criterion,
-    met: criterion.met,
-    evidence: criterion.evidence,
-    severity: criterion.severity === "suggestion" || criterion.severity === "design-invariant" ? criterion.severity : "blocking",
-    ...(typeof criterion.score === "number" ? { score: criterion.score } : {}),
-  })), reviewOutput)
-  const t = result.transition
-  await store.update(toolCtx.sessionId, (draft) => {
-    draft.phase = t.nextPhase
-    draft.phaseState = t.nextPhaseState
-    draft.iterationCount = t.nextIterationCount
-    draft.retryCount = 0
-    draft.latestReviewResults = t.latestReviewResults
-    if (t.clearReviewArtifactHash) draft.reviewArtifactHash = null
-    if (t.resetUserGateMessage) draft.userGateMessageReceived = false
-    if (t.clearRevisionBaseline) draft.revisionBaseline = null
-  })
-
-  return `Isolated phase review submitted. ${t.responseMessage}`
 }
 
 // ---- propose_backtrack ----
@@ -881,6 +524,7 @@ async function executeDriftToolCall(toolCall: DriftToolCallPlan, toolCtx: ToolCo
     case "propose_backtrack": return handleProposeBacktrack(toolCall.args, toolCtx, ctx)
     case "request_review": return handleRequestReview(toolCall.args, toolCtx, ctx)
     case "submit_feedback": return handleSubmitFeedback(toolCall.args, toolCtx, ctx)
+    case "repair_current_task_boundary_from_impl_plan": return handleRepairCurrentTaskBoundaryFromImplPlan(toolCall.args, toolCtx, ctx)
   }
 }
 
@@ -911,10 +555,14 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
   propose_backtrack: handleProposeBacktrack,
   analyze_task_boundary_change: handleAnalyzeTaskBoundaryChange,
   apply_task_boundary_change: handleApplyTaskBoundaryChange,
+  approve_current_task_scope_expansion: handleApproveCurrentTaskScopeExpansion,
+  repair_current_task_boundary_from_impl_plan: handleRepairCurrentTaskBoundaryFromImplPlan,
   route_patch_suggestions: handleRoutePatchSuggestions,
   resolve_patch_suggestion: handleResolvePatchSuggestion,
   apply_patch_suggestion: handleApplyPatchSuggestion,
   propose_direct_application: handleProposeDirectApplication,
+  request_allowlist_expansion: handleRequestAllowlistExpansion,
+  summarize_workflow_incident: handleSummarizeWorkflowIncident,
   report_drift: handleReportDrift,
   plan_drift_repair: handlePlanDriftRepair,
   apply_drift_repair: handleApplyDriftRepair,

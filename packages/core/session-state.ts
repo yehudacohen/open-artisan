@@ -57,6 +57,9 @@ function freshState(sessionId: string): WorkflowState {
     phaseApprovalCounts: {},
     escapePending: false,
     pendingRevisionSteps: null,
+    revisionAutoSkipBlockedReason: null,
+    pendingAllowlistExpansions: [],
+    toolFailureHistory: [],
     userGateMessageReceived: false,
     reviewArtifactHash: null,
     latestReviewResults: null,
@@ -172,6 +175,7 @@ function migrateState(migrated: Record<string, unknown>): void {
       if (node && typeof node === "object" && !Array.isArray(node)) {
         ;(node as Record<string, unknown>)["expectedTests"] ??= []
         ;(node as Record<string, unknown>)["expectedFiles"] ??= []
+        ;(node as Record<string, unknown>)["verificationCommands"] ??= []
       }
     }
   }
@@ -181,6 +185,12 @@ function migrateState(migrated: Record<string, unknown>): void {
   migrated["approvedArtifactFiles"] ??= {}
   // v24 → v25: add persisted scenario sufficiency context.
   migrated["realWorldAcceptanceScenario"] ??= null
+  // v25 → v26: add current-step auto-skip guard reason.
+  migrated["revisionAutoSkipBlockedReason"] ??= null
+  // v26 → v27: add typed pending allowlist expansion records.
+  migrated["pendingAllowlistExpansions"] ??= []
+  // v27 → v28: add compact tool failure history.
+  migrated["toolFailureHistory"] ??= []
   // retryCount is transient — reset on load so the idle handler starts fresh.
   // If the agent was stuck before a restart, it deserves a clean retry budget.
   migrated["retryCount"] = 0

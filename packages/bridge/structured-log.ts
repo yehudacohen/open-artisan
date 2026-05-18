@@ -20,12 +20,9 @@ export function createBridgeLogger(stateDir: string) {
   const logPath = join(stateDir, ".bridge.log")
   const level = process.env["OPENARTISAN_DEBUG"] ? "debug" : "info"
 
-  const transport = pino.transport({
-    target: "pino/file",
-    options: { destination: logPath, mkdir: true },
-  })
+  const destination = pino.destination({ dest: logPath, mkdir: true, sync: true })
 
-  const logger = pino({ level }, transport)
+  const logger = pino({ level }, destination)
 
   return logger
 }

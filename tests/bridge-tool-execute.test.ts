@@ -352,7 +352,7 @@ describe("tool.execute — task boundary revision workflow", () => {
 
     expect(result).toContain("T1")
     expect(result).toContain("T2")
-    expect(result).toContain("Completed task(s) must be reset")
+    expect(result).toContain("future corrective work")
   })
 
   it("returns the structured public boundary-change analysis shape", async () => {
@@ -397,7 +397,7 @@ describe("tool.execute — task boundary revision workflow", () => {
     expect(analysis.conflicts[0]?.kind).toBe("file-overlap")
   })
 
-  it("applies an ownership change, resets completed impacted tasks, and clears stale task-review state", async () => {
+  it("rejects ownership changes that would reset completed impacted tasks", async () => {
     await exec("select_mode", { mode: "GREENFIELD", feature_name: "boundary-apply" })
     await ctx.engine!.store.update("s1", (d) => {
       d.phase = "IMPLEMENTATION"
@@ -425,20 +425,19 @@ describe("tool.execute — task boundary revision workflow", () => {
       reason: "T2 must absorb the runtime seam already exercised by review.",
     })
 
-    expect(result).toContain("applied")
+    expect(result).toContain("Completed task(s) cannot be reset")
     const state = ctx.engine!.store.get("s1")
     const t1 = state?.implDag?.find((t) => t.id === "T1")
     const t2 = state?.implDag?.find((t) => t.id === "T2")
-    expect(t1?.expectedFiles).not.toContain("/repo/src/a.ts")
-    expect(t1?.status).toBe("pending")
-    expect(t2?.expectedFiles).toContain("/repo/src/a.ts")
-    expect(t2?.expectedFiles).not.toContain("/repo/src/b.ts")
-    expect(state?.phaseState).toBe("DRAFT")
+    expect(t1?.expectedFiles).toContain("/repo/src/a.ts")
+    expect(t1?.status).toBe("complete")
+    expect(t2?.expectedFiles).toEqual(["/repo/src/b.ts"])
+    expect(state?.phaseState).toBe("TASK_REVIEW")
     expect(state?.currentTaskId).toBe("T2")
-    expect(state?.taskCompletionInProgress).toBeNull()
-    expect(state?.reviewArtifactHash).toBeNull()
-    expect(state?.reviewArtifactFiles).toEqual([])
-    expect(state?.latestReviewResults).toBeNull()
+    expect(state?.taskCompletionInProgress).toBe("T2")
+    expect(state?.reviewArtifactHash).toBe("stale-review-hash")
+    expect(state?.reviewArtifactFiles).toEqual(["/repo/tests/b.test.ts"])
+    expect(state?.latestReviewResults).toEqual([{ criterion: "Old review", met: false, evidence: "stale" }])
   })
 })
 
@@ -565,8 +564,8 @@ describe("tool.execute — submit_feedback", () => {
     expect(state?.phase).toBe("IMPLEMENTATION")
     expect(state?.implDag).not.toBeNull()
     expect(state?.implDag?.length).toBeGreaterThanOrEqual(1)
-    expect(state?.implDag?.[0]?.expectedTests).toEqual(["tests/setup.test.ts"])
-    expect(state?.implDag?.[1]?.expectedTests).toEqual(["tests/core.test.ts"])
+    expect(state?.implDag?.[0]?.expectedTests).toEqual([resolve(tmpDir, "tests/setup.test.ts")])
+    expect(state?.implDag?.[1]?.expectedTests).toEqual([resolve(tmpDir, "tests/core.test.ts")])
     expect(state?.currentTaskId).not.toBeNull()
     expect(state?.approvedArtifacts.impl_plan).toBeTruthy()
   })
@@ -864,6 +863,25 @@ describe("tool.execute — submit_feedback", () => {
     })
     expect(result).toContain("Waiting for user response")
   })
+
+  it("allows dry-run approval validation before user gate message", async () => {
+    await exec("select_mode", { mode: "GREENFIELD", feature_name: "dry-run-without-user-gate" })
+    await ctx.engine!.store.update("s1", (d) => {
+      d.phaseState = "USER_GATE"
+      d.userGateMessageReceived = false
+    })
+
+    const result = await exec("submit_feedback", {
+      feedback_type: "approve",
+      feedback_text: "validation only",
+      dry_run: true,
+    })
+
+    expect(result).toContain("Dry-run approval validation passed")
+    const state = ctx.engine!.store.get("s1")
+    expect(state?.phaseState).toBe("USER_GATE")
+    expect(state?.userGateMessageReceived).toBe(false)
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -974,6 +992,35 @@ describe("tool.execute — mark_task_complete", () => {
     expect(state?.implDag?.find((t) => t.id === "T2")?.status).toBe("in-flight")
   })
 
+  it("submit_task_review accepts typed reviewer fields without review_output", async () => {
+    await exec("select_mode", { mode: "GREENFIELD", feature_name: "str-typed-feat" })
+    await ctx.engine!.store.update("s1", (d) => {
+      d.phase = "IMPLEMENTATION"
+      d.phaseState = "TASK_REVIEW"
+      d.implDag = [
+        { id: "T1", description: "Setup", dependencies: [], expectedTests: [], expectedFiles: [], estimatedComplexity: "small", status: "complete" },
+      ]
+      d.currentTaskId = "T1"
+      d.taskCompletionInProgress = "T1"
+      d.taskReviewCount = 1
+    })
+
+    const result = await exec("submit_task_review", {
+      passed: true,
+      issues: [],
+      reasoning: "Structured review fields are valid.",
+      code_quality_score: "9",
+      error_handling_score: 9,
+      patch_suggestions: [],
+    })
+
+    expect(result).toContain("review passed")
+    const state = ctx.engine!.store.get("s1")
+    expect(state?.phaseState).toBe("DRAFT")
+    expect(state?.taskCompletionInProgress).toBeNull()
+    expect(state?.latestReviewResults?.some((criterion) => criterion.evidence.includes("Code quality score 9/10"))).toBe(true)
+  })
+
   it("submit_task_review rejects stale task files after review context issuance", async () => {
     await exec("select_mode", { mode: "GREENFIELD", feature_name: `task-stale-${Date.now()}` })
     await mkdir(join(tmpDir, "src"), { recursive: true })
@@ -1033,7 +1080,8 @@ describe("tool.execute — mark_task_complete", () => {
       args: { review_output: "not json", review_token: "retry-token" },
       context: { sessionId: "s1", directory: tmpDir, invocation: "isolated-reviewer" },
     }, ctx) as string
-    expect(malformed).toContain("Failed to parse review output")
+    expect(malformed).toContain("reviewer infrastructure")
+    expect(malformed).toContain("Attempt consumed:** no")
     expect(ctx.reviewSubmissionTokens.has("retry-token")).toBe(true)
 
     const passed = await handleToolExecute({
@@ -1157,6 +1205,29 @@ describe("tool.execute — mark_task_complete", () => {
     expect(state?.phaseState).toBe("TASK_REVISE")
     expect(state?.currentTaskId).toBe("T1")
     expect(state?.taskReviewCount).toBe(1)
+  })
+
+  it("submit_task_review does not consume attempts for reviewer infrastructure failures", async () => {
+    await exec("select_mode", { mode: "GREENFIELD", feature_name: "reviewer-runtime-fail-feat" })
+    await ctx.engine!.store.update("s1", (d) => {
+      d.phase = "IMPLEMENTATION"
+      d.phaseState = "TASK_REVIEW"
+      d.implDag = [
+        { id: "T1", description: "Setup", dependencies: [], expectedTests: [], expectedFiles: [], estimatedComplexity: "small", status: "complete" },
+      ]
+      d.currentTaskId = "T1"
+      d.taskCompletionInProgress = "T1"
+      d.taskReviewCount = 0
+    })
+
+    const result = await exec("submit_task_review", {
+      review_output: JSON.stringify({ passed: false, issues: ["ISOLATED_REVIEW_FAILED: Cannot extract text"], reasoning: "reviewer JSON parse failed" }),
+    })
+
+    expect(result).toContain("Attempt consumed: no")
+    const state = ctx.engine!.store.get("s1")
+    expect(state?.taskReviewCount).toBe(0)
+    expect(state?.toolFailureHistory[0]?.category).toBe("reviewer-infrastructure")
   })
 
   it("blocks re-entry when review is pending", async () => {
@@ -1697,6 +1768,31 @@ describe("tool.execute — agent-only mode", () => {
     expect(ctx.engine!.store.get("s1")?.phaseState).toBe("USER_GATE")
   })
 
+  it("submit_phase_review accepts typed criteria without review_output", async () => {
+    await exec("select_mode", { mode: "GREENFIELD", feature_name: `phase-submit-typed-${Date.now()}` })
+    const planPath = await writeCurrentPlanArtifact("s1", ctx)
+    await exec("request_review", {
+      summary: "Plan",
+      artifact_description: "Plan artifact",
+      artifact_files: [planPath],
+    })
+
+    const criteria = Array.from({ length: 16 }, (_, i) => ({
+      criterion: `Criterion ${i + 1}`,
+      met: true,
+      evidence: "verified by structured isolated reviewer submission",
+      severity: "blocking",
+      score: i === 0 ? "9" : undefined,
+    }))
+    const result = await exec("submit_phase_review", {
+      satisfied: true,
+      criteria_results: criteria,
+    })
+
+    expect(result).toContain("Isolated phase review submitted")
+    expect(ctx.engine!.store.get("s1")?.phaseState).toBe("USER_GATE")
+  })
+
   it("submit_phase_review rejects stale reviewed artifact files", async () => {
     await exec("select_mode", { mode: "GREENFIELD", feature_name: `phase-review-stale-${Date.now()}` })
     const planPath = await writeCurrentPlanArtifact("s1", ctx, "# Original plan")
@@ -1767,7 +1863,7 @@ describe("tool.execute — agent-only mode", () => {
     expect(state?.latestReviewResults?.[0]?.evidence).toContain("not json")
   })
 
-  it("submit_phase_review routes incomplete reviewer criteria to REVISE as reviewer failure", async () => {
+  it("submit_phase_review blocks incomplete reviewer criteria as reviewer infrastructure failure", async () => {
     await exec("select_mode", { mode: "GREENFIELD", feature_name: `phase-incomplete-review-${Date.now()}` })
     const planPath = await writeCurrentPlanArtifact("s1", ctx)
     await exec("request_review", {
@@ -1786,12 +1882,13 @@ describe("tool.execute — agent-only mode", () => {
       review_output: JSON.stringify({ satisfied: true, criteria_results: incompleteCriteria }),
     })
 
-    expect(result).toContain("Isolated phase review submitted")
+    expect(result).toContain("Error: Isolated phase reviewer failed")
+    expect(result).toContain("Reviewer returned only 3 blocking criteria")
     const state = ctx.engine!.store.get("s1")
-    expect(state?.phaseState).toBe("REVISE")
-    expect(state?.latestReviewResults?.length).toBeGreaterThan(3)
-    expect(state?.latestReviewResults?.[0]?.criterion).toContain("Isolated reviewer failed")
+    expect(state?.phaseState).toBe("REVIEW")
+    expect(state?.latestReviewResults?.[0]?.criterion).toContain("Isolated reviewer infrastructure failed")
     expect(state?.latestReviewResults?.[0]?.evidence).toContain("Reviewer returned only 3 blocking criteria")
+    expect(state?.toolFailureHistory[0]?.toolName).toBe("submit_phase_review")
   })
 
   it("submit_phase_review preserves isolated reviewer subprocess failure text", async () => {
@@ -1859,6 +1956,41 @@ describe("tool.execute — submit_auto_approve", () => {
     expect(state?.phaseState).toBe("USER_GATE")
     expect(state?.reviewArtifactHash).toBe("stale-review-hash")
     expect(state?.latestReviewResults).not.toBeNull()
+  })
+
+  it("submit_auto_approve accepts typed auto-approver fields without review_output", async () => {
+    const agentCtx = makeBridgeContext()
+    await handleInit({ projectDir: tmpDir, persistence: { kind: "filesystem" } }, agentCtx)
+    await handleSessionCreated({ sessionId: "robot-session", agent: "robot-artisan" }, agentCtx)
+    await agentCtx.engine!.store.update("robot-session", (d) => {
+      d.mode = "GREENFIELD"
+      d.phase = "PLANNING"
+      d.phaseState = "USER_GATE"
+      d.activeAgent = "robot-artisan"
+      d.reviewArtifactHash = "reviewed-plan"
+    })
+    agentCtx.reviewSubmissionTokens ??= new Map()
+    agentCtx.reviewSubmissionTokens.set("auto-review-token", {
+      sessionId: "robot-session",
+      kind: "auto-approve",
+      subject: "PLANNING",
+      expiresAt: Date.now() + 60_000,
+    })
+
+    const result = await handleToolExecute({
+      name: "submit_auto_approve",
+      args: {
+        approve: true,
+        confidence: "0.95",
+        reasoning: "Structured auto-approval fields are valid.",
+        review_token: "auto-review-token",
+      },
+      context: { sessionId: "robot-session", directory: tmpDir, invocation: "auto-approver" },
+    }, agentCtx) as string
+
+    expect(result).toContain("Auto-approved")
+    expect(agentCtx.engine!.store.get("robot-session")?.phaseState).toBe("DRAFT")
+    expect(agentCtx.reviewSubmissionTokens.has("auto-review-token")).toBe(false)
   })
 })
 
@@ -2276,7 +2408,7 @@ describe("tool.execute — submit_task_review quality scoring", () => {
     expect(state?.taskReviewCount).toBe(0)
   })
 
-  it("graceful degradation with {0,0} scores reverts task (not infinite loop)", async () => {
+  it("reviewer runtime failure scores revert task without consuming an attempt", async () => {
     await exec("select_mode", { mode: "GREENFIELD", feature_name: "gd-feat" })
     await ctx.engine!.store.update("s1", (d) => {
       d.phase = "IMPLEMENTATION"
@@ -2290,8 +2422,8 @@ describe("tool.execute — submit_task_review quality scoring", () => {
       d.phaseState = "TASK_REVIEW"
     })
 
-    // Simulate graceful degradation: passed=true but scores={0,0}
-    // parseTaskReviewResult should override to passed=false, reverting the task
+    // Simulate a reviewer runtime failure encoded by an isolated-review adapter.
+    // parseTaskReviewResult should override to passed=false, reverting the task.
     const result = await exec("submit_task_review", {
       review_output: JSON.stringify({
         passed: true,
@@ -2402,7 +2534,7 @@ describe("task.getAutoApproveContext", () => {
 })
 
 // ---------------------------------------------------------------------------
-// Re-entry clearance cycle and force-accept
+// Re-entry clearance cycle and repeated review failures
 // ---------------------------------------------------------------------------
 
 describe("tool.execute — task review edge cases", () => {
@@ -2442,7 +2574,7 @@ describe("tool.execute — task review edge cases", () => {
     expect(r3).not.toContain("already awaiting review")
   })
 
-  it("force-accepts after MAX_TASK_REVIEW_ITERATIONS", async () => {
+  it("does not force-accept after repeated task review failures", async () => {
     await exec("select_mode", { mode: "GREENFIELD", feature_name: "cap-feat" })
     await ctx.engine!.store.update("s1", (d) => {
       d.phase = "IMPLEMENTATION"
@@ -2455,16 +2587,18 @@ describe("tool.execute — task review edge cases", () => {
       d.taskReviewCount = 10 // At the cap
     })
 
-    // Submit failing review when at cap — should force-accept
+    // Submit failing review when past the old cap — should keep the task open.
     const result = await exec("submit_task_review", {
       review_output: JSON.stringify({ passed: false, issues: ["Still broken"], reasoning: "Won't pass" }),
     })
-    expect(result).toContain("force-accepted")
+    expect(result).toContain("review FAILED")
+    expect(result).not.toContain("force-accepted")
 
     const state = ctx.engine!.store.get("s1")
     expect(state?.taskCompletionInProgress).toBeNull()
-    expect(state?.taskReviewCount).toBe(0)
-    expect(state?.currentTaskId).toBeNull()
+    expect(state?.taskReviewCount).toBe(11)
+    expect(state?.currentTaskId).toBe("T1")
+    expect(state?.implDag?.find((task) => task.id === "T1")?.status).toBe("in-flight")
   })
 
   it("passes implementation_summary to review prompt", async () => {
@@ -2488,7 +2622,7 @@ describe("tool.execute — task review edge cases", () => {
     expect(result).not.toContain("(see task files)")
   })
 
-  it("allows reset_task during implementation scheduling", async () => {
+  it("rejects reset_task for completed tasks during implementation scheduling", async () => {
     await exec("select_mode", { mode: "GREENFIELD", feature_name: "scheduling-reset" })
     await ctx.engine!.store.update("s1", (d) => {
       d.phase = "IMPLEMENTATION"
@@ -2503,11 +2637,11 @@ describe("tool.execute — task review edge cases", () => {
 
     const result = await exec("reset_task", { task_ids: ["T1"], reason: "Drift repair reset from scheduling." })
 
-    expect(result).toContain("Reset 1 task")
+    expect(result).toContain("Completed task(s) cannot be reset")
     const state = ctx.engine!.store.get("s1")
-    expect(state?.phaseState).toBe("DRAFT")
-    expect(state?.currentTaskId).toBe("T1")
-    expect(state?.implDag?.find((task) => task.id === "T1")?.status).toBe("in-flight")
+    expect(state?.phaseState).toBe("SCHEDULING")
+    expect(state?.currentTaskId).toBeNull()
+    expect(state?.implDag?.find((task) => task.id === "T1")?.status).toBe("complete")
   })
 
   it("rejects reset_task when completed downstream dependencies are not reset together", async () => {
@@ -2525,13 +2659,13 @@ describe("tool.execute — task review edge cases", () => {
 
     const result = await exec("reset_task", { task_ids: ["T1"], reason: "Attempt unsafe partial reset." })
 
-    expect(result).toContain("depends on \"T1\"")
+    expect(result).toContain("Completed task(s) cannot be reset")
     const state = ctx.engine!.store.get("s1")
     expect(state?.implDag?.map((task) => task.status)).toEqual(["complete", "complete"])
     expect(state?.currentTaskId).toBeNull()
   })
 
-  it("allows reset_task when completed downstream dependencies are reset together", async () => {
+  it("rejects reset_task even when completed downstream dependencies are reset together", async () => {
     await exec("select_mode", { mode: "GREENFIELD", feature_name: "reset-downstream-closure" })
     await ctx.engine!.store.update("s1", (d) => {
       d.phase = "IMPLEMENTATION"
@@ -2547,10 +2681,10 @@ describe("tool.execute — task review edge cases", () => {
 
     const result = await exec("reset_task", { task_ids: ["T2", "T1"], reason: "Reset full completed closure." })
 
-    expect(result).toContain("Reset 2 task")
+    expect(result).toContain("Completed task(s) cannot be reset")
     const state = ctx.engine!.store.get("s1")
-    expect(state?.currentTaskId).toBe("T1")
-    expect(state?.implDag?.map((task) => task.status)).toEqual(["in-flight", "pending", "pending"])
+    expect(state?.currentTaskId).toBeNull()
+    expect(state?.implDag?.map((task) => task.status)).toEqual(["complete", "complete", "pending"])
   })
 
   it("records service file claims when reset_task selects the current task", async () => {
@@ -2581,7 +2715,7 @@ describe("tool.execute — task review edge cases", () => {
       d.phase = "IMPLEMENTATION"
       d.phaseState = "DRAFT"
       d.implDag = [
-        { id: "T1", description: "Resettable", dependencies: [], expectedTests: [], expectedFiles: ["src/reset.ts"], estimatedComplexity: "small", status: "complete" },
+        { id: "T1", description: "Resettable", dependencies: [], expectedTests: [], expectedFiles: ["src/reset.ts"], estimatedComplexity: "small", status: "in-flight" },
       ]
       d.currentTaskId = null
     })
@@ -2606,7 +2740,7 @@ describe("tool.execute — task review edge cases", () => {
       d.phase = "IMPLEMENTATION"
       d.phaseState = "SCHEDULING"
       d.implDag = [
-        { id: "T1", description: "Resettable", dependencies: [], expectedTests: [], expectedFiles: ["src/a.ts"], estimatedComplexity: "small", status: "complete" },
+        { id: "T1", description: "Resettable", dependencies: [], expectedTests: [], expectedFiles: ["src/a.ts"], estimatedComplexity: "small", status: "in-flight" },
         { id: "T2", description: "Pending downstream", dependencies: ["T1"], expectedTests: [], expectedFiles: ["src/b.ts"], estimatedComplexity: "small", status: "pending" },
       ]
       d.currentTaskId = null

@@ -8,7 +8,7 @@
 import { existsSync } from "node:fs"
 import { readFile } from "node:fs/promises"
 import type { SubagentDispatcher } from "./subagent-dispatcher"
-import { withTimeout } from "./utils"
+import { extractJsonFromText, withTimeout } from "./utils"
 import {
   MAX_PRIOR_INTENT_CHARS,
   MAX_SCOPE_DISPLAY_CHARS,
@@ -47,7 +47,7 @@ async function ephemeralIntentCheckPrompt(
     ...(parentModel ? { model: parentModel } : {}),
   })
   try {
-    return await session.prompt(prompt)
+    return await session.prompt(prompt, { submissionTool: { name: "submit_intent_comparison_result" } })
   } finally {
     await session.destroy()
   }
@@ -119,7 +119,8 @@ ${priorScope.slice(0, MAX_SCOPE_CONTEXT_CHARS)}
 First, determine if these are the SAME goal or a DIFFERENT goal.
 Second, if SAME, determine if the prior workflow FULLY covers the current request or only PARTIALLY covers it.
 
-Respond with exactly one line:
+Preferred submission path: if the \`submit_intent_comparison_result\` tool is available, call it exactly once with \`classification\` and \`explanation\` instead of replying with text.
+If that tool is unavailable, respond with exactly one line:
 - If DIFFERENT: "DIFFERENT: <one sentence explaining why>"
 - If SAME but PARTIAL: "PARTIAL: <one sentence explaining what the prior workflow covered and what's missing>"
 - If SAME and FULL: "FULL: <one sentence confirming the prior workflow covers everything>"
@@ -136,6 +137,18 @@ Respond now:`
  * Parse LLM response into structured result
  */
 function parseIntentComparisonResponse(llmResult: string): IntentComparisonResult {
+  try {
+    const parsed = JSON.parse(extractJsonFromText(llmResult)) as { classification?: string; explanation?: string }
+    if (parsed.classification === "FULL" || parsed.classification === "PARTIAL" || parsed.classification === "DIFFERENT" || parsed.classification === "ERROR") {
+      return {
+        classification: parsed.classification,
+        explanation: parsed.explanation ?? "",
+        rawResponse: llmResult,
+      }
+    }
+  } catch {
+    // Fall back to the legacy one-line text contract for adapters without tools.
+  }
   const response = llmResult.trim().toUpperCase()
   const isError = response.startsWith("ERROR:")
   const isDifferent = response.startsWith("DIFFERENT:")

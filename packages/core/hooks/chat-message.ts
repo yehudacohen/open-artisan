@@ -34,6 +34,13 @@ export interface ChatMessageOutput {
   intercepted: boolean
   /** The detected feedback type, if intercepted */
   feedbackType: "approve" | "feedback" | null
+  route?: {
+    kind: "approve-with-meta"
+    feedbackType: "approve"
+    decisionText: string
+    metaText: string
+    reason: string
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -76,6 +83,16 @@ function looksLikeApproval(text: string): boolean {
   return segments.length > 1 && segments.every((segment) => APPROVAL_PREFIX_RE.test(segment))
 }
 
+function splitApprovalWithMeta(text: string): { decisionText: string; metaText: string } | null {
+  const match = text.trim().match(/^(.+?)([.!?])\s+(.+)$/)
+  if (!match) return null
+  const decisionText = match[1]?.trim() ?? ""
+  const metaText = match[3]?.trim() ?? ""
+  if (!looksLikeApproval(decisionText)) return null
+  if (!looksLikeUserGateMetaQuestion(metaText)) return null
+  return { decisionText, metaText }
+}
+
 export function looksLikeUserGateMetaQuestion(text: string): boolean {
   const normalized = text.trim().toLowerCase().replace(/\s+/g, " ")
   if (!normalized) return false
@@ -101,6 +118,7 @@ export function looksLikeUserGateMetaQuestion(text: string): boolean {
     /\b(have|has|did|are|is|was|were)\b.*\b(implemented|complete|done|finished|pass(?:ed)?|green)\b.*\b(tasks?|implementation|tests?|verification|review)\b/.test(normalized) ||
     /\b(all|which|what)\s+(implementation\s+)?tasks?\b.*\b(done|complete|implemented|finished)\b/.test(normalized) ||
     /\bhow\s+(has|was|is)\s+(your\s+)?experience\b/.test(normalized) ||
+    /\bhow\s+(did|does)\s+(open[- ]artisan|workflow|dogfood(?:ing)?)\s+(feel|go|work)\b/.test(normalized) ||
     /\bwhat\s+was\s+(your\s+)?experience\b/.test(normalized) ||
     /\b(open[- ]artisan|workflow|dogfood(?:ing)?)\b.*\b(experience|rough|friction|worked|working)\b/.test(normalized) ||
     /\bdo\s+you\s+think\b.*\b(right|good|ready|correct|sound)\b/.test(normalized)
@@ -151,6 +169,7 @@ export function processUserMessage(
     .join(" ")
 
   const isConditionalApproval = state.phaseState === "ESCAPE_HATCH" ? false : looksLikeConditionalApproval(textContent)
+  const approvalWithMeta = state.phaseState === "ESCAPE_HATCH" ? null : splitApprovalWithMeta(textContent)
 
   if (state.phaseState === "ESCAPE_HATCH" && looksLikeEscapeHatchClarification(textContent)) {
     return { parts, intercepted: false, feedbackType: null }
@@ -172,18 +191,18 @@ export function processUserMessage(
 
   // In ESCAPE_HATCH, non-clarification user messages are decisions/feedback
   // (approval is structurally blocked by the state machine).
-  if (state.phaseState !== "ESCAPE_HATCH" && !isConditionalApproval && looksLikeUserGateMetaQuestion(textContent)) {
+  if (state.phaseState !== "ESCAPE_HATCH" && !approvalWithMeta && !isConditionalApproval && looksLikeUserGateMetaQuestion(textContent)) {
     return { parts, intercepted: false, feedbackType: null }
   }
 
-  const isApproval = state.phaseState === "ESCAPE_HATCH" ? false : looksLikeApproval(textContent) || isConditionalApproval
+  const isApproval = state.phaseState === "ESCAPE_HATCH" ? false : Boolean(approvalWithMeta) || looksLikeApproval(textContent) || isConditionalApproval
   const feedbackType = isApproval ? "approve" : "feedback"
 
   // Inject routing instructions as a new leading text part
   const routingNote = state.phaseState === "ESCAPE_HATCH"
     ? buildEscapeHatchNote(state.phase)
     : isApproval
-      ? buildApprovalNote(state.phase, state.phaseState)
+      ? buildApprovalNote(state.phase, state.phaseState, approvalWithMeta?.metaText)
       : buildFeedbackNote(state.phase, state.phaseState)
 
   const injectedParts: Array<{ type: string; text?: string }> = [
@@ -195,15 +214,25 @@ export function processUserMessage(
     parts: injectedParts,
     intercepted: true,
     feedbackType,
+    ...(approvalWithMeta ? {
+      route: {
+        kind: "approve-with-meta" as const,
+        feedbackType: "approve" as const,
+        decisionText: approvalWithMeta.decisionText,
+        metaText: approvalWithMeta.metaText,
+        reason: "User supplied an approval decision followed by a meta/clarification follow-up.",
+      },
+    } : {}),
   }
 }
 
-function buildApprovalNote(phase: Phase, _phaseState: PhaseState): string {
+function buildApprovalNote(phase: Phase, _phaseState: PhaseState, metaText?: string): string {
   return (
     `[WORKFLOW GATE — IMMEDIATE ACTION REQUIRED] ` +
     `The user has approved the ${phase} artifact. ` +
     `Call \`submit_feedback\` NOW with feedback_type="approve" and feedback_text set to the user's message. ` +
-    `This must be your first and only tool call. Do NOT do anything else first.`
+    `This must be your first and only tool call. Do NOT do anything else first.` +
+    (metaText ? ` After the workflow approval is recorded, answer the user's meta follow-up normally: ${metaText}` : "")
   )
 }
 

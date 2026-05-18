@@ -61,6 +61,7 @@ export async function cascadeAutoSkip(
     if (!current) return null
     if (current.phaseState !== "REVISE") return null
     if (!current.revisionBaseline) return null // No baseline → can't detect, let agent proceed
+    if (current.revisionAutoSkipBlockedReason) return null
 
     let changed: boolean
     try {
@@ -111,6 +112,7 @@ export async function cascadeAutoSkip(
         draft.phaseState = "REVISE"
         draft.pendingRevisionSteps = remainingSteps
         draft.revisionBaseline = nextBaseline
+        draft.revisionAutoSkipBlockedReason = nextStep.autoSkipBlockedReason ?? null
         draft.retryCount = 0
       })
 
@@ -129,6 +131,7 @@ export async function cascadeAutoSkip(
           draft.phase = userGateOutcome.nextPhase
           draft.phaseState = userGateOutcome.nextPhaseState
           draft.revisionBaseline = null
+          draft.revisionAutoSkipBlockedReason = null
           draft.pendingRevisionSteps = null
           draft.retryCount = 0
           draft.userGateMessageReceived = false

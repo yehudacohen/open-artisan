@@ -22,6 +22,7 @@
 import type { TaskIsolation, TaskIsolationFailureReason, TaskNode } from "../dag"
 import type { PhaseToolPolicy } from "../phase-tool-policy-types"
 import type { Phase, PhaseState, WorkflowMode } from "../workflow-primitives"
+import { normalizeWorkflowPath, normalizeWorkflowPaths } from "../path-normalization"
 
 export interface ParallelIsolationAssessment {
   allowed: boolean
@@ -297,6 +298,7 @@ export function getPhaseToolPolicy(
   mode: WorkflowMode | null,
   fileAllowlist: string[],
   taskExpectedFiles?: string[],
+  cwd = process.cwd(),
 ): PhaseToolPolicy {
   switch (phase) {
     // -----------------------------------------------------------------------
@@ -519,17 +521,19 @@ export function getPhaseToolPolicy(
         // In INCREMENTAL, per-task files intersect with the workflow allowlist.
         // The agent can only write files that are both in the task's expectedFiles
         // AND in the workflow allowlist. If no task files specified, use the full allowlist.
-        const allowSet = new Set(fileAllowlist)
+        const allowSet = new Set(normalizeWorkflowPaths(fileAllowlist, cwd))
         const taskSet = taskExpectedFiles && taskExpectedFiles.length > 0
-          ? new Set(taskExpectedFiles)
+          ? new Set(normalizeWorkflowPaths(taskExpectedFiles, cwd))
           : null
         return {
           blocked: [],
           writePathPredicate: (filePath: string) => {
             if (isEnvFile(filePath)) return false
             if (isOpenArtisanFile(filePath)) return true // always allow artifact writes
-            if (!allowSet.has(filePath)) return false
-            if (taskSet && !taskSet.has(filePath)) return false
+            const normalized = normalizeWorkflowPath(filePath, cwd)
+            if (!normalized) return false
+            if (!allowSet.has(normalized)) return false
+            if (taskSet && !taskSet.has(normalized)) return false
             return true
           },
           bashCommandPredicate: (command: string) => {
@@ -541,7 +545,7 @@ export function getPhaseToolPolicy(
             return readOnlyBash(command)
           },
           allowedDescription: taskSet
-            ? `INCREMENTAL mode: only current task files may be written (${taskSet.size} files). .env always blocked.`
+            ? `INCREMENTAL mode has two write gates: global feature allowlist (${fileAllowlist.length} files) and current task boundary (${taskSet.size} files). The file must pass both. If the user already approved this file for the active task, call approve_current_task_scope_expansion to update both gates atomically. .env always blocked.`
             : `INCREMENTAL mode: only allowlisted files may be written (${fileAllowlist.length} files). .env always blocked. Bash write operators (>, >>, tee, sed -i) are blocked.`,
         }
       }
@@ -552,16 +556,17 @@ export function getPhaseToolPolicy(
       // When no task is active (e.g. between tasks, or pre-v22 DAGs without
       // expectedFiles), fall back to unrestricted writes.
       if (taskExpectedFiles && taskExpectedFiles.length > 0) {
-        const taskSet = new Set(taskExpectedFiles)
+        const taskSet = new Set(normalizeWorkflowPaths(taskExpectedFiles, cwd))
         return {
           blocked: [],
           writePathPredicate: (filePath: string) => {
             if (isEnvFile(filePath)) return false
             if (isOpenArtisanFile(filePath)) return true // always allow artifact writes
-            return taskSet.has(filePath)
+            const normalized = normalizeWorkflowPath(filePath, cwd)
+            return normalized ? taskSet.has(normalized) : false
           },
           bashCommandPredicate: readOnlyBash,
-          allowedDescription: `Implementation phase: only current task files may be written (${taskSet.size} files). .openartisan/ always allowed. .env always blocked.`,
+          allowedDescription: `Implementation phase: only current task boundary files may be written (${taskSet.size} files). If the file is approved for this active task but missing from the boundary, call approve_current_task_scope_expansion. .openartisan/ always allowed. .env always blocked.`,
         }
       }
 

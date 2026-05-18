@@ -7,6 +7,7 @@ import { sql, type Kysely } from "kysely"
 import { tracePGlite } from "./pglite-trace"
 import type { OpenArtisanDatabase } from "./open-artisan-repository-schema"
 import { acquireDatabaseOperationLease, asDatabaseOperationLeaseDb, createDatabaseOperationLeaseOwner } from "./database-operation-lease"
+import { executePGliteRawBatch } from "./pglite-connection-manager"
 
 export const OPEN_ARTISAN_DB_SCHEMA_VERSION = 2
 
@@ -22,16 +23,20 @@ function tableName(schemaName: string, table: string): string {
   return `${quoteIdentifier(schemaName)}.${quoteIdentifier(table)}`
 }
 
+async function executeStatements(db: Kysely<OpenArtisanDatabase>, statements: string[]): Promise<void> {
+  if (statements.length === 0) return
+  if (await executePGliteRawBatch(db, statements)) return
+  for (const statement of statements) await sql.raw(statement).execute(db)
+}
+
 async function applyMigration(
   db: Kysely<OpenArtisanDatabase>,
   schemaName: string,
   version: number,
   run: (tx: Kysely<OpenArtisanDatabase>) => Promise<void>,
 ): Promise<void> {
-  await db.transaction().execute(async (tx) => {
-    await run(tx)
-    await tx.withSchema(schemaName).insertInto("schema_migrations").values({ version, applied_at: nowIso() }).execute()
-  })
+  await run(db)
+  await db.withSchema(schemaName).insertInto("schema_migrations").values({ version, applied_at: nowIso() }).execute()
 }
 
 export async function ensureOpenArtisanSchema(input: {
@@ -42,22 +47,20 @@ export async function ensureOpenArtisanSchema(input: {
   const startedAt = Date.now()
   tracePGlite("schema.openartisan.start", { databasePath: input.databasePath, schemaName: input.schemaName })
   const schema = quoteIdentifier(input.schemaName)
-  await sql.raw(`create schema if not exists ${schema}`).execute(input.db)
-  await sql.raw(`
-    create table if not exists ${tableName(input.schemaName, "database_operation_locks")} (
+  await executeStatements(input.db, [
+    `create schema if not exists ${schema}`,
+    `create table if not exists ${tableName(input.schemaName, "database_operation_locks")} (
       lock_key text primary key,
       owner_id text not null,
       lease_expires_at text not null,
       created_at text not null,
       updated_at text not null
-    )
-  `).execute(input.db)
-  await sql.raw(`
-    create table if not exists ${tableName(input.schemaName, "schema_migrations")} (
+    )`,
+    `create table if not exists ${tableName(input.schemaName, "schema_migrations")} (
       version integer primary key,
       applied_at text not null
-    )
-  `).execute(input.db)
+    )`,
+  ])
   const lease = await acquireDatabaseOperationLease(asDatabaseOperationLeaseDb(input.db), input.schemaName, {
     leaseKey: `open-artisan:schema-migration:${input.schemaName}`,
     ownerId: createDatabaseOperationLeaseOwner("open-artisan-migration"),
@@ -112,7 +115,7 @@ async function applyOpenArtisanTables(db: Kysely<OpenArtisanDatabase>, schemaNam
     `create table if not exists ${tableName(schemaName, "human_gates")} (id text primary key, workflow_id text not null, task_id text not null, resolved boolean not null, record jsonb not null, created_at text not null, resolved_at text)`,
     `create table if not exists ${tableName(schemaName, "fast_forward_records")} (id text primary key, workflow_id text not null, record jsonb not null, created_at text not null)`,
   ]
-  for (const statement of tables) await sql.raw(statement).execute(db)
+  await executeStatements(db, tables)
 }
 
 async function applyOpenArtisanIndexes(db: Kysely<OpenArtisanDatabase>, schemaName: string): Promise<void> {
@@ -143,5 +146,5 @@ async function applyOpenArtisanIndexes(db: Kysely<OpenArtisanDatabase>, schemaNa
     `create index if not exists ${quoteIdentifier("human_gates_workflow_resolved_idx")} on ${tableName(schemaName, "human_gates")} (workflow_id, resolved)`,
     `create index if not exists ${quoteIdentifier("fast_forward_records_workflow_idx")} on ${tableName(schemaName, "fast_forward_records")} (workflow_id)`,
   ]
-  for (const statement of indexes) await sql.raw(statement).execute(db)
+  await executeStatements(db, indexes)
 }

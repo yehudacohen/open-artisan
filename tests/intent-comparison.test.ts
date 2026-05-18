@@ -20,20 +20,22 @@ function makeDispatcher(overrides?: {
   promptText?: string
   createThrows?: boolean
   promptThrows?: boolean
-}): SubagentDispatcher & { _createMock: ReturnType<typeof mock> } {
+}): SubagentDispatcher & { _createMock: ReturnType<typeof mock>; _promptMock: ReturnType<typeof mock> } {
   const defaultText = overrides?.promptText ?? "FULL: Prior workflow covers everything"
+  const promptMock = overrides?.promptThrows
+    ? mock(async () => { throw new Error("prompt failed") })
+    : mock(async () => defaultText)
   const createMock = overrides?.createThrows
     ? mock(async () => { throw new Error("create failed") })
     : mock(async () => ({
         id: "mock-intent-session",
-        prompt: overrides?.promptThrows
-          ? mock(async () => { throw new Error("prompt failed") })
-          : mock(async () => defaultText),
+        prompt: promptMock,
         destroy: mock(async () => {}),
       }))
   return {
     createSession: createMock,
     _createMock: createMock,
+    _promptMock: promptMock,
   }
 }
 
@@ -56,6 +58,13 @@ describe("compareIntentsWithLLM — classifications", () => {
     const result = await compareIntentsWithLLM(makeInput({ dispatcher }))
     expect(result.classification).toBe("FULL")
     expect(result.explanation).toContain("covers everything")
+  })
+
+  it("parses structured tool-style intent comparison output", async () => {
+    const dispatcher = makeDispatcher({ promptText: JSON.stringify({ classification: "PARTIAL", explanation: "Prior workflow lacks billing." }) })
+    const result = await compareIntentsWithLLM(makeInput({ dispatcher }))
+    expect(result.classification).toBe("PARTIAL")
+    expect(result.explanation).toContain("billing")
   })
 
   it("returns PARTIAL when LLM says PARTIAL", async () => {
@@ -123,6 +132,12 @@ describe("compareIntentsWithLLM — session lifecycle", () => {
     const createCall = dispatcher._createMock.mock.calls[0]
     // String model is passed through as-is — the adapter (not the core) normalizes to { modelID }
     expect((createCall as any)?.[0]?.model).toBe("gpt-4")
+  })
+
+  it("requests structured tool submission for intent comparison", async () => {
+    const dispatcher = makeDispatcher()
+    await compareIntentsWithLLM(makeInput({ dispatcher }))
+    expect(dispatcher._promptMock.mock.calls[0]?.[1]).toEqual({ submissionTool: { name: "submit_intent_comparison_result" } })
   })
 })
 

@@ -179,6 +179,28 @@ describe("cascadeAutoSkip", () => {
     expect(afterState.pendingRevisionSteps).toBeNull()
   })
 
+  it("returns null when current revision explicitly blocks auto-skip", async () => {
+    const planPath = writeArtifact(".openartisan/feat/plan.md", "# Plan\n")
+    const baselineHash = createHash("sha256").update("# Plan\n").digest("hex").slice(0, 32)
+    const state = freshState({
+      phase: "PLANNING" as Phase,
+      phaseState: "REVISE",
+      artifactDiskPaths: { plan: planPath },
+      revisionBaseline: { type: "content-hash", hash: baselineHash },
+      revisionAutoSkipBlockedReason: "scope expansion requires explicit artifact updates",
+      pendingRevisionSteps: [
+        { phase: "INTERFACES" as Phase, phaseState: "REVISE", artifact: "interfaces", instructions: "Update interfaces." },
+      ],
+    })
+    const store = createMockStore(new Map([[SID, state]]))
+    const result = await cascadeAutoSkip(makeDeps(store), SID, cwd)
+    expect(result).toBeNull()
+    const afterState = store.get(SID)!
+    expect(afterState.phase).toBe("PLANNING")
+    expect(afterState.phaseState).toBe("REVISE")
+    expect(afterState.pendingRevisionSteps).toHaveLength(1)
+  })
+
   // ---------------------------------------------------------------------------
   // hasArtifactChanged error handling
   // ---------------------------------------------------------------------------
@@ -325,26 +347,6 @@ describe("cascadeAutoSkip", () => {
     expect(afterState.phase).toBe("PLANNING")
     expect(afterState.phaseState).toBe("REVISE")
     expect(afterState.pendingRevisionSteps?.length).toBe(1)
-  })
-
-  // ---------------------------------------------------------------------------
-  // Return message format
-  // ---------------------------------------------------------------------------
-
-  describe("return message format preconditions", () => {
-    it("documents the callable export shape when a real skip cannot be triggered in this unit seam", async () => {
-      // Test the message format by checking the function contract.
-      // When skippedPhases has items and there are remaining steps,
-      // the message should include the skipped phase names in bold
-      // and mention the current phase.
-      //
-      // We test this by verifying the message format matches expectations
-      // if we could trigger the skip. Since we can't easily trigger a real
-      // skip in unit tests (requires real file/git state), we test the
-      // module's export shape and dependency injection contract.
-      expect(typeof cascadeAutoSkip).toBe("function")
-      expect(cascadeAutoSkip.length).toBe(3) // (deps, sessionId, cwd)
-    })
   })
 
   // ---------------------------------------------------------------------------

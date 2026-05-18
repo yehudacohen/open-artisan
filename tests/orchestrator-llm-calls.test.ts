@@ -20,26 +20,28 @@ function makeDispatcher(overrides?: {
   promptText?: string
   createThrows?: boolean
   promptThrows?: boolean
-}): SubagentDispatcher & { _createMock: ReturnType<typeof mock>; _destroyMock: ReturnType<typeof mock> } {
+}): SubagentDispatcher & { _createMock: ReturnType<typeof mock>; _destroyMock: ReturnType<typeof mock>; _promptMock: ReturnType<typeof mock> } {
   const defaultText = overrides?.promptText ?? JSON.stringify({
     affected_artifacts: ["plan"],
     root_cause_artifact: "plan",
     reasoning: "The feedback targets the plan",
   })
+  const promptMock = overrides?.promptThrows
+    ? mock(async () => { throw new Error("prompt failed") })
+    : mock(async () => defaultText)
   const destroyMock = mock(async () => {})
   const createMock = overrides?.createThrows
     ? mock(async () => { throw new Error("create failed") })
     : mock(async () => ({
         id: "mock-orch-session",
-        prompt: overrides?.promptThrows
-          ? mock(async () => { throw new Error("prompt failed") })
-          : mock(async () => defaultText),
+        prompt: promptMock,
         destroy: destroyMock,
       }))
   return {
     createSession: createMock,
     _createMock: createMock,
     _destroyMock: destroyMock,
+    _promptMock: promptMock,
   }
 }
 
@@ -85,6 +87,13 @@ describe("createAssessFn — success path", () => {
     const opts = (createCall as any)?.[0]
     expect(opts?.model).toEqual({ modelID: "claude-3", providerID: "anthropic" })
     expect(opts?.parentId).toBe("parent-session-123")
+  })
+
+  it("requests structured tool submission for assess", async () => {
+    const dispatcher = makeDispatcher()
+    const assess = createAssessFn(dispatcher)
+    await assess("Fix the plan", "plan")
+    expect(dispatcher._promptMock.mock.calls[0]?.[1]).toEqual({ submissionTool: { name: "submit_orchestrator_assess_result" } })
   })
 })
 
@@ -137,6 +146,7 @@ describe("createDivergeFn — classification", () => {
     expect(result.success).toBe(true)
     if (!result.success) return
     expect(result.classification).toBe("tactical")
+    expect(dispatcher._promptMock.mock.calls[0]?.[1]).toEqual({ submissionTool: { name: "submit_orchestrator_diverge_result" } })
   })
 
   it("returns backtrack classification", async () => {

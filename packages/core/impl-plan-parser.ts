@@ -9,6 +9,7 @@
  *   ## Task T1: Set up database schema
  *   **Dependencies:** none
  *   **Expected tests:** tests/db.test.ts, tests/schema.test.ts
+ *   **Verification commands:** bun run typecheck, bun test tests/db.test.ts
  *   **Files:** src/db/schema.ts, src/db/migrations/001.sql
  *   **Complexity:** small
  *   <description prose>
@@ -24,16 +25,17 @@
  * - Task IDs may be labeled ("Task T1") or use task-shaped IDs like "T1" / "task-auth"
  * - Dependencies may be comma-separated or space-separated, "none" means empty
  * - Expected tests may be absent (treated as empty array)
+ * - Verification commands may be absent (treated as empty array)
  * - Files may be absent (treated as empty array)
  * - Complexity defaults to "medium" if absent or unrecognized
  *
  * Returns a ParseResult with either the ImplDAG or a list of parse errors.
  */
 
-import { resolve } from "node:path"
 import { createImplDAG } from "./dag"
 import type { ImplDAG, TaskNode, TaskComplexity, TaskCategory } from "./dag"
 import type { WorkflowMode } from "./workflow-primitives"
+import { findInvalidWorkflowPaths, normalizeWorkflowPaths } from "./path-normalization"
 
 // ---------------------------------------------------------------------------
 // Types
@@ -80,6 +82,9 @@ const DEPS_RE = /^\s*(?:-\s*)?\*{0,2}(?:Dep(?:endencies|ends on)|Requires?)[*:\s
 /** Matches "**Expected tests:** ..." or shorthand "**Tests:** ..." */
 const TESTS_RE = /^\s*(?:-\s*)?\*{0,2}(?:Expected\s+)?tests?[*:\s]+(.*)$/i
 
+/** Matches "**Verification commands:** ..." or shorthand "**Commands:** ..." */
+const COMMANDS_RE = /^\s*(?:-\s*)?\*{0,2}(?:Verification\s+)?commands?[*:\s]+(.*)$/i
+
 /** Matches "**Complexity:** small" */
 const COMPLEXITY_RE = /^\s*(?:-\s*)?\*{0,2}Complexity[*:\s]+(.*)$/i
 
@@ -109,6 +114,22 @@ function parseList(raw: string): string[] {
     .filter((s) => s.length > 0 && !/^none$/i.test(s))
 }
 
+function parseCommandList(raw: string): string[] {
+  const trimmed = raw.trim()
+  if (/^none$/i.test(trimmed) || trimmed === "" || trimmed === "-") return []
+  const inlineCommands = Array.from(trimmed.matchAll(/`([^`]+)`/g), (match) => match[1]!.trim())
+    .filter((command) => command.length > 0 && !/^none$/i.test(command))
+  if (inlineCommands.length > 0) return inlineCommands
+  return trimmed
+    .split(/\s*,\s*/)
+    .map((command) => command.trim())
+    .filter((command) => command.length > 0 && !/^none$/i.test(command))
+}
+
+function looksLikeExpectedTestPath(value: string): boolean {
+  return /[\\/]/.test(value) || /\.[A-Za-z0-9]+$/.test(value)
+}
+
 function parseComplexity(raw: string): TaskComplexity {
   const lower = raw.trim().toLowerCase()
   if (lower === "small") return "small"
@@ -129,6 +150,18 @@ function parseCategory(raw: string): TaskCategory | undefined {
   return undefined // unknown — will default to "standalone"
 }
 
+function extractBoundaryRepairFiles(bodyLines: string[]): string[] {
+  const text = bodyLines.join("\n")
+  if (!/boundary\s+repair\s+(?:will\s+)?add/i.test(text)) return []
+  const files = new Set<string>()
+  const pathPattern = /`([^`]+\.[A-Za-z0-9]+)`|(?:^|[\s(:])((?:[A-Za-z0-9_.-]+\/)+[A-Za-z0-9_.-]+\.[A-Za-z0-9]+)/g
+  for (const match of text.matchAll(pathPattern)) {
+    const value = (match[1] ?? match[2] ?? "").trim()
+    if (value && !/^https?:\/\//i.test(value)) files.add(value)
+  }
+  return Array.from(files)
+}
+
 // ---------------------------------------------------------------------------
 // Block extractor
 // ---------------------------------------------------------------------------
@@ -139,6 +172,7 @@ interface RawBlock {
   rawDeps: string
   rawTests: string
   rawFiles: string
+  rawCommands: string
   rawComplexity: string
   rawCategory: string
   hasDepsField: boolean
@@ -156,7 +190,7 @@ function extractRawBlocks(text: string): RawBlock[] {
   const blocks: RawBlock[] = []
   let current: RawBlock | null = null
   let inCodeBlock = false
-  let pendingListField: "deps" | "tests" | "files" | null = null
+  let pendingListField: "deps" | "tests" | "files" | "commands" | null = null
 
   for (const line of lines) {
     // Track fenced code blocks — ignore task headers inside them
@@ -182,6 +216,7 @@ function extractRawBlocks(text: string): RawBlock[] {
         rawDeps: "",
         rawTests: "",
         rawFiles: "",
+        rawCommands: "",
         rawComplexity: "",
         rawCategory: "",
         hasDepsField: false,
@@ -219,6 +254,13 @@ function extractRawBlocks(text: string): RawBlock[] {
       continue
     }
 
+    const commandsMatch = COMMANDS_RE.exec(line)
+    if (commandsMatch) {
+      current.rawCommands = commandsMatch[1]!.trim()
+      pendingListField = current.rawCommands === "" ? "commands" : null
+      continue
+    }
+
     const complexityMatch = COMPLEXITY_RE.exec(line)
     if (complexityMatch) {
       current.rawComplexity = complexityMatch[1]!.trim()
@@ -241,6 +283,8 @@ function extractRawBlocks(text: string): RawBlock[] {
           current.rawDeps = current.rawDeps ? `${current.rawDeps}, ${value}` : value
         } else if (pendingListField === "tests") {
           current.rawTests = current.rawTests ? `${current.rawTests}, ${value}` : value
+        } else if (pendingListField === "commands") {
+          current.rawCommands = current.rawCommands ? `${current.rawCommands}, ${value}` : value
         } else {
           current.rawFiles = current.rawFiles ? `${current.rawFiles}, ${value}` : value
         }
@@ -306,12 +350,18 @@ export function parseImplPlan(artifactText: string): ParseResult {
       : block.description
 
     const category = parseCategory(block.rawCategory)
+    const expectedFiles = parseList(block.rawFiles)
+    for (const file of extractBoundaryRepairFiles(block.bodyLines)) {
+      if (!expectedFiles.includes(file)) expectedFiles.push(file)
+    }
+
     nodes.push({
       id: block.id,
       description,
       dependencies: parseList(block.rawDeps),
       expectedTests: parseList(block.rawTests),
-      expectedFiles: parseList(block.rawFiles),
+      verificationCommands: parseCommandList(block.rawCommands),
+      expectedFiles,
       estimatedComplexity: parseComplexity(block.rawComplexity),
       status: "pending",
       // Only set category if explicitly specified; undefined = defaults to "standalone"
@@ -356,23 +406,35 @@ export function validateExecutableImplPlan(
     }
   }
 
-  if (mode !== "INCREMENTAL") {
-    return errors
-  }
-
   const parsed = parseImplPlan(artifactText)
   if (!parsed.success) {
     return errors
   }
 
-  const normalizedAllowlist = new Set(
-    fileAllowlist.map((path) => (path.startsWith("/") ? path : resolve(cwd, path))),
-  )
+  for (const task of parsed.dag.tasks) {
+    const nonPathExpectedTests = task.expectedTests.filter((entry) => !looksLikeExpectedTestPath(entry))
+    if (nonPathExpectedTests.length > 0) {
+      errors.push(
+        `Task "${task.id}" has non-path **Expected tests:** entries: ${nonPathExpectedTests.join(", ")}. ` +
+        `Expected tests accepts test/spec file paths only; put runnable commands under **Verification commands:**.`,
+      )
+    }
+    const invalidPaths = findInvalidWorkflowPaths([...task.expectedFiles, ...task.expectedTests], cwd, { allowOutsideProject: false })
+    if (invalidPaths.length > 0) {
+      errors.push(
+        `Task "${task.id}" references files outside the project root or invalid paths: ${invalidPaths.join(", ")}`,
+      )
+    }
+  }
+
+  if (mode !== "INCREMENTAL") {
+    return errors
+  }
+
+  const normalizedAllowlist = new Set(normalizeWorkflowPaths(fileAllowlist, cwd))
 
   for (const task of parsed.dag.tasks) {
-    const scopedPaths = [...task.expectedFiles, ...task.expectedTests].map((path) =>
-      path.startsWith("/") ? path : resolve(cwd, path),
-    )
+    const scopedPaths = normalizeWorkflowPaths([...task.expectedFiles, ...task.expectedTests], cwd)
 
     if (scopedPaths.length > 0 && normalizedAllowlist.size === 0) {
       errors.push(

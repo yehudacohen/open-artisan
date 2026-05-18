@@ -55,6 +55,8 @@ export interface FeedbackHandlerRevise {
   clearEscapePending: boolean
   /** If set, replace intentBaseline with this string */
   newIntentBaseline?: string
+  /** Why immediate/cascade auto-skip is blocked for this revision, when set. */
+  autoSkipBlockedReason?: string
   message: string
 }
 
@@ -133,6 +135,7 @@ export async function handleEscapeHatch(
       pendingRevisionSteps: ndPlan.revisionSteps.slice(1),
       clearEscapePending: true,
       newIntentBaseline: newDirectionText.slice(0, 2000),
+      ...(ndFirst.autoSkipBlockedReason ? { autoSkipBlockedReason: ndFirst.autoSkipBlockedReason } : {}),
       message:
         `Entirely new direction accepted. Intent baseline replaced.\n\n` +
         `**Step 1 of ${ndPlan.revisionSteps.length}:** Revise the **${ndFirst.artifact}** artifact.\n` +
@@ -217,6 +220,7 @@ export async function handleEscapeHatch(
         pendingRevisionSteps: altPlan.revisionSteps.slice(1),
         clearEscapePending: true,
         newIntentBaseline: feedbackText.slice(0, 2000),
+        ...(altFirst.autoSkipBlockedReason ? { autoSkipBlockedReason: altFirst.autoSkipBlockedReason } : {}),
         message:
           `Alternative direction accepted — scope change detected, backtracking to ${altFirst.phase}.\n\n` +
           `${altFirst.instructions}\n\n` +
@@ -239,6 +243,7 @@ export async function handleEscapeHatch(
       pendingRevisionSteps: altPlan.revisionSteps.slice(1),
       clearEscapePending: true,
       newIntentBaseline: feedbackText.slice(0, 2000),
+      ...(altFirst.autoSkipBlockedReason ? { autoSkipBlockedReason: altFirst.autoSkipBlockedReason } : {}),
       message:
         `Alternative direction accepted — rebuilding revision plan.\n\n` +
         `**Step 1 of ${altPlan.revisionSteps.length}:** Revise the **${altFirst.artifact}** artifact.\n` +
@@ -270,6 +275,7 @@ export async function handleEscapeHatch(
     targetPhaseState: "REVISE",
     pendingRevisionSteps: steps.slice(1),
     clearEscapePending: true,
+    ...(firstStep.autoSkipBlockedReason ? { autoSkipBlockedReason: firstStep.autoSkipBlockedReason } : {}),
     message:
       `Escape hatch resolved — proceeding with revision.\n\n` +
       `**Step 1 of ${steps.length}:** Revise the **${firstStep.artifact}** artifact.\n` +
@@ -310,6 +316,7 @@ export function handleCascade(
     targetPhaseState: "REVISE",
     pendingRevisionSteps: remaining,
     clearEscapePending: false,
+    ...(nextStep.autoSkipBlockedReason ? { autoSkipBlockedReason: nextStep.autoSkipBlockedReason } : {}),
     message:
       `**Revision cascade — continuing to next artifact.**\n\n` +
       `Revise the **${nextStep.artifact}** artifact.\n` +
@@ -370,6 +377,7 @@ export async function handleNormalRevise(
       targetPhaseState: firstStep.phaseState as "REVISE" | "DRAFT",
       pendingRevisionSteps: revisionSteps.slice(1),
       clearEscapePending: false,
+      ...(firstStep.autoSkipBlockedReason ? { autoSkipBlockedReason: firstStep.autoSkipBlockedReason } : {}),
       message:
         `**Scope change detected — backtracking to ${firstStep.phase} phase.**\n\n` +
         `${firstStep.instructions}\n\n` +
@@ -424,6 +432,7 @@ export async function handleNormalRevise(
     targetPhaseState: "REVISE",
     pendingRevisionSteps: revisionSteps.slice(1),
     clearEscapePending: false,
+    ...(firstStep.autoSkipBlockedReason ? { autoSkipBlockedReason: firstStep.autoSkipBlockedReason } : {}),
     message:
       fallbackMessage + "\n\n" +
       `**Orchestrator routing:** Revise **${firstStep.artifact}** artifact.\n` +

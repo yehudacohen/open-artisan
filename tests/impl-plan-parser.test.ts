@@ -88,6 +88,27 @@ describe("parseImplPlan — happy path", () => {
     expect(t2.expectedTests).toContain("tests/user-repo.test.ts")
   })
 
+  it("parses verification commands separately from expected test paths", () => {
+    const plan = `
+## Task T1: Release checks
+**Dependencies:** none
+**Files:** packages/create-app/src/release-readiness.ts
+**Expected tests:** packages/create-app/src/release-readiness.test.ts
+**Verification commands:** \`bun run typecheck\`, \`bun run check:release\`, \`bun run smoke:generated\`
+**Complexity:** medium
+`
+
+    const result = parseImplPlan(plan)
+    if (!result.success) throw new Error(result.errors.join("; "))
+    const task = Array.from(result.dag.tasks)[0]!
+    expect(task.expectedTests).toEqual(["packages/create-app/src/release-readiness.test.ts"])
+    expect(task.verificationCommands).toEqual([
+      "bun run typecheck",
+      "bun run check:release",
+      "bun run smoke:generated",
+    ])
+  })
+
   it("parses complexity correctly", () => {
     const result = parseImplPlan(SIMPLE_PLAN)
     if (!result.success) throw new Error(result.errors.join("; "))
@@ -324,6 +345,78 @@ describe("validateExecutableImplPlan", () => {
 
     expect(errors.some((error) => error.includes("outside the approved INCREMENTAL allowlist"))).toBe(true)
   })
+
+  it("treats relative, absolute, and backslash task paths as the same allowlisted path", () => {
+    const plan = `
+## Task T1: Scoped work
+**Dependencies:** none
+**Files:** .\\src\\allowed.ts
+**Expected tests:** tests/allowed.test.ts
+**Complexity:** medium
+`
+
+    const errors = validateExecutableImplPlan(
+      plan,
+      "INCREMENTAL",
+      ["/project/src/allowed.ts", "tests/allowed.test.ts"],
+      "/project",
+    )
+
+    expect(errors).toEqual([])
+  })
+
+  it("rejects executable task paths outside the project root", () => {
+    const plan = `
+## Task T1: Bad scope
+**Dependencies:** none
+**Files:** ../outside.ts
+**Expected tests:** none
+**Complexity:** medium
+`
+
+    const errors = validateExecutableImplPlan(plan, "GREENFIELD", [], "/project")
+
+    expect(errors.some((error) => error.includes("outside the project root"))).toBe(true)
+  })
+
+  it("does not allow commands or prose in Expected tests metadata", () => {
+    const plan = `
+## Task T1: Release checks
+**Dependencies:** none
+**Files:** packages/create-app/src/release-readiness.ts
+**Expected tests:** release-readiness package test, source typecheck, and test-inclusive typecheck
+**Verification commands:** \`bun run typecheck\`
+**Complexity:** medium
+`
+
+    const errors = validateExecutableImplPlan(plan, "GREENFIELD", [], "/project")
+
+    expect(errors.some((error) => error.includes("non-path **Expected tests:** entries"))).toBe(true)
+    expect(errors.some((error) => error.includes("put runnable commands under **Verification commands:**"))).toBe(true)
+  })
+
+  it("does not apply INCREMENTAL allowlist validation to verification commands", () => {
+    const plan = `
+## Task T1: Scoped release checks
+**Dependencies:** none
+**Files:** packages/create-app/src/release-readiness.ts
+**Expected tests:** packages/create-app/src/release-readiness.test.ts
+**Verification commands:** \`bun run typecheck\`, \`bun run check:release\`
+**Complexity:** medium
+`
+
+    const errors = validateExecutableImplPlan(
+      plan,
+      "INCREMENTAL",
+      [
+        "/project/packages/create-app/src/release-readiness.ts",
+        "/project/packages/create-app/src/release-readiness.test.ts",
+      ],
+      "/project",
+    )
+
+    expect(errors).toEqual([])
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -503,6 +596,23 @@ Some intro text.
 // ---------------------------------------------------------------------------
 
 describe("parseImplPlan — expectedFiles", () => {
+  it("promotes boundary repair file additions into first-class task files", () => {
+    const result = parseImplPlan(`
+## Task T8: Mirror generated examples
+**Dependencies:** none
+**Expected tests:** none
+**Files:** src/runtime.ts
+**Complexity:** medium
+
+Boundary repair will add \`examples/migrations/001_init.sql\` and \`examples/admin/users.ts\` when this task starts.
+`)
+
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    const task = Array.from(result.dag.tasks)[0]!
+    expect(task.expectedFiles).toEqual(["src/runtime.ts", "examples/migrations/001_init.sql", "examples/admin/users.ts"])
+  })
+
   it("parses Files: field into expectedFiles array", () => {
     const plan = `
 ## Task T1: Build page

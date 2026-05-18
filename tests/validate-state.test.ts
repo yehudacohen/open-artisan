@@ -28,6 +28,9 @@ function makeValidState(overrides: Partial<WorkflowState> = {}): WorkflowState {
     phaseApprovalCounts: {},
     escapePending: false,
     pendingRevisionSteps: null,
+    revisionAutoSkipBlockedReason: null,
+    pendingAllowlistExpansions: [],
+    toolFailureHistory: [],
     currentTaskId: null,
     feedbackHistory: [],
     userGateMessageReceived: false,
@@ -448,6 +451,24 @@ describe("validateWorkflowState — v6 fields", () => {
     const err = validateWorkflowState(state)
     expect(err).not.toBeNull()
     expect(err).toContain("invalid status")
+  })
+
+  it("rejects non-string implDag verificationCommands entries", () => {
+    const state = makeValidState({
+      implDag: [{
+        id: "T1",
+        description: "d",
+        dependencies: [],
+        expectedTests: [],
+        expectedFiles: [],
+        verificationCommands: [123],
+        estimatedComplexity: "small",
+        status: "pending",
+      } as any],
+    })
+    const err = validateWorkflowState(state)
+    expect(err).not.toBeNull()
+    expect(err).toContain("verificationCommands[0] must be a string")
   })
 
   it("accepts implDag tasks with all valid statuses", () => {
@@ -919,5 +940,69 @@ describe("validateWorkflowState — implementation pointer invariants", () => {
       taskReviewCount: 1,
     }))
     expect(err).toContain("cannot point to a terminal task")
+  })
+})
+
+describe("validateWorkflowState — repair metadata validation", () => {
+  it("rejects pending allowlist expansion records with invalid artifact, phase, or timestamp", () => {
+    expect(validateWorkflowState(makeValidState({
+      pendingAllowlistExpansions: [{
+        files: ["/repo/src/a.ts"],
+        reason: "Need this file for approved implementation work.",
+        sourceArtifact: "bogus" as any,
+        requestedAtPhase: "IMPLEMENTATION",
+        requestedAt: 1,
+      }],
+    }))).toContain("sourceArtifact")
+
+    expect(validateWorkflowState(makeValidState({
+      pendingAllowlistExpansions: [{
+        files: ["/repo/src/a.ts"],
+        reason: "Need this file for approved implementation work.",
+        sourceArtifact: "impl_plan",
+        requestedAtPhase: "BOGUS" as any,
+        requestedAt: 1,
+      }],
+    }))).toContain("requestedAtPhase")
+
+    expect(validateWorkflowState(makeValidState({
+      pendingAllowlistExpansions: [{
+        files: ["/repo/src/a.ts"],
+        reason: "Need this file for approved implementation work.",
+        sourceArtifact: "impl_plan",
+        requestedAtPhase: "IMPLEMENTATION",
+        requestedAt: -1,
+      }],
+    }))).toContain("requestedAt")
+  })
+
+  it("rejects invalid tool failure history categories and phase/state pairs", () => {
+    expect(validateWorkflowState(makeValidState({
+      toolFailureHistory: [{
+        fingerprint: "abc",
+        category: "unknown" as any,
+        toolName: "mark_task_complete",
+        message: "failed",
+        count: 1,
+        firstSeenAt: 1,
+        lastSeenAt: 1,
+        phase: "IMPLEMENTATION",
+        phaseState: "DRAFT",
+      }],
+    }))).toContain("category")
+
+    expect(validateWorkflowState(makeValidState({
+      toolFailureHistory: [{
+        fingerprint: "abc",
+        category: "reviewer-infrastructure",
+        toolName: "mark_task_complete",
+        message: "failed",
+        count: 1,
+        firstSeenAt: 1,
+        lastSeenAt: 1,
+        phase: "PLANNING",
+        phaseState: "TASK_REVIEW" as any,
+      }],
+    }))).toContain("phaseState")
   })
 })

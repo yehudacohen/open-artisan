@@ -7,6 +7,7 @@ import { mkdir } from "node:fs/promises"
 import { Kysely, sql } from "kysely"
 
 import { tracePGlite } from "./pglite-trace"
+import { executePGliteRawBatch } from "./pglite-connection-manager"
 import type { RoadmapDocument, RoadmapItem } from "./roadmap-types"
 
 export const ROADMAP_SCHEMA_VERSION = 1
@@ -53,20 +54,24 @@ function quoteIdentifier(identifier: string): string {
   return `"${identifier.replace(/"/g, '""')}"`
 }
 
+async function executeStatements(db: Kysely<RoadmapDatabase>, statements: string[]): Promise<void> {
+  if (statements.length === 0) return
+  if (await executePGliteRawBatch(db, statements)) return
+  for (const statement of statements) await sql.raw(statement).execute(db)
+}
+
 async function applyRoadmapMigration(input: {
   db: Kysely<RoadmapDatabase>
   schemaName: string
   version: number
   run: (tx: Kysely<RoadmapDatabase>) => Promise<void>
 }): Promise<void> {
-  await input.db.transaction().execute(async (tx) => {
-    await input.run(tx)
-    await tx
-      .withSchema(input.schemaName)
-      .insertInto("schema_migrations")
-      .values({ version: input.version, applied_at: new Date().toISOString() })
-      .execute()
-  })
+  await input.run(input.db)
+  await input.db
+    .withSchema(input.schemaName)
+    .insertInto("schema_migrations")
+    .values({ version: input.version, applied_at: new Date().toISOString() })
+    .execute()
 }
 
 export async function ensureRoadmapSchema(input: {
@@ -83,22 +88,20 @@ export async function ensureRoadmapSchema(input: {
   const roadmapItemsTable = `${quotedSchema}.${quoteIdentifier("roadmap_items")}`
   const roadmapEdgesTable = `${quotedSchema}.${quoteIdentifier("roadmap_edges")}`
 
-  await sql.raw(`create schema if not exists ${quotedSchema}`).execute(input.db)
-  await sql.raw(`
-    create table if not exists ${quotedSchema}.${quoteIdentifier("database_operation_locks")} (
+  await executeStatements(input.db, [
+    `create schema if not exists ${quotedSchema}`,
+    `create table if not exists ${quotedSchema}.${quoteIdentifier("database_operation_locks")} (
       lock_key text primary key,
       owner_id text not null,
       lease_expires_at text not null,
       created_at text not null,
       updated_at text not null
-    )
-  `).execute(input.db)
-  await sql.raw(`
-    create table if not exists ${quotedSchema}.${quoteIdentifier("schema_migrations")} (
+    )`,
+    `create table if not exists ${quotedSchema}.${quoteIdentifier("schema_migrations")} (
       version integer primary key,
       applied_at text not null
-    )
-  `).execute(input.db)
+    )`,
+  ])
   const appliedMigrationRows = await input.db.withSchema(input.schemaName).selectFrom("schema_migrations").select("version").execute()
   const appliedMigrations = new Set(appliedMigrationRows.map((row) => row.version))
   if (appliedMigrations.has(ROADMAP_SCHEMA_VERSION)) {
@@ -112,15 +115,13 @@ export async function ensureRoadmapSchema(input: {
     schemaName: input.schemaName,
     version: ROADMAP_SCHEMA_VERSION,
     async run(tx) {
-      await sql.raw(`
-        create table if not exists ${roadmapDocumentsTable} (
+      await executeStatements(tx, [
+        `create table if not exists ${roadmapDocumentsTable} (
           document_id text primary key,
           schema_version integer not null,
           document jsonb not null
-        )
-      `).execute(tx)
-      await sql.raw(`
-        create table if not exists ${roadmapItemsTable} (
+        )`,
+        `create table if not exists ${roadmapItemsTable} (
           document_id text not null,
           item_id text primary key,
           kind text not null,
@@ -131,21 +132,19 @@ export async function ensureRoadmapSchema(input: {
           feature_name text,
           created_at text not null,
           updated_at text not null
-        )
-      `).execute(tx)
-      await sql.raw(`create index if not exists ${quoteIdentifier("roadmap_items_document_idx")} on ${roadmapItemsTable} (document_id)`).execute(tx)
-      await sql.raw(`create index if not exists ${quoteIdentifier("roadmap_items_feature_priority_idx")} on ${roadmapItemsTable} (feature_name, priority desc)`).execute(tx)
-      await sql.raw(`create index if not exists ${quoteIdentifier("roadmap_items_status_priority_idx")} on ${roadmapItemsTable} (status, priority desc)`).execute(tx)
-      await sql.raw(`
-        create table if not exists ${roadmapEdgesTable} (
+        )`,
+        `create index if not exists ${quoteIdentifier("roadmap_items_document_idx")} on ${roadmapItemsTable} (document_id)`,
+        `create index if not exists ${quoteIdentifier("roadmap_items_feature_priority_idx")} on ${roadmapItemsTable} (feature_name, priority desc)`,
+        `create index if not exists ${quoteIdentifier("roadmap_items_status_priority_idx")} on ${roadmapItemsTable} (status, priority desc)`,
+        `create table if not exists ${roadmapEdgesTable} (
           document_id text not null,
           edge_key text primary key,
           from_item_id text not null,
           to_item_id text not null,
           kind text not null
-        )
-      `).execute(tx)
-      await sql.raw(`create index if not exists ${quoteIdentifier("roadmap_edges_document_idx")} on ${roadmapEdgesTable} (document_id)`).execute(tx)
+        )`,
+        `create index if not exists ${quoteIdentifier("roadmap_edges_document_idx")} on ${roadmapEdgesTable} (document_id)`,
+      ])
     },
   })
   tracePGlite("schema.roadmap.migration.done", { databasePath: input.databasePath, schemaName: input.schemaName, migration: ROADMAP_SCHEMA_VERSION })

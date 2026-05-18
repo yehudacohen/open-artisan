@@ -252,6 +252,9 @@ async function runScannerSession(
     })
 
     try {
+      // Discovery scanner sessions intentionally return free-form Markdown
+      // reports; their aggregate output is synthesized by the authoring agent,
+      // not consumed as a phase-gate verdict or workflow transition contract.
       const text = await withTimeout(
         session.prompt(normalizedPrompt),
         SCANNER_TIMEOUT_MS,

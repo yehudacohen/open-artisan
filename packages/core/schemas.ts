@@ -204,6 +204,8 @@ export const ProposeDirectApplicationSchema = z.object({
   verification_command: z.string().optional(),
 }).strict()
 
+export const ArtifactKeySchema = z.enum(["design", "conventions", "plan", "interfaces", "tests", "impl_plan", "implementation"])
+
 export const ChangeProposalRouteSchema = z.enum([
   "current-task-fix",
   "task-boundary-change",
@@ -225,6 +227,26 @@ export const ChangeProposalToolSchema = z.object({
   artifact_keys: z.array(z.string().min(1)).optional(),
 }).strict()
 
+export const RequestAllowlistExpansionToolSchema = z.object({
+  files: z.array(z.string().min(1)).min(1),
+  reason: z.string().min(20),
+  source_artifact: ArtifactKeySchema,
+}).strict()
+
+export const ApproveCurrentTaskScopeExpansionToolSchema = z.object({
+  task_id: z.string().min(1).optional(),
+  files: z.array(z.string().min(1)).optional(),
+  expected_tests: z.array(z.string().min(1)).optional(),
+  reason: z.string().min(20),
+}).strict()
+
+export const RepairCurrentTaskBoundaryFromImplPlanToolSchema = z.object({
+  task_id: z.string().min(1).optional(),
+  reason: z.string().min(20),
+}).strict()
+
+export const SummarizeWorkflowIncidentToolSchema = z.object({}).strict()
+
 export const ChangeProposalReviewOutputSchema = z.object({
   approved: z.boolean(),
   route: ChangeProposalRouteSchema,
@@ -235,9 +257,49 @@ export const ChangeProposalReviewOutputSchema = z.object({
   rejected_files: z.array(z.string().min(1)).default([]),
 }).strict()
 
+export const TaskDriftReviewOutputSchema = z.object({
+  drift_detected: z.boolean(),
+  updated_descriptions: z.record(z.string(), z.string()).default({}),
+  reasoning: z.string().default(""),
+}).strict()
+
+export const OrchestratorAssessOutputSchema = z.object({
+  affected_artifacts: z.array(ArtifactKeySchema),
+  root_cause_artifact: ArtifactKeySchema,
+  reasoning: z.string().default(""),
+}).strict()
+
+export const OrchestratorDivergeOutputSchema = z.object({
+  classification: z.enum(["tactical", "backtrack", "strategic"]),
+  trigger_criterion: z.enum(["scope_expansion", "architectural_shift", "cascade_depth", "accumulated_drift", "upstream_root_cause"]).nullable().optional(),
+  reasoning: z.string().default(""),
+}).strict()
+
+export const AutoApproveOutputSchema = z.object({
+  approve: z.boolean(),
+  confidence: z.number().min(0).max(1),
+  reasoning: z.string().default(""),
+  feedback: z.string().optional(),
+}).strict()
+
+export const RebuttalReviewOutputSchema = z.object({
+  criteria_results: z.array(z.object({
+    criterion: z.string().min(1),
+    met: z.boolean(),
+    evidence: z.string().min(1),
+    severity: CriterionSeveritySchema.optional(),
+    score: z.number().optional(),
+    rebuttal_accepted: z.boolean().optional(),
+  }).strict()),
+}).strict()
+
+export const IntentComparisonOutputSchema = z.object({
+  classification: z.enum(["FULL", "PARTIAL", "DIFFERENT", "ERROR"]),
+  explanation: z.string().default(""),
+}).strict()
+
 export const DisableOpenArtisanToolSchema = z.object({}).strict()
 
-export const ArtifactKeySchema = z.enum(["design", "conventions", "plan", "interfaces", "tests", "impl_plan", "implementation"])
 export const DriftScopeSchema = z.enum(["current-task", "current-phase", "workflow", "roadmap"])
 export const DriftRepairStrategySchema = z.enum(["minimal", "safe-auto", "ask-first"])
 
@@ -290,6 +352,7 @@ export const SubmitFeedbackToolSchema = z.object({
   feedback_text: z.string().optional(),
   approved_files: z.array(z.string()).optional(),
   resolved_human_gates: z.array(z.string()).optional(),
+  dry_run: z.boolean().optional(),
 }).strict()
 
 export const MarkTaskCompleteToolSchema = z.object({
@@ -326,19 +389,76 @@ export const SpawnSubWorkflowToolSchema = z.object({
 export const QueryParentWorkflowToolSchema = z.object({}).strict()
 export const QueryChildWorkflowToolSchema = z.object({ task_id: z.string().min(1) }).strict()
 export const SubmitTaskReviewToolSchema = z.object({
-  review_output: z.string().min(1),
+  review_output: z.string().min(1).optional(),
+  passed: z.boolean().optional(),
+  issues: z.array(z.string()).optional(),
+  reasoning: z.string().optional(),
+  code_quality_score: z.union([z.string(), z.number()]).optional(),
+  error_handling_score: z.union([z.string(), z.number()]).optional(),
+  patch_suggestions: z.array(TaskReviewPatchSuggestionSchema).optional(),
   review_token: z.string().min(1),
 }).strict()
 export const SubmitPhaseReviewToolSchema = z.object({
   review_output: z.string().optional(),
+  satisfied: z.boolean().optional(),
+  criteria_results: z.array(CriterionResultSchema.extend({
+    score: z.union([z.string(), z.number()]).optional(),
+  })).optional(),
   review_stdout: z.string().optional(),
   review_stderr: z.string().optional(),
   review_exit_code: z.number().int().nullable().optional(),
   review_error: z.string().nullable().optional(),
   review_token: z.string().min(1),
 }).strict()
+export const SubmitTaskReviewResultToolSchema = z.object({
+  passed: z.boolean(),
+  issues: z.array(z.string()).optional(),
+  reasoning: z.string().optional(),
+  code_quality_score: z.string().optional(),
+  error_handling_score: z.string().optional(),
+  patch_suggestions: z.array(TaskReviewPatchSuggestionSchema).optional(),
+}).strict()
+export const SubmitPhaseReviewResultToolSchema = z.object({
+  satisfied: z.boolean(),
+  criteria_results: z.array(z.object({
+    criterionId: z.string().optional(),
+    criterion_id: z.string().optional(),
+    criterion: z.string(),
+    met: z.boolean(),
+    evidence: z.string(),
+    severity: z.enum(["blocking", "suggestion", "design-invariant"]).optional(),
+    score: z.string().optional(),
+  }).strict()),
+}).strict()
+export const SubmitChangeProposalReviewResultToolSchema = ChangeProposalReviewOutputSchema
+export const SubmitTaskDriftReviewResultToolSchema = TaskDriftReviewOutputSchema
+export const SubmitOrchestratorAssessResultToolSchema = OrchestratorAssessOutputSchema
+export const SubmitOrchestratorDivergeResultToolSchema = OrchestratorDivergeOutputSchema.extend({
+  trigger_criterion: z.string().optional(),
+})
+export const SubmitAutoApproveResultToolSchema = z.object({
+  approve: z.boolean(),
+  confidence: z.string().min(1),
+  reasoning: z.string().optional(),
+  feedback: z.string().optional(),
+}).strict()
+export const SubmitRebuttalReviewResultToolSchema = z.object({
+  criteria_results: z.array(z.object({
+    criterion: z.string().min(1),
+    met: z.boolean(),
+    evidence: z.string().min(1),
+    severity: z.enum(["blocking", "suggestion", "design-invariant"]).optional(),
+    score: z.string().optional(),
+    rebuttal_accepted: z.boolean().optional(),
+  }).strict()),
+}).strict()
+export const SubmitIntentComparisonResultToolSchema = IntentComparisonOutputSchema
 export const SubmitAutoApproveToolSchema = z.object({
-  review_output: z.string().min(1),
+  review_output: z.string().min(1).optional(),
+  approve: z.boolean().optional(),
+  confidence: z.union([z.string(), z.number()]).optional(),
+  reasoning: z.string().optional(),
+  feedback: z.string().optional(),
   review_token: z.string().min(1),
 }).strict()
 export const ResetTaskToolSchema = z.object({
@@ -381,6 +501,13 @@ export type GitCheckpointSkippedFromSchema = z.infer<typeof GitCheckpointSkipped
 export type TaskReviewOutput = z.infer<typeof TaskReviewOutputSchema>
 export type ChangeProposalToolInput = z.infer<typeof ChangeProposalToolSchema>
 export type ChangeProposalReviewOutput = z.infer<typeof ChangeProposalReviewOutputSchema>
+export type TaskDriftReviewOutput = z.infer<typeof TaskDriftReviewOutputSchema>
+export type OrchestratorAssessOutput = z.infer<typeof OrchestratorAssessOutputSchema>
+export type OrchestratorDivergeOutput = z.infer<typeof OrchestratorDivergeOutputSchema>
+export type AutoApproveOutput = z.infer<typeof AutoApproveOutputSchema>
+export type RebuttalReviewOutput = z.infer<typeof RebuttalReviewOutputSchema>
+export type IntentComparisonOutput = z.infer<typeof IntentComparisonOutputSchema>
+export type ApproveCurrentTaskScopeExpansionInput = z.infer<typeof ApproveCurrentTaskScopeExpansionToolSchema>
 export type DisableOpenArtisanToolInput = z.infer<typeof DisableOpenArtisanToolSchema>
 export type ReportDriftToolInput = z.infer<typeof ReportDriftToolSchema>
 export type PlanDriftRepairToolInput = z.infer<typeof PlanDriftRepairToolSchema>

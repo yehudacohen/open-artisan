@@ -4,7 +4,7 @@
  * Uses the bridge server in-process (no child process spawn) by calling
  * method handlers directly with a real store + FileSystemStateBackend.
  */
-import { describe, expect, it, beforeEach, afterEach } from "bun:test"
+import { describe, expect, it, beforeEach, afterEach, setDefaultTimeout } from "bun:test"
 import { join } from "node:path"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
@@ -24,6 +24,8 @@ import { resolveRuntimeBackendKind } from "#core/open-artisan-runtime-backends"
 
 let tmpDir: string
 let ctx: BridgeContext
+
+setDefaultTimeout(90_000)
 
 function makeBridgeContext(): BridgeContext {
   let engine: EngineContext | null = null

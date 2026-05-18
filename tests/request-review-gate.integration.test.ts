@@ -9,7 +9,7 @@
  * 2. request_review allows when all DAG tasks are complete
  * 3. mark_task_complete dispatches per-task review (mocked via client)
  * 4. mark_task_complete rejects when per-task review fails
- * 5. mark_task_complete accepts when per-task review dispatch fails (graceful degradation)
+ * 5. mark_task_complete blocks when per-task review dispatch fails
  */
 import { describe, expect, it, beforeEach, afterEach, mock } from "bun:test"
 import { mkdtempSync, mkdirSync, rmSync } from "node:fs"
@@ -30,7 +30,7 @@ function makeMockClient() {
 
   // Stack of custom prompt responses. When non-empty, the next session.prompt
   // call pops from this stack instead of returning the default passing response.
-  const promptResponseStack: Array<{ data: { parts: Array<{ type: string; text: string }> } } | Error> = []
+  const promptResponseStack: Array<{ data: { info?: unknown; parts: Array<{ type: string; text: string }> } } | Error> = []
 
   const client = {
     session: {
@@ -71,7 +71,7 @@ function makeMockClient() {
           ],
         }
         return {
-          data: { parts: [{ type: "text", text: JSON.stringify(response) }] },
+          data: { info: response, parts: [{ type: "text", text: JSON.stringify(response) }] },
         }
       }),
       delete: mock(async (opts: { sessionID: string }) => {
@@ -79,7 +79,7 @@ function makeMockClient() {
       }),
     },
     /** Push a custom response to be returned by the next session.prompt call */
-    _pushPromptResponse(resp: { data: { parts: Array<{ type: string; text: string }> } } | Error) {
+    _pushPromptResponse(resp: { data: { info?: unknown; parts: Array<{ type: string; text: string }> } } | Error) {
       promptResponseStack.push(resp)
     },
   }
@@ -458,8 +458,9 @@ describe("mark_satisfied — v22 artifact files gate", () => {
     )
 
     // Push self-review response
+    const phaseReview = { satisfied: true, criteria_results: [{ criterion: "Test", met: true, evidence: "pass", severity: "blocking" }] }
     client._pushPromptResponse({
-      data: { parts: [{ type: "text", text: JSON.stringify({ satisfied: true, criteria_results: [{ criterion: "Test", met: true, evidence: "pass", severity: "blocking" }] }) }] },
+      data: { info: phaseReview, parts: [{ type: "text", text: JSON.stringify(phaseReview) }] },
     })
 
     // mark_satisfied should NOT be blocked when the markdown artifact was reviewed from disk.
@@ -482,18 +483,20 @@ describe("mark_task_complete — per-task review integration", () => {
     const ctx = { directory: tempDir, sessionId: sid }
 
     // Push a FAILING task review response
+    const taskReview = {
+      passed: false,
+      issues: [
+        "Test tests/core.test.ts is failing with TypeError",
+        "Missing error handling in core module",
+      ],
+      reasoning: "Two tests are failing and error handling is incomplete.",
+    }
     client._pushPromptResponse({
       data: {
+        info: taskReview,
         parts: [{
           type: "text",
-          text: JSON.stringify({
-            passed: false,
-            issues: [
-              "Test tests/core.test.ts is failing with TypeError",
-              "Missing error handling in core module",
-            ],
-            reasoning: "Two tests are failing and error handling is incomplete.",
-          }),
+          text: JSON.stringify(taskReview),
         }],
       },
     })
@@ -515,15 +518,17 @@ describe("mark_task_complete — per-task review integration", () => {
     const ctx = { directory: tempDir, sessionId: sid }
 
     // Push a PASSING task review response
+    const taskReview = {
+      passed: true,
+      issues: [],
+      reasoning: "All tests pass and implementation looks correct.",
+    }
     client._pushPromptResponse({
       data: {
+        info: taskReview,
         parts: [{
           type: "text",
-          text: JSON.stringify({
-            passed: true,
-            issues: [],
-            reasoning: "All tests pass and implementation looks correct.",
-          }),
+          text: JSON.stringify(taskReview),
         }],
       },
     })
@@ -539,7 +544,7 @@ describe("mark_task_complete — per-task review integration", () => {
     expect(result).toContain("T1")
   }, 30000)
 
-  it("gracefully degrades when task review dispatch fails", async () => {
+  it("blocks task completion when task review dispatch fails", async () => {
     const sid = `review-test-${Date.now()}-degrade`
     await driveToImplementation(sid)
     const ctx = { directory: tempDir, sessionId: sid }
@@ -552,10 +557,8 @@ describe("mark_task_complete — per-task review integration", () => {
       ctx,
     )
 
-    // Should NOT reject — graceful degradation accepts the task
-    expect(result).not.toContain("did NOT pass the per-task review")
-    // Should contain the normal success message
-    expect(result).toContain("T1")
+    expect(result).toContain("reviewer infrastructure")
+    expect(result).toContain("Attempt consumed")
   }, 30000)
 
   it("task stays incomplete after review rejection (DAG not updated)", async () => {
@@ -564,15 +567,17 @@ describe("mark_task_complete — per-task review integration", () => {
     const ctx = { directory: tempDir, sessionId: sid }
 
     // Push a failing review
+    const failingReview = {
+      passed: false,
+      issues: ["Tests failing"],
+      reasoning: "Tests are not passing.",
+    }
     client._pushPromptResponse({
       data: {
+        info: failingReview,
         parts: [{
           type: "text",
-          text: JSON.stringify({
-            passed: false,
-            issues: ["Tests failing"],
-            reasoning: "Tests are not passing.",
-          }),
+          text: JSON.stringify(failingReview),
         }],
       },
     })
@@ -586,15 +591,17 @@ describe("mark_task_complete — per-task review integration", () => {
 
     // Second attempt with passing review — should succeed
     // (proving the DAG was NOT updated on the first attempt)
+    const passingReview = {
+      passed: true,
+      issues: [],
+      reasoning: "All tests pass now.",
+    }
     client._pushPromptResponse({
       data: {
+        info: passingReview,
         parts: [{
           type: "text",
-          text: JSON.stringify({
-            passed: true,
-            issues: [],
-            reasoning: "All tests pass now.",
-          }),
+          text: JSON.stringify(passingReview),
         }],
       },
     })

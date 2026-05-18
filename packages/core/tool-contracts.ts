@@ -9,6 +9,7 @@
 import type { z } from "./schemas"
 import {
   AnalyzeTaskBoundaryChangeSchema,
+  ApproveCurrentTaskScopeExpansionToolSchema,
   ApplyDriftRepairToolSchema,
   ApplyPatchSuggestionSchema,
   ApplyTaskBoundaryChangeSchema,
@@ -18,6 +19,7 @@ import {
   GuardedEditSchema,
   GuardedPatchSchema,
   GuardedWriteSchema,
+  SubmitIntentComparisonResultToolSchema,
   MarkAnalyzeCompleteToolSchema,
   MarkSatisfiedToolSchema,
   MarkScanCompleteToolSchema,
@@ -28,6 +30,8 @@ import {
   QueryChildWorkflowToolSchema,
   QueryParentWorkflowToolSchema,
   RequestReviewToolSchema,
+  RequestAllowlistExpansionToolSchema,
+  RepairCurrentTaskBoundaryFromImplPlanToolSchema,
   ReportDriftToolSchema,
   ResetTaskToolSchema,
   ResolveHumanGateToolSchema,
@@ -40,9 +44,18 @@ import {
   StateToolSchema,
   StructuralTransitionToolSchema,
   SubmitAutoApproveToolSchema,
+  SubmitAutoApproveResultToolSchema,
+  SubmitChangeProposalReviewResultToolSchema,
   SubmitFeedbackToolSchema,
+  SubmitOrchestratorAssessResultToolSchema,
+  SubmitOrchestratorDivergeResultToolSchema,
+  SubmitPhaseReviewResultToolSchema,
   SubmitPhaseReviewToolSchema,
+  SubmitRebuttalReviewResultToolSchema,
+  SubmitTaskDriftReviewResultToolSchema,
+  SubmitTaskReviewResultToolSchema,
   SubmitTaskReviewToolSchema,
+  SummarizeWorkflowIncidentToolSchema,
 } from "./schemas"
 
 /** Adapter families that may consume a tool contract. */
@@ -154,18 +167,153 @@ export type ToolContractProjectionResult = ToolContractProjectionSuccess | ToolC
  * Implementations must verify explicit role classification, canonical naming,
  * and author-facing MCP exposure invariants before generation proceeds.
  */
-export declare function validateToolContracts(
+export function validateToolContracts(
   contracts: readonly ToolContract[],
-): ToolContractValidationResult
+): ToolContractValidationResult {
+  const errors: ToolContractValidationError[] = []
+  const names = new Set<string>()
+  const mcpNames = new Set<string>()
+  const validRoles: HermesSurfaceRole[] = ["author", "reviewer", "control", "none"]
+
+  for (const contract of contracts) {
+    if (names.has(contract.name)) {
+      errors.push({
+        code: "duplicate-canonical-name",
+        contractName: contract.name,
+        field: "name",
+        message: `Duplicate canonical tool name: ${contract.name}`,
+      })
+    }
+    names.add(contract.name)
+
+    if (!validRoles.includes(contract.hermesSurfaceRole)) {
+      errors.push({
+        code: "invalid-hermes-surface-role",
+        contractName: contract.name,
+        field: "hermesSurfaceRole",
+        message: `Invalid Hermes surface role for ${contract.name}: ${String(contract.hermesSurfaceRole)}`,
+      })
+    }
+
+    if (!contract.hermesSurfaceRole) {
+      errors.push({
+        code: "missing-hermes-surface-role",
+        contractName: contract.name,
+        field: "hermesSurfaceRole",
+        message: `Tool ${contract.name} must declare hermesSurfaceRole explicitly.`,
+      })
+    }
+
+    if (contract.hermesSurfaceRole === "author" && !contract.exposeTo.includes("mcp")) {
+      errors.push({
+        code: "author-surface-requires-mcp-exposure",
+        contractName: contract.name,
+        field: "exposeTo",
+        message: `Author-facing Hermes tool ${contract.name} must be exposed to MCP.`,
+      })
+    }
+
+    if (contract.exposeTo.includes("mcp")) {
+      if (!contract.mcpName) {
+        errors.push({
+          code: "mcp-exposed-tool-missing-mcp-name",
+          contractName: contract.name,
+          field: "mcpName",
+          message: `MCP-exposed tool ${contract.name} must declare mcpName.`,
+        })
+      } else if (mcpNames.has(contract.mcpName)) {
+        errors.push({
+          code: "duplicate-mcp-name",
+          contractName: contract.name,
+          field: "mcpName",
+          message: `Duplicate MCP tool name: ${contract.mcpName}`,
+        })
+      } else {
+        mcpNames.add(contract.mcpName)
+      }
+    }
+  }
+
+  return errors.length > 0 ? { success: false, errors } : { success: true, contracts }
+}
+
+/** Human-readable validation summary for fail-fast runtime startup errors. */
+export function formatToolContractValidationErrors(
+  errors: readonly ToolContractValidationError[],
+): string {
+  return errors
+    .map((error) => `${error.code} ${error.contractName}.${error.field}: ${error.message}`)
+    .join("\n")
+}
+
+/**
+ * Runtime assertion for adapter startup. Import-time registry derivation should
+ * fail closed instead of exposing a partially invalid workflow tool surface.
+ */
+export function assertValidToolContracts(
+  contracts: readonly ToolContract[],
+): readonly ToolContract[] {
+  const validation = validateToolContracts(contracts)
+  if (!validation.success) {
+    throw new Error(
+      `Invalid Open Artisan tool contract registry:\n${formatToolContractValidationErrors(validation.errors)}`,
+    )
+  }
+  return validation.contracts
+}
 
 /**
  * Pure projection contract for deriving adapter-facing tool surfaces from the
  * canonical registry.
  */
-export declare function deriveToolContractProjection(
+export function deriveToolContractProjection(
   contracts: readonly ToolContract[],
   config: ToolContractProjectionConfig,
-): ToolContractProjectionResult
+): ToolContractProjectionResult {
+  const validation = validateToolContracts(contracts)
+  if (!validation.success) {
+    return {
+      success: false,
+      config,
+      errors: validation.errors.map((error) => ({
+        code: "projection-invariant-violation",
+        contractName: error.contractName,
+        message: error.message,
+      })),
+    }
+  }
+
+  const projected = validation.contracts.filter((contract) =>
+    contract.exposeTo.includes(config.adapterExposure) &&
+    (config.hermesSurfaceRole === undefined || contract.hermesSurfaceRole === config.hermesSurfaceRole),
+  )
+
+  if (config.adapterExposure === "mcp") {
+    const names = new Set<string>()
+    const errors: ToolContractProjectionError[] = []
+    for (const contract of projected) {
+      const name = contract.mcpName ?? `oa_${contract.name}`
+      if (names.has(name)) {
+        errors.push({
+          code: "projection-name-collision",
+          contractName: contract.name,
+          message: `Projected MCP tool name collision: ${name}`,
+        })
+      }
+      names.add(name)
+      if (config.hermesSurfaceRole === "author" && contract.hermesSurfaceRole !== "author") {
+        errors.push({
+          code: "projection-invariant-violation",
+          contractName: contract.name,
+          message: `Hermes author projection included non-author tool ${contract.name}.`,
+        })
+      }
+    }
+    if (errors.length > 0) return { success: false, errors, config }
+  }
+
+  return { success: true, contracts: projected, config }
+}
 
 /** Operational drift signal for generated or declared adapter surfaces. */
 export interface ToolContractOperationalDrift {
@@ -222,8 +370,17 @@ export const TOOL_CONTRACTS: readonly ToolContract[] = [
   { name: "mark_task_complete", description: "Mark the current implementation DAG task complete and request task review.", schema: MarkTaskCompleteToolSchema, workflowGuard: true, exposeTo: ["bridge", "mcp", "opencode"], hermesSurfaceRole: "author", mcpName: "oa_mark_task_complete" },
   { name: "submit_task_review", description: "Submit per-task isolated review results.", schema: SubmitTaskReviewToolSchema, workflowGuard: true, exposeTo: ["bridge"], hermesSurfaceRole: "reviewer" },
   { name: "submit_phase_review", description: "Submit phase-level isolated review results.", schema: SubmitPhaseReviewToolSchema, workflowGuard: false, exposeTo: ["bridge"], hermesSurfaceRole: "reviewer" },
+  { name: "submit_task_review_result", description: "Reviewer-only OpenCode tool for structured per-task isolated review result submission.", schema: SubmitTaskReviewResultToolSchema, workflowGuard: true, exposeTo: ["opencode"], hermesSurfaceRole: "reviewer" },
+  { name: "submit_phase_review_result", description: "Reviewer-only OpenCode tool for structured phase isolated review result submission.", schema: SubmitPhaseReviewResultToolSchema, workflowGuard: true, exposeTo: ["opencode"], hermesSurfaceRole: "reviewer" },
+  { name: "submit_change_proposal_review_result", description: "Reviewer-only OpenCode tool for structured change-proposal routing submission.", schema: SubmitChangeProposalReviewResultToolSchema, workflowGuard: true, exposeTo: ["opencode"], hermesSurfaceRole: "reviewer" },
+  { name: "submit_task_drift_review_result", description: "Reviewer-only OpenCode tool for structured task-drift review submission.", schema: SubmitTaskDriftReviewResultToolSchema, workflowGuard: true, exposeTo: ["opencode"], hermesSurfaceRole: "reviewer" },
+  { name: "submit_orchestrator_assess_result", description: "Orchestrator-only OpenCode tool for structured feedback artifact assessment submission.", schema: SubmitOrchestratorAssessResultToolSchema, workflowGuard: true, exposeTo: ["opencode"], hermesSurfaceRole: "reviewer" },
+  { name: "submit_orchestrator_diverge_result", description: "Orchestrator-only OpenCode tool for structured feedback divergence submission.", schema: SubmitOrchestratorDivergeResultToolSchema, workflowGuard: true, exposeTo: ["opencode"], hermesSurfaceRole: "reviewer" },
+  { name: "submit_auto_approve_result", description: "Auto-approver-only OpenCode tool for structured auto-approval submission.", schema: SubmitAutoApproveResultToolSchema, workflowGuard: true, exposeTo: ["opencode"], hermesSurfaceRole: "control" },
+  { name: "submit_rebuttal_review_result", description: "Reviewer-only OpenCode tool for structured rebuttal review submission.", schema: SubmitRebuttalReviewResultToolSchema, workflowGuard: true, exposeTo: ["opencode"], hermesSurfaceRole: "reviewer" },
+  { name: "submit_intent_comparison_result", description: "Reviewer-only OpenCode tool for structured prior-workflow intent comparison submission.", schema: SubmitIntentComparisonResultToolSchema, workflowGuard: true, exposeTo: ["opencode"], hermesSurfaceRole: "reviewer" },
   { name: "submit_auto_approve", description: "Submit auto-approval results for robot-artisan mode.", schema: SubmitAutoApproveToolSchema, workflowGuard: true, exposeTo: ["bridge"], hermesSurfaceRole: "control" },
-  { name: "reset_task", description: "Reset implementation DAG tasks to pending for rework.", schema: ResetTaskToolSchema, workflowGuard: true, exposeTo: ["bridge", "mcp"], hermesSurfaceRole: "author", mcpName: "oa_reset_task" },
+  { name: "reset_task", description: "Reset unfinished implementation DAG tasks to pending for rework; completed tasks are immutable and must be corrected by future tasks.", schema: ResetTaskToolSchema, workflowGuard: true, exposeTo: ["bridge", "mcp"], hermesSurfaceRole: "author", mcpName: "oa_reset_task" },
   { name: "resolve_human_gate", description: "Record a real external prerequisite for an implementation DAG task.", schema: ResolveHumanGateToolSchema, workflowGuard: true, exposeTo: ["bridge", "mcp", "opencode"], hermesSurfaceRole: "author", mcpName: "oa_resolve_human_gate" },
   { name: "propose_backtrack", description: "Propose returning to an earlier workflow phase when current artifacts cannot be repaired locally.", schema: ProposeBacktrackToolSchema, workflowGuard: true, exposeTo: ["bridge", "mcp", "opencode"], hermesSurfaceRole: "author", mcpName: "oa_propose_backtrack" },
   { name: "propose_direct_application", description: "Propose and structurally apply a small safe patch without starting the full workflow.", schema: ProposeDirectApplicationSchema, workflowGuard: true, exposeTo: ["bridge", "mcp"], hermesSurfaceRole: "author", mcpName: "oa_propose_direct_application" },
@@ -232,10 +389,14 @@ export const TOOL_CONTRACTS: readonly ToolContract[] = [
   { name: "query_child_workflow", description: "Inspect a child workflow delegated from this workflow.", schema: QueryChildWorkflowToolSchema, workflowGuard: true, exposeTo: ["bridge", "mcp", "opencode"], hermesSurfaceRole: "author", mcpName: "oa_query_child_workflow" },
   { name: "analyze_task_boundary_change", description: "Preview a localized implementation DAG task-boundary change.", schema: AnalyzeTaskBoundaryChangeSchema, workflowGuard: true, exposeTo: ["bridge", "mcp", "opencode"], hermesSurfaceRole: "author", mcpName: "oa_analyze_task_boundary_change" },
   { name: "apply_task_boundary_change", description: "Apply an approved localized implementation DAG task-boundary change.", schema: ApplyTaskBoundaryChangeSchema, workflowGuard: true, exposeTo: ["bridge", "mcp", "opencode"], hermesSurfaceRole: "author", mcpName: "oa_apply_task_boundary_change" },
+  { name: "approve_current_task_scope_expansion", description: "Atomically approve and apply current-task scope expansion to the INCREMENTAL allowlist and DAG task boundary.", schema: ApproveCurrentTaskScopeExpansionToolSchema, workflowGuard: true, exposeTo: ["bridge", "mcp", "opencode"], hermesSurfaceRole: "author", mcpName: "oa_approve_current_task_scope_expansion" },
+  { name: "repair_current_task_boundary_from_impl_plan", description: "Synchronize the active task boundary with the approved IMPL_PLAN task metadata.", schema: RepairCurrentTaskBoundaryFromImplPlanToolSchema, workflowGuard: true, exposeTo: ["bridge", "mcp", "opencode"], hermesSurfaceRole: "author", mcpName: "oa_repair_current_task_boundary_from_impl_plan" },
   { name: "route_patch_suggestions", description: "Route pending reviewer patch suggestions to apply, defer, backtrack, or ask.", schema: RoutePatchSuggestionsSchema, workflowGuard: true, exposeTo: ["bridge", "mcp", "opencode"], hermesSurfaceRole: "author", mcpName: "oa_route_patch_suggestions" },
   { name: "resolve_patch_suggestion", description: "Record the disposition of a persisted reviewer patch suggestion.", schema: ResolvePatchSuggestionSchema, workflowGuard: true, exposeTo: ["bridge", "mcp", "opencode"], hermesSurfaceRole: "author", mcpName: "oa_resolve_patch_suggestion" },
   { name: "apply_patch_suggestion", description: "Apply a persisted reviewer patch suggestion to the worktree.", schema: ApplyPatchSuggestionSchema, workflowGuard: true, exposeTo: ["bridge", "mcp", "opencode"], hermesSurfaceRole: "author", mcpName: "oa_apply_patch_suggestion" },
   { name: "propose_change", description: "Ask an isolated reviewer to classify a needed scope, boundary, allowlist, or artifact change before repairing it.", schema: ChangeProposalToolSchema, workflowGuard: true, exposeTo: ["opencode"], hermesSurfaceRole: "none" },
+  { name: "request_allowlist_expansion", description: "Record a typed request for user-approved INCREMENTAL allowlist expansion.", schema: RequestAllowlistExpansionToolSchema, workflowGuard: true, exposeTo: ["bridge", "mcp", "opencode"], hermesSurfaceRole: "author", mcpName: "oa_request_allowlist_expansion" },
+  { name: "summarize_workflow_incident", description: "Produce a concise maintainer-ready summary of repeated tooling failures and contradictory workflow state.", schema: SummarizeWorkflowIncidentToolSchema, workflowGuard: true, exposeTo: ["bridge", "mcp", "opencode"], hermesSurfaceRole: "author", mcpName: "oa_summarize_workflow_incident" },
   { name: "disable_open_artisan", description: "Disable Open Artisan for an opted-in build-mode OpenCode session.", schema: DisableOpenArtisanToolSchema, workflowGuard: false, exposeTo: ["opencode"], hermesSurfaceRole: "none" },
   { name: "guarded_edit", description: "Safely edit one file after validating the target path against the active phase policy.", schema: GuardedEditSchema, workflowGuard: true, exposeTo: ["opencode"], hermesSurfaceRole: "none" },
   { name: "guarded_write", description: "Safely create one file after validating the target path against the active phase policy.", schema: GuardedWriteSchema, workflowGuard: true, exposeTo: ["opencode"], hermesSurfaceRole: "none" },
@@ -249,17 +410,19 @@ export const TOOL_CONTRACTS: readonly ToolContract[] = [
   { name: "_state_get", description: "Show the current workflow state.", schema: StateToolSchema, workflowGuard: false, exposeTo: ["mcp"], hermesSurfaceRole: "author", mcpName: "oa_state" },
 ]
 
+const VALIDATED_TOOL_CONTRACTS = assertValidToolContracts(TOOL_CONTRACTS)
+
 /** All guarded workflow tools regardless of adapter surface. */
-export const WORKFLOW_TOOL_CONTRACTS = TOOL_CONTRACTS.filter((contract) => contract.workflowGuard)
+export const WORKFLOW_TOOL_CONTRACTS = VALIDATED_TOOL_CONTRACTS.filter((contract) => contract.workflowGuard)
 
 /** Bridge-dispatchable tool contracts. */
-export const BRIDGE_TOOL_CONTRACTS = TOOL_CONTRACTS.filter((contract) => contract.exposeTo.includes("bridge"))
+export const BRIDGE_TOOL_CONTRACTS = VALIDATED_TOOL_CONTRACTS.filter((contract) => contract.exposeTo.includes("bridge"))
 
 /** MCP-exposed tool contracts used by Claude/MCP-compatible consumers. */
-export const MCP_TOOL_CONTRACTS = TOOL_CONTRACTS.filter((contract) => contract.exposeTo.includes("mcp"))
+export const MCP_TOOL_CONTRACTS = VALIDATED_TOOL_CONTRACTS.filter((contract) => contract.exposeTo.includes("mcp"))
 
 /** OpenCode-exposed tool contracts. */
-export const OPENCODE_TOOL_CONTRACTS = TOOL_CONTRACTS.filter((contract) => contract.exposeTo.includes("opencode"))
+export const OPENCODE_TOOL_CONTRACTS = VALIDATED_TOOL_CONTRACTS.filter((contract) => contract.exposeTo.includes("opencode"))
 
 /**
  * Hermes author-facing projection.

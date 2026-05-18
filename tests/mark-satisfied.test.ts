@@ -3,7 +3,7 @@
  * Covers G9: suggestion-severity criteria don't block advancement.
  */
 import { describe, expect, it } from "bun:test"
-import { evaluateMarkSatisfied, countExpectedBlockingCriteria } from "#core/tools/mark-satisfied"
+import { evaluateMarkSatisfied, countExpectedBlockingCriteria, countSubmittedBlockingCriteria } from "#core/tools/mark-satisfied"
 
 // ---------------------------------------------------------------------------
 // All criteria blocking (default behavior)
@@ -246,6 +246,36 @@ describe("evaluateMarkSatisfied — cross-validation", () => {
       },
       3,
     )
+    expect(result.passed).toBe(true)
+  })
+
+  it("treats unknown severities and [Q]/[D] criteria as blocking instead of undercounting", () => {
+    const criteria = [
+      { criterion: "Base 1", met: true, evidence: "ok", severity: "blocking" },
+      { criterion: "Base 2", met: true, evidence: "ok", severity: "blocking" },
+      ...Array.from({ length: 11 }, (_, i) => ({
+        criterion: `Base ${i + 3}`,
+        met: true,
+        evidence: "ok",
+        severity: "must-pass",
+      })),
+      ...Array.from({ length: 5 }, (_, i) => ({
+        criterion: `[Q] Quality ${i + 1}`,
+        met: true,
+        evidence: "ok",
+        severity: "quality",
+        score: 9,
+      })),
+      ...Array.from({ length: 2 }, (_, i) => ({
+        criterion: `[D] Design invariant ${i + 1}`,
+        met: true,
+        evidence: "ok",
+        severity: "design",
+      })),
+    ]
+
+    expect(countSubmittedBlockingCriteria(criteria as any)).toBe(20)
+    const result = evaluateMarkSatisfied({ criteria_met: criteria as any }, 20)
     expect(result.passed).toBe(true)
   })
 

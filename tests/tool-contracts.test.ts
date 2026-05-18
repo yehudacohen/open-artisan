@@ -6,10 +6,14 @@ import { buildHermesToolContractsArtifact, hermesToolContractCount } from "../to
 import { RequestReviewToolSchema, toJsonSchema } from "#core/schemas"
 import { WORKFLOW_TOOL_NAMES } from "#core/workflow-tool-names"
 import {
+  assertValidToolContracts,
   BRIDGE_TOOL_CONTRACTS,
+  deriveToolContractProjection,
   HERMES_AUTHOR_TOOL_CONTRACTS,
+  HERMES_AUTHOR_PROJECTION_CONFIG,
   MCP_TOOL_CONTRACTS,
   TOOL_CONTRACTS,
+  validateToolContracts,
   WORKFLOW_TOOL_CONTRACTS,
 } from "#core/tool-contracts"
 
@@ -21,6 +25,39 @@ describe("tool contract registry", () => {
     const mcpNames = MCP_TOOL_CONTRACTS.map((contract) => contract.mcpName)
     expect(mcpNames.every((name): name is string => typeof name === "string" && name.length > 0)).toBe(true)
     expect(new Set(mcpNames).size).toBe(mcpNames.length)
+  })
+
+  it("validates the canonical registry and derives the Hermes author projection", () => {
+    const validation = validateToolContracts(TOOL_CONTRACTS)
+    expect(validation.success).toBe(true)
+
+    const projection = deriveToolContractProjection(TOOL_CONTRACTS, HERMES_AUTHOR_PROJECTION_CONFIG)
+    expect(projection.success).toBe(true)
+    expect(projection.success ? projection.contracts.map((contract) => contract.name) : []).toEqual(
+      HERMES_AUTHOR_TOOL_CONTRACTS.map((contract) => contract.name),
+    )
+  })
+
+  it("rejects invalid contract registry metadata", () => {
+    const { mcpName: _mcpName, ...badAuthorBase } = TOOL_CONTRACTS[0]!
+    const invalid = validateToolContracts([
+      ...TOOL_CONTRACTS,
+      { ...TOOL_CONTRACTS[0]!, name: TOOL_CONTRACTS[0]!.name },
+      { ...badAuthorBase, name: "bad_author", exposeTo: ["bridge"] as const, hermesSurfaceRole: "author" },
+    ])
+
+    expect(invalid.success).toBe(false)
+    expect(invalid.success ? [] : invalid.errors.map((error) => error.code)).toContain("duplicate-canonical-name")
+    expect(invalid.success ? [] : invalid.errors.map((error) => error.code)).toContain("author-surface-requires-mcp-exposure")
+  })
+
+  it("fails closed when adapter startup sees invalid contract metadata", () => {
+    const { mcpName: _mcpName, ...badAuthorBase } = TOOL_CONTRACTS[0]!
+
+    expect(() => assertValidToolContracts([
+      ...TOOL_CONTRACTS,
+      { ...badAuthorBase, name: "bad_author", exposeTo: ["bridge"] as const, hermesSurfaceRole: "author" },
+    ])).toThrow(/Invalid Open Artisan tool contract registry/)
   })
 
   it("drives the workflow guard tool allowlist", () => {
@@ -66,7 +103,32 @@ describe("tool contract registry", () => {
     expect(hermesBridgeNames).not.toContain("submit_task_review")
     expect(hermesBridgeNames).not.toContain("submit_phase_review")
     expect(hermesBridgeNames).not.toContain("submit_auto_approve")
+    expect(hermesBridgeNames).not.toContain("submit_task_review_result")
+    expect(hermesBridgeNames).not.toContain("submit_phase_review_result")
+    expect(hermesBridgeNames).not.toContain("submit_change_proposal_review_result")
+    expect(hermesBridgeNames).not.toContain("submit_task_drift_review_result")
+    expect(hermesBridgeNames).not.toContain("submit_orchestrator_assess_result")
+    expect(hermesBridgeNames).not.toContain("submit_orchestrator_diverge_result")
+    expect(hermesBridgeNames).not.toContain("submit_auto_approve_result")
+    expect(hermesBridgeNames).not.toContain("submit_rebuttal_review_result")
+    expect(hermesBridgeNames).not.toContain("submit_intent_comparison_result")
     expect(hermesBridgeNames).toContain("request_review")
     expect(hermesBridgeNames).toContain("submit_feedback")
+  })
+
+  it("keeps OpenCode-local result capture tools out of bridge dispatch", () => {
+    const bridgeNames = BRIDGE_TOOL_CONTRACTS.map((contract) => contract.name)
+    expect(bridgeNames).not.toContain("submit_task_review_result")
+    expect(bridgeNames).not.toContain("submit_phase_review_result")
+    expect(bridgeNames).not.toContain("submit_change_proposal_review_result")
+    expect(bridgeNames).not.toContain("submit_task_drift_review_result")
+    expect(bridgeNames).not.toContain("submit_orchestrator_assess_result")
+    expect(bridgeNames).not.toContain("submit_orchestrator_diverge_result")
+    expect(bridgeNames).not.toContain("submit_auto_approve_result")
+    expect(bridgeNames).not.toContain("submit_rebuttal_review_result")
+    expect(bridgeNames).not.toContain("submit_intent_comparison_result")
+    expect(bridgeNames).toContain("submit_task_review")
+    expect(bridgeNames).toContain("submit_phase_review")
+    expect(bridgeNames).toContain("submit_auto_approve")
   })
 })

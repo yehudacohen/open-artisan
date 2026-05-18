@@ -63,6 +63,43 @@ export interface SubagentPromptOptions {
     type: "json_schema"
     schema: Record<string, unknown>
   }
+  /**
+   * Preferred reviewer submission tool for adapters that can expose local tools
+   * to the isolated subagent. When available, the reviewer should submit typed
+   * arguments through this tool instead of relying on final-message JSON text.
+   */
+  submissionTool?: {
+    name: string
+    /**
+     * When true, assistant text is not an acceptable fallback. Adapters that
+     * support local submission capture must return an encoded tool payload or
+     * fail closed so callers do not try to JSON-repair prose.
+     */
+    required?: boolean
+  }
+}
+
+const SUBAGENT_TOOL_SUBMISSION_PREFIX = "__OPEN_ARTISAN_TOOL_SUBMISSION__"
+
+export function encodeSubagentToolSubmission(toolName: string, payload: string): string {
+  return `${SUBAGENT_TOOL_SUBMISSION_PREFIX}:${toolName}\n${payload}`
+}
+
+export function decodeSubagentToolSubmission(text: string, expectedToolName: string): { success: true; payload: string } | { success: false; error: string } {
+  const prefix = `${SUBAGENT_TOOL_SUBMISSION_PREFIX}:`
+  if (!text.startsWith(prefix)) {
+    return {
+      success: false,
+      error: `Expected ${expectedToolName} tool submission, but isolated reviewer returned assistant text instead. Text/prose fallback is disabled for this review.`,
+    }
+  }
+  const newline = text.indexOf("\n")
+  if (newline === -1) return { success: false, error: `Malformed ${expectedToolName} tool submission envelope.` }
+  const toolName = text.slice(prefix.length, newline)
+  if (toolName !== expectedToolName) {
+    return { success: false, error: `Expected ${expectedToolName} tool submission, got ${toolName}.` }
+  }
+  return { success: true, payload: text.slice(newline + 1) }
 }
 
 /**

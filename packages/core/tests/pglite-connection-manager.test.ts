@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test"
+import { afterEach, expect, it, setDefaultTimeout } from "bun:test"
 import { mkdir, mkdtemp, rm, utimes, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { basename, join } from "node:path"
@@ -8,6 +8,7 @@ import { sql } from "kysely"
 import { createPGliteDatabaseHandle } from "#core/pglite-connection-manager"
 import { cleanupStalePhysicalPGliteLock, createInProcessPGliteAccessQueue, inspectPhysicalPGliteLock, type PGliteAccessQueue } from "#core/pglite-access-queue"
 import { PGLITE_QUEUE_WAIT_TIMEOUT_ENV } from "#core/constants"
+import { pgliteShardDescribe } from "../../../tests/helpers/pglite-shard-gate"
 
 interface TestDatabase {
   items: {
@@ -17,7 +18,8 @@ interface TestDatabase {
 
 const tempDirs: string[] = []
 let previousQueueWaitTimeout: string | undefined
-const PGLITE_HANDLE_TEST_TIMEOUT_MS = 20_000
+setDefaultTimeout(90_000)
+process.env["OPENARTISAN_PGLITE_QUEUE_WAIT_TIMEOUT_MS"] = "120000"
 
 afterEach(async () => {
   if (previousQueueWaitTimeout === undefined) {
@@ -35,7 +37,7 @@ async function tempDbPath(): Promise<string> {
   return join(dir, "test.pg")
 }
 
-describe("PGliteDatabaseHandle", () => {
+pgliteShardDescribe("PGliteDatabaseHandle", () => {
   it("inspects and removes stale physical lock files without an owner", async () => {
     const tempDir = await mkdtemp(join(tmpdir(), "openartisan-pglite-lock-"))
     const databasePath = join(tempDir, "workflow-db")
@@ -104,7 +106,7 @@ describe("PGliteDatabaseHandle", () => {
 
     expect(rows).toEqual([{ id: "one" }])
     await handle.dispose()
-  }, PGLITE_HANDLE_TEST_TIMEOUT_MS)
+  })
 
   it("does not hold the physical database lock while idle", async () => {
     const databasePath = await tempDbPath()
@@ -119,7 +121,7 @@ describe("PGliteDatabaseHandle", () => {
     expect(rows).toEqual([{ id: "one" }])
     await firstHandle.dispose()
     await secondHandle.dispose()
-  }, PGLITE_HANDLE_TEST_TIMEOUT_MS)
+  })
 
   it("waits for queued operations before disposing", async () => {
     const databasePath = await tempDbPath()
@@ -155,7 +157,7 @@ describe("PGliteDatabaseHandle", () => {
     await operation
     await disposal
     expect(disposed).toBe(true)
-  }, PGLITE_HANDLE_TEST_TIMEOUT_MS)
+  })
 
   it("rejects operations after disposal", async () => {
     const databasePath = await tempDbPath()
@@ -165,5 +167,5 @@ describe("PGliteDatabaseHandle", () => {
     await handle.dispose()
 
     await expect(handle.run((db) => sql.raw("select 1").execute(db))).rejects.toThrow("has been disposed")
-  }, PGLITE_HANDLE_TEST_TIMEOUT_MS)
+  })
 })

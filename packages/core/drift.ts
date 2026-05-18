@@ -12,6 +12,7 @@ import {
   ApplyPatchSuggestionSchema,
   ApplyTaskBoundaryChangeSchema,
   ProposeBacktrackToolSchema,
+  RepairCurrentTaskBoundaryFromImplPlanToolSchema,
   RequestReviewToolSchema,
   ResetTaskToolSchema,
   ResolveHumanGateToolSchema,
@@ -19,6 +20,7 @@ import {
 } from "./schemas"
 import type { WorkflowState } from "./workflow-state-types"
 import type { ArtifactKey, Phase, PhaseState, WorkflowMode } from "./workflow-primitives"
+import { normalizeWorkflowPath } from "./path-normalization"
 
 export type DriftScope = "current-task" | "current-phase" | "workflow" | "roadmap"
 export type DriftSeverity = "info" | "warning" | "blocking"
@@ -45,6 +47,7 @@ export type DriftRepairActionKind =
   | "propose_backtrack"
   | "request_user_decision"
   | "resolve_human_gate"
+  | "repair_current_task_boundary_from_impl_plan"
 
 export type DriftWorkflowToolName = "report_drift" | "plan_drift_repair" | "apply_drift_repair"
 export const DRIFT_WORKFLOW_TOOL_NAMES: DriftWorkflowToolName[] = ["report_drift", "plan_drift_repair", "apply_drift_repair"]
@@ -57,6 +60,7 @@ export type DriftRepairToolName =
   | "propose_backtrack"
   | "submit_feedback"
   | "resolve_human_gate"
+  | "repair_current_task_boundary_from_impl_plan"
 
 export interface DriftEvidence {
   filePath?: string
@@ -143,6 +147,7 @@ export interface BuildWorkflowDriftReportInput {
   artifactKeys?: ArtifactKey[]
   taskIds?: string[]
   changedFiles?: string[]
+  cwd?: string
   worktreeObservations?: DbWorktreeObservation[]
   routedPatchSuggestions?: RoutedPatchSuggestion[]
 }
@@ -172,18 +177,20 @@ function stableId(...parts: string[]): string {
   return createHash("sha256").update(parts.join("\0")).digest("hex").slice(0, 24)
 }
 
-function normalizePath(path: string): string {
-  return path.replace(/\\/g, "/").replace(/^\.\//, "")
+function normalizePath(path: string, cwd?: string): string {
+  return cwd ? normalizeWorkflowPath(path, cwd) ?? "" : path.replace(/\\/g, "/").replace(/^\.\//, "")
 }
 
-function pathMatches(left: string, right: string): boolean {
-  const a = normalizePath(left)
-  const b = normalizePath(right)
+function pathMatches(left: string, right: string, cwd?: string): boolean {
+  const a = normalizePath(left, cwd)
+  const b = normalizePath(right, cwd)
+  if (!a || !b) return false
+  if (cwd) return a === b
   return a === b || a.endsWith(`/${b}`) || b.endsWith(`/${a}`)
 }
 
-function includesPath(paths: string[], targetPath: string): boolean {
-  return paths.some((path) => pathMatches(path, targetPath))
+function includesPath(paths: string[], targetPath: string, cwd?: string): boolean {
+  return paths.some((path) => pathMatches(path, targetPath, cwd))
 }
 
 function patchSuggestionAction(route: RoutedPatchSuggestion, impact: DriftDependencyImpact): DriftRepairAction {
@@ -275,7 +282,7 @@ export function computeTaskDriftImpact(state: Pick<WorkflowState, "implDag">, ta
   const abortedTaskIds = statusMatches("aborted")
   const resetTaskIds = allImpacted.filter((taskId) => {
     const task = state.implDag?.find((candidate) => candidate.id === taskId)
-    return task?.status === "complete" || task?.status === "in-flight"
+    return task?.status === "in-flight"
   })
   return {
     ...EMPTY_DRIFT_IMPACT,
@@ -308,6 +315,8 @@ function validatedToolCall(toolCall: DriftToolCallPlan | undefined, allowedToolN
       return SubmitFeedbackToolSchema.safeParse(toolCall.args).success ? toolCall : null
     case "resolve_human_gate":
       return ResolveHumanGateToolSchema.safeParse(toolCall.args).success ? toolCall : null
+    case "repair_current_task_boundary_from_impl_plan":
+      return RepairCurrentTaskBoundaryFromImplPlanToolSchema.safeParse(toolCall.args).success ? toolCall : null
   }
 }
 
@@ -318,9 +327,10 @@ export function buildRepairToolCall(action: DriftRepairAction): DriftToolCallPla
     case "apply_task_boundary_change":
       return validatedToolCall(action.toolCall, ["apply_task_boundary_change"])
     case "reset_tasks":
+      if (action.impact.resetTaskIds.length === 0) return null
       return {
         toolName: "reset_task",
-        args: { task_ids: action.impact.resetTaskIds.length > 0 ? action.impact.resetTaskIds : action.impact.taskIds },
+        args: { task_ids: action.impact.resetTaskIds },
         requiredPhase: "IMPLEMENTATION",
         requiredPhaseStates: ["DRAFT", "REVISE", "SCHEDULING"],
       }
@@ -334,6 +344,8 @@ export function buildRepairToolCall(action: DriftRepairAction): DriftToolCallPla
       }
     case "resolve_human_gate":
       return validatedToolCall(action.toolCall, ["resolve_human_gate"])
+    case "repair_current_task_boundary_from_impl_plan":
+      return validatedToolCall(action.toolCall, ["repair_current_task_boundary_from_impl_plan"])
     case "request_user_decision":
       return validatedToolCall(action.toolCall, ["submit_feedback"]) ?? {
         toolName: "submit_feedback",
@@ -372,27 +384,45 @@ export function buildWorkflowDriftReport(input: BuildWorkflowDriftReportInput): 
   const artifactKeys = unique(input.artifactKeys ?? [])
   if (artifactKeys.length > 0) {
     const impact = computeArtifactDriftImpact({ artifactKeys, mode, hasDesignDoc: Boolean(input.state.artifactDiskPaths.design) })
-    const action: DriftRepairAction = {
-      id: stableId("drift-action", input.workflowId, "artifact", artifactKeys.join(",")),
-      kind: "propose_backtrack",
-      safety: "requires-backtrack",
-      reason: `Artifact drift affects ${impact.revalidateArtifactKeys.join(", ")}.`,
-      impact,
-      evidence: artifactKeys.map((artifactKey) => ({
-        artifactKey,
-        ...(input.state.artifactDiskPaths[artifactKey] ? { filePath: input.state.artifactDiskPaths[artifactKey] } : {}),
-        message: `${artifactKey} was reported as drifted.`,
-      })),
-    }
+    const evidence = artifactKeys.map((artifactKey) => ({
+      artifactKey,
+      ...(input.state.artifactDiskPaths[artifactKey] ? { filePath: input.state.artifactDiskPaths[artifactKey] } : {}),
+      message: `${artifactKey} was reported as drifted.`,
+    }))
+    const currentTaskId = input.scope === "current-task" && input.state.phase === "IMPLEMENTATION" ? input.state.currentTaskId : null
+    const currentTaskBoundaryRepair = currentTaskId !== null
+    const action: DriftRepairAction = currentTaskBoundaryRepair
+      ? {
+        id: stableId("drift-action", input.workflowId, "impl-plan-boundary", currentTaskId),
+        kind: "repair_current_task_boundary_from_impl_plan",
+        safety: "safe-auto",
+        reason: `Current-task drift can be repaired by synchronizing ${currentTaskId} with the approved IMPL_PLAN before considering broad artifact backtracking.`,
+        impact: { ...impact, taskIds: [currentTaskId] },
+        evidence,
+        toolCall: {
+          toolName: "repair_current_task_boundary_from_impl_plan",
+          args: { task_id: currentTaskId, reason: "Repair current-task boundary from approved IMPL_PLAN after tactical drift report." },
+          requiredPhase: "IMPLEMENTATION",
+          requiredPhaseStates: ["DRAFT", "REVISE", "TASK_REVISE", "SCHEDULING"],
+        },
+      }
+      : {
+        id: stableId("drift-action", input.workflowId, "artifact", artifactKeys.join(",")),
+        kind: "propose_backtrack",
+        safety: "requires-backtrack",
+        reason: `Artifact drift affects ${impact.revalidateArtifactKeys.join(", ")}.`,
+        impact,
+        evidence,
+      }
     findings.push({
       id: stableId("drift-finding", input.workflowId, "artifact", artifactKeys.join(",")),
       kind: "artifact_vs_code",
-      severity: "blocking",
-      owner: "spec",
-      summary: `Artifact drift reported for ${artifactKeys.join(", ")}`,
+      severity: currentTaskBoundaryRepair ? "warning" : "blocking",
+      owner: currentTaskBoundaryRepair ? "task_dag" : "spec",
+      summary: currentTaskBoundaryRepair ? `Current-task artifact drift reported for ${artifactKeys.join(", ")}` : `Artifact drift reported for ${artifactKeys.join(", ")}`,
       expected: "Approved artifacts remain aligned with implementation and downstream artifacts.",
       actual: "One or more approved artifacts were reported as drifted.",
-      evidence: action.evidence,
+      evidence,
       impact,
       proposedActions: [action],
     })
@@ -407,9 +437,19 @@ export function buildWorkflowDriftReport(input: BuildWorkflowDriftReportInput): 
         id: stableId("drift-action", input.workflowId, "reset", impact.resetTaskIds.join(",")),
         kind: "reset_tasks",
         safety: "safe-auto",
-        reason: `Reset drifted completed/in-flight task closure: ${impact.resetTaskIds.join(", ")}.`,
+        reason: `Reset drifted in-flight task closure: ${impact.resetTaskIds.join(", ")}.`,
         impact,
-        evidence: impact.resetTaskIds.map((taskId) => ({ taskId, message: `${taskId} is complete or in-flight and must be reset for repair.` })),
+        evidence: impact.resetTaskIds.map((taskId) => ({ taskId, message: `${taskId} is in-flight and can be reset for repair.` })),
+      })
+    }
+    if (impact.completedTaskIds.length > 0) {
+      proposedActions.push({
+        id: stableId("drift-action", input.workflowId, "forward-repair", impact.completedTaskIds.join(",")),
+        kind: "request_user_decision",
+        safety: "requires-approval",
+        reason: `Completed task drift affects immutable task(s) ${impact.completedTaskIds.join(", ")}; preserve completed tasks and add a forward corrective, revert, or superseding task instead of resetting them.`,
+        impact,
+        evidence: impact.completedTaskIds.map((taskId) => ({ taskId, message: `${taskId} is complete and must be fast-forwarded; repair requires future DAG work.` })),
       })
     }
     if (impact.missingTaskIds.length > 0 || impact.delegatedTaskIds.length > 0 || impact.humanGatedTaskIds.length > 0 || impact.abortedTaskIds.length > 0) {
@@ -441,9 +481,9 @@ export function buildWorkflowDriftReport(input: BuildWorkflowDriftReportInput): 
     })
   }
 
-  const changedFiles = unique((input.changedFiles ?? []).map(normalizePath).filter(Boolean))
+  const changedFiles = unique((input.changedFiles ?? []).map((path) => normalizePath(path, input.cwd)).filter(Boolean))
   if (mode === "INCREMENTAL" && changedFiles.length > 0 && input.state.fileAllowlist.length > 0) {
-    const allowlistViolations = changedFiles.filter((file) => !includesPath(input.state.fileAllowlist, file))
+    const allowlistViolations = changedFiles.filter((file) => !includesPath(input.state.fileAllowlist, file, input.cwd))
     if (allowlistViolations.length > 0) {
       const impact: DriftDependencyImpact = { ...EMPTY_DRIFT_IMPACT, allowlistViolations }
       const action: DriftRepairAction = {
@@ -470,7 +510,7 @@ export function buildWorkflowDriftReport(input: BuildWorkflowDriftReportInput): 
   }
 
   for (const route of input.routedPatchSuggestions ?? []) {
-    const owner = input.state.implDag?.find((task) => includesPath(task.expectedFiles, route.suggestion.targetPath))
+    const owner = input.state.implDag?.find((task) => includesPath(task.expectedFiles, route.suggestion.targetPath, input.cwd))
     const impact = owner ? computeTaskDriftImpact({ implDag: input.state.implDag }, [owner.id]) : { ...EMPTY_DRIFT_IMPACT }
     const action = patchSuggestionAction(route, impact)
     findings.push({

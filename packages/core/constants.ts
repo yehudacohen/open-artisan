@@ -101,9 +101,10 @@ export const IDLE_COOLDOWN_MS = 10_000
 
 /**
  * Maximum wall-clock time for a self-review subagent session (ms).
- * Set to 5 minutes — the reviewer evaluates 14+ criteria with quality scores.
+ * Set to 10 minutes — implementation reviews can include many source files,
+ * upstream artifacts, and 20+ criteria with quality scores.
  */
-export const SELF_REVIEW_TIMEOUT_MS = 300_000
+export const SELF_REVIEW_TIMEOUT_MS = 600_000
 
 /**
  * Maximum wall-clock time for a per-task review subagent session (ms).

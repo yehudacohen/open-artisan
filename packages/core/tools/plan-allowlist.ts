@@ -2,6 +2,7 @@ import { resolve } from "node:path"
 import { readFileSync } from "node:fs"
 
 import type { Phase, WorkflowMode } from "../workflow-primitives"
+import type { PendingAllowlistExpansion } from "../workflow-state-types"
 
 function normalizeHeading(text: string): string {
   return text
@@ -29,6 +30,16 @@ function isAllowlistHeading(lower: string): boolean {
     lower === "minimal incremental file allowlist:" ||
     lower === "requested file allowlist" ||
     lower === "requested file allowlist:" ||
+    lower === "proposed allowlist" ||
+    lower === "proposed allowlist:" ||
+    lower === "proposed file allowlist" ||
+    lower === "proposed file allowlist:" ||
+    lower === "proposed planning approval allowlist" ||
+    lower === "proposed planning approval allowlist:" ||
+    lower === "candidate allowlist" ||
+    lower === "candidate allowlist:" ||
+    lower === "candidate file allowlist" ||
+    lower === "candidate file allowlist:" ||
     lower === "replacement allowlist" ||
     lower === "replacement allowlist:" ||
     lower === "replacement file allowlist" ||
@@ -51,6 +62,16 @@ function isConcreteAllowlistHeading(lower: string): boolean {
     lower === "minimal incremental file allowlist:" ||
     lower === "requested file allowlist" ||
     lower === "requested file allowlist:" ||
+    lower === "proposed allowlist" ||
+    lower === "proposed allowlist:" ||
+    lower === "proposed file allowlist" ||
+    lower === "proposed file allowlist:" ||
+    lower === "proposed planning approval allowlist" ||
+    lower === "proposed planning approval allowlist:" ||
+    lower === "candidate allowlist" ||
+    lower === "candidate allowlist:" ||
+    lower === "candidate file allowlist" ||
+    lower === "candidate file allowlist:" ||
     lower === "replacement allowlist" ||
     lower === "replacement allowlist:" ||
     lower === "replacement file allowlist" ||
@@ -192,6 +213,7 @@ export function deriveReviewFileAllowlist(input: {
   artifactPaths: string[]
   fallbackAllowlist: string[]
   cwd: string
+  pendingAllowlistExpansions?: PendingAllowlistExpansion[]
 }): { allowlist: string[]; source: "planning-artifact" | "active-state" | "none" } {
   if (input.mode === "INCREMENTAL" && input.phase === "PLANNING") {
     for (const artifactPath of input.artifactPaths) {
@@ -201,6 +223,12 @@ export function deriveReviewFileAllowlist(input: {
       } catch {
         // Continue to the next artifact path, then fall back to active state.
       }
+    }
+    const pendingPlanAllowlist = (input.pendingAllowlistExpansions ?? [])
+      .filter((request) => request.sourceArtifact === "plan" && request.requestedAtPhase === "PLANNING")
+      .flatMap((request) => request.files)
+    if (pendingPlanAllowlist.length > 0) {
+      return { allowlist: Array.from(new Set(pendingPlanAllowlist)), source: "planning-artifact" }
     }
   }
 

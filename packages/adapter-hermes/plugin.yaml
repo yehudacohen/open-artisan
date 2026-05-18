@@ -24,9 +24,13 @@ tools:
   - oa_spawn_sub_workflow
   - oa_analyze_task_boundary_change
   - oa_apply_task_boundary_change
+  - oa_approve_current_task_scope_expansion
+  - oa_repair_current_task_boundary_from_impl_plan
   - oa_route_patch_suggestions
   - oa_resolve_patch_suggestion
   - oa_apply_patch_suggestion
+  - oa_request_allowlist_expansion
+  - oa_summarize_workflow_incident
   - oa_report_drift
   - oa_plan_drift_repair
   - oa_apply_drift_repair

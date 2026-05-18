@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test"
+import { afterEach, expect, it, setDefaultTimeout } from "bun:test"
 import { mkdtemp, readFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -7,10 +7,15 @@ import { createPGliteRoadmapStateBackend } from "#core/roadmap-state-backend-pgl
 import { createSessionStateStore } from "#core/session-state"
 import { createFileSystemStateBackend } from "#core/state-backend-fs"
 import type { RoadmapDocument, RoadmapStateBackend } from "#core/roadmap-types"
+import { pgliteShardDescribe } from "../../../tests/helpers/pglite-shard-gate"
 
 const NOW = "2026-04-16T00:00:00.000Z"
 const tempDirs: string[] = []
 const tempBackends: RoadmapStateBackend[] = []
+
+setDefaultTimeout(90_000)
+process.env["OPENARTISAN_SESSION_STORE_OPERATION_TIMEOUT_MS"] = "120000"
+process.env["OPENARTISAN_PGLITE_QUEUE_WAIT_TIMEOUT_MS"] = "120000"
 
 afterEach(async () => {
   await Promise.all(tempBackends.splice(0).map((backend) => backend.dispose?.() ?? Promise.resolve()))
@@ -66,7 +71,7 @@ function makeBackend(stateDir: string, overrides: Record<string, unknown> = {}) 
   return backend
 }
 
-describe("createPGliteRoadmapStateBackend", () => {
+pgliteShardDescribe("createPGliteRoadmapStateBackend", () => {
   it("persists roadmap state in PGlite without touching workflow-state persistence", async () => {
     const stateDir = await makeTempStateDir()
     const workflowStore = createSessionStateStore(createFileSystemStateBackend(stateDir))

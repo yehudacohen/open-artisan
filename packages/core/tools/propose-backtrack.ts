@@ -14,7 +14,7 @@
 
 import type { WorkflowState } from "../workflow-state-types"
 import type { Phase } from "../workflow-primitives"
-import type { DivergenceClass, Orchestrator, OrchestratorPlanResult, RevisionStep } from "../orchestrator-types"
+import { getAutoSkipBlockedReasonForClassification, type DivergenceClass, type Orchestrator, type OrchestratorPlanResult, type RevisionStep } from "../orchestrator-types"
 
 // ---------------------------------------------------------------------------
 // Outcome types
@@ -30,6 +30,8 @@ export interface ProposeBacktrackExecute {
   pendingRevisionSteps: RevisionStep[]
   /** The orchestrator's classification */
   classification: "backtrack" | "strategic"
+  /** Why immediate/cascade auto-skip is blocked for this revision, when set. */
+  autoSkipBlockedReason?: string
   message: string
 }
 
@@ -50,6 +52,11 @@ export type ProposeBacktrackOutcome =
   | ProposeBacktrackError
 
 import { PHASE_ORDER } from "../constants"
+
+function withAutoSkipBlockedReason(steps: RevisionStep[], reason: string | null): RevisionStep[] {
+  if (!reason) return steps
+  return steps.map((step) => ({ ...step, autoSkipBlockedReason: reason }))
+}
 
 function isBacktrackAuthoringState(state: WorkflowState): boolean {
   return (
@@ -141,7 +148,9 @@ export async function handleProposeBacktrack(
     }
   }
 
-  const { revisionSteps, classification } = plan
+  const autoSkipBlockedReason = getAutoSkipBlockedReasonForClassification(plan)
+  const revisionSteps = withAutoSkipBlockedReason(plan.revisionSteps, autoSkipBlockedReason)
+  const { classification } = plan
 
   // 6. Tactical → reject; agent should fix in-place
   if (classification === "tactical") {
@@ -149,12 +158,21 @@ export async function handleProposeBacktrack(
     const guidance = firstStep
       ? `\n\nOrchestrator guidance: ${firstStep.instructions}`
       : ""
+    const tacticalText = `${args.reason}\n${firstStep?.instructions ?? ""}`.toLowerCase()
+    const boundaryRepairHint = state.phase === "IMPLEMENTATION" && /allowlist|task boundary|current task files|expected files|impl[_ -]?plan|guard/.test(tacticalText)
+      ? (
+        `\n\nExecutable repair path: this looks like a local task-boundary/allowlist repair, so do not backtrack. ` +
+        `If the file is already approved for this task, call \`approve_current_task_scope_expansion\`. ` +
+        `If the approved IMPL_PLAN already lists the missing files, call \`repair_current_task_boundary_from_impl_plan\`. ` +
+        `If neither applies, request a user/planning scope decision before editing.`
+      )
+      : ""
     return {
       action: "reject",
       message:
         `Backtrack proposal rejected — the orchestrator classified this as a **tactical** change ` +
-        `that can be addressed in the current phase.${guidance}\n\n` +
-        `Continue working in ${state.phase}/${state.phaseState}. Apply the fix here rather than backtracking.`,
+        `that can be addressed in the current phase.${guidance}${boundaryRepairHint}\n\n` +
+        `Continue working in ${state.phase}/${state.phaseState} using an executable repair tool before attempting source writes.`,
     }
   }
 
@@ -176,6 +194,7 @@ export async function handleProposeBacktrack(
     targetPhaseState: firstStep.phaseState as "DRAFT" | "REVISE",
     pendingRevisionSteps: revisionSteps.slice(1),
     classification,
+    ...(autoSkipBlockedReason ? { autoSkipBlockedReason } : {}),
     message:
       `**${classLabel} approved** — moving to ${firstStep.phase}/${firstStep.phaseState}.\n\n` +
       `${firstStep.instructions}\n\n` +

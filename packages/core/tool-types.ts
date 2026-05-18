@@ -3,6 +3,7 @@
  */
 
 import type { TaskNode } from "./dag"
+import type { ArtifactKey } from "./types"
 import type { WorkflowMode } from "./types"
 
 /**
@@ -47,6 +48,8 @@ export interface SubmitFeedbackArgs {
    * The user is confirming they have completed the required infrastructure/credential setup.
    */
   resolved_human_gates?: string[]
+  /** Validate the approval path without checkpointing or mutating workflow state. */
+  dry_run?: boolean
 }
 
 export interface ResolveHumanGateArgs {
@@ -58,6 +61,15 @@ export interface ResolveHumanGateArgs {
   why: string
   /** Steps the human can take to verify the gate is resolved */
   verification_steps: string
+}
+
+export interface RequestAllowlistExpansionArgs {
+  /** Project-relative or absolute source/test files that require user-approved allowlist expansion. */
+  files: string[]
+  /** Human-readable reason surfaced at the approval gate. */
+  reason: string
+  /** Artifact whose approved boundary exposed the missing allowlist entry. */
+  source_artifact: ArtifactKey
 }
 
 export interface SpawnSubWorkflowArgs {
@@ -103,7 +115,7 @@ export interface AnalyzeTaskBoundaryChangeArgs {
 export interface ApplyTaskBoundaryChangeArgs extends AnalyzeTaskBoundaryChangeArgs {
   /** Explicit acknowledgement of which tasks are expected to be impacted by the change. Required at apply time. */
   expected_impacted_tasks: string[]
-  /** Explicit acknowledgement of which completed tasks are expected to be reset. Required at apply time. */
+  /** Legacy acknowledgement of completed-task impact. Completed-task resets are rejected; use future corrective tasks instead. */
   expected_reset_tasks: string[]
 }
 

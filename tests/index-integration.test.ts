@@ -70,7 +70,7 @@ function makeMockClient() {
           ],
         }
         return {
-          data: { parts: [{ type: "text", text: JSON.stringify(response) }] },
+          data: { info: response, parts: [{ type: "text", text: JSON.stringify(response) }] },
         }
       }),
       delete: mock(async (opts: { sessionID: string }) => {
@@ -446,7 +446,65 @@ describe("OpenCode integration — task boundary revision workflow", () => {
     expect(result).toContain("/repo/src/outside.ts")
   })
 
-  it("applies a boundary change and reassigns overlapping ownership", async () => {
+  it("records first-class allowlist expansion requests without reviewer extraction", async () => {
+    const sid = `int-test-${Date.now()}-allowlist-expansion`
+    await plugin.event({ event: { type: "session.created", properties: { info: { id: sid } } } })
+    const ctx = { directory: tempDir, sessionId: sid }
+    await plugin.tool.select_mode.execute({ mode: "INCREMENTAL", feature_name: `allowlist-expansion-${Date.now()}` }, ctx)
+    await plugin._testStore.update(sid, (d: any) => {
+      d.phase = "IMPLEMENTATION"
+      d.phaseState = "DRAFT"
+      d.fileAllowlist = [`${tempDir}/src/allowed.ts`]
+    })
+
+    const result = await plugin.tool.request_allowlist_expansion.execute({
+      files: ["src/new-boundary.ts"],
+      reason: "Implementation discovered a necessary source boundary that the approved plan omitted.",
+      source_artifact: "impl_plan",
+    }, ctx)
+
+    expect(result).toContain("allowlist expansion requested")
+    const state = plugin._testStore.get(sid)
+    expect(state.pendingAllowlistExpansions).toHaveLength(1)
+    expect(state.pendingAllowlistExpansions[0].files).toEqual([`${tempDir}/src/new-boundary.ts`])
+    expect(state.pendingAllowlistExpansions[0].sourceArtifact).toBe("impl_plan")
+    expect(state.phaseState).toBe("USER_GATE")
+  })
+
+  it("applies approved allowlist expansion and returns to active work", async () => {
+    const sid = `int-test-${Date.now()}-allowlist-expansion-apply`
+    await plugin.event({ event: { type: "session.created", properties: { info: { id: sid } } } })
+    const ctx = { directory: tempDir, sessionId: sid }
+    await plugin.tool.select_mode.execute({ mode: "INCREMENTAL", feature_name: `allowlist-expansion-apply-${Date.now()}` }, ctx)
+    await plugin._testStore.update(sid, (d: any) => {
+      d.phase = "IMPLEMENTATION"
+      d.phaseState = "DRAFT"
+      d.fileAllowlist = [`${tempDir}/src/allowed.ts`]
+    })
+
+    await plugin.tool.request_allowlist_expansion.execute({
+      files: ["src/contracts.d.ts"],
+      reason: "Implementation must delete and replace a generated contract file that the approved plan omitted.",
+      source_artifact: "impl_plan",
+    }, ctx)
+    await plugin._testStore.update(sid, (d: any) => {
+      d.userGateMessageReceived = true
+    })
+
+    const result = await plugin.tool.submit_feedback.execute({
+      feedback_type: "approve",
+      feedback_text: "approved",
+    }, ctx)
+
+    expect(result).toContain("Applied approved allowlist expansion")
+    const state = plugin._testStore.get(sid)
+    expect(state.fileAllowlist).toContain(`${tempDir}/src/contracts.d.ts`)
+    expect(state.pendingAllowlistExpansions).toEqual([])
+    expect(state.phase).toBe("IMPLEMENTATION")
+    expect(state.phaseState).toBe("DRAFT")
+  })
+
+  it("rejects boundary changes that would reset completed task ownership", async () => {
     const sid = `int-test-${Date.now()}-boundary-apply`
     await plugin.event({ event: { type: "session.created", properties: { info: { id: sid } } } })
     const ctx = { directory: tempDir, sessionId: sid }
@@ -472,14 +530,13 @@ describe("OpenCode integration — task boundary revision workflow", () => {
       reason: "T2 must absorb the runtime seam already exercised by review.",
     }, ctx)
 
-    expect(result).toContain("applied")
+    expect(result).toContain("Completed task(s) cannot be reset")
     const state = plugin._testStore.get(sid)
     const t1 = state?.implDag?.find((t: any) => t.id === "T1")
     const t2 = state?.implDag?.find((t: any) => t.id === "T2")
-    expect(t1?.expectedFiles).not.toContain("/repo/src/a.ts")
-    expect(t1?.status).toBe("pending")
-    expect(t2?.expectedFiles).toContain("/repo/src/a.ts")
-    expect(t2?.expectedFiles).not.toContain("/repo/src/b.ts")
+    expect(t1?.expectedFiles).toContain("/repo/src/a.ts")
+    expect(t1?.status).toBe("complete")
+    expect(t2?.expectedFiles).toEqual(["/repo/src/b.ts"])
   })
 })
 
@@ -503,12 +560,13 @@ describe("OpenCode integration — drift repair parity", () => {
     const report = JSON.parse(reportRaw)
     const planRaw = await plugin.tool.plan_drift_repair.execute({ drift_report_id: report.value.id, strategy: "safe-auto" }, ctx)
     const plan = JSON.parse(planRaw)
-    expect(plan.value.toolCalls[0].toolCall.toolName).toBe("reset_task")
+    expect(plan.value.actions[0].kind).toBe("request_user_decision")
+    expect(plan.value.toolCalls[0].toolCall.toolName).toBe("submit_feedback")
 
     const appliedRaw = await plugin.tool.apply_drift_repair.execute({ repair_plan_id: plan.value.id, apply_safe_actions: true }, ctx)
     const applied = JSON.parse(appliedRaw)
-    expect(applied.value.results[0].result).toContain("Reset 1 task")
-    expect(plugin._testStore.get(sid)?.implDag?.[0]?.status).toBe("in-flight")
+    expect(applied.value.results[0].skipped).toContain("requires-approval")
+    expect(plugin._testStore.get(sid)?.implDag?.[0]?.status).toBe("complete")
   })
 })
 
@@ -578,6 +636,38 @@ describe("Plugin shape — returned object has all required keys", () => {
 
   it("WORKFLOW_TOOL_NAMES contains every callable workflow tool", () => {
     expect([...WORKFLOW_TOOL_NAMES].sort()).toEqual(WORKFLOW_TOOL_CONTRACTS.map((contract) => contract.name).sort())
+  })
+
+  it("reviewer result capture tools reject calls without an active isolated reviewer", async () => {
+    const captureToolArgs: Record<string, Record<string, unknown>> = {
+      submit_task_review_result: { passed: true, issues: [], reasoning: "ok", code_quality_score: "9", error_handling_score: "9" },
+      submit_phase_review_result: { satisfied: true, criteria_results: [{ criterion: "ok", met: true, evidence: "evidence", severity: "blocking", score: "9" }] },
+      submit_change_proposal_review_result: { approved: true, route: "current-task-fix", confidence: "high", reason: "ok" },
+      submit_task_drift_review_result: { drift_detected: false, updated_descriptions: [], reasoning: "ok" },
+      submit_orchestrator_assess_result: { affected_artifacts: ["plan"], root_cause_artifact: "plan", reasoning: "ok" },
+      submit_orchestrator_diverge_result: { classification: "tactical", trigger_criterion: "scope_expansion", reasoning: "ok" },
+      submit_auto_approve_result: { approve: true, confidence: "0.9", reasoning: "ok", feedback: "approved" },
+      submit_rebuttal_review_result: { criteria_results: [{ criterion: "ok", met: true, evidence: "evidence", severity: "blocking", score: "9", rebuttal_accepted: true }] },
+      submit_intent_comparison_result: { classification: "FULL", explanation: "same intent" },
+    }
+
+    for (const [toolName, args] of Object.entries(captureToolArgs)) {
+      const result = await plugin.tool[toolName].execute(args, { sessionId: `capture-${toolName}` })
+      expect(result).toContain("can only be called by an active isolated reviewer session")
+    }
+  })
+
+  it("patch suggestion tools report unavailable DB services", async () => {
+    const patchSuggestionCalls: Array<[string, Record<string, unknown>]> = [
+      ["route_patch_suggestions", {}],
+      ["resolve_patch_suggestion", { patch_suggestion_id: "patch-1", resolution: "deferred", message: "later" }],
+      ["apply_patch_suggestion", { patch_suggestion_id: "patch-1" }],
+    ]
+
+    for (const [toolName, args] of patchSuggestionCalls) {
+      const result = await plugin.tool[toolName].execute(args, { sessionId: `patch-${toolName}`, directory: tempDir })
+      expect(result).toContain("DB-backed patch suggestion services are not enabled")
+    }
   })
 })
 
@@ -2042,7 +2132,7 @@ describe("robot-artisan autonomy", () => {
       promptCallCount += 1
       if (promptCallCount === 1) {
         return {
-          data: { parts: [{ type: "text", text: JSON.stringify({
+          data: { info: { satisfied: true, criteria_results: planningPassCriteria() }, parts: [{ type: "text", text: JSON.stringify({
             classification: "tactical",
             reasoning: "mock",
             satisfied: true,
@@ -2138,7 +2228,7 @@ describe("robot-artisan autonomy", () => {
       promptCallCount += 1
       if (promptCallCount === 1) {
         return {
-          data: { parts: [{ type: "text", text: JSON.stringify({
+          data: { info: { satisfied: true, criteria_results: planningPassCriteria() }, parts: [{ type: "text", text: JSON.stringify({
             classification: "tactical",
             reasoning: "mock",
             satisfied: true,
@@ -2239,11 +2329,55 @@ describe("End-to-end: GREENFIELD happy path through PLANNING", () => {
     const result = await plugin.tool.mark_satisfied.execute({
       criteria_met: planningPassCriteria().slice(0, 2),
     }, ctx)
+    await plugin.tool.mark_satisfied.execute({
+      criteria_met: planningPassCriteria().slice(0, 2),
+    }, ctx)
 
     expect(result).toContain("Error: Only 2 blocking criteria submitted")
     const state = plugin._testStore.get(sid)
     expect(state.phase).toBe("PLANNING")
     expect(state.phaseState).toBe("REVIEW")
+    expect(state.toolFailureHistory[0]?.toolName).toBe("mark_satisfied")
+    expect(state.toolFailureHistory[0]?.count).toBe(2)
+    const summary = await plugin.tool.summarize_workflow_incident.execute({}, ctx)
+    expect(summary).toContain("Repeated tool failures: 1")
+    expect(summary).toContain("tooling/mark_satisfied x2")
+  })
+
+  it("keeps REVIEW state and records a tooling incident when isolated reviewer returns too few criteria", async () => {
+    const sid = `int-test-${Date.now()}-reviewer-incomplete-criteria`
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: sid } } },
+    })
+    const ctx = { directory: tempDir, sessionId: sid }
+    const featureName = "reviewer-incomplete-criteria"
+
+    await plugin.tool.select_mode.execute({ mode: "GREENFIELD", feature_name: featureName }, ctx)
+    await requestPlanningReview(ctx, featureName)
+    ;(client.session.prompt as ReturnType<typeof mock>)
+      .mockImplementationOnce(async () => ({
+        data: { info: {
+          satisfied: true,
+          criteria_results: planningPassCriteria().slice(0, 2),
+        } },
+      }))
+      .mockImplementationOnce(async () => ({
+        data: { info: {
+          satisfied: true,
+          criteria_results: planningPassCriteria().slice(0, 2),
+        } },
+      }))
+
+    const result = await plugin.tool.mark_satisfied.execute({ criteria_met: planningPassCriteria() }, ctx)
+
+    expect(result).toContain("Error: Isolated reviewer failed")
+    expect(result).toContain("Reviewer returned only 2 blocking criteria")
+    const state = plugin._testStore.get(sid)
+    expect(state.phase).toBe("PLANNING")
+    expect(state.phaseState).toBe("REVIEW")
+    expect(state.latestReviewResults?.[0]?.criterion).toBe("Isolated reviewer runtime failed")
+    expect(state.toolFailureHistory[0]?.category).toBe("reviewer-infrastructure")
+    expect(state.toolFailureHistory[0]?.toolName).toBe("mark_satisfied")
   })
 
   it("keeps REVIEW state and surfaces the error when isolated reviewer dispatch fails", async () => {
@@ -2271,7 +2405,7 @@ describe("End-to-end: GREENFIELD happy path through PLANNING", () => {
     expect(state.latestReviewResults?.[0]?.evidence).toContain("reviewer runtime unavailable")
   })
 
-  it("falls back to typed agent criteria when isolated reviewer violates JSON output contract", async () => {
+  it("blocks when isolated reviewer does not call the required submission tool", async () => {
     const sid = `int-test-${Date.now()}-reviewer-invalid-json-fallback`
     await plugin.event({
       event: { type: "session.created", properties: { info: { id: sid } } },
@@ -2287,10 +2421,12 @@ describe("End-to-end: GREENFIELD happy path through PLANNING", () => {
 
     const result = await plugin.tool.mark_satisfied.execute({ criteria_met: planningPassCriteria() }, ctx)
 
-    expect(result).toContain("Self-review complete")
+    expect(result).toContain("Error: Isolated reviewer failed")
+    expect(result).toContain("must call submit_phase_review_result")
     const state = plugin._testStore.get(sid)
     expect(state.phase).toBe("PLANNING")
-    expect(state.phaseState).toBe("USER_GATE")
+    expect(state.phaseState).toBe("REVIEW")
+    expect(state.latestReviewResults?.[0]?.criterion).toBe("Isolated reviewer runtime failed")
   })
 
   it("keeps REVIEW state when isolated reviewer times out", async () => {
@@ -2684,6 +2820,16 @@ describe("mark_task_complete — phase gating and final-task cleanup", () => {
       draft.taskCompletionInProgress = null
     })
 
+    ;(client.session.prompt as ReturnType<typeof mock>).mockImplementationOnce(async () => ({
+      data: {
+        info: { passed: true, issues: [], scores: { code_quality: 9, error_handling: 9 }, reasoning: "Task passes." },
+        parts: [{
+          type: "text",
+          text: JSON.stringify({ passed: true, issues: [], scores: { code_quality: 9, error_handling: 9 }, reasoning: "Task passes." }),
+        }],
+      },
+    }))
+
     const result = await plugin.tool.mark_task_complete.execute(
       { task_id: "T1", implementation_summary: "done", tests_passing: true },
       ctx,
@@ -2835,7 +2981,7 @@ describe("DONE → MODE_SELECT auto-reset", () => {
       draft.escapePending = false
       draft.pendingFeedback = "stale feedback"
       draft.revisionBaseline = { type: "content-hash", hash: "abc123" }
-      draft.userGateMessageReceived = true
+      draft.userGateMessageReceived = false
     })
 
     await plugin["chat.message"](
@@ -3549,7 +3695,7 @@ describe("fileAllowlist — relative paths are normalized to absolute", () => {
     await store.update(sid, (draft: any) => {
       draft.phase = "PLANNING"
       draft.phaseState = "USER_GATE"
-      draft.userGateMessageReceived = true
+      draft.userGateMessageReceived = false
     })
 
     // Approve with mixed relative and absolute paths
@@ -3595,7 +3741,7 @@ describe("fileAllowlist — relative paths are normalized to absolute", () => {
     await store.update(sid, (draft: any) => {
       draft.phase = "PLANNING"
       draft.phaseState = "USER_GATE"
-      draft.userGateMessageReceived = true
+      draft.userGateMessageReceived = false
       draft.artifactDiskPaths.plan = planPath
     })
 
@@ -3631,7 +3777,7 @@ describe("fileAllowlist — relative paths are normalized to absolute", () => {
     await store.update(sid, (draft: any) => {
       draft.phase = "PLANNING"
       draft.phaseState = "USER_GATE"
-      draft.userGateMessageReceived = true
+      draft.userGateMessageReceived = false
       draft.artifactDiskPaths.plan = planPath
     })
 
@@ -3736,8 +3882,97 @@ describe("fileAllowlist — relative paths are normalized to absolute", () => {
     const state = store.get(sid)
     expect(state.phase).toBe("IMPL_PLAN")
     expect(state.phaseState).toBe("USER_GATE")
+    expect(state.userGateMessageReceived).toBe(true)
     expect(state.approvalCount).toBe(3)
     expect(state.implDag).toBeNull()
+  })
+
+  it("dry-runs IMPL_PLAN approval validation without mutating workflow state", async () => {
+    const sid = `int-test-${Date.now()}-impl-dry-run`
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: sid } } },
+    })
+    const ctx = { directory: tempDir, sessionId: sid }
+
+    await plugin.tool.select_mode.execute(
+      { mode: "INCREMENTAL", feature_name: "impl-dry-run-test" },
+      ctx,
+    )
+
+    const store = plugin._testStore
+    const implPlanPath = await writeImplPlanArtifact("impl-dry-run-test", `# Implementation Plan
+
+## Task T1: In-scope work
+**Dependencies:** none
+**Files:** src/allowed.ts
+**Expected tests:** tests/allowed.test.ts
+**Complexity:** medium
+`)
+    await store.update(sid, (draft: any) => {
+      draft.phase = "IMPL_PLAN"
+      draft.phaseState = "USER_GATE"
+      draft.userGateMessageReceived = false
+      draft.fileAllowlist = [`${tempDir}/src/allowed.ts`, `${tempDir}/tests/allowed.test.ts`]
+      draft.artifactDiskPaths.impl_plan = implPlanPath
+      draft.approvalCount = 3
+    })
+
+    const result = await plugin.tool.submit_feedback.execute(
+      { feedback_type: "approve", feedback_text: "approved", dry_run: true },
+      ctx,
+    )
+
+    expect(result).toContain("Dry-run approval validation passed")
+    const state = store.get(sid)
+    expect(state.phase).toBe("IMPL_PLAN")
+    expect(state.phaseState).toBe("USER_GATE")
+    expect(state.userGateMessageReceived).toBe(false)
+    expect(state.approvalCount).toBe(3)
+    expect(state.implDag).toBeNull()
+  })
+
+  it("dry-runs human-gate approval without resolving gates", async () => {
+    const sid = `int-test-${Date.now()}-human-gate-dry-run`
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: sid } } },
+    })
+    const ctx = { directory: tempDir, sessionId: sid }
+
+    await plugin.tool.select_mode.execute(
+      { mode: "GREENFIELD", feature_name: "human-gate-dry-run-test" },
+      ctx,
+    )
+
+    const store = plugin._testStore
+    await store.update(sid, (draft: any) => {
+      draft.phase = "IMPLEMENTATION"
+      draft.phaseState = "USER_GATE"
+      draft.userGateMessageReceived = true
+      draft.implDag = [
+        {
+          id: "T1",
+          description: "External setup",
+          dependencies: [],
+          expectedFiles: [],
+          expectedTests: [],
+          estimatedComplexity: "small",
+          status: "human-gated",
+          humanGate: { whatIsNeeded: "Configure credentials", why: "Needed", verificationSteps: "Check env", resolved: false },
+        },
+      ]
+    })
+
+    const result = await plugin.tool.submit_feedback.execute(
+      { feedback_type: "approve", feedback_text: "approved", resolved_human_gates: ["T1"], dry_run: true },
+      ctx,
+    )
+
+    expect(result).toContain("Dry-run human-gate validation passed")
+    const state = store.get(sid)
+    expect(state.phase).toBe("IMPLEMENTATION")
+    expect(state.phaseState).toBe("USER_GATE")
+    expect(state.implDag[0].status).toBe("human-gated")
+    expect(state.implDag[0].humanGate.resolved).toBe(false)
   })
 
   it("approves IMPL_PLAN when task files and tests are markdown-wrapped but in scope", async () => {

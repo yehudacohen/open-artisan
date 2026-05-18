@@ -11,11 +11,13 @@ import {
   buildAdjacentTasksForTask,
   buildTaskReviewAcceptancePlan,
   buildTaskReviewPrompt,
+  classifyTaskReviewResult,
   parseTaskReviewResult,
   dispatchTaskReview,
   type TaskReviewRequest,
 } from "#core/task-review"
 import type { TaskNode } from "#core/dag"
+import type { SubagentDispatcher, SubagentPromptOptions } from "#core/subagent-dispatcher"
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -128,6 +130,15 @@ describe("buildTaskReviewPrompt", () => {
     }))
     expect(prompt).toContain("tests/auth.test.ts")
     expect(prompt).toContain("tests/jwt.test.ts")
+  })
+
+  it("includes verification commands when present", () => {
+    const prompt = buildTaskReviewPrompt(makeRequest({
+      task: makeTask({ id: "T1", verificationCommands: ["bun run typecheck", "bun run check:release"] }),
+    }))
+    expect(prompt).toContain("Verification Commands")
+    expect(prompt).toContain("bun run typecheck")
+    expect(prompt).toContain("bun run check:release")
   })
 
   it("omits expected tests section when none specified", () => {
@@ -445,6 +456,21 @@ describe("parseTaskReviewResult", () => {
   })
 })
 
+describe("classifyTaskReviewResult", () => {
+  it("classifies reviewer infrastructure failures separately from implementation failures", () => {
+    expect(classifyTaskReviewResult({ success: false, error: "Cannot extract text from reviewer result" })).toBe("reviewer-failed")
+  })
+
+  it("classifies boundary and allowlist findings as repairable scope gates", () => {
+    const result = parseTaskReviewResult(JSON.stringify({
+      passed: false,
+      issues: ["File is blocked by the current task boundary and outside allowlist."],
+      reasoning: "Task boundary must include the generated example file.",
+    }))
+    expect(classifyTaskReviewResult(result)).toBe("boundary-repair-needed")
+  })
+})
+
 // ---------------------------------------------------------------------------
 // dispatchTaskReview — mock client
 // ---------------------------------------------------------------------------
@@ -496,8 +522,62 @@ describe("dispatchTaskReview", () => {
     expect(dispatcher._createMock).toHaveBeenCalledTimes(1)
   })
 
+  it("requests structured JSON output from the reviewer", async () => {
+    let capturedOptions: SubagentPromptOptions | undefined
+    const dispatcher: SubagentDispatcher = {
+      createSession: mock(async () => ({
+        id: "review-1",
+        prompt: mock(async (_text, options) => {
+          capturedOptions = options
+          return JSON.stringify({
+            passed: true,
+            issues: [],
+            scores: { code_quality: 9, error_handling: 9 },
+            patch_suggestions: [],
+            reasoning: "All checks pass",
+          })
+        }),
+        destroy: mock(async () => {}),
+      })),
+    }
+
+    const result = await dispatchTaskReview(dispatcher, makeRequest())
+
+    expect(result.success).toBe(true)
+    expect(capturedOptions?.responseFormat?.type).toBe("json_schema")
+    expect(capturedOptions?.submissionTool?.name).toBe("submit_task_review_result")
+  })
+
+  it("repairs markdown reviewer output with a second isolated prompt", async () => {
+    let promptCalls = 0
+    const dispatcher: SubagentDispatcher = {
+      createSession: mock(async () => ({
+        id: `review-${promptCalls + 1}`,
+        prompt: mock(async () => {
+          promptCalls++
+          if (promptCalls === 1) return "**Evaluating...** This task looks good, but this is not JSON."
+          return JSON.stringify({
+            passed: true,
+            issues: [],
+            scores: { code_quality: 9, error_handling: 9 },
+            patch_suggestions: [],
+            reasoning: "Repaired JSON review passes.",
+          })
+        }),
+        destroy: mock(async () => {}),
+      })),
+    }
+
+    const result = await dispatchTaskReview(dispatcher, makeRequest())
+
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    expect(result.passed).toBe(true)
+    expect(promptCalls).toBe(2)
+  })
+
   it("returns error when session create fails", async () => {
-    const failDispatcher: import("#core/subagent-dispatcher").SubagentDispatcher = {
+    const failDispatcher: SubagentDispatcher = {
       createSession: mock(async () => { throw new Error("Cannot create session") }),
     }
     const result = await dispatchTaskReview(failDispatcher, makeRequest())
@@ -507,7 +587,7 @@ describe("dispatchTaskReview", () => {
   })
 
   it("returns error when session prompt fails", async () => {
-    const failDispatcher: import("#core/subagent-dispatcher").SubagentDispatcher = {
+    const failDispatcher: SubagentDispatcher = {
       createSession: mock(async () => ({
         id: "review-1",
         prompt: mock(async () => { throw new Error("Network error") }),

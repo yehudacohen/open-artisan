@@ -19,24 +19,26 @@ function makeDispatcher(overrides?: {
   promptText?: string
   createThrows?: boolean
   promptThrows?: boolean
-}): SubagentDispatcher & { _createMock: ReturnType<typeof mock> } {
+}): SubagentDispatcher & { _createMock: ReturnType<typeof mock>; _promptMock: ReturnType<typeof mock> } {
   const defaultText = overrides?.promptText ?? JSON.stringify({
     approve: true,
     confidence: 0.85,
     reasoning: "Looks good",
   })
+  const promptMock = overrides?.promptThrows
+    ? mock(async () => { throw new Error("prompt failed") })
+    : mock(async () => defaultText)
   const createMock = overrides?.createThrows
     ? mock(async () => { throw new Error("create failed") })
     : mock(async () => ({
         id: "mock-auto-session",
-        prompt: overrides?.promptThrows
-          ? mock(async () => { throw new Error("prompt failed") })
-          : mock(async () => defaultText),
+        prompt: promptMock,
         destroy: mock(async () => {}),
       }))
   return {
     createSession: createMock,
     _createMock: createMock,
+    _promptMock: promptMock,
   }
 }
 
@@ -75,6 +77,12 @@ describe("dispatchAutoApproval — approve", () => {
     await dispatchAutoApproval(dispatcher, makeRequest())
     const createCall = dispatcher._createMock.mock.calls[0]
     expect((createCall as any)?.[0]?.agent).toBe("auto-approver")
+  })
+
+  it("requests structured tool submission from the auto-approver", async () => {
+    const dispatcher = makeDispatcher()
+    await dispatchAutoApproval(dispatcher, makeRequest())
+    expect(dispatcher._promptMock.mock.calls[0]?.[1]).toEqual({ submissionTool: { name: "submit_auto_approve_result" } })
   })
 })
 

@@ -12,12 +12,13 @@ For each task:
 1. **ID** — unique identifier (e.g., "task-001")
 2. **Description** — what this task implements, which interface methods/types it covers
 3. **Dependencies** — IDs of tasks that must complete before this one starts
-4. **Expected tests** — which test file paths should pass when this task is complete
-5. **Files** — which file paths this task will create or modify (relative to project root).
+4. **Expected tests** — test/spec file paths only, or `none`. Do not put commands or prose here.
+5. **Verification commands** — runnable commands for typechecks, smoke checks, release checks, etc. Use this for `bun run ...` commands.
+6. **Files** — which file paths this task will create or modify (relative to project root).
    These are the files the reviewer will evaluate — be explicit and complete.
-6. **Category** — one of: `scaffold`, `human-gate`, `integration`, `standalone` (see below)
-7. **Complexity** — small / medium / large estimate
-8. **Merge point** — if parallel tasks converge here, identify it
+7. **Category** — one of: `scaffold`, `human-gate`, `integration`, `standalone` (see below)
+8. **Complexity** — small / medium / large estimate
+9. **Merge point** — if parallel tasks converge here, identify it
 
 ### Task categories
 
@@ -72,7 +73,8 @@ the critical path should verify the feature works in the target environment, not
 - No cycles (task cannot depend on itself, directly or transitively)
 - Every interface method is covered by at least one task
 - Merge points explicitly identified where parallel branches converge
-- Expected test outcomes specified per task (which tests become green)
+- Expected test file paths specified per task (which test files become green)
+- Verification commands specified separately from test file paths
 - Every `integration` task depends on its corresponding `scaffold` task
 - Every `integration` task depends on relevant `human-gate` tasks for credentials/infra
 - No `standalone` task depends on a `human-gate` task

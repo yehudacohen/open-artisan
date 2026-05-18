@@ -68,6 +68,11 @@ describe("extractTextFromPromptResult", () => {
   it("extracts text from message history arrays", () => {
     expect(extractTextFromPromptResult({ data: [{ info: { id: "msg-1" }, parts: [{ type: "text", text: "history" }] }] })).toBe("history")
   })
+
+  it("throws a diagnostic for metadata-only prompt envelopes", () => {
+    expect(() => extractTextFromPromptResult({ data: { info: { id: "msg-1", role: "assistant" } } }, "reviewer"))
+      .toThrow("Cannot extract text from reviewer result")
+  })
 })
 
 // ---------------------------------------------------------------------------

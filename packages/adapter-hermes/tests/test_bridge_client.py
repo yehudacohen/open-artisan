@@ -476,10 +476,7 @@ class TestJsonRpcRoundTrip:
         thread = threading.Thread(target=serve_once)
         thread.start()
         try:
-            for _ in range(50):
-                if socket_path.exists():
-                    break
-                time.sleep(0.01)
+            assert ready.wait(timeout=2)
             client._socket_path = str(socket_path)
             result = client.call("state.get", {"sessionId": "test-session"})
         finally:

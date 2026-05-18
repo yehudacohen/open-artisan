@@ -18,13 +18,14 @@ import { extractApprovedFileAllowlist } from "../../core/tools/plan-allowlist"
 import { parseToolArgs } from "../../core/tool-args"
 import { SubmitFeedbackToolSchema } from "../../core/schemas"
 import { computeSubmitFeedbackApproveTransition, computeSubmitFeedbackReviseTransition } from "../../core/tools/transitions"
+import { applyPendingAllowlistExpansions } from "../../core/tools/allowlist-expansion"
 import { computeForwardSkip } from "../../core/fast-forward"
 import {
   buildSubmitFeedbackClarificationMessage,
   buildSelfApprovalBlockedMessage,
   findReviewedArtifactFilesOutsideAllowlist,
   findUnresolvedHumanGates,
-  materializeImplPlanDag,
+  materializeForwardOnlyImplPlanDag,
   normalizeApprovalFilePaths,
   resolveSubmitFeedbackHumanGates,
   stripWorkflowRoutingNotes,
@@ -153,6 +154,7 @@ interface ParsedSubmitFeedbackArgs {
   feedback_text?: string | undefined
   approved_files?: string[] | undefined
   resolved_human_gates?: string[] | undefined
+  dry_run?: boolean | undefined
 }
 
 function createIncrementalAllowlistResolver(
@@ -369,6 +371,14 @@ async function applyApprovalTransition(
   const approveArtifactPath = approveArtifactKey && approveArtifactKey !== "implementation"
     ? state.artifactDiskPaths[approveArtifactKey] ?? null
     : null
+  let materializedImplPlanForApproval: ReturnType<typeof materializeForwardOnlyImplPlanDag> | null = null
+  if (state.phase === "IMPL_PLAN") {
+    const planContent = readArtifactContent(state, "impl_plan")
+    if (planContent) {
+      materializedImplPlanForApproval = materializeForwardOnlyImplPlanDag(planContent, cwd, state.implDag)
+      if (!materializedImplPlanForApproval.success) return `Error: ${materializedImplPlanForApproval.error}`
+    }
+  }
   const approvedArtifactMarker = approveArtifactKey
     ? buildApprovedArtifactMarker(state, approveArtifactKey, approveArtifactPath)
     : null
@@ -412,18 +422,12 @@ async function applyApprovalTransition(
       draft.taskReviewCount = 0
     }
     if (state.phase === "IMPL_PLAN") {
-      const planContent = readArtifactContent(state, "impl_plan")
-      if (planContent) {
-        const materialized = materializeImplPlanDag(planContent)
-        if (materialized) {
-          draft.implDag = materialized.nodes
-          draft.currentTaskId = materialized.currentTaskId
-          if (materialized.currentTaskId) {
-            draft.implDag = applyDispatch(draft, materialized.currentTaskId)
-            draft.phaseState = "DRAFT"
-          }
-        } else {
-          draft.implDag = null
+      if (materializedImplPlanForApproval?.success) {
+        draft.implDag = materializedImplPlanForApproval.nodes
+        draft.currentTaskId = materializedImplPlanForApproval.currentTaskId
+        if (materializedImplPlanForApproval.currentTaskId) {
+          draft.implDag = applyDispatch(draft, materializedImplPlanForApproval.currentTaskId)
+          draft.phaseState = "DRAFT"
         }
       }
     }
@@ -474,6 +478,24 @@ async function handleApproveFeedback(
   ctx: BridgeContext,
 ): Promise<string> {
   const resolvedHumanGates = args.resolved_human_gates ?? []
+  if (state.pendingAllowlistExpansions.length > 0 && (state.phase === "IMPL_PLAN" || state.phase === "IMPLEMENTATION")) {
+    if (args.dry_run) {
+      const files = Array.from(new Set(state.pendingAllowlistExpansions.flatMap((request) => request.files)))
+      return `Dry-run allowlist expansion approval passed for ${files.join(", ")}. No checkpoint was created and workflow state was not mutated.`
+    }
+    let message = ""
+    await ctx.engine!.store.update(toolCtx.sessionId, (draft) => {
+      const applied = applyPendingAllowlistExpansions(draft, toolCtx.directory)
+      message = applied.success ? applied.message : `Error: ${applied.error}`
+    })
+    return message
+  }
+  if (args.dry_run && state.phase === "IMPLEMENTATION" && state.implDag && resolvedHumanGates.length > 0) {
+    const resolutionResult = resolveSubmitFeedbackHumanGates(state, resolvedHumanGates)
+    if (!resolutionResult.success) return resolutionResult.error
+    const remainingGateCount = resolutionResult.resolution.remainingGates.length
+    return `Dry-run human-gate validation passed for ${state.phase}/${state.phaseState}. ${remainingGateCount} gate(s) would remain unresolved. No checkpoint was created and workflow state was not mutated.`
+  }
   const humanGateResult = await resolveHumanGateFeedback(state, resolvedHumanGates, toolCtx, ctx)
   if (humanGateResult) return humanGateResult
 
@@ -484,6 +506,10 @@ async function handleApproveFeedback(
   if (reviewAllowlistError) return reviewAllowlistError
   const planningAllowlistError = seedPlanningAllowlistFromArtifact(state, args, cwd, allowlists)
   if (planningAllowlistError) return planningAllowlistError
+
+  if (args.dry_run) {
+    return `Dry-run approval validation passed for ${state.phase}/USER_GATE. No checkpoint was created and workflow state was not mutated.`
+  }
 
   return applyApprovalTransition(state, args, resolvedHumanGates, cwd, allowlists, toolCtx, ctx)
 }
@@ -526,7 +552,7 @@ export const handleSubmitFeedback: ToolHandler = async (args, toolCtx, ctx) => {
   const gateError = validateSubmitFeedbackGate(state.phaseState)
   if (gateError) return `Error: ${gateError}`
 
-  if (!state.userGateMessageReceived) {
+  if (!state.userGateMessageReceived && !parsedArgs.data.dry_run) {
     return buildSelfApprovalBlockedMessage()
   }
 

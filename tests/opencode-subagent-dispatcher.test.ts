@@ -10,6 +10,7 @@
  */
 import { describe, expect, it, mock } from "bun:test"
 import { createOpenCodeSubagentDispatcher } from "#plugin/opencode-subagent-dispatcher"
+import { decodeSubagentToolSubmission } from "#core/subagent-dispatcher"
 
 function makeClient(overrides?: {
   createResponse?: unknown
@@ -114,6 +115,46 @@ describe("createOpenCodeSubagentDispatcher", () => {
     expect(text).toBe("assistant answer")
   })
 
+  it("prompt() recovers from parentID-only metadata using message history", async () => {
+    const client = makeClient({
+      promptResponse: { data: { info: { parentID: "user-1" } } },
+      messagesResponse: {
+        data: [
+          { info: { id: "user-1", role: "user" }, parts: [{ type: "text", text: "repair prompt text" }] },
+          { info: { id: "assistant-1", parentID: "user-1", role: "assistant" }, parts: [{ type: "text", text: "repaired json response" }] },
+        ],
+      },
+    })
+    const dispatcher = createOpenCodeSubagentDispatcher(client as any)
+    const session = await dispatcher.createSession({ title: "Task Review: T4 (real-agent-workflow-runtime)", agent: "workflow-reviewer" })
+    const text = await session.prompt("hello")
+
+    expect(text).toBe("repaired json response")
+    expect(client.session.message).not.toHaveBeenCalled()
+    expect(client.session.messages).toHaveBeenCalledWith({ path: { id: "sess-1" }, query: { limit: 20 } })
+  })
+
+  it("prompt() recovers parentID-only metadata from nested history collections", async () => {
+    const client = makeClient({
+      promptResponse: { data: { info: { parentID: "user-1", role: "assistant" } } },
+      messagesResponse: {
+        data: {
+          messages: [
+            { info: { id: "user-1", role: "user" }, parts: [{ type: "text", text: "repair prompt text" }] },
+            { info: { id: "assistant-1", parentID: "user-1", role: "assistant" }, parts: [{ type: "text", text: "nested repaired json response" }] },
+          ],
+        },
+      },
+    })
+    const dispatcher = createOpenCodeSubagentDispatcher(client as any)
+    const session = await dispatcher.createSession({ title: "Task Review: T4 (real-agent-workflow-runtime)", agent: "workflow-reviewer" })
+    const text = await session.prompt("hello")
+
+    expect(text).toBe("nested repaired json response")
+    expect(client.session.message).not.toHaveBeenCalled()
+    expect(client.session.messages).toHaveBeenCalledWith({ path: { id: "sess-1" }, query: { limit: 20 } })
+  })
+
   it("prompt() skips target assistant metadata without text in message history", async () => {
     const client = makeClient({
       promptResponse: { data: { info: { id: "assistant-1", role: "assistant" } } },
@@ -192,6 +233,81 @@ describe("createOpenCodeSubagentDispatcher", () => {
     await session.prompt("hello", { responseFormat: { type: "json_schema", schema: { type: "object" } } })
     const call = (client.session.prompt as ReturnType<typeof mock>).mock.calls[0]
     expect((call as any)?.[0]?.body?.format).toEqual({ type: "json_schema", schema: { type: "object" } })
+  })
+
+  it("returns captured reviewer tool submissions before parsing prompt text", async () => {
+    const calls: string[] = []
+    const submissions = {
+      begin(sessionId: string, toolName: string) {
+        calls.push(`begin:${sessionId}:${toolName}`)
+      },
+      take(sessionId: string, toolName: string) {
+        calls.push(`take:${sessionId}:${toolName}`)
+        return JSON.stringify({ passed: true, issues: [], reasoning: "submitted by tool" })
+      },
+      clear(sessionId: string) {
+        calls.push(`clear:${sessionId}`)
+      },
+    }
+    const client = makeClient({ promptResponse: { data: { parts: [{ type: "text", text: "**markdown instead of json**" }] } } })
+    const dispatcher = createOpenCodeSubagentDispatcher(client as any, { reviewerToolSubmissions: submissions })
+    const session = await dispatcher.createSession({ title: "test", agent: "workflow-reviewer" })
+    const text = await session.prompt("hello", { submissionTool: { name: "submit_task_review_result" } })
+    const decoded = decodeSubagentToolSubmission(text, "submit_task_review_result")
+
+    expect(decoded.success).toBe(true)
+    if (!decoded.success) return
+    expect(JSON.parse(decoded.payload).reasoning).toBe("submitted by tool")
+    expect(calls).toEqual([
+      "begin:sess-1:submit_task_review_result",
+      "take:sess-1:submit_task_review_result",
+      "clear:sess-1",
+    ])
+  })
+
+  it("rejects text fallback when a local reviewer submission tool is required", async () => {
+    const calls: string[] = []
+    const submissions = {
+      begin(sessionId: string, toolName: string) {
+        calls.push(`begin:${sessionId}:${toolName}`)
+      },
+      take(sessionId: string, toolName: string) {
+        calls.push(`take:${sessionId}:${toolName}`)
+        return null
+      },
+      clear(sessionId: string) {
+        calls.push(`clear:${sessionId}`)
+      },
+    }
+    const client = makeClient({ promptResponse: { data: { parts: [{ type: "text", text: "**markdown instead of tool submission**" }] } } })
+    const dispatcher = createOpenCodeSubagentDispatcher(client as any, { reviewerToolSubmissions: submissions })
+    const session = await dispatcher.createSession({ title: "test", agent: "workflow-reviewer" })
+
+    await expect(session.prompt("hello", { submissionTool: { name: "submit_task_review_result" } }))
+      .rejects.toThrow("must call submit_task_review_result")
+    expect(calls).toEqual([
+      "begin:sess-1:submit_task_review_result",
+      "take:sess-1:submit_task_review_result",
+      "take:sess-1:submit_task_review_result",
+      "clear:sess-1",
+    ])
+  })
+
+  it("uses structured prompt payloads before text extraction", async () => {
+    const client = makeClient({
+      promptResponse: {
+        data: {
+          info: {
+            structured: { passed: true, issues: [], reasoning: "structured wins" },
+          },
+        },
+      },
+    })
+    const dispatcher = createOpenCodeSubagentDispatcher(client as any)
+    const session = await dispatcher.createSession({ title: "test", agent: "workflow-reviewer" })
+    const text = await session.prompt("hello", { submissionTool: { name: "submit_task_review_result" } })
+
+    expect(JSON.parse(text).reasoning).toBe("structured wins")
   })
 
   it("throws when client.session is not available", async () => {

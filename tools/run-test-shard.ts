@@ -85,11 +85,30 @@ assertPGliteShardIsComplete()
 const files = shardFiles(shard)
 if (files.length === 0) throw new Error(`No test files selected for shard "${shard}"`)
 
-const args = ["test", "--timeout", "90000"]
-if (shard === "pglite") args.push("--max-concurrency", "2")
-args.push(...passthrough)
-args.push(...files)
+async function runBunTestProcess(selectedFiles: string[]): Promise<number> {
+  const args = ["test", "--timeout", "90000", ...passthrough, ...selectedFiles]
+  const proc = Bun.spawn(["bun", ...args], {
+    stdout: "inherit",
+    stderr: "inherit",
+    env: {
+      ...process.env,
+      ...(shard === "pglite" ? { OPENARTISAN_RUN_PGLITE_TESTS: "1" } : {}),
+    },
+  })
+  return proc.exited
+}
+
+async function runPGliteShard(): Promise<number> {
+  // PGlite/Kysely keep process-global connection and queue state. Running all
+  // heavy PGlite files in one Bun process creates cross-file contention that is
+  // much slower than process-isolated files, even with Bun's max-concurrency=1.
+  for (const file of files) {
+    console.log(`Running pglite file: ${file}`)
+    const code = await runBunTestProcess([file])
+    if (code !== 0) return code
+  }
+  return 0
+}
 
 console.log(`Running ${shard} shard (${files.length} files)`)
-const proc = Bun.spawn(["bun", ...args], { stdout: "inherit", stderr: "inherit" })
-process.exit(await proc.exited)
+process.exit(shard === "pglite" ? await runPGliteShard() : await runBunTestProcess(files))

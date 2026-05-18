@@ -29,8 +29,8 @@ export const handleAnalyzeTaskBoundaryChange: ToolHandler = async (args, toolCtx
   const state = requireState(ctx, toolCtx.sessionId)
   const parsedArgs = parseToolArgs(AnalyzeTaskBoundaryChangeSchema, args)
   if (!parsedArgs.success) return `Error: ${parsedArgs.error}`
-  const result = analyzeTaskBoundaryChange(toAnalyzeTaskBoundaryChangeArgs(parsedArgs.data), state)
-  if (!result.success) return `Error: ${result.error}`
+  const result = analyzeTaskBoundaryChange(toAnalyzeTaskBoundaryChangeArgs(parsedArgs.data), state, toolCtx.directory)
+  if (!result.success) return `Error: ${result.error.message}`
   return JSON.stringify(result.analysis, null, 2)
 }
 
@@ -39,7 +39,7 @@ export const handleApplyTaskBoundaryChange: ToolHandler = async (args, toolCtx, 
   const state = requireState(ctx, toolCtx.sessionId)
   const parsedArgs = parseToolArgs(ApplyTaskBoundaryChangeSchema, args)
   if (!parsedArgs.success) return `Error: ${parsedArgs.error}`
-  const result = applyTaskBoundaryChange(toApplyTaskBoundaryChangeArgs(parsedArgs.data), state)
+  const result = applyTaskBoundaryChange(toApplyTaskBoundaryChangeArgs(parsedArgs.data), state, toolCtx.directory)
   if (!result.success) return `Error: ${result.error.message}`
   await store.update(toolCtx.sessionId, (draft) => {
     draft.implDag = result.updatedNodes

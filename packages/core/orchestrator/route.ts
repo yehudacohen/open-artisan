@@ -11,7 +11,7 @@
  */
 import type { ArtifactKey, Phase } from "../workflow-primitives"
 import type { Orchestrator } from "../orchestrator-types"
-import type { OrchestratorAssessResult, OrchestratorDeps, OrchestratorPlanResult, OrchestratorRouteInput, RevisionStep } from "../orchestrator-types"
+import { getAutoSkipBlockedReasonForClassification, type OrchestratorAssessResult, type OrchestratorDeps, type OrchestratorPlanResult, type OrchestratorRouteInput, type RevisionStep } from "../orchestrator-types"
 import { PHASE_TO_ARTIFACT } from "../artifacts"
 
 // ---------------------------------------------------------------------------
@@ -153,10 +153,12 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
 
       // ---- Step 2: Diverge --------------------------------------------------
       let classification: "tactical" | "strategic" | "backtrack" = "tactical"
+      let triggerCriterion: OrchestratorPlanResult["triggerCriterion"]
       try {
         const divergeResult = await deps.diverge(assessResult, input.approvedArtifacts)
         if (divergeResult.success) {
           classification = divergeResult.classification
+          triggerCriterion = divergeResult.triggerCriterion
         }
         // If diverge fails, default to tactical
       } catch {
@@ -164,9 +166,18 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
       }
 
       // ---- Step 3: Build revision plan --------------------------------------
+      const autoSkipBlockedReason = getAutoSkipBlockedReasonForClassification({
+        classification,
+        ...(triggerCriterion ? { triggerCriterion } : {}),
+      })
       const revisionSteps = buildRevisionSteps(rootCause, classification, deps, input.mode, input.currentPhase)
+        .map((step) => autoSkipBlockedReason ? { ...step, autoSkipBlockedReason } : step)
 
-      return { revisionSteps, classification }
+      return {
+        revisionSteps,
+        classification,
+        ...(triggerCriterion ? { triggerCriterion } : {}),
+      }
     },
   }
 }

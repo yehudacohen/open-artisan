@@ -1,5 +1,4 @@
 import { JSONRPCErrorException } from "json-rpc-2.0"
-import { randomBytes } from "node:crypto"
 import { readFileSync } from "node:fs"
 
 import type { MethodHandler, BridgeContext } from "../server"
@@ -14,50 +13,16 @@ import {
   computeAutoApproveTransition,
 } from "../../core/autonomous-user-gate"
 import { SubmitAutoApproveToolSchema } from "../../core/schemas"
+import { buildAutoApproveOutputFromSubmission } from "../../core/review-submission-normalizers"
 import { parseToolArgs } from "../../core/tool-args"
 import { computeSubmitFeedbackReviseTransition } from "../../core/tools/transitions"
 import { extractApprovedFileAllowlist } from "../../core/tools/plan-allowlist"
 import { computeForwardSkip } from "../../core/fast-forward"
-import { REVIEW_SUBMISSION_TOKEN_BYTES, REVIEW_SUBMISSION_TOKEN_TTL_MS } from "../../core/constants"
 import type { ToolHandler } from "./tool-handler-types"
 import { artifactFilesHash } from "./review-feedback-tool-handlers"
+import { consumeReviewSubmissionToken, issueReviewSubmissionToken } from "./review-submission-tokens"
 
 type ApprovedArtifactMarker = (state: WorkflowState, artifactKey: ArtifactKey) => string
-
-function cleanupExpiredAutoApproveTokens(ctx: BridgeContext): void {
-  const tokens = ctx.reviewSubmissionTokens
-  if (!tokens) return
-  const now = Date.now()
-  for (const [token, record] of tokens.entries()) {
-    if (record.expiresAt <= now) tokens.delete(token)
-  }
-}
-
-function issueAutoApproveToken(ctx: BridgeContext, sessionId: string, phase: string, artifactHash?: string | null): string {
-  cleanupExpiredAutoApproveTokens(ctx)
-  const token = randomBytes(REVIEW_SUBMISSION_TOKEN_BYTES).toString("hex")
-  const tokens = ctx.reviewSubmissionTokens ?? new Map()
-  tokens.set(token, {
-    sessionId,
-    kind: "auto-approve",
-    subject: phase,
-    expiresAt: Date.now() + REVIEW_SUBMISSION_TOKEN_TTL_MS,
-    ...(artifactHash ? { artifactHash } : {}),
-  })
-  ctx.reviewSubmissionTokens = tokens
-  return token
-}
-
-function consumeAutoApproveToken(ctx: BridgeContext, token: string, sessionId: string, phase: string, consume = true): { error: string | null; artifactHash: string | null } {
-  cleanupExpiredAutoApproveTokens(ctx)
-  const record = ctx.reviewSubmissionTokens?.get(token)
-  if (!record) return { error: "Invalid or expired auto-approver token. Request a fresh auto-approval context and retry.", artifactHash: null }
-  if (record.sessionId !== sessionId || record.kind !== "auto-approve" || record.subject !== phase) {
-    return { error: "Auto-approver token does not match the pending gate. Request a fresh auto-approval context and retry.", artifactHash: null }
-  }
-  if (consume) ctx.reviewSubmissionTokens?.delete(token)
-  return { error: null, artifactHash: record.artifactHash ?? null }
-}
 
 function autoApproveArtifactHash(state: WorkflowState, directory: string): string | null {
   if (state.reviewArtifactFiles.length > 0) return artifactFilesHash(state.reviewArtifactFiles, directory)
@@ -124,8 +89,10 @@ export function createAutoApproveToolHandlers(buildApprovedArtifactMarker: Appro
 
     const parsedArgs = parseToolArgs(SubmitAutoApproveToolSchema, args)
     if (!parsedArgs.success) return `Error: ${parsedArgs.error}`
-    const reviewOutput = parsedArgs.data.review_output.trim()
-    const tokenResult = consumeAutoApproveToken(ctx, parsedArgs.data.review_token, toolCtx.sessionId, state.phase, false)
+    const normalizedSubmission = buildAutoApproveOutputFromSubmission(parsedArgs.data)
+    if (!normalizedSubmission.success) return `Error: ${normalizedSubmission.error}`
+    const reviewOutput = normalizedSubmission.reviewOutput
+    const tokenResult = consumeReviewSubmissionToken(ctx, parsedArgs.data.review_token, toolCtx.sessionId, "auto-approve", state.phase, false)
     if (tokenResult.error) return `Error: ${tokenResult.error}`
     const currentArtifactHash = autoApproveArtifactHash(state, toolCtx.directory)
     if (tokenResult.artifactHash && (!currentArtifactHash || tokenResult.artifactHash !== currentArtifactHash)) {
@@ -229,7 +196,7 @@ export function createAutoApproveToolHandlers(buildApprovedArtifactMarker: Appro
     const directory = ctx.projectDir ?? process.cwd()
     const artifactHash = autoApproveArtifactHash(state, directory)
     if (state.reviewArtifactFiles.length > 0 && !artifactHash) return null
-    const token = issueAutoApproveToken(ctx, p.sessionId, state.phase, artifactHash)
+    const token = issueReviewSubmissionToken(ctx, p.sessionId, "auto-approve", state.phase, artifactHash)
     return appendAutoApproveTokenInstruction(`**Gate:** USER_GATE\n` + buildAutoApprovePrompt(buildAutoApproveRequest(state, p.sessionId)), token)
   }
 

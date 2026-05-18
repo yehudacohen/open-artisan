@@ -67,7 +67,8 @@ Rules:
   include downstream artifacts that haven't been created yet (e.g. if we're at INTERFACES, don't
   list tests/impl_plan/implementation as affected unless they already exist).
 
-IMPORTANT: You MUST reply with ONLY a valid JSON object — no explanation, no markdown prose, no preamble.
+Preferred submission path: if the \`submit_orchestrator_assess_result\` tool is available, call it exactly once with the classification instead of replying with text.
+If that tool is unavailable, you MUST reply with ONLY a valid JSON object — no explanation, no markdown prose, no preamble.
 The JSON must have exactly these fields:
 {
   "affected_artifacts": ["<artifact_key>", ...],
@@ -108,6 +109,7 @@ export function createAssessFn(
           prompt,
           ASSESS_SYSTEM_PROMPT,
           "Orchestrator: assess feedback",
+          "submit_orchestrator_assess_result",
           getParentSessionId?.(),
           getParentModel?.(),
         ),
@@ -178,7 +180,8 @@ Rules:
 - When in doubt between tactical and backtrack, prefer backtrack — it's better to revisit upstream than to patch downstream.
 - When in doubt between backtrack and strategic, prefer strategic — user escalation is safer.
 
-IMPORTANT: You MUST reply with ONLY a valid JSON object — no explanation, no markdown prose, no preamble.
+Preferred submission path: if the \`submit_orchestrator_diverge_result\` tool is available, call it exactly once with the classification instead of replying with text.
+If that tool is unavailable, you MUST reply with ONLY a valid JSON object — no explanation, no markdown prose, no preamble.
 The JSON must have exactly these fields:
 {
   "classification": "tactical" | "backtrack" | "strategic",
@@ -242,6 +245,7 @@ export function createDivergeFn(
           prompt,
           DIVERGE_SYSTEM_PROMPT,
           "Orchestrator: diverge classification",
+          "submit_orchestrator_diverge_result",
           getParentSessionId?.(),
           getParentModel?.(),
         ),
@@ -310,6 +314,7 @@ async function ephemeralOrchestratorPrompt(
   promptText: string,
   systemPrompt: string | undefined,
   title: string,
+  submissionToolName: string,
   parentSessionId?: string,
   parentModel?: string | { modelID: string; providerID?: string },
 ): Promise<string> {
@@ -324,7 +329,7 @@ async function ephemeralOrchestratorPrompt(
     ...(parentModel ? { model: parentModel } : {}),
   })
   try {
-    return await session.prompt(fullText)
+    return await session.prompt(fullText, { submissionTool: { name: submissionToolName } })
   } finally {
     await session.destroy()
   }

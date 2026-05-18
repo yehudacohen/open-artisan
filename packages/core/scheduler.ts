@@ -293,6 +293,14 @@ function buildTaskPrompt(task: TaskNode, progress: TaskProgress): string {
     lines.push("Verify your implementation matches the approved interfaces and run the full test suite.")
   }
 
+  if ((task.verificationCommands ?? []).length > 0) {
+    lines.push("")
+    lines.push("**Verification commands to run for this task:**")
+    for (const command of task.verificationCommands ?? []) {
+      lines.push(`  - \`${command}\``)
+    }
+  }
+
   lines.push("")
   lines.push(`**Complexity estimate:** ${task.estimatedComplexity}`)
   lines.push("")

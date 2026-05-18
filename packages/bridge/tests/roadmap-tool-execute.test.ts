@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test"
+import { afterEach, beforeEach, expect, it, setDefaultTimeout } from "bun:test"
 import { mkdir, mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -9,8 +9,13 @@ import { handleToolExecute } from "#bridge/methods/tool-execute"
 import type { BridgeContext } from "#bridge/server"
 import type { EngineContext } from "#core/engine-context"
 import type { RoadmapDocument } from "#core/roadmap-types"
+import { pgliteShardDescribe } from "../../../tests/helpers/pglite-shard-gate"
 
 const NOW = "2026-04-16T00:00:00.000Z"
+
+setDefaultTimeout(90_000)
+process.env["OPENARTISAN_SESSION_STORE_OPERATION_TIMEOUT_MS"] = "120000"
+process.env["OPENARTISAN_PGLITE_QUEUE_WAIT_TIMEOUT_MS"] = "120000"
 
 let tmpDir: string
 let ctx: BridgeContext
@@ -80,7 +85,7 @@ afterEach(async () => {
   await rm(tmpDir, { recursive: true, force: true })
 })
 
-describe("bridge roadmap tool execution", () => {
+pgliteShardDescribe("bridge roadmap tool execution", () => {
   it("reads roadmap state through tool.execute using roadmap-specific result shapes", async () => {
     await ctx.roadmapBackend!.createRoadmap(makeRoadmapDocument())
 

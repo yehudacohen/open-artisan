@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test"
+import { afterEach, expect, it, setDefaultTimeout } from "bun:test"
 import { mkdtemp, readFile, rm, stat } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -12,10 +12,15 @@ import { createFileSystemStateBackend } from "#core/state-backend-fs"
 import { createPGliteRoadmapRepository } from "#core/roadmap-repository-pglite"
 import type { PGliteAccessQueue } from "#core/pglite-access-queue"
 import type { RoadmapDocument, RoadmapPGliteRepositoryOptions, RoadmapRepository } from "#core/roadmap-types"
+import { pgliteShardDescribe } from "../../../tests/helpers/pglite-shard-gate"
 
 const NOW = "2026-04-16T00:00:00.000Z"
 const tempDirs: string[] = []
 const tempRepos: RoadmapRepository[] = []
+
+setDefaultTimeout(90_000)
+process.env["OPENARTISAN_SESSION_STORE_OPERATION_TIMEOUT_MS"] = "120000"
+process.env["OPENARTISAN_PGLITE_QUEUE_WAIT_TIMEOUT_MS"] = "120000"
 
 afterEach(async () => {
   await Promise.all(tempRepos.splice(0).map((repository) => repository.dispose()))
@@ -84,7 +89,7 @@ function makeRepository(stateDir: string): RoadmapRepository {
   return repository
 }
 
-describe("createPGliteRoadmapRepository", () => {
+pgliteShardDescribe("createPGliteRoadmapRepository", () => {
   it("records ordered schema migrations", async () => {
     const stateDir = await makeTempStateDir()
     const repository = makeRepository(stateDir)

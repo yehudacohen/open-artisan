@@ -23,6 +23,7 @@ import { buildRobotArtisanIdleReprompt } from "../autonomous-user-gate"
 export type IdleDecision =
   | { action: "reprompt"; message: string; retryCount: number }
   | { action: "escalate"; message: string }
+  | { action: "disable"; message: string }
   | { action: "ignore" }
 
 /**
@@ -44,6 +45,17 @@ export function handleIdle(state: WorkflowState): IdleDecision {
   // If it's true and the agent is still at USER_GATE, the agent failed to act.
   if (state.retryCount > MAX_IDLE_RETRIES) {
     return { action: "ignore" }
+  }
+
+  const isBuildModeArtisan = state.activeAgent === "build-artisan"
+
+  if (isBuildModeArtisan && shouldEscalateBuildModeStall(state)) {
+    return {
+      action: "disable",
+      message:
+        `Open Artisan disabled itself because build mode stalled during ${state.phase}/${state.phaseState}. ` +
+        `Continue manually or restart Open Artisan when you are ready to resume the workflow.`,
+    }
   }
 
   if (state.phaseState === "USER_GATE") {
@@ -103,6 +115,12 @@ export function handleIdle(state: WorkflowState): IdleDecision {
     retryCount: nextRetry,
     message: buildRepromptMessage(state.phase, state.phaseState, nextRetry),
   }
+}
+
+function shouldEscalateBuildModeStall(state: WorkflowState): boolean {
+  return state.retryCount >= MAX_IDLE_RETRIES || (
+    state.phaseState === "REVIEW" && hasReviewerRuntimeFailure(state)
+  )
 }
 
 function hasReviewerRuntimeFailure(state: WorkflowState): boolean {

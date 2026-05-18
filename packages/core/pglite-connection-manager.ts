@@ -41,6 +41,7 @@ export interface PGliteDatabaseHandleOptions {
 }
 
 const connections = new Map<string, SharedPGliteConnectionEntry>()
+const pgliteClients = new WeakMap<Kysely<unknown>, PGlite>()
 let handleOperationId = 0
 
 async function createKyselyConnection<Database>(databasePath: string): Promise<Kysely<Database>> {
@@ -49,8 +50,17 @@ async function createKyselyConnection<Database>(databasePath: string): Promise<K
   await mkdir(dirname(databasePath), { recursive: true })
   const client = new PGlite(databasePath)
   const db = new Kysely<Database>({ dialect: new PGliteDialect(client) })
+  pgliteClients.set(db as unknown as Kysely<unknown>, client)
   tracePGlite("connection.open.ready", { databasePath, durationMs: Date.now() - startedAt })
   return db
+}
+
+export async function executePGliteRawBatch<Database>(db: Kysely<Database>, statements: string[]): Promise<boolean> {
+  if (statements.length === 0) return true
+  const client = pgliteClients.get(db as unknown as Kysely<unknown>)
+  if (!client) return false
+  await client.exec(statements.join(";\n"))
+  return true
 }
 
 export async function acquireSharedPGliteConnection<Database>(databasePath: string): Promise<SharedPGliteConnection<Database>> {
@@ -108,9 +118,10 @@ export async function acquireSharedPGliteConnection<Database>(databasePath: stri
 }
 
 export function createPGliteDatabaseHandle<Database>(options: PGliteDatabaseHandleOptions): PGliteDatabaseHandle<Database> {
-  const runQueued = options.accessQueue
-    ? <Result>(scope: string, operation: () => Promise<Result>) => options.accessQueue!.run(scope, operation)
-    : runWithPGliteAccessQueue
+  const runQueued = <Result>(scope: string, operation: () => Promise<Result>) =>
+    options.accessQueue
+      ? options.accessQueue.run(scope, () => runWithPGliteAccessQueue(scope, operation))
+      : runWithPGliteAccessQueue(scope, operation)
   let connectionPromise: Promise<SharedPGliteConnection<Database>> | null = null
   let pendingOperations = 0
   let closing = false

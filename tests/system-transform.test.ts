@@ -65,7 +65,7 @@ describe("buildWorkflowSystemPrompt — state header", () => {
   it("omits realWorldAcceptanceScenario when no scenario has been captured", () => {
     const prompt = buildWorkflowSystemPrompt(makeState({ realWorldAcceptanceScenario: null }))
 
-    expect(prompt).not.toContain("Real-World Acceptance Scenario")
+    expect(prompt).not.toContain("A maintainer needs reviewers")
     expect(prompt).not.toContain("Scenario Sufficiency")
   })
 })

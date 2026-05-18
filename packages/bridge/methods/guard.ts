@@ -86,7 +86,8 @@ export const handleGuardCheck: MethodHandler = async (params, ctx) => {
   const taskExpectedFiles = rawTaskFiles && ctx.projectDir
     ? rawTaskFiles.map((f: string) => f.startsWith("/") ? f : resolve(ctx.projectDir!, f))
     : rawTaskFiles
-  const policy = getPhaseToolPolicy(state.phase, state.phaseState, state.mode, state.fileAllowlist, taskExpectedFiles)
+  const baseDir = resolve(ctx.projectDir ?? process.cwd())
+  const policy = getPhaseToolPolicy(state.phase, state.phaseState, state.mode, state.fileAllowlist, taskExpectedFiles, baseDir)
 
   // Check blocked list
   if (policy.blocked.some((blocked) => policyToolName.includes(blocked))) {
@@ -121,7 +122,6 @@ export const handleGuardCheck: MethodHandler = async (params, ctx) => {
           policyVersion: ctx.policyVersion,
         } satisfies GuardCheckResult
       }
-      const baseDir = resolve(ctx.projectDir ?? process.cwd())
       for (const filePath of filePaths) {
         const checkedPath = filePath.startsWith("/") ? filePath : resolve(baseDir, filePath)
         const rel = relative(baseDir, checkedPath)

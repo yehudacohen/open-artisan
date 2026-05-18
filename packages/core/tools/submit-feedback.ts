@@ -18,6 +18,7 @@ import { createImplDAG, type TaskNode } from "../dag"
 import { nextSchedulerDecisionForInput, readDecisionInput, resolveHumanGate, type SchedulerDecision } from "../scheduler"
 import { resolve } from "node:path"
 import { parseImplPlan, validateExecutableImplPlan } from "../impl-plan-parser"
+import { normalizeWorkflowPaths } from "../path-normalization"
 
 export const SUBMIT_FEEDBACK_DESCRIPTION = `
 Call this tool to record the user's response at a review gate.
@@ -95,7 +96,7 @@ export function buildSelfApprovalBlockedMessage(): string {
 }
 
 export function normalizeApprovalFilePaths(paths: string[] | undefined, cwd: string): string[] {
-  return (paths ?? []).map((path) => (path.startsWith("/") ? path : resolve(cwd, path)))
+  return normalizeWorkflowPaths(paths, cwd)
 }
 
 export function findReviewedArtifactFilesOutsideAllowlist(args: {
@@ -111,7 +112,8 @@ export function findReviewedArtifactFilesOutsideAllowlist(args: {
       .filter((path): path is string => typeof path === "string"),
   )
   return args.reviewArtifactFiles
-    .map((path) => (path.startsWith("/") ? path : resolve(args.cwd, path)))
+    .map((path) => normalizeWorkflowPaths([path], args.cwd)[0])
+    .filter((path): path is string => Boolean(path))
     .filter((path) => !artifactPaths.has(path))
     .filter((path) => !normalizedAllowlist.has(path))
 }
@@ -137,12 +139,80 @@ export function validateSubmitFeedbackImplPlanApproval(args: {
   return null
 }
 
-export function materializeImplPlanDag(planContent: string): { nodes: TaskNode[]; currentTaskId: string | null } | null {
+export function materializeImplPlanDag(planContent: string, cwd?: string): { nodes: TaskNode[]; currentTaskId: string | null } | null {
   const parseResult = parseImplPlan(planContent)
   if (!parseResult.success) return null
-  const nodes = Array.from(parseResult.dag.tasks).map((task) => ({ ...task }))
+  const nodes = Array.from(parseResult.dag.tasks).map((task) => ({
+    ...task,
+    expectedFiles: cwd ? normalizeWorkflowPaths(task.expectedFiles, cwd) : task.expectedFiles,
+    expectedTests: cwd ? normalizeWorkflowPaths(task.expectedTests, cwd) : task.expectedTests,
+  }))
   const firstReady = nodes.find((task) => task.status === "pending" && task.dependencies.length === 0)
   return { nodes, currentTaskId: firstReady?.id ?? null }
+}
+
+export type ForwardOnlyImplPlanMaterializationResult =
+  | { success: true; nodes: TaskNode[]; currentTaskId: string | null }
+  | { success: false; error: string }
+
+function sameStringArray(left: string[], right: string[]): boolean {
+  return left.length === right.length && left.every((value, index) => right[index] === value)
+}
+
+function completedTaskRewriteReason(existing: TaskNode, planned: TaskNode): string | null {
+  const checks: Array<[string, boolean]> = [
+    ["description", existing.description === planned.description],
+    ["dependencies", sameStringArray(existing.dependencies, planned.dependencies)],
+    ["expectedTests", sameStringArray(existing.expectedTests, planned.expectedTests)],
+    ["verificationCommands", sameStringArray(existing.verificationCommands ?? [], planned.verificationCommands ?? [])],
+    ["expectedFiles", sameStringArray(existing.expectedFiles, planned.expectedFiles)],
+    ["estimatedComplexity", existing.estimatedComplexity === planned.estimatedComplexity],
+    ["category", (existing.category ?? "standalone") === (planned.category ?? "standalone")],
+  ]
+  const changed = checks.find(([, matches]) => !matches)
+  return changed?.[0] ?? null
+}
+
+export function materializeForwardOnlyImplPlanDag(
+  planContent: string,
+  cwd?: string,
+  existingNodes: TaskNode[] | null = null,
+): ForwardOnlyImplPlanMaterializationResult {
+  const materialized = materializeImplPlanDag(planContent, cwd)
+  if (!materialized) return { success: false, error: "Failed to parse implementation plan into DAG." }
+  const completed = existingNodes?.filter((task) => task.status === "complete") ?? []
+  if (completed.length === 0) return { success: true, ...materialized }
+
+  const plannedById = new Map(materialized.nodes.map((task) => [task.id, task]))
+  for (const task of completed) {
+    const planned = plannedById.get(task.id)
+    if (!planned) continue
+    const changedField = completedTaskRewriteReason(task, planned)
+    if (changedField) {
+      return {
+        success: false,
+        error:
+          `Completed task "${task.id}" is immutable; revised IMPL_PLAN changes its ${changedField}. ` +
+          `Preserve completed tasks exactly and add a new corrective, revert, or superseding task for future work.`,
+      }
+    }
+  }
+
+  const completedIds = new Set(completed.map((task) => task.id))
+  const nodes = [
+    ...completed.map((task) => ({
+      ...task,
+      dependencies: [...task.dependencies],
+      expectedTests: [...task.expectedTests],
+      expectedFiles: [...task.expectedFiles],
+      ...(task.verificationCommands ? { verificationCommands: [...task.verificationCommands] } : {}),
+      ...(task.humanGate ? { humanGate: { ...task.humanGate } } : {}),
+      ...(task.isolation ? { isolation: { ...task.isolation, writablePaths: [...task.isolation.writablePaths] } } : {}),
+    })),
+    ...materialized.nodes.filter((task) => !completedIds.has(task.id)),
+  ]
+  const firstReady = createImplDAG(nodes).getReady()[0] ?? null
+  return { success: true, nodes, currentTaskId: firstReady?.id ?? null }
 }
 
 export function findUnresolvedHumanGates(state: Pick<WorkflowState, "implDag">): TaskNode[] {
@@ -213,6 +283,17 @@ export function resolveSubmitFeedbackHumanGates(
  */
 export function processSubmitFeedback(args: SubmitFeedbackArgs): SubmitFeedbackResult {
   const feedbackText = stripWorkflowRoutingNotes(args.feedback_text)
+  const normalizedFeedback = feedbackText.trim().toLowerCase().replace(/\s+/g, " ")
+  if (
+    args.feedback_type === "approve" &&
+    /\b(?:but|except|unless|however)\b|\bplease\s+(?:fix|add|remove|revise|change|update)\b/.test(normalizedFeedback)
+  ) {
+    return {
+      feedbackType: "revise",
+      feedbackText,
+      responseMessage: "Approval text also contains revision feedback; treating this as a revision request instead of approval.",
+    }
+  }
   // Validate feedback_type — unknown values should not silently fall through to "revise"
   if (args.feedback_type !== "approve" && args.feedback_type !== "revise") {
     return {

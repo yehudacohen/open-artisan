@@ -3,7 +3,7 @@
  */
 import { describe, expect, it } from "bun:test"
 import type { TaskNode } from "#core/dag"
-import { buildSubmitFeedbackClarificationMessage, findReviewedArtifactFilesOutsideAllowlist, findUnresolvedHumanGates, isUserGateMetaFeedback, materializeImplPlanDag, normalizeApprovalFilePaths, processSubmitFeedback, resolveSubmitFeedbackHumanGates, validateSubmitFeedbackGate, validateSubmitFeedbackImplPlanApproval } from "#core/tools/submit-feedback"
+import { buildSubmitFeedbackClarificationMessage, findReviewedArtifactFilesOutsideAllowlist, findUnresolvedHumanGates, isUserGateMetaFeedback, materializeForwardOnlyImplPlanDag, materializeImplPlanDag, normalizeApprovalFilePaths, processSubmitFeedback, resolveSubmitFeedbackHumanGates, validateSubmitFeedbackGate, validateSubmitFeedbackImplPlanApproval } from "#core/tools/submit-feedback"
 
 function task(overrides: Partial<TaskNode>): TaskNode {
   return {
@@ -116,7 +116,7 @@ describe("submit_feedback shared gate guards", () => {
 
 describe("submit_feedback incremental allowlist helpers", () => {
   it("normalizes approval file paths against cwd", () => {
-    expect(normalizeApprovalFilePaths(["src/a.ts", "/tmp/b.ts"], "/repo")).toEqual(["/repo/src/a.ts", "/tmp/b.ts"])
+    expect(normalizeApprovalFilePaths(["src/a.ts", "/repo/b.ts"], "/repo")).toEqual(["/repo/src/a.ts", "/repo/b.ts"])
   })
 
   it("ignores workflow artifact paths when checking reviewed files", () => {
@@ -158,6 +158,81 @@ describe("submit_feedback IMPL_PLAN approval helpers", () => {
     const materialized = materializeImplPlanDag(validImplPlan)
     expect(materialized?.nodes.map((node) => node.id)).toEqual(["T1"])
     expect(materialized?.currentTaskId).toBe("T1")
+  })
+
+  it("materializes DAG task file sets as absolute paths when cwd is provided", () => {
+    const materialized = materializeImplPlanDag(validImplPlan, "/repo")
+    expect(materialized?.nodes[0]?.expectedFiles).toEqual(["/repo/src/a.ts"])
+    expect(materialized?.nodes[0]?.expectedTests).toEqual(["/repo/tests/a.test.ts"])
+  })
+
+  it("forward-only materialization preserves completed tasks and appends future corrective tasks", () => {
+    const revisedPlan = `
+## Task T1: Build foundation
+**Dependencies:** none
+**Expected tests:** tests/a.test.ts
+**Files:** src/a.ts
+**Complexity:** small
+
+Already completed.
+
+## Task T2: Correct foundation behavior
+**Dependencies:** T1
+**Expected tests:** tests/a.test.ts
+**Files:** src/a.ts
+**Complexity:** small
+
+Add a forward corrective task instead of rewriting T1.
+`
+    const completed = task({ id: "T1", status: "complete", description: "Build foundation — Already completed.", expectedFiles: ["/repo/src/a.ts"], expectedTests: ["/repo/tests/a.test.ts"] })
+
+    const materialized = materializeForwardOnlyImplPlanDag(revisedPlan, "/repo", [completed])
+
+    expect(materialized.success).toBe(true)
+    if (!materialized.success) return
+    expect(materialized.nodes.find((node) => node.id === "T1")).toEqual(completed)
+    expect(materialized.nodes.find((node) => node.id === "T2")?.status).toBe("pending")
+    expect(materialized.currentTaskId).toBe("T2")
+  })
+
+  it("forward-only materialization rejects rewrites of completed task metadata", () => {
+    const rewrittenPlan = `
+## Task T1: Rewritten foundation
+**Dependencies:** none
+**Expected tests:** tests/a.test.ts
+**Files:** src/a.ts, src/new.ts
+**Complexity:** small
+
+Attempts to rewrite completed task ownership.
+`
+    const completed = task({ id: "T1", status: "complete", description: "Original completed foundation", expectedFiles: ["/repo/src/a.ts"], expectedTests: ["/repo/tests/a.test.ts"] })
+
+    const materialized = materializeForwardOnlyImplPlanDag(rewrittenPlan, "/repo", [completed])
+
+    expect(materialized.success).toBe(false)
+    if (materialized.success) return
+    expect(materialized.error).toContain("Completed task \"T1\" is immutable")
+    expect(materialized.error).toContain("add a new corrective")
+  })
+
+  it("forward-only materialization rejects description-only rewrites of completed tasks", () => {
+    const rewrittenPlan = `
+## Task T1: Renamed completed foundation
+**Dependencies:** none
+**Expected tests:** tests/a.test.ts
+**Files:** src/a.ts
+**Complexity:** small
+
+Attempts to rewrite completed task description only.
+`
+    const completed = task({ id: "T1", status: "complete", description: "Original completed foundation", expectedFiles: ["/repo/src/a.ts"], expectedTests: ["/repo/tests/a.test.ts"] })
+
+    const materialized = materializeForwardOnlyImplPlanDag(rewrittenPlan, "/repo", [completed])
+
+    expect(materialized.success).toBe(false)
+    if (materialized.success) return
+    expect(materialized.error).toContain("Completed task \"T1\" is immutable")
+    expect(materialized.error).toContain("description")
   })
 })
 

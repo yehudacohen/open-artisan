@@ -87,6 +87,17 @@ describe("nextSchedulerDecision — dispatch", () => {
     expect(decision.prompt).toContain("tests/auth.test.ts")
   })
 
+  it("prompt includes verification commands separately from expected test paths", () => {
+    const dag = createImplDAG([
+      makeTask({ id: "T1", verificationCommands: ["bun run typecheck", "bun run check:release"] }),
+    ])
+    const decision = nextSchedulerDecision(dag)
+    if (decision.action !== "dispatch") throw new Error("Expected dispatch")
+    expect(decision.prompt).toContain("Verification commands to run")
+    expect(decision.prompt).toContain("bun run typecheck")
+    expect(decision.prompt).toContain("bun run check:release")
+  })
+
   it("progress.total matches total task count", () => {
     const dag = createImplDAG([
       makeTask({ id: "T1" }),

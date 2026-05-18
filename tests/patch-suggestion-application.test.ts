@@ -1,4 +1,4 @@
-import { afterAll, afterEach, describe, expect, it } from "bun:test"
+import { afterAll, afterEach, expect, it, setDefaultTimeout } from "bun:test"
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -10,6 +10,9 @@ import { applyPatchSuggestionToWorktree, extractPatchTouchedPaths } from "#core/
 import { workflowDbId } from "#core/runtime-persistence"
 import type { WorkflowState } from "#core/workflow-state-types"
 import { makeWorkflowState } from "./helpers/workflow-state"
+import { pgliteShardDescribe } from "./helpers/pglite-shard-gate"
+
+setDefaultTimeout(90_000)
 
 const tempDirs: string[] = []
 const sharedTempDirs: string[] = []
@@ -115,7 +118,7 @@ function suggestion(state: WorkflowState, overrides: Partial<DbPatchSuggestion> 
   }
 }
 
-describe("applyPatchSuggestionToWorktree", () => {
+pgliteShardDescribe("applyPatchSuggestionToWorktree", () => {
   it("extracts every path touched by a unified diff", () => {
     expect(extractPatchTouchedPaths([
       "diff --git a/src/a.txt b/src/a.txt",

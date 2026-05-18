@@ -22,10 +22,9 @@
  *   - Does NOT have a rebuttal loop
  *   - Returns a simple pass/fail with issues list
  *
- * If the reviewer fails to dispatch (network error, timeout), the task review
- * falls back to passing (graceful degradation) — the full implementation review
- * at the end will catch issues. This ensures the task review is additive safety,
- * not a blocking dependency on subagent availability.
+ * If the reviewer fails to dispatch (network error, timeout), callers treat it
+ * as reviewer infrastructure failure rather than an implementation verdict. The
+ * task must not be marked complete solely because review tooling failed.
  */
 
 import type { TaskNode, TaskCategory, TaskStatus } from "./dag"
@@ -36,7 +35,7 @@ import { nextSchedulerDecisionForInput, readDecisionInput, type SchedulerDecisio
 import { withTimeout, extractJsonFromText } from "./utils"
 import { TASK_REVIEW_TIMEOUT_MS } from "./constants"
 import { buildTaskReviewRubric, getTaskReviewCheckCountLabel } from "./rubrics"
-import { TaskReviewOutputSchema, formatZodError } from "./schemas"
+import { TaskReviewOutputSchema, formatZodError, toJsonSchema } from "./schemas"
 import { buildScenarioSufficiencyPromptBlock } from "./scenario-sufficiency"
 import type { ScenarioSufficiencyContext } from "./workflow-state-types"
 
@@ -141,6 +140,12 @@ export interface TaskReviewError {
 }
 
 export type TaskReviewResult = TaskReviewSuccess | TaskReviewError
+export type TaskReviewOutcomeClassification =
+  | "passed"
+  | "implementation-failed"
+  | "reviewer-failed"
+  | "scope-expansion-needed"
+  | "boundary-repair-needed"
 
 export interface TaskReviewAcceptancePlan {
   completedTaskFiles: string[]
@@ -202,6 +207,15 @@ export function buildTaskReviewPrompt(req: TaskReviewRequest): string {
     lines.push("The following tests should pass after this task is complete:")
     for (const t of req.task.expectedTests) {
       lines.push(`  - \`${t}\``)
+    }
+    lines.push("")
+  }
+
+  if ((req.task.verificationCommands ?? []).length > 0) {
+    lines.push("## Verification Commands")
+    lines.push("The implementation summary should report these commands passing, or explain any command that could not be run:")
+    for (const command of req.task.verificationCommands ?? []) {
+      lines.push(`  - \`${command}\``)
     }
     lines.push("")
   }
@@ -285,7 +299,10 @@ export function buildTaskReviewPrompt(req: TaskReviewRequest): string {
   lines.push("")
   lines.push("## Response Format")
   lines.push("")
-  lines.push("Return ONLY a JSON object with no preamble:")
+  lines.push("Preferred submission path: if the `submit_task_review_result` tool is available, call it exactly once with the review fields instead of replying with text. The tool validates the structured payload.")
+  lines.push("If that tool is unavailable, return ONLY the JSON object below with no preamble.")
+  lines.push("")
+  lines.push("JSON fallback shape:")
   lines.push("```json")
   lines.push(JSON.stringify({
     passed: false,
@@ -312,6 +329,19 @@ export function buildTaskReviewPrompt(req: TaskReviewRequest): string {
 // ---------------------------------------------------------------------------
 
 const MIN_QUALITY_SCORE = 8
+
+export function classifyTaskReviewResult(result: TaskReviewResult | null): TaskReviewOutcomeClassification {
+  if (!result || !result.success) return "reviewer-failed"
+  if (result.passed) return "passed"
+  const text = `${result.reasoning}\n${result.issues.join("\n")}`.toLowerCase()
+  if (/scope expansion|out of scope|beyond (the )?(approved )?(task|plan)|planning decision|requires planning/.test(text)) {
+    return "scope-expansion-needed"
+  }
+  if (/task boundary|current task files|expectedfiles|expected files|allowlist|not allowlisted|outside.*allowlist|file.*boundary/.test(text)) {
+    return "boundary-repair-needed"
+  }
+  return "implementation-failed"
+}
 
 export function parseTaskReviewResult(raw: string): TaskReviewResult {
   try {
@@ -371,6 +401,36 @@ export function parseTaskReviewResult(raw: string): TaskReviewResult {
   }
 }
 
+function summarizeReviewerText(text: string): string {
+  const normalized = text.replace(/\s+/g, " ").trim()
+  return normalized.length > 1000 ? `${normalized.slice(0, 1000)}...[truncated ${normalized.length}]` : normalized
+}
+
+function buildTaskReviewJsonRepairPrompt(rawText: string): string {
+  return [
+    "CRITICAL OUTPUT CONTRACT: if the `submit_task_review_result` tool is available, call it exactly once with the corrected review fields and do not reply with text.",
+    "If that tool is unavailable, return ONLY one valid JSON object. Do not include markdown, headings, bullets, code fences, preamble, or analysis outside JSON string fields.",
+    "",
+    "Your previous task review response was not valid task-review JSON. Do not evaluate that previous response as the implementation artifact.",
+    "Evaluate the task implementation only, then submit the corrected structured review verdict.",
+    "Return ONLY a valid JSON object matching this exact schema. Do not include markdown, bullets, code fences, or commentary.",
+    "",
+    "Required schema:",
+    JSON.stringify({
+      passed: false,
+      issues: ["Specific issue with file:line evidence"],
+      scores: { code_quality: 8, error_handling: 8 },
+      patch_suggestions: [],
+      reasoning: "Short explanation of the verdict",
+    }, null, 2),
+    "",
+    "Previous invalid response:",
+    "```",
+    summarizeReviewerText(rawText),
+    "```",
+  ].join("\n")
+}
+
 // ---------------------------------------------------------------------------
 // Ephemeral session helper
 // ---------------------------------------------------------------------------
@@ -389,7 +449,13 @@ async function ephemeralTaskReviewPrompt(
     ...(parentModel ? { model: parentModel } : {}),
   })
   try {
-    return await session.prompt(prompt)
+    return await session.prompt(prompt, {
+      submissionTool: { name: "submit_task_review_result" },
+      responseFormat: {
+        type: "json_schema",
+        schema: toJsonSchema(TaskReviewOutputSchema),
+      },
+    })
   } finally {
     await session.destroy()
   }
@@ -405,8 +471,8 @@ async function ephemeralTaskReviewPrompt(
  * Returns TaskReviewSuccess with pass/fail and issues, or TaskReviewError
  * if the session lifecycle fails.
  *
- * On failure, the caller should fall back to passing (graceful degradation) —
- * the full implementation review at the end will catch issues.
+ * On failure, callers should keep the task open and surface the infrastructure
+ * failure. A missing reviewer verdict is not a task pass.
  */
 export async function dispatchTaskReview(
   dispatcher: SubagentDispatcher,
@@ -421,7 +487,20 @@ export async function dispatchTaskReview(
       TASK_REVIEW_TIMEOUT_MS,
       "task-review",
     )
-    return parseTaskReviewResult(text)
+    const parsed = parseTaskReviewResult(text)
+    if (parsed.success) return parsed
+
+    const repairedText = await withTimeout(
+      ephemeralTaskReviewPrompt(dispatcher, buildTaskReviewJsonRepairPrompt(text), req.parentSessionId, req.parentModel, `${title} JSON repair`),
+      TASK_REVIEW_TIMEOUT_MS,
+      "task-review-json-repair",
+    )
+    const repaired = parseTaskReviewResult(repairedText)
+    if (repaired.success) return repaired
+    return {
+      success: false,
+      error: `${parsed.error}. JSON repair failed: ${repaired.error}`,
+    }
   } catch (err) {
     const errorMsg = err instanceof Error ? err.message : String(err)
     return {

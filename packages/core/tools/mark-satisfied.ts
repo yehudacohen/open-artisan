@@ -31,6 +31,32 @@ export interface MarkSatisfiedResult {
   responseMessage: string
 }
 
+function isQualityCriterion(criterion: string): boolean {
+  return /^\s*\[Q\]/i.test(criterion)
+}
+
+function isDesignInvariantCriterion(criterion: string): boolean {
+  return /^\s*\[D\]/i.test(criterion)
+}
+
+export function normalizeCriterionSeverity(input: {
+  criterion: string
+  severity?: string | null | undefined
+}): CriterionResult["severity"] {
+  if (isDesignInvariantCriterion(input.criterion)) return "design-invariant"
+  if (isQualityCriterion(input.criterion)) return "blocking"
+  if (input.severity === "suggestion") return "suggestion"
+  if (input.severity === "design-invariant") return "design-invariant"
+  return "blocking"
+}
+
+export function countSubmittedBlockingCriteria(criteria: ReadonlyArray<{ criterion: string; severity?: string | null | undefined }>): number {
+  return criteria.filter((criterion) => {
+    const severity = normalizeCriterionSeverity(criterion)
+    return severity === "blocking" || severity === "design-invariant"
+  }).length
+}
+
 /**
  * Counts the expected blocking criteria from the acceptance criteria text.
  * Looks for numbered lines within the "Blocking criteria" section.
@@ -67,10 +93,7 @@ export function evaluateMarkSatisfied(args: MarkSatisfiedArgs, expectedBlockingC
   // Cross-validate: if the expected blocking count is known, reject submissions
   // that evaluate fewer blocking criteria than expected (prevents gaming).
   if (expectedBlockingCount && expectedBlockingCount > 0) {
-    const submittedBlockingCount = args.criteria_met.filter((c) => {
-      const sev = c.severity ?? "blocking"
-      return sev === "blocking" || sev === "design-invariant"
-    }).length
+    const submittedBlockingCount = countSubmittedBlockingCriteria(args.criteria_met)
     if (submittedBlockingCount < expectedBlockingCount) {
       return {
         passed: false,
@@ -84,22 +107,19 @@ export function evaluateMarkSatisfied(args: MarkSatisfiedArgs, expectedBlockingC
   }
 
   const allCriteria = args.criteria_met.map<CriterionResult>((c) => {
-    const isQualityCriterion = c.criterion.startsWith("[Q]")
-    const isDesignInvariant = c.criterion.startsWith("[D]")
+    const qualityCriterion = isQualityCriterion(c.criterion)
     // For [Q] quality criteria with a score, `met` is derived from the score threshold.
     // Score >= 9 → met; score < 9 → not met. This prevents the agent from claiming
     // "met" while giving a low score.
-    const met = (isQualityCriterion && typeof c.score === "number")
+    const met = (qualityCriterion && typeof c.score === "number")
       ? c.score >= 9
       : c.met
-    // [D] criteria are design-invariant (blocking + non-rebuttable)
-    const severity: CriterionResult["severity"] = isDesignInvariant
-      ? "design-invariant"
-      : (c.severity ?? "blocking")
+    const severity = normalizeCriterionSeverity(c)
     return {
+      ...((c.criterionId ?? c.criterion_id) ? { criterionId: (c.criterionId ?? c.criterion_id)! } : {}),
       criterion: c.criterion,
       met,
-      evidence: isQualityCriterion && typeof c.score === "number"
+      evidence: qualityCriterion && typeof c.score === "number"
         ? `${c.evidence} (score: ${c.score}/10)`
         : c.evidence,
       severity,

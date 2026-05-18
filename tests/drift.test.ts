@@ -62,7 +62,7 @@ describe("drift impact interfaces", () => {
     expect(impact.artifactReviseTargets).toEqual([{ artifactKey: "interfaces", phase: "INTERFACES", phaseState: "REVISE" }])
   })
 
-  it("walks implementation DAG dependents and marks completed tasks for reset", () => {
+  it("walks implementation DAG dependents without marking completed tasks for reset", () => {
     const impact = computeTaskDriftImpact(stateWithDag([
       { id: "T1", description: "One", dependencies: [], expectedTests: [], expectedFiles: [], estimatedComplexity: "small", status: "complete" },
       { id: "T2", description: "Two", dependencies: ["T1"], expectedTests: [], expectedFiles: [], estimatedComplexity: "small", status: "complete" },
@@ -71,7 +71,7 @@ describe("drift impact interfaces", () => {
 
     expect(impact.taskIds).toEqual(["T1"])
     expect(impact.downstreamTaskIds).toEqual(["T2", "T3"])
-    expect(impact.resetTaskIds).toEqual(["T1", "T2"])
+    expect(impact.resetTaskIds).toEqual([])
     expect(impact.completedTaskIds).toEqual(["T1", "T2"])
     expect(impact.missingTaskIds).toEqual([])
   })
@@ -110,7 +110,28 @@ describe("drift impact interfaces", () => {
     expect(impact.downstreamTaskIds).toEqual(["T2", "T3"])
     expect(impact.inFlightTaskIds).toEqual(["T2"])
     expect(impact.completedTaskIds).toEqual(["T3"])
-    expect(impact.resetTaskIds).toEqual(["T2", "T3"])
+    expect(impact.resetTaskIds).toEqual(["T2"])
+  })
+
+  it("routes completed task drift to a user decision instead of safe reset", () => {
+    const report = buildWorkflowDriftReport({
+      workflowId: "wf-completed-drift",
+      state: {
+        mode: "GREENFIELD",
+        phase: "IMPLEMENTATION",
+        currentTaskId: null,
+        artifactDiskPaths: {},
+        fileAllowlist: [],
+        implDag: [
+          { id: "T1", description: "Done", dependencies: [], expectedTests: [], expectedFiles: [], estimatedComplexity: "small", status: "complete" },
+        ],
+      },
+      taskIds: ["T1"],
+    })
+
+    expect(report.findings[0]?.proposedActions[0]?.kind).toBe("request_user_decision")
+    expect(report.findings[0]?.proposedActions[0]?.safety).toBe("requires-approval")
+    expect(report.findings[0]?.proposedActions[0]?.reason).toContain("forward corrective")
   })
 
   it("maps reset repair actions back to the existing reset_task tool", () => {
@@ -129,6 +150,19 @@ describe("drift impact interfaces", () => {
       requiredPhase: "IMPLEMENTATION",
       requiredPhaseStates: ["DRAFT", "REVISE", "SCHEDULING"],
     })
+  })
+
+  it("does not emit reset_task calls for reset actions without unfinished reset candidates", () => {
+    const action: DriftRepairAction = {
+      id: "A-complete-only",
+      kind: "reset_tasks",
+      safety: "safe-auto",
+      reason: "Completed task drift should be repaired by future work, not reset_task.",
+      impact: { ...EMPTY_DRIFT_IMPACT, taskIds: ["T1"], completedTaskIds: ["T1"] },
+      evidence: [{ taskId: "T1", message: "Completed task drift." }],
+    }
+
+    expect(buildRepairToolCall(action)).toBeNull()
   })
 
   it("does not emit invalid request_review calls for unresolved artifact revalidation", () => {
@@ -402,8 +436,58 @@ describe("drift impact interfaces", () => {
 
     expect(report.findings.map((finding) => finding.kind)).toEqual(["artifact_vs_code", "dag_vs_code", "allowlist_vs_changes"])
     expect(report.impact.revalidateArtifactKeys).toEqual(["interfaces", "tests", "impl_plan", "implementation"])
-    expect(report.impact.resetTaskIds).toEqual(["T1"])
+    expect(report.impact.resetTaskIds).toEqual([])
     expect(report.impact.allowlistViolations).toEqual(["src/out-of-scope.ts"])
+  })
+
+  it("normalizes relative, absolute, and backslash paths against cwd for allowlist drift", () => {
+    const report = buildWorkflowDriftReport({
+      workflowId: "workflow:drift-paths",
+      createdAt: "2026-05-01T00:00:00.000Z",
+      cwd: "/repo",
+      state: {
+        mode: "INCREMENTAL",
+        phase: "IMPLEMENTATION",
+        currentTaskId: null,
+        artifactDiskPaths: {},
+        fileAllowlist: ["src/allowed.ts", "tests\\allowed.test.ts"],
+        implDag: null,
+      },
+      changedFiles: ["/repo/src/allowed.ts", "tests/allowed.test.ts", "src\\out-of-scope.ts"],
+    })
+
+    expect(report.findings.map((finding) => finding.kind)).toEqual(["allowlist_vs_changes"])
+    expect(report.impact.allowlistViolations).toEqual(["/repo/src/out-of-scope.ts"])
+  })
+
+  it("routes current-task artifact drift to impl-plan boundary repair instead of broad backtrack", () => {
+    const report = buildWorkflowDriftReport({
+      workflowId: "workflow:task-boundary",
+      createdAt: "2026-05-01T00:00:00.000Z",
+      scope: "current-task",
+      state: {
+        mode: "INCREMENTAL",
+        phase: "IMPLEMENTATION",
+        currentTaskId: "T8",
+        artifactDiskPaths: { impl_plan: "/repo/.openartisan/feat/impl-plan.md" },
+        fileAllowlist: ["/repo/src/runtime.ts"],
+        implDag: [
+          { id: "T8", description: "Mirror generated examples", dependencies: [], expectedTests: [], expectedFiles: ["/repo/src/runtime.ts"], estimatedComplexity: "medium", status: "in-flight" },
+        ],
+      },
+      artifactKeys: ["impl_plan", "implementation"],
+      taskIds: ["T8"],
+    })
+
+    expect(report.findings[0]?.severity).toBe("warning")
+    expect(report.findings[0]?.proposedActions[0]?.kind).toBe("repair_current_task_boundary_from_impl_plan")
+    expect(report.findings[0]?.proposedActions[0]?.safety).toBe("safe-auto")
+    expect(buildRepairToolCall(report.findings[0]!.proposedActions[0]!)).toEqual({
+      toolName: "repair_current_task_boundary_from_impl_plan",
+      args: { task_id: "T8", reason: "Repair current-task boundary from approved IMPL_PLAN after tactical drift report." },
+      requiredPhase: "IMPLEMENTATION",
+      requiredPhaseStates: ["DRAFT", "REVISE", "TASK_REVISE", "SCHEDULING"],
+    })
   })
 
   it("exposes drift tool interface schemas", () => {

@@ -78,6 +78,13 @@ export interface TaskNode {
   expectedTests: string[]
 
   /**
+   * Runnable verification commands (for example typechecks, smoke tests, or
+   * release checks) that should be run after the task. These are commands, not
+   * file paths, so they are not part of INCREMENTAL allowlist validation.
+   */
+  verificationCommands?: string[]
+
+  /**
    * File paths (relative to project root) that this task is expected to
    * create or modify. Specified in the IMPL_PLAN by the agent, parsed by
    * the impl-plan-parser. Accumulated by mark_task_complete into
@@ -196,6 +203,7 @@ export function createImplDAG(tasks: TaskNode[]): ImplDAG {
     ...t,
     dependencies: [...t.dependencies],
     expectedTests: [...t.expectedTests],
+    verificationCommands: [...(t.verificationCommands ?? [])],
     expectedFiles: [...(t.expectedFiles ?? [])],
     ...(t.isolation
       ? {

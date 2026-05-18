@@ -11,8 +11,19 @@
  */
 
 import type { SubagentDispatcher, SubagentSession, SubagentCreateOptions, SubagentPromptOptions } from "../../../packages/core/subagent-dispatcher"
+import { encodeSubagentToolSubmission } from "../../../packages/core/subagent-dispatcher"
 import { extractEphemeralSessionId, extractTextFromPromptResult } from "../../../packages/core/utils"
 import type { OpencodeClient } from "@opencode-ai/sdk"
+
+export interface ReviewerToolSubmissionStore {
+  begin(sessionId: string, toolName: string): void
+  take(sessionId: string, toolName: string): string | null
+  clear(sessionId: string): void
+}
+
+export interface OpenCodeSubagentDispatcherOptions {
+  reviewerToolSubmissions?: ReviewerToolSubmissionStore
+}
 
 const WORKFLOW_TOOL_DENYLIST: Record<string, false> = {
   check_prior_workflow: false,
@@ -24,6 +35,10 @@ const WORKFLOW_TOOL_DENYLIST: Record<string, false> = {
   resolve_human_gate: false,
   request_review: false,
   submit_feedback: false,
+  request_allowlist_expansion: false,
+  approve_current_task_scope_expansion: false,
+  repair_current_task_boundary_from_impl_plan: false,
+  summarize_workflow_incident: false,
   propose_change: false,
   disable_open_artisan: false,
   propose_backtrack: false,
@@ -44,15 +59,105 @@ function summarizeResponse(response: unknown): string {
   }
 }
 
-function extractMessageId(response: unknown): string | null {
-  if (!response || typeof response !== "object") return null
+function summarizeMessages(value: unknown): string {
+  const messages = normalizeMessages(value).map((message) => ({
+    id: message.id,
+    parentId: message.parentId,
+    role: message.role,
+    hasText: !!message.text,
+  }))
+  return summarizeResponse({ messages })
+}
+
+function findStructuredSubmission(value: unknown, toolName: string | undefined, depth = 0): string | null {
+  if (!value || depth > 6) return null
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = findStructuredSubmission(item, toolName, depth + 1)
+      if (found) return found
+    }
+    return null
+  }
+  if (typeof value !== "object") return null
+  const record = value as Record<string, unknown>
+  if (toolName === "submit_task_review_result" && typeof record["passed"] === "boolean") {
+    return JSON.stringify(record)
+  }
+  if (toolName === "submit_phase_review_result" && typeof record["satisfied"] === "boolean" && Array.isArray(record["criteria_results"])) {
+    return JSON.stringify(record)
+  }
+  if (toolName === "submit_change_proposal_review_result" && typeof record["approved"] === "boolean" && typeof record["route"] === "string") {
+    return JSON.stringify(record)
+  }
+  if (toolName === "submit_task_drift_review_result" && typeof record["drift_detected"] === "boolean") {
+    return JSON.stringify(record)
+  }
+  if (toolName === "submit_orchestrator_assess_result" && Array.isArray(record["affected_artifacts"]) && typeof record["root_cause_artifact"] === "string") {
+    return JSON.stringify(record)
+  }
+  if (toolName === "submit_orchestrator_diverge_result" && typeof record["classification"] === "string") {
+    return JSON.stringify(record)
+  }
+  if (toolName === "submit_auto_approve_result" && typeof record["approve"] === "boolean" && (typeof record["confidence"] === "number" || typeof record["confidence"] === "string")) {
+    return JSON.stringify(record)
+  }
+  if (toolName === "submit_rebuttal_review_result" && Array.isArray(record["criteria_results"])) {
+    return JSON.stringify(record)
+  }
+  if (toolName === "submit_intent_comparison_result" && typeof record["classification"] === "string") {
+    return JSON.stringify(record)
+  }
+  for (const key of ["structured", "payload", "arguments", "args", "input", "output", "result", "data", "info", "message", "body", "tool", "toolCall"]) {
+    const found = findStructuredSubmission(record[key], toolName, depth + 1)
+    if (found) return found
+  }
+  return null
+}
+
+function buildMissingSubmissionToolError(title: string, toolName: string, result: unknown): Error {
+  return new Error(
+    `${title}: isolated subagent must call ${toolName}; received no captured tool submission. ` +
+    `Text/prose fallback is disabled when the local submission tool is available. result=${summarizeResponse(result)}`,
+  )
+}
+
+function requiresLocalSubmissionTool(toolName: string | undefined): boolean {
+  return toolName === "submit_phase_review_result" ||
+    toolName === "submit_task_review_result" ||
+    toolName === "submit_rebuttal_review_result"
+}
+
+function formatSubmissionPayload(toolName: string | undefined, payload: string, required: boolean): string {
+  return toolName && required ? encodeSubagentToolSubmission(toolName, payload) : payload
+}
+
+type PromptMessageIds = {
+  assistantId: string | null
+  parentId: string | null
+}
+
+function readString(record: Record<string, unknown>, keys: string[]): string | null {
+  for (const key of keys) {
+    const value = record[key]
+    if (typeof value === "string" && value.length > 0) return value
+  }
+  return null
+}
+
+function extractPromptMessageIds(response: unknown): PromptMessageIds {
+  if (!response || typeof response !== "object") return { assistantId: null, parentId: null }
   const data = ((response as Record<string, unknown>)["data"] ?? response) as Record<string, unknown>
   const info = data["info"] as Record<string, unknown> | undefined
-  return typeof info?.["id"] === "string" ? info["id"] : null
+  const source = info ?? data
+  return {
+    assistantId: readString(source, ["id", "messageID", "messageId", "message_id"]),
+    parentId: readString(source, ["parentID", "parentId", "parent_id"]),
+  }
 }
 
 type NormalizedMessage = {
   id: string | null
+  parentId: string | null
   role: string | null
   text: string | null
 }
@@ -79,56 +184,75 @@ function normalizeMessage(value: unknown): NormalizedMessage | null {
   if (!unwrapped || typeof unwrapped !== "object" || Array.isArray(unwrapped)) return null
   const record = unwrapped as Record<string, unknown>
   const info = (record.info && typeof record.info === "object" ? record.info : record) as Record<string, unknown>
-  const id = typeof info.id === "string" ? info.id : null
+  const id = readString(info, ["id", "messageID", "messageId", "message_id"])
+  const parentId = readString(info, ["parentID", "parentId", "parent_id"])
   const role = typeof info.role === "string" ? info.role : null
   const text = extractTextFromParts(record.parts)
-  if (!id && !role && !text) return null
-  return { id, role, text }
+  if (!id && !parentId && !role && !text) return null
+  return { id, parentId, role, text }
 }
 
 function normalizeMessages(value: unknown): NormalizedMessage[] {
   const unwrapped = unwrapData(value)
   if (Array.isArray(unwrapped)) return unwrapped.flatMap((item) => normalizeMessages(item))
-  const message = normalizeMessage(unwrapped)
-  return message ? [message] : []
+  if (!unwrapped || typeof unwrapped !== "object") return []
+  const record = unwrapped as Record<string, unknown>
+  const messages: NormalizedMessage[] = []
+  const message = normalizeMessage(record)
+  if (message) messages.push(message)
+  for (const key of ["messages", "items", "results", "records", "list", "children", "message", "body", "result", "output"]) {
+    messages.push(...normalizeMessages(record[key]))
+  }
+  return messages
 }
 
-function selectAssistantText(value: unknown, messageId: string): string | null {
+function selectAssistantText(value: unknown, messageId?: string | null, parentId?: string | null): string | null {
   const messages = normalizeMessages(value)
-  const target = messages.find((message) => message.id === messageId && message.text)
-  if (target?.text) return target.text
+  if (messageId) {
+    const target = messages.find((message) => message.id === messageId && message.role === "assistant" && message.text)
+    if (target?.text) return target.text
+  }
+  if (parentId) {
+    const parentIndex = messages.findIndex((message) => message.id === parentId)
+    if (parentIndex !== -1) {
+      const nextAssistant = messages.slice(parentIndex + 1).find((message) => message.role === "assistant" && message.text)
+      if (nextAssistant?.text) return nextAssistant.text
+    }
+    const childAssistant = messages.slice().reverse().find((message) => message.parentId === parentId && message.role === "assistant" && message.text)
+    if (childAssistant?.text) return childAssistant.text
+  }
   const latestAssistant = messages.slice().reverse().find((message) => message.role === "assistant" && message.text)
   return latestAssistant?.text ?? null
 }
 
 function selectDirectMessageText(value: unknown, messageId: string): string | null {
   const messages = normalizeMessages(value)
-  const target = messages.find((message) => message.id === messageId && message.text)
+  const target = messages.find((message) => message.id === messageId && message.role === "assistant" && message.text)
   if (target?.text) return target.text
   if (messages.length === 1 && messages[0]?.text) return messages[0].text
   return selectAssistantText(value, messageId)
 }
 
-async function fetchPromptMessageText(client: OpencodeClient, sessionId: string, messageId: string): Promise<string | null> {
-  if (typeof client.session?.message === "function") {
-    const result = await client.session.message({ path: { id: sessionId, messageID: messageId } })
-    const text = selectDirectMessageText(result, messageId)
-    if (text) return text
+async function fetchPromptMessageText(client: OpencodeClient, sessionId: string, ids: PromptMessageIds): Promise<{ text: string | null; diagnostic: string | null }> {
+  if (ids.assistantId && typeof client.session?.message === "function") {
+    const result = await client.session.message({ path: { id: sessionId, messageID: ids.assistantId } })
+    const text = selectDirectMessageText(result, ids.assistantId)
+    if (text) return { text, diagnostic: null }
   }
 
   if (typeof client.session?.messages === "function") {
     const history = await client.session.messages({ path: { id: sessionId }, query: { limit: 20 } })
-    return selectAssistantText(history, messageId)
+    return { text: selectAssistantText(history, ids.assistantId, ids.parentId), diagnostic: summarizeMessages(history) }
   }
 
-  return null
+  return { text: null, diagnostic: "client.session.messages unavailable" }
 }
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
-export function createOpenCodeSubagentDispatcher(client: OpencodeClient): SubagentDispatcher {
+export function createOpenCodeSubagentDispatcher(client: OpencodeClient, options: OpenCodeSubagentDispatcherOptions = {}): SubagentDispatcher {
   return {
     async createSession(opts: SubagentCreateOptions): Promise<SubagentSession> {
       if (!client.session) {
@@ -181,31 +305,63 @@ export function createOpenCodeSubagentDispatcher(client: OpencodeClient): Subage
         id: sessionId,
 
         async prompt(text: string, promptOptions?: SubagentPromptOptions): Promise<string> {
+          const submissionToolName = promptOptions?.submissionTool?.name
+          const requireSubmissionTool = promptOptions?.submissionTool?.required === true ||
+            (!!options.reviewerToolSubmissions && requiresLocalSubmissionTool(submissionToolName))
+          if (submissionToolName) options.reviewerToolSubmissions?.begin(sessionId, submissionToolName)
           // Generate a unique part ID with "prt" prefix — required by the OpenCode API
           const partId = `prt_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
-          const result = await client.session!.prompt({
-            path: { id: sessionId },
-            body: {
-              noReply: false,
-              ...(opts.agent ? { agent: opts.agent } : {}),
-              ...(modelConfig ? { model: modelConfig } : {}),
-              ...(promptOptions?.responseFormat ? { format: promptOptions.responseFormat } : {}),
-              tools: WORKFLOW_TOOL_DENYLIST,
-              parts: [{ type: "text", text, id: partId }],
-            },
-          })
+          let result: unknown = null
           try {
+            try {
+              result = await client.session!.prompt({
+                path: { id: sessionId },
+                body: {
+                  noReply: false,
+                  ...(opts.agent ? { agent: opts.agent } : {}),
+                  ...(modelConfig ? { model: modelConfig } : {}),
+                  ...(promptOptions?.responseFormat ? { format: promptOptions.responseFormat } : {}),
+                  tools: WORKFLOW_TOOL_DENYLIST,
+                  parts: [{ type: "text", text, id: partId }],
+                },
+              })
+            } catch (promptError) {
+              const submitted = submissionToolName ? options.reviewerToolSubmissions?.take(sessionId, submissionToolName) : null
+              if (submitted) return formatSubmissionPayload(submissionToolName, submitted, requireSubmissionTool)
+              throw promptError
+            }
+            const submitted = submissionToolName ? options.reviewerToolSubmissions?.take(sessionId, submissionToolName) : null
+            if (submitted) return formatSubmissionPayload(submissionToolName, submitted, requireSubmissionTool)
+            const structured = findStructuredSubmission(result, submissionToolName)
+            if (structured) return formatSubmissionPayload(submissionToolName, structured, requireSubmissionTool)
+            if (requireSubmissionTool) throw buildMissingSubmissionToolError(opts.title, submissionToolName!, result)
             return extractTextFromPromptResult(result, opts.title)
           } catch (initialError) {
-            const messageId = extractMessageId(result)
-            if (!messageId) throw initialError
+            const submitted = submissionToolName ? options.reviewerToolSubmissions?.take(sessionId, submissionToolName) : null
+            if (submitted) return formatSubmissionPayload(submissionToolName, submitted, requireSubmissionTool)
+            const structured = findStructuredSubmission(result, submissionToolName)
+            if (structured) return formatSubmissionPayload(submissionToolName, structured, requireSubmissionTool)
+            if (result === null) throw initialError
+            if (requireSubmissionTool && result !== null) throw buildMissingSubmissionToolError(opts.title, submissionToolName!, result)
+            const messageIds = extractPromptMessageIds(result)
+            if (!messageIds.assistantId && !messageIds.parentId && typeof client.session?.messages !== "function") throw initialError
             let lastResult: unknown = result
+            let lastDiagnostic: string | null = null
             for (let attempt = 0; attempt < 60; attempt++) {
               await sleep(500)
-              const text = await fetchPromptMessageText(client, sessionId, messageId)
-              if (text) return text
+              const fetched = await fetchPromptMessageText(client, sessionId, messageIds)
+              lastDiagnostic = fetched.diagnostic
+              if (fetched.text) return fetched.text
+            }
+            if (lastDiagnostic) {
+              throw new Error(
+                `Cannot extract text from ${opts.title} result after polling session history; ` +
+                `ids=${summarizeResponse(messageIds)} history=${lastDiagnostic} original=${summarizeResponse(result)}`,
+              )
             }
             return extractTextFromPromptResult(lastResult, opts.title)
+          } finally {
+            if (submissionToolName) options.reviewerToolSubmissions?.clear(sessionId)
           }
         },
 

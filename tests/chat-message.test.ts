@@ -3,7 +3,7 @@
  * Covers G6: processUserMessage and the new buildUserGateHint export.
  */
 import { describe, expect, it } from "bun:test"
-import { processUserMessage, buildUserGateHint } from "#core/hooks/chat-message"
+import { processUserMessage, buildUserGateHint, stripInjectedWorkflowGateText } from "#core/hooks/chat-message"
 import type { WorkflowState } from "#core/workflow-state-types"
 import { makeWorkflowState } from "./helpers/workflow-state"
 
@@ -144,6 +144,10 @@ describe("processUserMessage — at USER_GATE, review clarification", () => {
     "Do you think this design is right?",
     "Can you update me on progress?",
     "What changed since the last review?",
+    "Did you address everything we spoke about in the review?",
+    "Have you handled all my feedback?",
+    "ok, can you propose the patch for approval?",
+    "can you show the allowlist expansion I need to approve?",
   ]
 
   for (const msg of clarificationMessages) {
@@ -281,5 +285,13 @@ describe("buildUserGateHint", () => {
     expect(hint).toContain("what am I reviewing")
     expect(hint).toContain("Do not call `submit_feedback` for clarification")
     expect(hint).not.toContain("If the user requests changes or asks questions")
+  })
+})
+
+describe("stripInjectedWorkflowGateText", () => {
+  it("removes stale workflow gate routing notes from ordinary user text", () => {
+    const text = "can you review the current state?[WORKFLOW GATE — IMMEDIATE ACTION REQUIRED] The user has provided feedback on the DISCOVERY artifact. Call `submit_feedback` NOW."
+
+    expect(stripInjectedWorkflowGateText(text)).toBe("can you review the current state?")
   })
 })

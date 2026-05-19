@@ -37,7 +37,8 @@ import { TASK_REVIEW_TIMEOUT_MS } from "./constants"
 import { buildTaskReviewRubric, getTaskReviewCheckCountLabel } from "./rubrics"
 import { TaskReviewOutputSchema, formatZodError, toJsonSchema } from "./schemas"
 import { buildScenarioSufficiencyPromptBlock } from "./scenario-sufficiency"
-import type { ScenarioSufficiencyContext } from "./workflow-state-types"
+import type { ReviewAttempt, ScenarioSufficiencyContext } from "./workflow-state-types"
+import { summarizePriorReviewAttempts } from "./tools/review-attempts"
 
 // ---------------------------------------------------------------------------
 // Types
@@ -108,6 +109,10 @@ export interface TaskReviewRequest {
   worktreeObservations?: DbWorktreeObservation[]
   /** Captured PLANNING scenario used as a sufficiency lens for task review. */
   realWorldAcceptanceScenario?: ScenarioSufficiencyContext | null
+  /** Prior persisted reviewer attempts for this task, used to focus retries. */
+  priorReviewAttempts?: ReviewAttempt[]
+  /** Current persisted attempt ID for incremental rubric-item progress. */
+  reviewAttemptId?: string
 }
 
 export interface TaskReviewScores {
@@ -220,6 +225,12 @@ export function buildTaskReviewPrompt(req: TaskReviewRequest): string {
     lines.push("")
   }
 
+  const priorAttempts = summarizePriorReviewAttempts(req.priorReviewAttempts ?? [], req.task.id)
+  if (priorAttempts) {
+    lines.push(priorAttempts)
+    lines.push("")
+  }
+
   // Reference approved artifacts so the reviewer can check alignment
   if (req.artifactDiskPaths) {
     const relevantPaths = Object.entries(req.artifactDiskPaths).filter(([, v]) => v)
@@ -299,7 +310,7 @@ export function buildTaskReviewPrompt(req: TaskReviewRequest): string {
   lines.push("")
   lines.push("## Response Format")
   lines.push("")
-  lines.push("Preferred submission path: if the `submit_task_review_result` tool is available, call it exactly once with the review fields instead of replying with text. The tool validates the structured payload.")
+  lines.push("Preferred submission path: if `submit_review_rubric_item` is available, call it after each criterion you evaluate so progress survives reviewer timeouts. Then call `submit_task_review_result` exactly once with the final review fields instead of replying with text. The final tool validates the structured payload.")
   lines.push("If that tool is unavailable, return ONLY the JSON object below with no preamble.")
   lines.push("")
   lines.push("JSON fallback shape:")
@@ -438,6 +449,8 @@ function buildTaskReviewJsonRepairPrompt(rawText: string): string {
 async function ephemeralTaskReviewPrompt(
   dispatcher: SubagentDispatcher,
   prompt: string,
+  taskId: string,
+  attemptId: string | undefined,
   parentSessionId?: string,
   parentModel?: string | { modelID: string; providerID?: string },
   title = "task-review",
@@ -450,7 +463,10 @@ async function ephemeralTaskReviewPrompt(
   })
   try {
     return await session.prompt(prompt, {
-      submissionTool: { name: "submit_task_review_result" },
+      submissionTool: {
+        name: "submit_task_review_result",
+        progress: { kind: "task", subject: taskId, ...(attemptId ? { attemptId } : {}) },
+      },
       responseFormat: {
         type: "json_schema",
         schema: toJsonSchema(TaskReviewOutputSchema),
@@ -483,7 +499,7 @@ export async function dispatchTaskReview(
     const featureSlug = req.featureName ? ` (${req.featureName})` : ""
     const title = `Task Review: ${req.task.id}${featureSlug}`
     const text = await withTimeout(
-      ephemeralTaskReviewPrompt(dispatcher, prompt, req.parentSessionId, req.parentModel, title),
+      ephemeralTaskReviewPrompt(dispatcher, prompt, req.task.id, req.reviewAttemptId, req.parentSessionId, req.parentModel, title),
       TASK_REVIEW_TIMEOUT_MS,
       "task-review",
     )
@@ -491,7 +507,7 @@ export async function dispatchTaskReview(
     if (parsed.success) return parsed
 
     const repairedText = await withTimeout(
-      ephemeralTaskReviewPrompt(dispatcher, buildTaskReviewJsonRepairPrompt(text), req.parentSessionId, req.parentModel, `${title} JSON repair`),
+      ephemeralTaskReviewPrompt(dispatcher, buildTaskReviewJsonRepairPrompt(text), req.task.id, req.reviewAttemptId, req.parentSessionId, req.parentModel, `${title} JSON repair`),
       TASK_REVIEW_TIMEOUT_MS,
       "task-review-json-repair",
     )

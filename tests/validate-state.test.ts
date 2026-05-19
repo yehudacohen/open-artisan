@@ -51,6 +51,8 @@ function makeValidState(overrides: Partial<WorkflowState> = {}): WorkflowState {
     childWorkflows: [],
     concurrency: { maxParallelTasks: 1 },
     reviewArtifactFiles: [],
+    reviewArtifactSubmissions: [],
+    reviewAttempts: [],
     realWorldAcceptanceScenario: null,
     ...overrides,
   }

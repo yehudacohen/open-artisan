@@ -504,6 +504,46 @@ describe("OpenCode integration — task boundary revision workflow", () => {
     expect(state.phaseState).toBe("DRAFT")
   })
 
+  it("applies pending INTERFACES allowlist expansion during approval", async () => {
+    const sid = `int-test-${Date.now()}-interfaces-allowlist-expansion-apply`
+    await plugin.event({ event: { type: "session.created", properties: { info: { id: sid } } } })
+    const ctx = { directory: tempDir, sessionId: sid }
+    await plugin.tool.select_mode.execute({ mode: "INCREMENTAL", feature_name: `interfaces-allowlist-expansion-apply-${Date.now()}` }, ctx)
+    const allowed = `${tempDir}/packages/core/src/auth-interfaces.ts`
+    const runtime = `${tempDir}/packages/runtime/src/internal/contracts-implementation.ts`
+    const createApp = `${tempDir}/packages/create-app/src/auth-tenancy-billing-interfaces.ts`
+    await Bun.write(allowed, "export interface CoreAuth {}\n")
+    await Bun.write(runtime, "export interface RuntimeAuth {}\n")
+    await Bun.write(createApp, "export interface CreateAppAuth {}\n")
+    await plugin._testStore.update(sid, (d: any) => {
+      d.phase = "INTERFACES"
+      d.phaseState = "USER_GATE"
+      d.userGateMessageReceived = true
+      d.fileAllowlist = [allowed]
+      d.reviewArtifactFiles = [allowed, runtime, createApp]
+      d.pendingAllowlistExpansions = [{
+        files: [runtime, createApp],
+        reason: "Reviewed interface files are required by the approved incremental plan.",
+        sourceArtifact: "interfaces",
+        requestedAtPhase: "INTERFACES",
+        requestedAt: 1,
+      }]
+    })
+
+    const result = await plugin.tool.submit_feedback.execute({
+      feedback_type: "approve",
+      feedback_text: "approve[WORKFLOW GATE — IMMEDIATE ACTION REQUIRED] The user has approved the INTERFACES artifact. Call `submit_feedback` NOW with feedback_type=\"approve\" and feedback_text set to the user's message. This must be your first and only tool call. Do NOT do anything else first.",
+    }, ctx)
+
+    expect(result).not.toContain("approval failed allowlist validation")
+    expect(result).toContain("Approval recorded")
+    const state = plugin._testStore.get(sid)
+    expect(state.fileAllowlist).toContain(runtime)
+    expect(state.fileAllowlist).toContain(createApp)
+    expect(state.pendingAllowlistExpansions).toEqual([])
+    expect(state.approvedArtifactFiles.interfaces).toEqual(expect.arrayContaining([allowed, runtime, createApp]))
+  })
+
   it("rejects boundary changes that would reset completed task ownership", async () => {
     const sid = `int-test-${Date.now()}-boundary-apply`
     await plugin.event({ event: { type: "session.created", properties: { info: { id: sid } } } })
@@ -629,7 +669,7 @@ describe("Plugin shape — returned object has all required keys", () => {
 
   it("exposes file-based request_review args without legacy artifact_content", () => {
     const args = plugin.tool.request_review.args
-    expect(Object.keys(args).sort()).toEqual(["artifact_description", "artifact_files", "summary"])
+    expect(Object.keys(args).sort()).toEqual(["artifact_data_json", "artifact_description", "artifact_files", "summary"])
     expect(args.artifact_content).toBeUndefined()
     expect(args.artifact_markdown).toBeUndefined()
   })
@@ -2006,6 +2046,39 @@ describe("experimental.chat.system.transform — injects workflow prompt", () =>
     expect(plugin._testStore.get(sid).activeAgent).toBe("build")
   })
 
+  it("disable_open_artisan strips stale workflow gate text from later build messages", async () => {
+    const sid = `int-test-${Date.now()}-artisan-off-stale-gate`
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: sid, agent: "build" } } },
+    })
+    await plugin["chat.message"](
+      { sessionID: sid, agent: "build" },
+      {
+        message: { sessionID: sid, id: "msg-build-stale-gate-opt-in" },
+        parts: [{ type: "text", text: "Use Open Artisan for this task." }],
+      },
+    )
+    await plugin._testStore.update(sid, (draft: any) => {
+      draft.phase = "DISCOVERY"
+      draft.phaseState = "USER_GATE"
+      draft.activeAgent = "build-artisan"
+    })
+    await plugin.tool.disable_open_artisan.execute({}, { directory: tempDir, sessionId: sid, agent: "build" })
+
+    const output = {
+      message: { sessionID: sid, id: "msg-build-stale-gate" },
+      parts: [{
+        type: "text",
+        text: "can you review the current state?[WORKFLOW GATE — IMMEDIATE ACTION REQUIRED] The user has provided feedback on the DISCOVERY artifact. Call `submit_feedback` NOW.",
+      }],
+    }
+    await plugin["chat.message"]({ sessionID: sid, agent: "build" }, output)
+
+    expect(output.parts).toHaveLength(1)
+    expect(output.parts[0]?.text).toBe("can you review the current state?")
+    expect(plugin._testStore.get(sid).userGateMessageReceived).toBe(false)
+  })
+
   it("disables compaction auto-continue at workflow user gates", async () => {
     const sid = `int-test-${Date.now()}-gate-autocontinue`
     await plugin.event({
@@ -2126,6 +2199,59 @@ describe("experimental.chat.system.transform — injects workflow prompt", () =>
 })
 
 describe("robot-artisan autonomy", () => {
+  it("applies pending INTERFACES allowlist expansion during inline auto-approval", async () => {
+    let promptCallCount = 0
+    ;(client.session.prompt as ReturnType<typeof mock>).mockImplementation(async () => {
+      promptCallCount += 1
+      if (promptCallCount === 1) {
+        return {
+          data: { info: { satisfied: true, criteria_results: planningPassCriteria() }, parts: [{ type: "text", text: JSON.stringify({
+            satisfied: true,
+            criteria_results: planningPassCriteria(),
+          }) }] },
+        }
+      }
+      return {
+        data: {
+          parts: [{ type: "text", text: JSON.stringify({ approve: true, confidence: 0.95, reasoning: "Interface artifact and allowlist expansion are ready." }) }],
+        },
+      }
+    })
+
+    const sid = `int-test-${Date.now()}-robot-interfaces-allowlist-expansion`
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: sid, agent: "robot-artisan" } } },
+    })
+    const ctx = { directory: tempDir, sessionId: sid, agent: "robot-artisan" }
+    await plugin.tool.select_mode.execute({ mode: "INCREMENTAL", feature_name: "robot-interfaces-allowlist-expansion" }, ctx)
+    const allowed = `${tempDir}/packages/core/src/auth-interfaces.ts`
+    const runtime = `${tempDir}/packages/runtime/src/internal/contracts-implementation.ts`
+    await Bun.write(allowed, "export interface CoreAuth {}\n")
+    await Bun.write(runtime, "export interface RuntimeAuth {}\n")
+    await plugin._testStore.update(sid, (draft: any) => {
+      draft.phase = "INTERFACES"
+      draft.phaseState = "REVIEW"
+      draft.mode = "INCREMENTAL"
+      draft.activeAgent = "robot-artisan"
+      draft.fileAllowlist = [allowed]
+      draft.reviewArtifactFiles = [allowed, runtime]
+      draft.pendingAllowlistExpansions = [{
+        files: [runtime],
+        reason: "Reviewed interface file is required by the approved incremental plan.",
+        sourceArtifact: "interfaces",
+        requestedAtPhase: "INTERFACES",
+        requestedAt: 1,
+      }]
+    })
+
+    const result = await plugin.tool.mark_satisfied.execute({ criteria_met: planningPassCriteria() }, ctx)
+
+    expect(result).toContain("Auto-approved")
+    const state = plugin._testStore.get(sid)
+    expect(state.fileAllowlist).toContain(runtime)
+    expect(state.pendingAllowlistExpansions).toEqual([])
+  })
+
   it("moves directly to REVISE when the auto-approver rejects", async () => {
     let promptCallCount = 0
     ;(client.session.prompt as ReturnType<typeof mock>).mockImplementation(async () => {

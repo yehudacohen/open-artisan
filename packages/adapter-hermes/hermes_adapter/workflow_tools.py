@@ -523,7 +523,7 @@ def _handle_workflow_tool(
                 bridge,
                 session_id,
             )
-        if bridge_tool_name in {"mark_satisfied", "submit_task_review", "submit_phase_review", "submit_auto_approve"}:
+        if bridge_tool_name in {"mark_satisfied", "submit_task_review", "submit_phase_review", "submit_review_rubric_item", "submit_auto_approve"}:
             return make_error_response(
                 f"oa_{bridge_tool_name} is reserved for isolated reviewers. "
                 "Wait for the adapter hook to submit the review result."

@@ -238,8 +238,12 @@ describe("createOpenCodeSubagentDispatcher", () => {
   it("returns captured reviewer tool submissions before parsing prompt text", async () => {
     const calls: string[] = []
     const submissions = {
-      begin(sessionId: string, toolName: string) {
-        calls.push(`begin:${sessionId}:${toolName}`)
+      begin(sessionId: string, toolName: string, context?: { parentSessionId?: string; kind?: string; subject?: string; attemptId?: string }) {
+        calls.push(`begin:${sessionId}:${toolName}:${context?.parentSessionId}:${context?.kind}:${context?.subject}:${context?.attemptId}`)
+      },
+      recordRubricItem(sessionId: string, item: unknown) {
+        calls.push(`progress:${sessionId}:${JSON.stringify(item)}`)
+        return { success: true as const }
       },
       take(sessionId: string, toolName: string) {
         calls.push(`take:${sessionId}:${toolName}`)
@@ -259,7 +263,44 @@ describe("createOpenCodeSubagentDispatcher", () => {
     if (!decoded.success) return
     expect(JSON.parse(decoded.payload).reasoning).toBe("submitted by tool")
     expect(calls).toEqual([
-      "begin:sess-1:submit_task_review_result",
+      "begin:sess-1:submit_task_review_result:undefined:undefined:undefined:undefined",
+      "take:sess-1:submit_task_review_result",
+      "clear:sess-1",
+    ])
+  })
+
+  it("allows reviewer progress submissions without satisfying the final submission", async () => {
+    const calls: string[] = []
+    const submissions = {
+      begin(sessionId: string, toolName: string, context?: { parentSessionId?: string; kind?: string; subject?: string; attemptId?: string }) {
+        calls.push(`begin:${sessionId}:${toolName}:${context?.parentSessionId}:${context?.kind}:${context?.subject}:${context?.attemptId}`)
+      },
+      recordRubricItem(sessionId: string, item: unknown) {
+        calls.push(`progress:${sessionId}:${JSON.stringify(item)}`)
+        return { success: true as const }
+      },
+      take(sessionId: string, toolName: string) {
+        calls.push(`take:${sessionId}:${toolName}`)
+        return null
+      },
+      clear(sessionId: string) {
+        calls.push(`clear:${sessionId}`)
+      },
+    }
+    const client = makeClient({ promptResponse: { data: { parts: [{ type: "text", text: "progress only" }] } } })
+    const dispatcher = createOpenCodeSubagentDispatcher(client as any, { reviewerToolSubmissions: submissions })
+    const session = await dispatcher.createSession({ title: "test", agent: "workflow-reviewer", parentId: "parent-1" })
+
+    await expect(session.prompt("hello", {
+      submissionTool: {
+        name: "submit_task_review_result",
+        progress: { kind: "task", subject: "T2", attemptId: "attempt-1" },
+      },
+    })).rejects.toThrow("must call submit_task_review_result")
+
+    expect(calls).toEqual([
+      "begin:sess-1:submit_task_review_result:parent-1:task:T2:attempt-1",
+      "take:sess-1:submit_task_review_result",
       "take:sess-1:submit_task_review_result",
       "clear:sess-1",
     ])
@@ -270,6 +311,10 @@ describe("createOpenCodeSubagentDispatcher", () => {
     const submissions = {
       begin(sessionId: string, toolName: string) {
         calls.push(`begin:${sessionId}:${toolName}`)
+      },
+      recordRubricItem(sessionId: string, item: unknown) {
+        calls.push(`progress:${sessionId}:${JSON.stringify(item)}`)
+        return { success: true as const }
       },
       take(sessionId: string, toolName: string) {
         calls.push(`take:${sessionId}:${toolName}`)

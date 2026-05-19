@@ -53,14 +53,16 @@ import { WORKFLOW_TOOL_NAMES } from "../../../packages/core/workflow-tool-names"
 // Tool handlers
 import { parseSelectModeArgs, buildSelectModeResponse } from "../../../packages/core/tools/select-mode"
 import { evaluateMarkSatisfied, countExpectedBlockingCriteria, countSubmittedBlockingCriteria } from "../../../packages/core/tools/mark-satisfied"
-import { capturePlanningScenarioForRequestReview, processRequestReview } from "../../../packages/core/tools/request-review"
+import { capturePlanningScenarioForRequestReview, parseRequestReviewArtifactData, processRequestReview } from "../../../packages/core/tools/request-review"
+import { buildReviewArtifactSubmission, recordReviewArtifactSubmission } from "../../../packages/core/tools/review-artifact-submissions"
+import { buildTaskReviewRubricItems, completeReviewAttempt, createReviewAttempt, recordReviewRubricItemProgress, rubricItemsFromPhaseCriteria, rubricItemsFromTaskReviewResult, upsertReviewAttempt } from "../../../packages/core/tools/review-attempts"
 import { buildSelfApprovalBlockedMessage, buildSubmitFeedbackClarificationMessage, findReviewedArtifactFilesOutsideAllowlist, findUnresolvedHumanGates, materializeForwardOnlyImplPlanDag, normalizeApprovalFilePaths, processSubmitFeedback, resolveSubmitFeedbackHumanGates, stripWorkflowRoutingNotes, validateSubmitFeedbackGate, validateSubmitFeedbackImplPlanApproval } from "../../../packages/core/tools/submit-feedback"
 import { processMarkTaskComplete, validateMarkTaskCompletePhase } from "../../../packages/core/tools/mark-task-complete"
 import { processSpawnSubWorkflow, SPAWN_SUB_WORKFLOW_DESCRIPTION } from "../../../packages/core/tools/spawn-sub-workflow"
 import { applyChildCompletion, findTimedOutChildren, applyDelegationTimeout, syncChildWorkflowsWithDag } from "../../../packages/core/tools/complete-sub-workflow"
 import { computeMarkAnalyzeCompleteTransition, computeMarkSatisfiedTransitionFromResult, computeMarkScanCompleteTransition, computeRequestReviewTransition, computeSubmitFeedbackApproveTransition } from "../../../packages/core/tools/transitions"
 import { handleProposeBacktrack } from "../../../packages/core/tools/propose-backtrack"
-import { applyPendingAllowlistExpansions, recordAllowlistExpansionRequest } from "../../../packages/core/tools/allowlist-expansion"
+import { applyPendingAllowlistExpansions, buildAllowlistWithPendingExpansions, recordAllowlistExpansionRequest } from "../../../packages/core/tools/allowlist-expansion"
 import { approveCurrentTaskScopeExpansion } from "../../../packages/core/tools/current-task-scope"
 import { repairCurrentTaskBoundaryFromImplPlan } from "../../../packages/core/tools/impl-plan-boundary-repair"
 import { buildIncidentSummary, recordToolFailure } from "../../../packages/core/tool-failure-history"
@@ -385,6 +387,7 @@ export const PASSTHROUGH_TOOL_NAMES = new Set([
   "google_search",   // Web search (read-only)
   "skill",           // Skill loading (read-only)
   "question",        // User interaction (read-only)
+  "submit_review_rubric_item", // Reviewer-only incremental rubric progress capture
   "submit_task_review_result",  // Reviewer-only structured submission capture
   "submit_phase_review_result", // Reviewer-only structured submission capture
   "submit_change_proposal_review_result", // Reviewer-only structured submission capture
@@ -482,10 +485,24 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
     const state = store.get(id)
     return state?.sessionModel ?? undefined
   }
-  const pendingReviewerToolSubmissions = new Map<string, { toolName: string; payload: string | null }>()
+  const pendingReviewerToolSubmissions = new Map<string, {
+    toolName: string
+    payload: string | null
+    parentSessionId?: string
+    kind?: "task" | "phase"
+    subject?: string
+    attemptId?: string
+  }>()
   const reviewerToolSubmissions = {
-    begin(sessionId: string, toolName: string): void {
-      pendingReviewerToolSubmissions.set(sessionId, { toolName, payload: null })
+    begin(sessionId: string, toolName: string, context?: { parentSessionId?: string; kind?: "task" | "phase"; subject?: string; attemptId?: string }): void {
+      pendingReviewerToolSubmissions.set(sessionId, {
+        toolName,
+        payload: null,
+        ...(context?.parentSessionId ? { parentSessionId: context.parentSessionId } : {}),
+        ...(context?.kind ? { kind: context.kind } : {}),
+        ...(context?.subject ? { subject: context.subject } : {}),
+        ...(context?.attemptId ? { attemptId: context.attemptId } : {}),
+      })
     },
     take(sessionId: string, toolName: string): string | null {
       const pending = pendingReviewerToolSubmissions.get(sessionId)
@@ -500,6 +517,26 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
       if (!pending) return { success: false, error: `${toolName} can only be called by an active isolated reviewer session.` }
       if (pending.toolName !== toolName) return { success: false, error: `Expected reviewer submission tool ${pending.toolName}, got ${toolName}.` }
       pending.payload = payload
+      return { success: true }
+    },
+    async recordRubricItem(sessionId: string, item: { criterion: string; status: "pending" | "passed" | "failed" | "unknown"; evidence?: string; score?: number }): Promise<{ success: true } | { success: false; error: string }> {
+      const pending = pendingReviewerToolSubmissions.get(sessionId)
+      if (!pending) return { success: false, error: "submit_review_rubric_item can only be called by an active isolated reviewer session." }
+      if (!pending.parentSessionId || !pending.kind || !pending.subject) {
+        return { success: false, error: "Active reviewer session is missing rubric progress context." }
+      }
+      const baseRubric = pending.kind === "task"
+        ? buildTaskReviewRubricItems(false)
+        : [{ criterion: item.criterion, status: "pending" as const }]
+      await store.update(pending.parentSessionId, (draft) => {
+        recordReviewRubricItemProgress(draft, {
+          kind: pending.kind!,
+          subject: pending.subject!,
+          ...(pending.attemptId ? { attemptId: pending.attemptId } : {}),
+          rubricItems: baseRubric,
+          rubricItem: item,
+        })
+      })
       return { success: true }
     },
   }
@@ -1422,6 +1459,10 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
               ? `Conventions document is at \`${conventionsPath}\`. Read it before evaluating.`
               : (state.conventions ?? undefined)
 
+            const phaseReviewAttempt = createReviewAttempt({ kind: "phase", subject: state.phase, rubricItems: [], artifactHash: state.reviewArtifactHash })
+            await store.update(sessionId, (draft) => {
+              upsertReviewAttempt(draft, phaseReviewAttempt)
+            })
             let reviewResult: Awaited<ReturnType<typeof dispatchSelfReview>> | null = null
             try {
               reviewResult = await dispatchSelfReview(subagentDispatcher, {
@@ -1440,6 +1481,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                 ...(Object.keys(state.approvedArtifactFiles ?? {}).length > 0 ? { approvedArtifactFiles: state.approvedArtifactFiles ?? {} } : {}),
                 realWorldAcceptanceScenario: state.realWorldAcceptanceScenario,
                 requireToolSubmission: true,
+                reviewAttemptId: phaseReviewAttempt.id,
               })
             } catch (reviewErr) {
               // dispatchSelfReview should never throw (returns SelfReviewError),
@@ -1676,6 +1718,13 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             if (t.clearRevisionBaseline) {
               draft.revisionBaseline = null
             }
+            const attempt = draft.reviewAttempts.find((candidate) => candidate.kind === "phase" && candidate.subject === state.phase && candidate.status === "started") ??
+              createReviewAttempt({ kind: "phase", subject: state.phase, rubricItems: rubricItemsFromPhaseCriteria(transitionCriteria) })
+            upsertReviewAttempt(draft, completeReviewAttempt({
+              attempt,
+              status: t.event === "self_review_pass" ? "passed" : "failed",
+              rubricItems: rubricItemsFromPhaseCriteria(transitionCriteria),
+            }))
           })
 
           // Robot-artisan auto-approval: when the active agent is "robot-artisan"
@@ -1767,6 +1816,9 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                     logTransition({ phase: state.phase, phaseState: outcome.nextPhaseState }, approveOutcome, "auto-approve/inline", notify)
 
                     const autoEffectiveAllowlist = (() => {
+                      if (state.pendingAllowlistExpansions.length > 0 && (state.phase === "INTERFACES" || state.phase === "TESTS")) {
+                        return buildAllowlistWithPendingExpansions(state, context.directory || process.cwd())
+                      }
                       if (state.phase === "PLANNING" && state.mode === "INCREMENTAL" && state.artifactDiskPaths.plan) {
                         try {
                           const extracted = extractApprovedFileAllowlist(readFileSync(state.artifactDiskPaths.plan, "utf-8"), context.directory || process.cwd())
@@ -1779,6 +1831,25 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                       }
                       return state.fileAllowlist
                     })()
+
+                    if (state.mode === "INCREMENTAL" && (state.phase === "INTERFACES" || state.phase === "TESTS")) {
+                      const reviewedOutsideAllowlist = findReviewedArtifactFilesOutsideAllowlist({
+                        reviewArtifactFiles: state.reviewArtifactFiles,
+                        artifactDiskPaths: state.artifactDiskPaths,
+                        allowlist: autoEffectiveAllowlist,
+                        cwd: context.directory || process.cwd(),
+                      })
+                      if (reviewedOutsideAllowlist.length > 0) {
+                        const feedback = `${state.phase} auto-approval failed allowlist validation: reviewed artifact files fall outside the approved INCREMENTAL allowlist: ${reviewedOutsideAllowlist.join(", ")}. Request or approve an allowlist expansion before approval.`
+                        await store.update(sessionId, (draft) => {
+                          draft.phaseState = "REVISE"
+                          draft.latestReviewResults = [{ criterion: `${state.phase} reviewed artifact allowlist`, met: false, evidence: feedback }]
+                          draft.pendingFeedback = feedback
+                          draft.iterationCount = state.iterationCount + 1
+                        })
+                        return `Auto-approve rejected: ${feedback}\n\nTransitioned to **${state.phase}/REVISE**.`
+                      }
+                    }
 
                     if (state.phase === "PLANNING" && state.mode === "INCREMENTAL" && autoEffectiveAllowlist.length === 0) {
                       log.warn("Robot-artisan: inline approval blocked because INCREMENTAL planning allowlist is missing")
@@ -1836,6 +1907,9 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                       }
                       if (state.phase === "PLANNING" && state.mode === "INCREMENTAL") {
                         draft.fileAllowlist = autoEffectiveAllowlist
+                      } else if (state.mode === "INCREMENTAL" && state.pendingAllowlistExpansions.length > 0 && (state.phase === "INTERFACES" || state.phase === "TESTS")) {
+                        draft.fileAllowlist = autoEffectiveAllowlist
+                        draft.pendingAllowlistExpansions = []
                       }
                       // Reset artifact file tracking for the new phase
                       draft.reviewArtifactFiles = []
@@ -2046,6 +2120,16 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
               await persistWorktreeObservations(runtimeBackend.services, worktreeObservations)
 
               let taskReviewResult: Awaited<ReturnType<typeof dispatchTaskReview>> | null = null
+              const taskReviewRubricItems = buildTaskReviewRubricItems(adjacentTasks.length > 0)
+              const taskReviewAttempt = createReviewAttempt({
+                kind: "task",
+                subject: taskNode.id,
+                rubricItems: taskReviewRubricItems,
+                artifactHash: state.reviewArtifactHash,
+              })
+              await store.update(sessionId, (draft) => {
+                upsertReviewAttempt(draft, taskReviewAttempt)
+              })
               try {
                 taskReviewResult = await dispatchTaskReview(subagentDispatcher, {
                   task: taskNode,
@@ -2060,6 +2144,8 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                   ...(adjacentTasks.length > 0 ? { adjacentTasks } : {}),
                   ...(worktreeObservations.length > 0 ? { worktreeObservations } : {}),
                   realWorldAcceptanceScenario: state.realWorldAcceptanceScenario,
+                  priorReviewAttempts: state.reviewAttempts,
+                  reviewAttemptId: taskReviewAttempt.id,
                   stateDir,
                 })
               } catch (reviewErr) {
@@ -2079,6 +2165,12 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                 const nextAttempt = state.taskReviewCount + 1
                 await store.update(sessionId, (draft) => {
                   draft.taskReviewCount = nextAttempt
+                  const persistedAttempt = draft.reviewAttempts.find((attempt) => attempt.id === taskReviewAttempt.id) ?? taskReviewAttempt
+                  upsertReviewAttempt(draft, completeReviewAttempt({
+                    attempt: persistedAttempt,
+                    status: "failed",
+                    rubricItems: rubricItemsFromTaskReviewResult(taskReviewResult, taskReviewRubricItems),
+                  }))
                 })
                 const scoreNote = taskReviewResult.scores
                   ? `\n\n**Task quality threshold:** task reviews require code_quality and error_handling scores >= 8. Received code_quality=${taskReviewResult.scores.code_quality}/10, error_handling=${taskReviewResult.scores.error_handling}/10.`
@@ -2120,6 +2212,13 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                     met: false,
                     evidence: reviewerError.length > 500 ? `${reviewerError.slice(0, 500)}...[truncated]` : reviewerError,
                   }]
+                  const persistedAttempt = draft.reviewAttempts.find((attempt) => attempt.id === taskReviewAttempt.id) ?? taskReviewAttempt
+                  upsertReviewAttempt(draft, completeReviewAttempt({
+                    attempt: persistedAttempt,
+                    status: /timed? out|timeout/i.test(reviewerError) ? "timed-out" : "error",
+                    rubricItems: rubricItemsFromTaskReviewResult(taskReviewResult ?? { success: false, error: reviewerError }, taskReviewRubricItems),
+                    error: reviewerError,
+                  }))
                 })
                 const duplicateNote = duplicateCount > 1
                   ? `\n**Known tooling defect:** this is the same reviewer/tool failure seen ${duplicateCount} times. It is safe to retry after fixing/restarting the reviewer path; do not rewrite implementation code for this duplicate failure.\n`
@@ -2135,6 +2234,14 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                 )
               }
               await persistTaskReviewResult(runtimeBackend.services, state, args.task_id, taskReviewResult)
+              await store.update(sessionId, (draft) => {
+                  const persistedAttempt = draft.reviewAttempts.find((attempt) => attempt.id === taskReviewAttempt.id) ?? taskReviewAttempt
+                  upsertReviewAttempt(draft, completeReviewAttempt({
+                    attempt: persistedAttempt,
+                  status: "passed",
+                  rubricItems: rubricItemsFromTaskReviewResult(taskReviewResult, taskReviewRubricItems),
+                }))
+              })
             }
 
             // Per-task drift check (14.2): after review passes, check if the
@@ -2522,9 +2629,16 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
               "Relative paths are resolved from the project directory before being stored. " +
               "Markdown phases must use .openartisan/<feature>/{conventions.md,plan.md,impl-plan.md}; source phases must use real project files.",
             ),
+          artifact_data_json: tool.schema
+            .string()
+            .optional()
+            .describe(
+              "Optional JSON object string containing structured artifact metadata for runtime/database consumers. " +
+              "Use this for machine-consumed contracts instead of encoding them only in Markdown prose.",
+            ),
         },
         async execute(
-          args: { summary: string; artifact_description: string; artifact_files: string[] } & Record<string, unknown>,
+          args: { summary: string; artifact_description: string; artifact_files: string[]; artifact_data_json?: string } & Record<string, unknown>,
           context: ToolExecuteContext,
         ) {
           const { store, sm, log, notify } = ctx
@@ -2543,6 +2657,8 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
           if (Object.prototype.hasOwnProperty.call(args, "artifact_markdown")) {
             return "Error: request_review no longer accepts artifact_markdown. Write the markdown artifact to its canonical .openartisan/<feature>/ file and pass artifact_files."
           }
+          const artifactData = parseRequestReviewArtifactData(args)
+          if (!artifactData.success) return `Error: ${artifactData.error}`
 
           const validStates = ["DRAFT", "REDRAFT", "CONVENTIONS", "REVISE", "REVIEW"]
           if (!validStates.includes(state.phaseState)) {
@@ -2599,6 +2715,14 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                 draft.realWorldAcceptanceScenario = scenarioCapture.scenario
               }
               draft.reviewArtifactFiles = artifactFiles
+              recordReviewArtifactSubmission(draft, buildReviewArtifactSubmission({
+                phase: state.phase,
+                ...(artifactKey ? { artifactKey } : {}),
+                summary: args.summary,
+                artifactDescription: args.artifact_description,
+                artifactFiles,
+                artifactData: artifactData.artifactData,
+              }))
             })
             // Refetch state after update
             const updatedState = store.get(sessionId) || state
@@ -2739,6 +2863,14 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
               draft.realWorldAcceptanceScenario = scenarioCapture.scenario
             }
             draft.reviewArtifactFiles = artifactFiles
+            recordReviewArtifactSubmission(draft, buildReviewArtifactSubmission({
+              phase: state.phase,
+              ...(artifactKey ? { artifactKey } : {}),
+              summary: args.summary,
+              artifactDescription: args.artifact_description,
+              artifactFiles,
+              artifactData: artifactData.artifactData,
+            }))
           })
 
           const diskMsg = artifactDiskPath
@@ -3073,6 +3205,9 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             // at PLANNING approval time, forcing the agent through INTERFACES/TESTS/IMPL_PLAN
             // even when approved_files was intentionally empty (operational-only tasks).
             const effectiveAllowlist: string[] = await (async () => {
+              if (state.pendingAllowlistExpansions.length > 0 && (state.phase === "INTERFACES" || state.phase === "TESTS")) {
+                return buildAllowlistWithPendingExpansions(state, context.directory || process.cwd())
+              }
               if (state.phase === "PLANNING" && state.mode === "INCREMENTAL") {
                 return deriveIncrementalAllowlist()
               }
@@ -3184,7 +3319,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
               approvalCount: phaseCount,
               featureName: state.featureName,
               expectedFiles,
-              ...(state.mode === "INCREMENTAL" ? { fileAllowlist: state.fileAllowlist } : {}),
+              ...(state.mode === "INCREMENTAL" ? { fileAllowlist: effectiveAllowlist } : {}),
             }
             const checkpointResult = await createGitCheckpoint(
               { cwd: context.directory || process.cwd() },
@@ -3228,6 +3363,9 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
               // rejects relative paths, so we resolve them against the project dir.
               if (state.phase === "PLANNING" && state.mode === "INCREMENTAL") {
                 draft.fileAllowlist = effectiveAllowlist
+              } else if (state.mode === "INCREMENTAL" && state.pendingAllowlistExpansions.length > 0 && (state.phase === "INTERFACES" || state.phase === "TESTS")) {
+                draft.fileAllowlist = effectiveAllowlist
+                draft.pendingAllowlistExpansions = []
               } else if (
                 state.mode === "INCREMENTAL" &&
                 draft.fileAllowlist.length === 0 &&

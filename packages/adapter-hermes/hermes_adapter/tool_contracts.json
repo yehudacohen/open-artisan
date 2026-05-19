@@ -107,6 +107,9 @@
           "items": {
             "type": "string"
           }
+        },
+        "artifact_data_json": {
+          "type": "string"
         }
       },
       "required": [

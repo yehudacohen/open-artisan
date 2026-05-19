@@ -141,6 +141,12 @@ export interface RequestReviewArgs {
    * Inline artifact content is intentionally not part of the public contract.
    */
   artifact_files: string[]
+  /**
+   * Optional JSON object containing structured artifact metadata captured by
+   * the runtime. This supplements the human-readable artifact file and avoids
+   * relying solely on Markdown conventions for machine-consumed contracts.
+   */
+  artifact_data_json?: string | undefined
 }
 
 /**

@@ -107,6 +107,58 @@ Use this task metadata shape so the implementation DAG parser can create determi
   return null
 }
 
+function buildPhaseToolGuide(state: WorkflowState): string | null {
+  if (state.phase === "MODE_SELECT" || state.phase === "DONE") return null
+
+  const lines: string[] = ["### Phase Tool Guide", ""]
+  lines.push("Use workflow tools as the primary runtime contract. Do not ask the user to revise when an available tool can safely apply or route the change.")
+  lines.push("")
+
+  if (state.phaseState === "USER_GATE" || state.phaseState === "ESCAPE_HATCH") {
+    lines.push("- `submit_feedback` — use only for real approval/revision decisions at user-facing gates.")
+    lines.push("- Do not use `submit_feedback` for status, experience, or clarification questions.")
+    return lines.join("\n")
+  }
+  if (state.phaseState === "HUMAN_GATE") {
+    lines.push("- `resolve_human_gate` — use only from the task that declared a human-gated requirement; otherwise wait for the user to complete the manual action.")
+    lines.push("- Do not treat HUMAN_GATE as an ordinary artifact approval/revision gate.")
+    return lines.join("\n")
+  }
+
+  if (state.phase === "DISCOVERY") {
+    if (state.phaseState === "SCAN") lines.push("- `mark_scan_complete` — call after read-only repository scanning is complete.")
+    if (state.phaseState === "ANALYZE") lines.push("- `mark_analyze_complete` — call after synthesizing scan findings into constraints.")
+    if (state.phaseState === "CONVENTIONS" || state.phaseState === "REVISE") {
+      lines.push("- `guarded_patch` / `guarded_edit` / `guarded_write` — update the conventions artifact within `.openartisan/` when edits are needed.")
+      lines.push("- `request_review` — submit the revised on-disk conventions artifact when complete.")
+    }
+  } else if (state.phase === "PLANNING" || state.phase === "IMPL_PLAN") {
+    lines.push("- `guarded_patch` / `guarded_edit` / `guarded_write` — update the canonical `.openartisan/<feature>/` artifact directly.")
+    lines.push("- `propose_backtrack` — use when the phase discovers a fundamental upstream artifact problem.")
+    lines.push("- `request_review` — submit the on-disk artifact after the draft/revision is complete.")
+  } else if (state.phase === "INTERFACES" || state.phase === "TESTS") {
+    lines.push("- `guarded_patch` / `guarded_edit` / `guarded_write` — apply phase-legal file changes directly instead of asking the user to revise.")
+    lines.push("- `request_allowlist_expansion` — use in INCREMENTAL mode when required files are outside the approved allowlist.")
+    lines.push("- `request_review` — submit the changed interface/test files when complete.")
+  } else if (state.phase === "IMPLEMENTATION") {
+    lines.push("- `mark_task_complete` — call after implementing and verifying the current DAG task.")
+    lines.push("- `route_patch_suggestions`, `apply_patch_suggestion`, `resolve_patch_suggestion` — handle reviewer patch suggestions before asking for user direction.")
+    lines.push("- `analyze_task_boundary_change` / `apply_task_boundary_change` — route expected-file/test boundary drift through the DAG.")
+    lines.push("- `request_allowlist_expansion` or `approve_current_task_scope_expansion` — use when INCREMENTAL scope needs explicit repair.")
+    lines.push("- `report_drift`, `plan_drift_repair`, `apply_drift_repair` — use for artifact/task/worktree drift instead of ad-hoc revision requests.")
+    lines.push("- `request_review` — submit final implementation files only after all agent-dispatchable DAG tasks are complete.")
+  }
+
+  if (state.phaseState === "REVIEW") {
+    lines.push("- `mark_satisfied` — submit independent criteria results after reading the artifact files.")
+  }
+  if (state.phaseState === "REVISE") {
+    lines.push("- Prefer applying an available patch/edit/repair tool and then `request_review`; do not stop at proposing a revision unless human action is truly required.")
+  }
+
+  return lines.join("\n")
+}
+
 // ---------------------------------------------------------------------------
 // State header builder
 // ---------------------------------------------------------------------------
@@ -320,6 +372,9 @@ export function buildWorkflowSystemPrompt(state: WorkflowState, options: Workflo
 
   // 3. Current sub-state context (with MODE_SELECT and DONE special cases)
   blocks.push(buildSubStateContext(state, reviewMode))
+
+  const phaseToolGuide = buildPhaseToolGuide(state)
+  if (phaseToolGuide) blocks.push(phaseToolGuide)
 
   // 4. Blocked tools list (M10 — impl plan §4.6)
   if (state.phase !== "MODE_SELECT" && state.phase !== "DONE") {
@@ -581,6 +636,7 @@ function buildSubStateContext(state: WorkflowState, reviewMode: "agent" | "isola
     case "DRAFT":
       lines.push(`You are drafting the ${state.phase} artifact.`)
       lines.push("When the draft is complete, call `request_review` with `artifact_files`; inline artifact content is not accepted. For DISCOVERY, PLANNING, and IMPL_PLAN markdown artifacts, write the canonical .openartisan file first and pass that path in `artifact_files`.")
+      lines.push("If the phase has machine-consumed metadata, pass it through `request_review.artifact_data_json` as a JSON object so the runtime can persist it instead of relying only on Markdown formatting.")
       lines.push("If you must choose between alternatives, choose one now and record the decision, alternatives, and tradeoffs in the artifact instead of asking the user.")
       lines.push("If this phase is not applicable, submit the appropriate on-disk artifact with a specific pass-through/fast-forward justification so review can approve or reject the skip.")
       lines.push("If you discover a fundamental flaw in an earlier phase's artifact that cannot be addressed here, call `propose_backtrack`.")

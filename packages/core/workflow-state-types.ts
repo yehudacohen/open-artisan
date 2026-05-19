@@ -68,8 +68,12 @@ import { createImplDAG } from "./dag"
  *        maintainer-ready incident summaries.
  *   v29: added verificationCommands to implDag TaskNode so runnable commands are
  *        stored separately from allowlist-checked expected test file paths.
+ *   v30: added reviewArtifactSubmissions to persist structured request_review
+ *        payloads alongside on-disk artifact files.
+ *   v31: added reviewAttempts to persist reviewer attempts, rubric item status,
+ *        and timeout/error outcomes across retries.
  */
-export const SCHEMA_VERSION = 29
+export const SCHEMA_VERSION = 31
 
 /**
  * Runtime concurrency policy for nested or delegated workflow execution.
@@ -106,6 +110,38 @@ export interface WorkflowToolFailureEntry {
   phase: Phase
   phaseState: PhaseState
   taskId?: string
+}
+
+export interface ReviewArtifactSubmission {
+  phase: Phase
+  artifactKey?: ArtifactKey
+  summary: string
+  artifactDescription: string
+  artifactFiles: string[]
+  artifactData: unknown | null
+  submittedAt: number
+}
+
+export type ReviewAttemptStatus = "started" | "passed" | "failed" | "timed-out" | "error"
+export type ReviewRubricItemStatus = "pending" | "passed" | "failed" | "unknown"
+
+export interface ReviewRubricItem {
+  criterion: string
+  status: ReviewRubricItemStatus
+  evidence?: string
+  score?: number
+}
+
+export interface ReviewAttempt {
+  id: string
+  kind: "task" | "phase"
+  subject: string
+  status: ReviewAttemptStatus
+  rubricItems: ReviewRubricItem[]
+  artifactHash?: string
+  error?: string
+  startedAt: number
+  completedAt?: number
 }
 
 /**
@@ -576,6 +612,17 @@ export interface WorkflowState {
    * Reset when the review cycle resets (e.g., entering a new DRAFT phase).
    */
   reviewArtifactFiles: string[]
+
+  /**
+   * Runtime-backed record of request_review submissions. The on-disk artifact
+   * remains the human-readable source of truth, while artifactData carries
+   * optional tool-submitted machine data for adapters/reviewers that should not
+   * have to scrape Markdown conventions.
+   */
+  reviewArtifactSubmissions: ReviewArtifactSubmission[]
+
+  /** Runtime-backed reviewer attempts and rubric item status across retries. */
+  reviewAttempts: ReviewAttempt[]
 }
 
 // ---------------------------------------------------------------------------
@@ -769,6 +816,7 @@ export function validateWorkflowStateResult(state: WorkflowState): WorkflowState
     return { success: false, error: workflowStateValidationError("Invalid sessionId: must be a non-empty string") }
   }
   const validPhases = Object.keys(VALID_PHASE_STATES) as Phase[]
+  const validArtifacts: ArtifactKey[] = ["design", "conventions", "plan", "interfaces", "tests", "impl_plan", "implementation"]
   if (!validPhases.includes(state.phase)) {
     return { success: false, error: workflowStateValidationError(`Invalid phase: "${state.phase}"`) }
   }
@@ -974,7 +1022,6 @@ export function validateWorkflowStateResult(state: WorkflowState): WorkflowState
     if (typeof entry.reason !== "string" || entry.reason.trim().length === 0) {
       return { success: false, error: workflowStateValidationError(`pendingAllowlistExpansions[${i}].reason must be non-empty`) }
     }
-    const validArtifacts: ArtifactKey[] = ["design", "conventions", "plan", "interfaces", "tests", "impl_plan", "implementation"]
     if (!validArtifacts.includes(entry.sourceArtifact)) {
       return { success: false, error: workflowStateValidationError(`pendingAllowlistExpansions[${i}].sourceArtifact must be a valid artifact key`) }
     }
@@ -1327,6 +1374,82 @@ export function validateWorkflowStateResult(state: WorkflowState): WorkflowState
   for (let i = 0; i < state.reviewArtifactFiles.length; i++) {
     if (typeof state.reviewArtifactFiles[i] !== "string") {
       return { success: false, error: workflowStateValidationError(`reviewArtifactFiles[${i}] must be a string`) }
+    }
+  }
+  // v30: reviewArtifactSubmissions
+  if (!Array.isArray(state.reviewArtifactSubmissions)) {
+    return { success: false, error: workflowStateValidationError(`reviewArtifactSubmissions must be an array, got ${typeof state.reviewArtifactSubmissions}`) }
+  }
+  for (let i = 0; i < state.reviewArtifactSubmissions.length; i++) {
+    const submission = state.reviewArtifactSubmissions[i]
+    if (!submission || typeof submission !== "object" || Array.isArray(submission)) {
+      return { success: false, error: workflowStateValidationError(`reviewArtifactSubmissions[${i}] must be an object`) }
+    }
+    if (!validPhases.includes(submission.phase)) {
+      return { success: false, error: workflowStateValidationError(`reviewArtifactSubmissions[${i}].phase must be a valid phase`) }
+    }
+    if (submission.artifactKey !== undefined && !validArtifacts.includes(submission.artifactKey)) {
+      return { success: false, error: workflowStateValidationError(`reviewArtifactSubmissions[${i}].artifactKey must be a valid artifact key when present`) }
+    }
+    if (typeof submission.summary !== "string" || typeof submission.artifactDescription !== "string") {
+      return { success: false, error: workflowStateValidationError(`reviewArtifactSubmissions[${i}] summary and artifactDescription must be strings`) }
+    }
+    if (!Array.isArray(submission.artifactFiles) || !submission.artifactFiles.every((file) => typeof file === "string")) {
+      return { success: false, error: workflowStateValidationError(`reviewArtifactSubmissions[${i}].artifactFiles must be a string array`) }
+    }
+    if (typeof submission.submittedAt !== "number" || !Number.isFinite(submission.submittedAt) || submission.submittedAt < 0) {
+      return { success: false, error: workflowStateValidationError(`reviewArtifactSubmissions[${i}].submittedAt must be a non-negative finite number`) }
+    }
+  }
+  // v31: reviewAttempts
+  if (!Array.isArray(state.reviewAttempts)) {
+    return { success: false, error: workflowStateValidationError(`reviewAttempts must be an array, got ${typeof state.reviewAttempts}`) }
+  }
+  const validReviewAttemptStatuses: ReviewAttemptStatus[] = ["started", "passed", "failed", "timed-out", "error"]
+  const validReviewRubricItemStatuses: ReviewRubricItemStatus[] = ["pending", "passed", "failed", "unknown"]
+  for (let i = 0; i < state.reviewAttempts.length; i++) {
+    const attempt = state.reviewAttempts[i]
+    if (!attempt || typeof attempt !== "object" || Array.isArray(attempt)) {
+      return { success: false, error: workflowStateValidationError(`reviewAttempts[${i}] must be an object`) }
+    }
+    if (typeof attempt.id !== "string" || !attempt.id) {
+      return { success: false, error: workflowStateValidationError(`reviewAttempts[${i}].id must be a non-empty string`) }
+    }
+    if (attempt.kind !== "task" && attempt.kind !== "phase") {
+      return { success: false, error: workflowStateValidationError(`reviewAttempts[${i}].kind must be task or phase`) }
+    }
+    if (typeof attempt.subject !== "string" || !attempt.subject) {
+      return { success: false, error: workflowStateValidationError(`reviewAttempts[${i}].subject must be a non-empty string`) }
+    }
+    if (!validReviewAttemptStatuses.includes(attempt.status)) {
+      return { success: false, error: workflowStateValidationError(`reviewAttempts[${i}].status must be one of ${validReviewAttemptStatuses.join(", ")}`) }
+    }
+    if (!Array.isArray(attempt.rubricItems)) {
+      return { success: false, error: workflowStateValidationError(`reviewAttempts[${i}].rubricItems must be an array`) }
+    }
+    for (let j = 0; j < attempt.rubricItems.length; j++) {
+      const item = attempt.rubricItems[j]
+      if (!item || typeof item !== "object" || Array.isArray(item)) {
+        return { success: false, error: workflowStateValidationError(`reviewAttempts[${i}].rubricItems[${j}] must be an object`) }
+      }
+      if (typeof item.criterion !== "string" || !item.criterion) {
+        return { success: false, error: workflowStateValidationError(`reviewAttempts[${i}].rubricItems[${j}].criterion must be a non-empty string`) }
+      }
+      if (!validReviewRubricItemStatuses.includes(item.status)) {
+        return { success: false, error: workflowStateValidationError(`reviewAttempts[${i}].rubricItems[${j}].status must be one of ${validReviewRubricItemStatuses.join(", ")}`) }
+      }
+      if (item.evidence !== undefined && typeof item.evidence !== "string") {
+        return { success: false, error: workflowStateValidationError(`reviewAttempts[${i}].rubricItems[${j}].evidence must be a string when present`) }
+      }
+      if (item.score !== undefined && (typeof item.score !== "number" || !Number.isFinite(item.score))) {
+        return { success: false, error: workflowStateValidationError(`reviewAttempts[${i}].rubricItems[${j}].score must be a finite number when present`) }
+      }
+    }
+    if (typeof attempt.startedAt !== "number" || !Number.isFinite(attempt.startedAt) || attempt.startedAt < 0) {
+      return { success: false, error: workflowStateValidationError(`reviewAttempts[${i}].startedAt must be a non-negative finite number`) }
+    }
+    if (attempt.completedAt !== undefined && (typeof attempt.completedAt !== "number" || !Number.isFinite(attempt.completedAt) || attempt.completedAt < 0)) {
+      return { success: false, error: workflowStateValidationError(`reviewAttempts[${i}].completedAt must be a non-negative finite number when present`) }
     }
   }
   // v21 cross-field: running childWorkflows entries must reference a "delegated" DAG task

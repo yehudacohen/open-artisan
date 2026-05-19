@@ -24,6 +24,12 @@ export interface WorkflowNextActionState {
   taskCompletionInProgress?: string | null
 }
 
+export interface WorkflowRuntimeExplanationState extends WorkflowNextActionState {
+  mode?: string | null
+  toolFailureHistory?: Array<{ toolName: string; message: string; count: number; phase: string; phaseState: string }>
+  pendingAllowlistExpansions?: unknown[]
+}
+
 const AUTHORING_PHASE_STATES = new Set(["DRAFT", "REDRAFT", "REVISE"])
 const STRUCTURAL_ADAPTER_PHASE_STATES = new Set(["SKIP_CHECK", "CASCADE_CHECK", "SCHEDULING"])
 
@@ -137,4 +143,28 @@ export function classifyWorkflowNextAction(state: WorkflowNextActionState | null
     stopReason: `No structural continuation rule for ${state.phase}/${state.phaseState}.`,
     continuationMessage: null,
   }
+}
+
+export function buildWorkflowRuntimeExplanation(state: WorkflowRuntimeExplanationState | null | undefined): string {
+  const action = classifyWorkflowNextAction(state)
+  if (!state) {
+    return [
+      `- Current phase: unavailable`,
+      `- Why blocked: workflow state is unavailable`,
+      `- Valid next action: recover or reload workflow state`,
+      `- Last failure: none recorded`,
+    ].join("\n")
+  }
+
+  const lastFailure = state.toolFailureHistory?.[0]
+  const validNextAction = action.continuationMessage ?? action.stopReason ?? "No next action available."
+  const whyBlocked = action.shouldContinue
+    ? (action.requiresAdapterAction ? "adapter/runtime action is required" : "not blocked; authoring should continue")
+    : (action.stopReason ?? "workflow cannot continue automatically")
+  return [
+    `- Current phase: ${state.phase}/${state.phaseState}${state.mode ? ` (${state.mode})` : ""}`,
+    `- Why blocked: ${whyBlocked}`,
+    `- Valid next action: ${validNextAction}`,
+    `- Last failure: ${lastFailure ? `${lastFailure.toolName} x${lastFailure.count} at ${lastFailure.phase}/${lastFailure.phaseState}: ${lastFailure.message}` : "none recorded"}`,
+  ].join("\n")
 }

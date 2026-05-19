@@ -249,6 +249,27 @@ describe("evaluateMarkSatisfied — cross-validation", () => {
     expect(result.passed).toBe(true)
   })
 
+  it("passes the exact 14-item discovery-style rubric instead of undercounting", () => {
+    const criteria = [
+      ...Array.from({ length: 7 }, (_, i) => ({
+        criterion: `${i + 1}. Discovery criterion ${i + 1}`,
+        met: true,
+        evidence: "verified in artifact",
+        severity: "blocking" as const,
+      })),
+      ...Array.from({ length: 7 }, (_, i) => ({
+        criterion: `${i + 8}. [Q] Quality criterion ${i + 1}`,
+        met: true,
+        evidence: "verified in artifact",
+        severity: "blocking" as const,
+        score: 9,
+      })),
+    ]
+
+    expect(countSubmittedBlockingCriteria(criteria)).toBe(14)
+    expect(evaluateMarkSatisfied({ criteria_met: criteria }, 14).passed).toBe(true)
+  })
+
   it("treats unknown severities and [Q]/[D] criteria as blocking instead of undercounting", () => {
     const criteria = [
       { criterion: "Base 1", met: true, evidence: "ok", severity: "blocking" },

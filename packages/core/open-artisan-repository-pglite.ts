@@ -235,6 +235,8 @@ function freshWorkflowState(sessionId: string): WorkflowState {
     childWorkflows: [],
     concurrency: { maxParallelTasks: 1 },
     reviewArtifactFiles: [],
+    reviewArtifactSubmissions: [],
+    reviewAttempts: [],
     realWorldAcceptanceScenario: null,
   }
 }

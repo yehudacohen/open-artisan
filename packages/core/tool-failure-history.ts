@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto"
 
 import type { WorkflowState, WorkflowToolFailureCategory, WorkflowToolFailureEntry } from "./workflow-state-types"
+import { buildWorkflowRuntimeExplanation } from "./workflow-next-action"
 
 const MAX_FAILURE_HISTORY = 20
 const MAX_FAILURE_MESSAGE = 500
@@ -94,6 +95,10 @@ export function buildIncidentSummary(state: WorkflowState): string {
   lines.push(`- Repeated tool failures: ${repeatedFailures.length}`)
   lines.push(``)
 
+  lines.push(`## Runtime State Explainer`)
+  lines.push(buildWorkflowRuntimeExplanation(state))
+  lines.push(``)
+
   if (state.pendingAllowlistExpansions.length > 0) {
     lines.push(`## Pending Allowlist Expansions`)
     for (const request of state.pendingAllowlistExpansions) {
@@ -110,6 +115,18 @@ export function buildIncidentSummary(state: WorkflowState): string {
     lines.push(``)
   }
 
+  if (state.reviewAttempts.length > 0) {
+    lines.push(`## Review Attempts`)
+    for (const attempt of state.reviewAttempts.slice(0, 10)) {
+      const openItems = attempt.rubricItems.filter((item) => item.status !== "passed")
+      lines.push(`- ${attempt.kind}/${attempt.subject} ${attempt.status} (${attempt.id}) open=${openItems.length}${attempt.error ? ` error=${attempt.error}` : ""}`)
+      if (openItems.length > 0) {
+        lines.push(`  remaining: ${openItems.map((item) => `${item.criterion}:${item.status}`).join(", ")}`)
+      }
+    }
+    lines.push(``)
+  }
+
   if (state.toolFailureHistory.length > 0) {
     lines.push(`## Tool Failure History`)
     for (const entry of state.toolFailureHistory) {
@@ -121,6 +138,9 @@ export function buildIncidentSummary(state: WorkflowState): string {
   lines.push(`## Recommended Maintainer Action`)
   if (repeatedFailures.some((entry) => entry.category === "reviewer-infrastructure")) {
     lines.push(`- Treat repeated reviewer failures as tooling defects. Do not request implementation rewrites until reviewer submission/extraction is fixed.`)
+  }
+  if (repeatedFailures.some((entry) => entry.toolName === "mark_satisfied")) {
+    lines.push(`- Repeated mark_satisfied failures are review-gate/runtime defects until proven otherwise. Inspect criteria counting, reviewer submission shape, and latestReviewResults before asking for artifact rewrites.`)
   }
   if (state.pendingAllowlistExpansions.length > 0 || (state.phase === "IMPLEMENTATION" && state.currentTaskId)) {
     lines.push(`- If blocked writes involve approved task files, run the atomic current-task scope repair or repair from approved IMPL_PLAN before backtracking.`)

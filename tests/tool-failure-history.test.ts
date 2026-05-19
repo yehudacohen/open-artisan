@@ -31,6 +31,41 @@ describe("tool failure history", () => {
     expect(buildIncidentSummary(state)).toContain("Repeated tool failures: 1")
   })
 
+  it("surfaces repeated mark_satisfied failures as review-gate runtime defects", () => {
+    const state = makeWorkflowState({ phase: "DISCOVERY", phaseState: "REVIEW" })
+    const message = "Only 1 blocking criteria submitted, but this phase requires 14."
+
+    recordToolFailure(state, { category: "tooling", toolName: "mark_satisfied", message, now: 1 })
+    recordToolFailure(state, { category: "tooling", toolName: "mark_satisfied", message, now: 2 })
+
+    const summary = buildIncidentSummary(state)
+    expect(summary).toContain("Runtime State Explainer")
+    expect(summary).toContain("Repeated tool failures: 1")
+    expect(summary).toContain("Repeated mark_satisfied failures are review-gate/runtime defects")
+    expect(summary).toContain("Last failure: mark_satisfied x2")
+  })
+
+  it("includes review attempts and open rubric items in incident summaries", () => {
+    const state = makeWorkflowState({
+      reviewAttempts: [{
+        id: "attempt1",
+        kind: "task",
+        subject: "T2",
+        status: "timed-out",
+        rubricItems: [{ criterion: "Run the tests", status: "unknown" }],
+        error: "task-review timed out after 180000ms",
+        startedAt: 1,
+        completedAt: 2,
+      }],
+    })
+
+    const summary = buildIncidentSummary(state)
+
+    expect(summary).toContain("Review Attempts")
+    expect(summary).toContain("task/T2 timed-out")
+    expect(summary).toContain("Run the tests:unknown")
+  })
+
   it("redacts volatile IDs, hashes, timestamps, and payload objects from incident summaries", () => {
     const state = makeWorkflowState({
       phase: "IMPLEMENTATION",

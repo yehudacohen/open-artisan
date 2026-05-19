@@ -70,6 +70,12 @@ export interface SubagentPromptOptions {
    */
   submissionTool?: {
     name: string
+    /** Runtime context for optional incremental reviewer progress tools. */
+    progress?: {
+      kind: "task" | "phase"
+      subject: string
+      attemptId?: string
+    }
     /**
      * When true, assistant text is not an acceptable fallback. Adapters that
      * support local submission capture must return an encoded tool payload or

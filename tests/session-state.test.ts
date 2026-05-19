@@ -74,6 +74,8 @@ function makeState(sessionId: string, featureName: string | null, overrides?: Pa
     childWorkflows: [],
     concurrency: { maxParallelTasks: 1 },
     reviewArtifactFiles: [],
+    reviewArtifactSubmissions: [],
+    reviewAttempts: [],
     realWorldAcceptanceScenario: null,
     ...overrides,
   }

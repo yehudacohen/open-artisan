@@ -90,3 +90,12 @@ export function applyPendingAllowlistExpansions(
     message: `Applied approved allowlist expansion for ${files.join(", ")}.${boundaryMessage} Returning to ${state.phase}/${state.phaseState}.`,
   }
 }
+
+export function buildAllowlistWithPendingExpansions(state: WorkflowState, cwd?: string): string[] {
+  const normalize = (paths: string[]) => cwd ? normalizeWorkflowPaths(paths, cwd) : Array.from(new Set(paths))
+  const expanded = new Set(normalize(state.fileAllowlist))
+  for (const request of state.pendingAllowlistExpansions) {
+    for (const file of normalize(request.files)) expanded.add(file)
+  }
+  return Array.from(expanded)
+}

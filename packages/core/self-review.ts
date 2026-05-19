@@ -71,12 +71,14 @@ export interface SelfReviewRequest {
   realWorldAcceptanceScenario?: ScenarioSufficiencyContext | null
   /** Require adapter-captured reviewer tool submissions instead of JSON text fallback. */
   requireToolSubmission?: boolean
+  /** Current persisted attempt ID for incremental rubric-item progress. */
+  reviewAttemptId?: string
 }
 
 export function buildReviewPrompt(req: SelfReviewRequest): string {
   const lines: string[] = []
 
-  lines.push("CRITICAL OUTPUT CONTRACT: if the `submit_phase_review_result` tool is available, call it exactly once with your assessment fields and do not reply with text/prose.")
+  lines.push("CRITICAL OUTPUT CONTRACT: if `submit_review_rubric_item` is available, call it after each criterion you evaluate so progress survives reviewer timeouts. If the `submit_phase_review_result` tool is available, call it exactly once with your final assessment fields and do not reply with text/prose.")
   lines.push("If that tool is unavailable, your final response must be ONLY one valid JSON object. Do not include markdown, headings, bullets, code fences, preamble, or analysis outside JSON string fields.")
   lines.push("")
   lines.push(`You are reviewing the **${req.phase}** artifact produced by the workflow.`)
@@ -271,7 +273,7 @@ export function buildReviewPrompt(req: SelfReviewRequest): string {
   lines.push("8. Use the full 1-10 range honestly. Reward excellence just as clearly as you punish flaws; do not compress scores into a narrow band.")
   lines.push("9. Scoring guide: 1-2 = fundamentally broken, 3-4 = major gaps, 5-6 = mixed/adequate but clearly incomplete, 7-8 = strong with meaningful improvement still needed, 9 = excellent and ready to advance, 10 = exceptional work that materially exceeds the normal quality bar for this phase.")
   lines.push("10. Set `satisfied` to true ONLY if ALL blocking criteria are met AND ALL [Q] scores are >= 9.")
-  lines.push("11. Required submission path when available: if the `submit_phase_review_result` tool is available, call it exactly once with your assessment fields instead of replying with text. The tool validates the structured payload.")
+  lines.push("11. Required submission path when available: use `submit_review_rubric_item` after each evaluated criterion when available, then call `submit_phase_review_result` exactly once with your final assessment fields instead of replying with text. The final tool validates the structured payload.")
   lines.push("12. If that tool is unavailable, return your assessment as a JSON object. IMPORTANT: reply with ONLY the JSON — no preamble, no explanation.")
   lines.push("")
   lines.push("The JSON must match this structure:")
@@ -312,6 +314,7 @@ async function ephemeralReviewPrompt(
   title = "workflow-review",
   submissionToolName = "submit_phase_review_result",
   requireToolSubmission = false,
+  progress?: { kind: "phase"; subject: string; attemptId?: string },
 ): Promise<string> {
   const session = await dispatcher.createSession({
     title,
@@ -321,8 +324,8 @@ async function ephemeralReviewPrompt(
   })
   try {
     const submissionTool = requireToolSubmission
-      ? { name: submissionToolName, required: true }
-      : { name: submissionToolName }
+      ? { name: submissionToolName, required: true, ...(progress ? { progress } : {}) }
+      : { name: submissionToolName, ...(progress ? { progress } : {}) }
     const raw = await session.prompt(prompt, { submissionTool })
     if (!requireToolSubmission) return raw
     const decoded = decodeSubagentToolSubmission(raw, submissionToolName)
@@ -484,7 +487,7 @@ export async function dispatchSelfReview(
     const featureSlug = req.featureName ? ` (${req.featureName})` : ""
     const title = `Review: ${req.phase}${featureSlug}`
     const text = await withTimeout(
-      ephemeralReviewPrompt(dispatcher, prompt, req.parentSessionId, req.parentModel, title, "submit_phase_review_result", req.requireToolSubmission === true),
+      ephemeralReviewPrompt(dispatcher, prompt, req.parentSessionId, req.parentModel, title, "submit_phase_review_result", req.requireToolSubmission === true, { kind: "phase", subject: req.phase, ...(req.reviewAttemptId ? { attemptId: req.reviewAttemptId } : {}) }),
       SELF_REVIEW_TIMEOUT_MS,
       "self-review",
     )
@@ -493,7 +496,7 @@ export async function dispatchSelfReview(
     if (parsed.success && !incomplete) return parsed
     if (parsed.success && incomplete) {
       const repairedText = await withTimeout(
-        ephemeralReviewPrompt(dispatcher, buildIncompleteCriteriaRepairPrompt(req, text, incomplete.submitted, incomplete.expected), req.parentSessionId, req.parentModel, `${title} criteria repair`, "submit_phase_review_result", req.requireToolSubmission === true),
+        ephemeralReviewPrompt(dispatcher, buildIncompleteCriteriaRepairPrompt(req, text, incomplete.submitted, incomplete.expected), req.parentSessionId, req.parentModel, `${title} criteria repair`, "submit_phase_review_result", req.requireToolSubmission === true, { kind: "phase", subject: req.phase, ...(req.reviewAttemptId ? { attemptId: req.reviewAttemptId } : {}) }),
         SELF_REVIEW_TIMEOUT_MS,
         "self-review-criteria-repair",
       )
@@ -513,7 +516,7 @@ export async function dispatchSelfReview(
     }
 
     const repairedText = await withTimeout(
-      ephemeralReviewPrompt(dispatcher, buildJsonRepairPrompt(text), req.parentSessionId, req.parentModel, `${title} JSON repair`, "submit_phase_review_result", req.requireToolSubmission === true),
+      ephemeralReviewPrompt(dispatcher, buildJsonRepairPrompt(text), req.parentSessionId, req.parentModel, `${title} JSON repair`, "submit_phase_review_result", req.requireToolSubmission === true, { kind: "phase", subject: req.phase, ...(req.reviewAttemptId ? { attemptId: req.reviewAttemptId } : {}) }),
       SELF_REVIEW_TIMEOUT_MS,
       "self-review-json-repair",
     )

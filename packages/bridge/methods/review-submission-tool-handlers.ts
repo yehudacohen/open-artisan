@@ -6,7 +6,7 @@ import type { WorkflowState } from "../../core/workflow-state-types"
 import type { OpenArtisanServices } from "../../core/open-artisan-services"
 import type { WorkflowEvent } from "../../core/workflow-primitives"
 import type { TaskReviewSuccess } from "../../core/task-review"
-import { buildTaskReviewAcceptancePlan, parseTaskReviewResult } from "../../core/task-review"
+import { buildAdjacentTasksForTask, buildTaskReviewAcceptancePlan, parseTaskReviewResult } from "../../core/task-review"
 import { parseReviewResult } from "../../core/self-review"
 import { computeMarkSatisfiedTransition } from "../../core/tools/transitions"
 import { applyDispatch, nextSchedulerDecisionForInput, readDecisionInput } from "../../core/scheduler"
@@ -15,14 +15,15 @@ import { extractJsonFromText } from "../../core/utils"
 import { getAcceptanceCriteria } from "../../core/hooks/system-transform"
 import { countExpectedBlockingCriteria, countSubmittedBlockingCriteria } from "../../core/tools/mark-satisfied"
 import { parseToolArgs } from "../../core/tool-args"
-import { SubmitPhaseReviewToolSchema, SubmitTaskReviewToolSchema } from "../../core/schemas"
+import { SubmitPhaseReviewToolSchema, SubmitReviewRubricItemToolSchema, SubmitTaskReviewToolSchema } from "../../core/schemas"
 import { buildPhaseReviewOutputFromSubmission, buildTaskReviewOutputFromSubmission } from "../../core/review-submission-normalizers"
 import { persistPhaseReviewResult, persistTaskDispatchClaims, persistTaskReviewResult } from "../../core/runtime-persistence"
 import type { DbAgentLease } from "../../core/open-artisan-repository"
 import type { ToolHandler } from "./tool-handler-types"
 import { artifactFilesHash, buildImplPlanExecutableContractFailureCriterion } from "./review-feedback-tool-handlers"
-import { consumeReviewSubmissionToken } from "./review-submission-tokens"
+import { consumeReviewSubmissionToken, getReviewSubmissionTokenRecord } from "./review-submission-tokens"
 import { recordToolFailure } from "../../core/tool-failure-history"
+import { buildTaskReviewRubricItems, completeReviewAttempt, createReviewAttempt, recordReviewRubricItemProgress, rubricItemsFromPhaseCriteria, rubricItemsFromTaskReviewResult, upsertReviewAttempt } from "../../core/tools/review-attempts"
 
 function requireState(ctx: BridgeContext, sessionId: string): WorkflowState {
   const state = ctx.engine!.store.get(sessionId)
@@ -127,6 +128,16 @@ function isTaskReviewRuntimeFailure(review: TaskReviewSuccess): boolean {
   )
 }
 
+function normalizedScore(value: string | number | undefined): number | undefined {
+  if (value === undefined) return undefined
+  const score = typeof value === "number" ? value : Number(value.trim())
+  return Number.isFinite(score) ? score : undefined
+}
+
+function currentReviewAttempt(draft: WorkflowState, kind: "task" | "phase", subject: string) {
+  return draft.reviewAttempts.find((candidate) => candidate.kind === kind && candidate.subject === subject && candidate.status === "started")
+}
+
 function transitionOrThrow(
   state: WorkflowState,
   event: WorkflowEvent,
@@ -182,6 +193,39 @@ export function taskReviewArtifactHash(state: WorkflowState, taskId: string, dir
   return artifactFilesHash(files, directory)
 }
 
+export const handleSubmitReviewRubricItem: ToolHandler = async (args, toolCtx, ctx) => {
+  const { store } = ctx.engine!
+  const parsedArgs = parseToolArgs(SubmitReviewRubricItemToolSchema, args)
+  if (!parsedArgs.success) return `Error: ${parsedArgs.error}`
+  const token = parsedArgs.data.review_token
+  if (!token) return "Error: review_token is required for bridge reviewer rubric progress submissions."
+  const tokenRecord = getReviewSubmissionTokenRecord(ctx, token)
+  if (!tokenRecord) return "Error: Invalid or expired isolated reviewer token. Request a fresh review context and retry."
+  if (tokenRecord.sessionId !== toolCtx.sessionId) return "Error: Isolated reviewer token does not match the pending review. Request a fresh review context and retry."
+  if (tokenRecord.kind !== "task" && tokenRecord.kind !== "phase") return "Error: submit_review_rubric_item only supports task and phase reviews."
+  const reviewKind: "task" | "phase" = tokenRecord.kind
+  const state = requireState(ctx, toolCtx.sessionId)
+  const score = normalizedScore(parsedArgs.data.score)
+  await store.update(toolCtx.sessionId, (draft) => {
+    const rubricItems = reviewKind === "task"
+      ? buildTaskReviewRubricItems(buildAdjacentTasksForTask(draft.implDag, tokenRecord.subject).length > 0)
+      : [{ criterion: parsedArgs.data.criterion, status: "pending" as const }]
+    recordReviewRubricItemProgress(draft, {
+      kind: reviewKind,
+      subject: tokenRecord.subject,
+      rubricItems,
+      artifactHash: tokenRecord.artifactHash ?? state.reviewArtifactHash,
+      rubricItem: {
+        criterion: parsedArgs.data.criterion,
+        status: parsedArgs.data.status,
+        ...(parsedArgs.data.evidence ? { evidence: parsedArgs.data.evidence } : {}),
+        ...(score !== undefined ? { score } : {}),
+      },
+    })
+  })
+  return "Review rubric item recorded."
+}
+
 function buildReviewerFailureCriteria(state: WorkflowState, reason: string) {
   const criteriaText = getAcceptanceCriteria(state.phase, state.phaseState, state.mode, state.artifactDiskPaths?.design ?? null)
   const expectedCount = Math.max(countExpectedBlockingCriteria(criteriaText), 1)
@@ -214,6 +258,7 @@ export const handleSubmitTaskReview: ToolHandler = async (args, toolCtx, ctx) =>
   const parsedArgs = parseToolArgs(SubmitTaskReviewToolSchema, args)
   if (!parsedArgs.success) return `Error: ${parsedArgs.error}`
   const taskId = recoveredTaskId
+  const baseTaskRubricItems = buildTaskReviewRubricItems(buildAdjacentTasksForTask(state.implDag, taskId).length > 0)
   const normalizedSubmission = buildTaskReviewOutputFromSubmission(parsedArgs.data)
   if (!normalizedSubmission.success) {
     let duplicateCount = 1
@@ -230,6 +275,13 @@ export const handleSubmitTaskReview: ToolHandler = async (args, toolCtx, ctx) =>
         met: false,
         evidence: normalizedSubmission.error,
       }]
+      const attempt = currentReviewAttempt(draft, "task", taskId) ?? createReviewAttempt({ kind: "task", subject: taskId, rubricItems: baseTaskRubricItems })
+      upsertReviewAttempt(draft, completeReviewAttempt({
+        attempt,
+        status: "error",
+        rubricItems: rubricItemsFromTaskReviewResult({ success: false, error: normalizedSubmission.error }, baseTaskRubricItems),
+        error: normalizedSubmission.error,
+      }))
     })
     return (
       `Task "${taskId}" is blocked by reviewer infrastructure, not by a code-review verdict.\n\n` +
@@ -258,6 +310,13 @@ export const handleSubmitTaskReview: ToolHandler = async (args, toolCtx, ctx) =>
         met: false,
         evidence: review.error,
       }]
+      const attempt = currentReviewAttempt(draft, "task", taskId) ?? createReviewAttempt({ kind: "task", subject: taskId, rubricItems: baseTaskRubricItems })
+      upsertReviewAttempt(draft, completeReviewAttempt({
+        attempt,
+        status: "error",
+        rubricItems: rubricItemsFromTaskReviewResult({ success: false, error: review.error }, baseTaskRubricItems),
+        error: review.error,
+      }))
     })
     return (
       `Task "${taskId}" is blocked by reviewer infrastructure, not by a code-review verdict.\n\n` +
@@ -289,6 +348,12 @@ export const handleSubmitTaskReview: ToolHandler = async (args, toolCtx, ctx) =>
     await store.update(toolCtx.sessionId, (draft) => {
       applyTaskReviewAcceptance(draft, acceptancePlan, nextState)
       draft.latestReviewResults = latestTaskReviewResults
+      const attempt = currentReviewAttempt(draft, "task", taskId) ?? createReviewAttempt({ kind: "task", subject: taskId, rubricItems: baseTaskRubricItems })
+      upsertReviewAttempt(draft, completeReviewAttempt({
+        attempt,
+        status: "passed",
+        rubricItems: rubricItemsFromTaskReviewResult(review, baseTaskRubricItems),
+      }))
     })
     await persistCurrentTaskClaim(ctx.openArtisanServices, store.get(toolCtx.sessionId), toolCtx.sessionId)
     return `Task "${taskId}" review passed.\n\n${nextMessage}`
@@ -307,6 +372,13 @@ export const handleSubmitTaskReview: ToolHandler = async (args, toolCtx, ctx) =>
       ? Math.max(draft.taskReviewCount ?? 0, 0)
       : nextReviewAttempt
     draft.latestReviewResults = latestTaskReviewResults
+    const attempt = currentReviewAttempt(draft, "task", taskId) ?? createReviewAttempt({ kind: "task", subject: taskId, rubricItems: baseTaskRubricItems })
+    upsertReviewAttempt(draft, completeReviewAttempt({
+      attempt,
+      status: reviewRuntimeFailure ? "error" : "failed",
+      rubricItems: rubricItemsFromTaskReviewResult(review, baseTaskRubricItems),
+      ...(reviewRuntimeFailure ? { error: `${review.issues.join("; ")} ${review.reasoning}`.trim() } : {}),
+    }))
     if (reviewRuntimeFailure) {
       const failure = recordToolFailure(draft, {
         category: "reviewer-infrastructure",
@@ -431,6 +503,12 @@ export const handleSubmitPhaseReview: ToolHandler = async (args, toolCtx, ctx) =
     if (t.clearReviewArtifactHash) draft.reviewArtifactHash = null
     if (t.resetUserGateMessage) draft.userGateMessageReceived = false
     if (t.clearRevisionBaseline) draft.revisionBaseline = null
+    const attempt = currentReviewAttempt(draft, "phase", state.phase) ?? createReviewAttempt({ kind: "phase", subject: state.phase, rubricItems: rubricItemsFromPhaseCriteria(rawCriteria) })
+    upsertReviewAttempt(draft, completeReviewAttempt({
+      attempt,
+      status: t.event === "self_review_pass" ? "passed" : "failed",
+      rubricItems: rubricItemsFromPhaseCriteria(rawCriteria),
+    }))
   })
 
   return `Isolated phase review submitted. ${t.responseMessage}`

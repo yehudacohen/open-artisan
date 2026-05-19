@@ -64,3 +64,8 @@ export function consumeReviewSubmissionToken(
   if (consume) ctx.reviewSubmissionTokens?.delete(token)
   return { error: null, artifactHash: record.artifactHash ?? null }
 }
+
+export function getReviewSubmissionTokenRecord(ctx: BridgeContext, token: string) {
+  cleanupExpiredReviewTokens(ctx)
+  return ctx.reviewSubmissionTokens?.get(token) ?? null
+}

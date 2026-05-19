@@ -212,6 +212,26 @@ describe("buildWorkflowSystemPrompt — REVISE sub-state", () => {
     expect(prompt).toContain("choose the best one")
     expect(prompt).toContain("alternatives/tradeoffs")
   })
+
+  it("tells agents to use available patch or repair tools before asking for revision", () => {
+    const prompt = buildWorkflowSystemPrompt(makeState({ phase: "IMPLEMENTATION", phaseState: "REVISE" }))
+
+    expect(prompt).toContain("Phase Tool Guide")
+    expect(prompt).toContain("route_patch_suggestions")
+    expect(prompt).toContain("apply_patch_suggestion")
+    expect(prompt).toContain("report_drift")
+    expect(prompt).toContain("do not stop at proposing a revision")
+  })
+})
+
+describe("buildWorkflowSystemPrompt — phase tool guide", () => {
+  it("describes request_review structured artifact data as a runtime contract", () => {
+    const prompt = buildWorkflowSystemPrompt(makeState({ phase: "PLANNING", phaseState: "DRAFT" }))
+
+    expect(prompt).toContain("Phase Tool Guide")
+    expect(prompt).toContain("workflow tools as the primary runtime contract")
+    expect(prompt).toContain("request_review")
+  })
 })
 
 describe("buildWorkflowSystemPrompt — structural workflow sub-states", () => {

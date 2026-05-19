@@ -18,6 +18,7 @@ Provide:
 - summary: a brief description of what was built in this phase
 - artifact_description: a description of the artifact(s) produced (files written, key decisions)
 - artifact_files: required file paths on disk that are the review source of truth
+- artifact_data_json: optional JSON object with machine-consumed artifact metadata
 
 After calling this tool, you will enter REVIEW state and must evaluate the artifact
 against the acceptance criteria using mark_satisfied.
@@ -25,6 +26,9 @@ against the acceptance criteria using mark_satisfied.
 Pass artifact file references that the reviewer can read from disk.
 Relative artifact_files paths are resolved from the project directory before being stored.
 Do not pass inline artifact content; normal workflow review is file-based only.
+If downstream tools need structured metadata, pass \`artifact_data_json\` as a JSON
+object string. The runtime parses and persists it with the request_review record;
+do not encode machine-only contracts solely in Markdown prose.
 
 Markdown artifacts are valid only for markdown phases:
 - DISCOVERY conventions: .openartisan/<feature>/conventions.md
@@ -53,6 +57,25 @@ export interface RequestReviewResult {
 export type PlanningScenarioCaptureResult =
   | { success: true; scenario: ScenarioSufficiencyContext | null }
   | { success: false; error: string }
+
+export type RequestReviewArtifactDataParseResult =
+  | { success: true; artifactData: unknown | null }
+  | { success: false; error: string }
+
+export function parseRequestReviewArtifactData(args: RequestReviewArgs): RequestReviewArtifactDataParseResult {
+  if (args.artifact_data_json === undefined) return { success: true, artifactData: null }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(args.artifact_data_json)
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error)
+    return { success: false, error: `artifact_data_json must be valid JSON: ${detail}` }
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return { success: false, error: "artifact_data_json must encode a JSON object." }
+  }
+  return { success: true, artifactData: parsed }
+}
 
 export function capturePlanningScenarioForRequestReview(input: {
   phase: Phase

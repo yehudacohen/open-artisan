@@ -225,6 +225,25 @@ describe("buildTaskReviewPrompt", () => {
     expect(prompt).toContain("do not fail this task solely")
   })
 
+  it("includes prior review attempts so retries can focus unfinished rubric items", () => {
+    const prompt = buildTaskReviewPrompt(makeRequest({
+      priorReviewAttempts: [{
+        id: "attempt1",
+        kind: "task",
+        subject: "T1",
+        status: "timed-out",
+        rubricItems: [{ criterion: "Run the tests", status: "unknown" }],
+        error: "task-review timed out after 180000ms",
+        startedAt: 1,
+        completedAt: 2,
+      }],
+    }))
+
+    expect(prompt).toContain("Prior Review Attempts")
+    expect(prompt).toContain("task-review timed out")
+    expect(prompt).toContain("Run the tests")
+  })
+
   it("includes review instructions", () => {
     const prompt = buildTaskReviewPrompt(makeRequest())
     expect(prompt).toContain("Run the tests")

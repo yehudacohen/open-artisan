@@ -10,6 +10,7 @@ import {
   OrchestratorAssessOutputSchema,
   OrchestratorDivergeOutputSchema,
   RebuttalReviewOutputSchema,
+  SubmitReviewRubricItemToolSchema,
   TaskDriftReviewOutputSchema,
   TaskReviewOutputSchema,
   formatZodError,
@@ -20,6 +21,7 @@ type ToolExecuteContext = ToolContext & { sessionId?: string; session_id?: strin
 
 export interface ReviewerResultSubmissionStore {
   record(sessionId: string, toolName: string, payload: string): { success: true } | { success: false; error: string }
+  recordRubricItem(sessionId: string, item: { criterion: string; status: "pending" | "passed" | "failed" | "unknown"; evidence?: string; score?: number }): Promise<{ success: true } | { success: false; error: string }> | { success: true } | { success: false; error: string }
 }
 
 function scoreValue(value: unknown): number | undefined {
@@ -33,6 +35,38 @@ export function createReviewerResultTools(tool: any, ctx: { reviewerToolSubmissi
   const { reviewerToolSubmissions } = ctx
 
   return {
+    submit_review_rubric_item: tool({
+      description: "Reviewer-only: persist one rubric item immediately while evaluating an active task or phase review. Normal workflow agents must not call this tool.",
+      args: {
+        review_token: tool.schema.string().optional().describe("Bridge reviewer token; ignored by OpenCode local reviewer sessions."),
+        criterion: tool.schema.string().describe("The exact rubric criterion being evaluated."),
+        status: tool.schema.enum(["pending", "passed", "failed", "unknown"]).describe("Current evaluation status for this criterion."),
+        evidence: tool.schema.string().optional().describe("Concrete evidence for the status, with file:line or command output where useful."),
+        severity: tool.schema.enum(["blocking", "suggestion", "design-invariant"]).optional(),
+        score: tool.schema.string().optional().describe("Quality score, 1-10, for [Q] criteria."),
+      },
+      async execute(args: Record<string, unknown>, context: ToolExecuteContext) {
+        const sessionId = resolveSessionId(context)
+        if (!sessionId) return "Error: Could not determine reviewer session ID."
+        const parsed = SubmitReviewRubricItemToolSchema.safeParse({
+          criterion: args["criterion"],
+          status: args["status"],
+          evidence: args["evidence"],
+          severity: args["severity"],
+          score: args["score"],
+        })
+        if (!parsed.success) return `Error: ${formatZodError(parsed.error)}`
+        const score = scoreValue(parsed.data.score)
+        const recorded = await reviewerToolSubmissions.recordRubricItem(sessionId, {
+          criterion: parsed.data.criterion,
+          status: parsed.data.status,
+          ...(parsed.data.evidence ? { evidence: parsed.data.evidence } : {}),
+          ...(score !== undefined ? { score } : {}),
+        })
+        return recorded.success ? "Review rubric item recorded." : `Error: ${recorded.error}`
+      },
+    }),
+
     submit_task_review_result: tool({
       description: "Reviewer-only: submit structured per-task isolated review results for the active reviewer session. Normal workflow agents must not call this tool.",
       args: {

@@ -43,6 +43,12 @@ export interface ChatMessageOutput {
   }
 }
 
+export function stripInjectedWorkflowGateText(text: string): string {
+  return text
+    .replace(/\[WORKFLOW (?:GATE|ESCAPE HATCH) — IMMEDIATE ACTION REQUIRED\][\s\S]*?(?=(?:\n\s*){2,}|$)/g, "")
+    .trim()
+}
+
 // ---------------------------------------------------------------------------
 // Approval signal detection (heuristic)
 // ---------------------------------------------------------------------------
@@ -99,6 +105,10 @@ export function looksLikeUserGateMetaQuestion(text: string): boolean {
 
   if (
     /\b(?:update me|status update|progress update|what changed|what has changed|what did you change|where are we|what's next|what is next)\b/.test(normalized) ||
+    /\b(?:did|have|has)\s+(?:you|we)\s+(?:address|handled?|covered?)\b.*\b(?:everything|all|feedback|items?|risks?|improvements?)\b/.test(normalized) ||
+    /\bwhat\s+(?:did|have)\s+(?:you|we)\s+(?:address|handled?|covered?)\b/.test(normalized) ||
+    /\b(?:can|could|please)\s+you\s+(?:propose|draft|prepare|show|list)\b.*\b(?:approval|approve|allowlist|patch|expansion)\b/.test(normalized) ||
+    /\b(?:what|which)\b.*\b(?:approval|approve)\b.*\b(?:files?|allowlist|patch|expansion)\b/.test(normalized) ||
     /\b(?:status|progress)\b.*\?/.test(normalized)
   ) {
     return true

@@ -9,7 +9,7 @@ import {
 } from "#core/constants"
 import { WORKFLOW_TOOL_NAMES } from "#core/workflow-tool-names"
 import { buildCompactionContext } from "#core/hooks/compaction"
-import { buildUserGateHint, processUserMessage } from "#core/hooks/chat-message"
+import { buildUserGateHint, processUserMessage, stripInjectedWorkflowGateText } from "#core/hooks/chat-message"
 import { handleIdle } from "#core/hooks/idle-handler"
 import { buildSubagentContext, buildWorkflowSystemPrompt } from "#core/hooks/system-transform"
 import { extractWriteToolPaths, getPhaseToolPolicy, getTaskWriteFiles } from "#core/hooks/tool-guard"
@@ -223,6 +223,19 @@ export function createPluginHooks({
   function clearDormantSession(sessionId: string): void {
     if (!dormantSessions.delete(sessionId)) return
     ctx.trace.record("session.dormant", { sessionId, dormant: false })
+  }
+
+  function stripStaleWorkflowGateNotes(parts: Array<{ type: string; text?: string }>): boolean {
+    let changed = false
+    for (const part of parts) {
+      if (part.type !== "text" || typeof part.text !== "string") continue
+      const stripped = stripInjectedWorkflowGateText(part.text)
+      if (stripped !== part.text) {
+        part.text = stripped
+        changed = true
+      }
+    }
+    return changed
   }
 
   function mutateHookMemory(hook: string, sessionId: string, label: string, mutator: (draft: WorkflowState) => void): boolean {
@@ -510,6 +523,9 @@ export function createPluginHooks({
         const state = store.get(sessionId)
         if (!state) return
 
+        const strippedStaleGate = stripStaleWorkflowGateNotes(output.parts)
+        if (strippedStaleGate) didMutateOutput = true
+
         const textContent = output.parts
           .filter((part) => part.type === "text" && part.text)
           .map((part) => part.text!)
@@ -577,6 +593,7 @@ export function createPluginHooks({
             draft.revisionBaseline = null
             draft.revisionAutoSkipBlockedReason = null
             draft.reviewArtifactFiles = []
+            draft.reviewArtifactSubmissions = []
             draft.userMessages = textContent ? [textContent] : []
           })
           logTransition(

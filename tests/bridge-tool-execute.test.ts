@@ -48,7 +48,7 @@ afterEach(async () => {
 })
 
 function exec(name: string, args: Record<string, unknown> = {}) {
-  const invocation = name === "submit_task_review" || name === "submit_phase_review"
+  const invocation = name === "submit_task_review" || name === "submit_phase_review" || name === "submit_review_rubric_item"
     ? { invocation: "isolated-reviewer" as const }
     : {}
   const state = ctx.engine?.store.get("s1")
@@ -814,6 +814,43 @@ describe("tool.execute — submit_feedback", () => {
     const state = ctx.engine!.store.get("s1")
     expect(state?.fileAllowlist).toContain(resolve(tmpDir, "src/a.ts"))
     expect(state?.fileAllowlist).toContain(resolve(tmpDir, "tests/a.test.ts"))
+  })
+
+  it("applies pending INTERFACES allowlist expansion during the same approval", async () => {
+    await exec("select_mode", { mode: "INCREMENTAL", feature_name: "interfaces-allowlist-expansion" })
+    const allowed = join(tmpDir, "packages/core/src/auth-interfaces.ts")
+    const runtime = join(tmpDir, "packages/runtime/src/internal/contracts-implementation.ts")
+    const createApp = join(tmpDir, "packages/create-app/src/auth-tenancy-billing-interfaces.ts")
+    await Bun.write(allowed, "export interface CoreAuth {}\n")
+    await Bun.write(runtime, "export interface RuntimeAuth {}\n")
+    await Bun.write(createApp, "export interface CreateAppAuth {}\n")
+    await ctx.engine!.store.update("s1", (d) => {
+      d.phase = "INTERFACES"
+      d.phaseState = "USER_GATE"
+      d.userGateMessageReceived = true
+      d.fileAllowlist = [allowed]
+      d.reviewArtifactFiles = [allowed, runtime, createApp]
+      d.pendingAllowlistExpansions = [{
+        files: [runtime, createApp],
+        reason: "Reviewed interface files are required by the approved incremental plan.",
+        sourceArtifact: "interfaces",
+        requestedAtPhase: "INTERFACES",
+        requestedAt: 1,
+      }]
+    })
+
+    const result = await exec("submit_feedback", {
+      feedback_type: "approve",
+      feedback_text: "approve",
+    })
+
+    expect(result).not.toContain("approval failed allowlist validation")
+    expect(result).toContain("Approved")
+    const state = ctx.engine!.store.get("s1")
+    expect(state?.fileAllowlist).toContain(runtime)
+    expect(state?.fileAllowlist).toContain(createApp)
+    expect(state?.pendingAllowlistExpansions).toEqual([])
+    expect(state?.approvedArtifactFiles?.interfaces).toEqual(expect.arrayContaining([allowed, runtime, createApp]))
   })
 
   it("rejects INCREMENTAL planning approval without an allowlist source", async () => {
@@ -1791,6 +1828,49 @@ describe("tool.execute — agent-only mode", () => {
 
     expect(result).toContain("Isolated phase review submitted")
     expect(ctx.engine!.store.get("s1")?.phaseState).toBe("USER_GATE")
+  })
+
+  it("submit_review_rubric_item persists phase-review progress before the final verdict", async () => {
+    await exec("select_mode", { mode: "GREENFIELD", feature_name: `phase-progress-${Date.now()}` })
+    const planPath = await writeCurrentPlanArtifact("s1", ctx)
+    await exec("request_review", {
+      summary: "Plan",
+      artifact_description: "Plan artifact",
+      artifact_files: [planPath],
+    })
+
+    const prompt = await handlePhaseGetReviewContext({ sessionId: "s1" }, ctx) as string
+    const token = prompt.match(/OPEN_ARTISAN_REVIEW_TOKEN:\s*([a-f0-9]+)/i)?.[1]
+    expect(token).toBeTruthy()
+
+    const progress = await handleToolExecute({
+      name: "submit_review_rubric_item",
+      args: {
+        review_token: token,
+        criterion: "Vision alignment",
+        status: "passed",
+        evidence: "Plan directly addresses the requested workflow hardening.",
+        severity: "blocking",
+        score: "9",
+      },
+      context: { sessionId: "s1", directory: tmpDir, invocation: "isolated-reviewer" },
+    }, ctx) as string
+
+    expect(progress).toContain("Review rubric item recorded")
+    const state = ctx.engine!.store.get("s1")
+    const item = state?.reviewAttempts[0]?.rubricItems.find((candidate) => candidate.criterion === "Vision alignment")
+    expect(item?.status).toBe("passed")
+    expect(item?.score).toBe(9)
+
+    const final = await handleToolExecute({
+      name: "submit_phase_review",
+      args: { review_error: "phase-review timed out after 180000ms", review_token: token },
+      context: { sessionId: "s1", directory: tmpDir, invocation: "isolated-reviewer" },
+    }, ctx) as string
+
+    expect(final).toContain("Isolated phase review submitted")
+    const completedItem = ctx.engine!.store.get("s1")?.reviewAttempts[0]?.rubricItems.find((candidate) => candidate.criterion === "Vision alignment")
+    expect(completedItem?.status).toBe("passed")
   })
 
   it("submit_phase_review rejects stale reviewed artifact files", async () => {

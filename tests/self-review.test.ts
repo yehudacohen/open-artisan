@@ -164,7 +164,7 @@ describe("dispatchSelfReview — all criteria met", () => {
     const dispatcher = makeDispatcher(makeReviewResponse())
     await dispatchSelfReview(dispatcher, BASE_REQ)
 
-    expect(dispatcher._promptMock.mock.calls[0]?.[1]).toEqual({ submissionTool: { name: "submit_phase_review_result" } })
+    expect(dispatcher._promptMock.mock.calls[0]?.[1]).toEqual({ submissionTool: { name: "submit_phase_review_result", progress: { kind: "phase", subject: "PLANNING" } } })
   })
 })
 
@@ -492,8 +492,8 @@ describe("dispatchSelfReview — invalid JSON recovery", () => {
     expect(result.success).toBe(true)
     const firstOptions = dispatcher._promptMock.mock.calls[0]?.[1] as any
     const repairOptions = dispatcher._promptMock.mock.calls[1]?.[1] as any
-    expect(firstOptions).toEqual({ submissionTool: { name: "submit_phase_review_result" } })
-    expect(repairOptions).toEqual({ submissionTool: { name: "submit_phase_review_result" } })
+    expect(firstOptions).toEqual({ submissionTool: { name: "submit_phase_review_result", progress: { kind: "phase", subject: "PLANNING" } } })
+    expect(repairOptions).toEqual({ submissionTool: { name: "submit_phase_review_result", progress: { kind: "phase", subject: "PLANNING" } } })
     expect(firstOptions?.responseFormat).toBeUndefined()
     expect(repairOptions?.responseFormat).toBeUndefined()
   })

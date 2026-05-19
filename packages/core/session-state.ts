@@ -78,6 +78,8 @@ function freshState(sessionId: string): WorkflowState {
     childWorkflows: [],
     concurrency: { maxParallelTasks: 1 },
     reviewArtifactFiles: [],
+    reviewArtifactSubmissions: [],
+    reviewAttempts: [],
     realWorldAcceptanceScenario: null,
   }
 }
@@ -191,6 +193,10 @@ function migrateState(migrated: Record<string, unknown>): void {
   migrated["pendingAllowlistExpansions"] ??= []
   // v27 → v28: add compact tool failure history.
   migrated["toolFailureHistory"] ??= []
+  // v29 → v30: add structured request_review submission history.
+  migrated["reviewArtifactSubmissions"] ??= []
+  // v30 → v31: add reviewer attempt/rubric progress history.
+  migrated["reviewAttempts"] ??= []
   // retryCount is transient — reset on load so the idle handler starts fresh.
   // If the agent was stuck before a restart, it deserves a clean retry budget.
   migrated["retryCount"] = 0

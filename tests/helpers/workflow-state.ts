@@ -46,6 +46,8 @@ export function makeWorkflowState(overrides: Partial<WorkflowState> = {}): Workf
     childWorkflows: [],
     concurrency: { maxParallelTasks: 1 },
     reviewArtifactFiles: [],
+    reviewArtifactSubmissions: [],
+    reviewAttempts: [],
     realWorldAcceptanceScenario: null,
     ...overrides,
   }

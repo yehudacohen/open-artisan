@@ -16,7 +16,7 @@ import { extractEphemeralSessionId, extractTextFromPromptResult } from "../../..
 import type { OpencodeClient } from "@opencode-ai/sdk"
 
 export interface ReviewerToolSubmissionStore {
-  begin(sessionId: string, toolName: string): void
+  begin(sessionId: string, toolName: string, context?: { parentSessionId?: string; kind?: "task" | "phase"; subject?: string; attemptId?: string }): void
   take(sessionId: string, toolName: string): string | null
   clear(sessionId: string): void
 }
@@ -308,7 +308,15 @@ export function createOpenCodeSubagentDispatcher(client: OpencodeClient, options
           const submissionToolName = promptOptions?.submissionTool?.name
           const requireSubmissionTool = promptOptions?.submissionTool?.required === true ||
             (!!options.reviewerToolSubmissions && requiresLocalSubmissionTool(submissionToolName))
-          if (submissionToolName) options.reviewerToolSubmissions?.begin(sessionId, submissionToolName)
+          if (submissionToolName) {
+            const progress = promptOptions?.submissionTool?.progress
+            options.reviewerToolSubmissions?.begin(sessionId, submissionToolName, {
+              ...(opts.parentId ? { parentSessionId: opts.parentId } : {}),
+              ...(progress?.kind ? { kind: progress.kind } : {}),
+              ...(progress?.subject ? { subject: progress.subject } : {}),
+              ...(progress?.attemptId ? { attemptId: progress.attemptId } : {}),
+            })
+          }
           // Generate a unique part ID with "prt" prefix — required by the OpenCode API
           const partId = `prt_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
           let result: unknown = null

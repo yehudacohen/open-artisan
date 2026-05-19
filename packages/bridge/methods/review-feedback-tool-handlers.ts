@@ -18,6 +18,8 @@ import { MarkSatisfiedToolSchema, RequestReviewToolSchema } from "../../core/sch
 import { computeMarkSatisfiedTransition, computeRequestReviewTransition } from "../../core/tools/transitions"
 import { createImplDAG } from "../../core/dag"
 import { parseImplPlan, validateExecutableImplPlan } from "../../core/impl-plan-parser"
+import { parseRequestReviewArtifactData } from "../../core/tools/request-review"
+import { buildReviewArtifactSubmission, recordReviewArtifactSubmission } from "../../core/tools/review-artifact-submissions"
 
 function requireState(ctx: BridgeContext, sessionId: string): WorkflowState {
   const state = ctx.engine!.store.get(sessionId)
@@ -211,6 +213,8 @@ export const handleRequestReview: ToolHandler = async (args, toolCtx, ctx) => {
   }
   const parsedArgs = parseToolArgs(RequestReviewToolSchema, args)
   if (!parsedArgs.success) return `Error: ${parsedArgs.error}`
+  const artifactData = parseRequestReviewArtifactData(parsedArgs.data)
+  if (!artifactData.success) return `Error: ${artifactData.error}`
 
   if (state.phaseState === "REVIEW") {
     let artifactFiles = parsedArgs.data.artifact_files.map((file) =>
@@ -250,6 +254,14 @@ export const handleRequestReview: ToolHandler = async (args, toolCtx, ctx) => {
         draft.artifactDiskPaths[artifactKey] = artifactDiskPath
       }
       draft.reviewArtifactFiles = artifactFiles
+      recordReviewArtifactSubmission(draft, buildReviewArtifactSubmission({
+        phase: state.phase,
+        ...(artifactKey ? { artifactKey } : {}),
+        summary: parsedArgs.data.summary,
+        artifactDescription: parsedArgs.data.artifact_description,
+        artifactFiles,
+        artifactData: artifactData.artifactData,
+      }))
     })
 
     const diskMsg = artifactDiskPath ? ` Artifact updated at ${artifactDiskPath}.` : ""
@@ -316,6 +328,14 @@ export const handleRequestReview: ToolHandler = async (args, toolCtx, ctx) => {
       draft.reviewArtifactHash = reviewHash
     }
     draft.reviewArtifactFiles = artifactFiles
+    recordReviewArtifactSubmission(draft, buildReviewArtifactSubmission({
+      phase: state.phase,
+      ...(artifactKey ? { artifactKey } : {}),
+      summary: parsedArgs.data.summary,
+      artifactDescription: parsedArgs.data.artifact_description,
+      artifactFiles,
+      artifactData: artifactData.artifactData,
+    }))
   })
 
   const diskMsg = artifactDiskPath ? ` Artifact written to ${artifactDiskPath}.` : ""

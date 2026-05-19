@@ -18,7 +18,7 @@ import { extractApprovedFileAllowlist } from "../../core/tools/plan-allowlist"
 import { parseToolArgs } from "../../core/tool-args"
 import { SubmitFeedbackToolSchema } from "../../core/schemas"
 import { computeSubmitFeedbackApproveTransition, computeSubmitFeedbackReviseTransition } from "../../core/tools/transitions"
-import { applyPendingAllowlistExpansions } from "../../core/tools/allowlist-expansion"
+import { applyPendingAllowlistExpansions, buildAllowlistWithPendingExpansions } from "../../core/tools/allowlist-expansion"
 import { computeForwardSkip } from "../../core/fast-forward"
 import {
   buildSubmitFeedbackClarificationMessage,
@@ -167,6 +167,10 @@ function createIncrementalAllowlistResolver(
     get() {
       if (approvedFiles) return normalizeApprovalFilePaths(approvedFiles, cwd)
       if (derivedApprovedFiles) return derivedApprovedFiles
+      if (state.pendingAllowlistExpansions.length > 0 && (state.phase === "INTERFACES" || state.phase === "TESTS")) {
+        derivedApprovedFiles = buildAllowlistWithPendingExpansions(state, cwd)
+        return derivedApprovedFiles
+      }
       const planContent = readArtifactContent(state, "plan")
       derivedApprovedFiles = planContent ? extractApprovedFileAllowlist(planContent, cwd) : []
       return derivedApprovedFiles
@@ -313,7 +317,11 @@ function validateIncrementalReviewAllowlist(
   allowlists: IncrementalAllowlistResolver,
 ): string | null {
   if (state.mode !== "INCREMENTAL" || (state.phase !== "INTERFACES" && state.phase !== "TESTS")) return null
-  const effectiveAllowlist = state.fileAllowlist.length === 0 ? allowlists.get() : state.fileAllowlist
+  const effectiveAllowlist = state.pendingAllowlistExpansions.length > 0
+    ? allowlists.get()
+    : state.fileAllowlist.length === 0
+      ? allowlists.get()
+      : state.fileAllowlist
   const reviewedOutsideAllowlist = findReviewedArtifactFilesOutsideAllowlist({
     reviewArtifactFiles: state.reviewArtifactFiles,
     artifactDiskPaths: state.artifactDiskPaths,
@@ -435,6 +443,9 @@ async function applyApprovalTransition(
       draft.fileAllowlist = normalizeApprovalFilePaths(args.approved_files, cwd)
     } else if (state.phase === "PLANNING" && state.mode === "INCREMENTAL" && allowlists.getDerived()) {
       draft.fileAllowlist = allowlists.getDerived() ?? []
+    } else if (state.mode === "INCREMENTAL" && state.pendingAllowlistExpansions.length > 0 && (state.phase === "INTERFACES" || state.phase === "TESTS")) {
+      draft.fileAllowlist = effectiveAllowlist
+      draft.pendingAllowlistExpansions = []
     } else if (
       state.mode === "INCREMENTAL" &&
       draft.fileAllowlist.length === 0 &&
@@ -457,7 +468,7 @@ async function applyApprovalTransition(
         phase: state.phase,
         approvalCount: approval.phaseCount,
         featureName: state.featureName,
-        ...(state.mode === "INCREMENTAL" ? { fileAllowlist: state.fileAllowlist } : {}),
+        ...(state.mode === "INCREMENTAL" ? { fileAllowlist: effectiveAllowlist } : {}),
         ...(state.reviewArtifactFiles.length > 0 ? { expectedFiles: state.reviewArtifactFiles } : {}),
       },
     )

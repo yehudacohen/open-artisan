@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test"
 
-import { classifyWorkflowNextAction } from "#core/workflow-next-action"
+import { buildWorkflowRuntimeExplanation, classifyWorkflowNextAction } from "#core/workflow-next-action"
 import type { WorkflowNextActionKind } from "#core/workflow-next-action"
 
 describe("classifyWorkflowNextAction", () => {
@@ -49,5 +49,27 @@ describe("classifyWorkflowNextAction", () => {
     expect(result.nextAction).toBe(nextAction)
     expect(result.shouldContinue).toBe(false)
     expect(result.stopReason).toBeTruthy()
+  })
+})
+
+describe("buildWorkflowRuntimeExplanation", () => {
+  it("summarizes phase, blockage reason, next action, and last failure", () => {
+    const explanation = buildWorkflowRuntimeExplanation({
+      phase: "DISCOVERY",
+      phaseState: "REVIEW",
+      mode: "INCREMENTAL",
+      toolFailureHistory: [{
+        toolName: "mark_satisfied",
+        message: "Only 1 blocking criteria submitted",
+        count: 2,
+        phase: "DISCOVERY",
+        phaseState: "REVIEW",
+      }],
+    })
+
+    expect(explanation).toContain("Current phase: DISCOVERY/REVIEW (INCREMENTAL)")
+    expect(explanation).toContain("Why blocked: adapter/runtime action is required")
+    expect(explanation).toContain("Valid next action: Dispatch isolated phase review for DISCOVERY")
+    expect(explanation).toContain("Last failure: mark_satisfied x2")
   })
 })

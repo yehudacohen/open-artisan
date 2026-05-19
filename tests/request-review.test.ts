@@ -6,7 +6,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { validateFileBasedReviewArtifacts } from "#core/tools/file-artifact-validation"
-import { processRequestReview } from "#core/tools/request-review"
+import { parseRequestReviewArtifactData, processRequestReview } from "#core/tools/request-review"
 
 function requestReviewArgs(overrides: { summary: string; artifact_description: string }) {
   return { ...overrides, artifact_files: ["/tmp/artifact.md"] }
@@ -98,6 +98,32 @@ describe("processRequestReview — phase instructions", () => {
     }))
     // Ensures the review instructions emphasize file reading
     expect(result.phaseInstructions.toLowerCase()).toContain("read")
+  })
+})
+
+describe("parseRequestReviewArtifactData", () => {
+  it("parses structured artifact metadata from request_review", () => {
+    const result = parseRequestReviewArtifactData({
+      summary: "Plan ready",
+      artifact_description: "Plan artifact",
+      artifact_files: ["/tmp/plan.md"],
+      artifact_data_json: JSON.stringify({ requiredSections: ["scenario"], allowlistSource: "tool" }),
+    })
+
+    expect(result.success).toBe(true)
+    expect(result.success ? result.artifactData : null).toEqual({ requiredSections: ["scenario"], allowlistSource: "tool" })
+  })
+
+  it("rejects non-object structured artifact metadata", () => {
+    const result = parseRequestReviewArtifactData({
+      summary: "Plan ready",
+      artifact_description: "Plan artifact",
+      artifact_files: ["/tmp/plan.md"],
+      artifact_data_json: "[]",
+    })
+
+    expect(result.success).toBe(false)
+    expect(result.success ? "" : result.error).toContain("JSON object")
   })
 })
 

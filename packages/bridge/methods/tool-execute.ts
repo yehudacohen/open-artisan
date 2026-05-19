@@ -26,7 +26,7 @@ import { handleQueryChildWorkflow, handleQueryParentWorkflow } from "./query-wor
 import { handleAnalyzeTaskBoundaryChange, handleApplyTaskBoundaryChange } from "./task-boundary-tool-handlers"
 import { handleCheckPriorWorkflow, handleResetTask, handleResolveHumanGate } from "./implementation-control-tool-handlers"
 import { createAutoApproveToolHandlers } from "./auto-approve-tool-handlers"
-import { handleSubmitPhaseReview, handleSubmitTaskReview, taskReviewArtifactHash } from "./review-submission-tool-handlers"
+import { handleSubmitPhaseReview, handleSubmitReviewRubricItem, handleSubmitTaskReview, taskReviewArtifactHash } from "./review-submission-tool-handlers"
 import { issueReviewSubmissionToken } from "./review-submission-tokens"
 import { artifactFilesHash, handleMarkSatisfied, handleRequestReview } from "./review-feedback-tool-handlers"
 import { handleSubmitFeedback } from "./feedback-tool-handlers"
@@ -73,6 +73,7 @@ import {
 } from "../../core/runtime-persistence"
 import { collectWorktreeObservations } from "../../core/worktree-observation"
 import type { DriftToolCallPlan } from "../../core/drift"
+import { buildTaskReviewRubricItems, createReviewAttempt, upsertReviewAttempt } from "../../core/tools/review-attempts"
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -175,7 +176,7 @@ function buildTaskReviewPendingMessage(taskId: string, implementationSummary: st
 }
 
 function appendReviewerTokenInstruction(prompt: string, token: string): string {
-  return `${prompt}\n\n---\n\nOPEN_ARTISAN_REVIEW_TOKEN: ${token}\nAdapters must include this one-time token as \`review_token\` when submitting the isolated reviewer result.`
+  return `${prompt}\n\n---\n\nOPEN_ARTISAN_REVIEW_TOKEN: ${token}\nAdapters must include this one-time token as \`review_token\` when submitting incremental \`submit_review_rubric_item\` progress and the final isolated reviewer result.`
 }
 
 /**
@@ -548,6 +549,7 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
   mark_task_complete: handleMarkTaskComplete,
   submit_task_review: handleSubmitTaskReview,
   submit_phase_review: handleSubmitPhaseReview,
+  submit_review_rubric_item: handleSubmitReviewRubricItem,
   submit_auto_approve: handleSubmitAutoApprove,
   reset_task: handleResetTask,
   check_prior_workflow: handleCheckPriorWorkflow,
@@ -573,7 +575,7 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
   roadmap_derive_execution_slice: handleRoadmapDeriveExecutionSlice,
 }
 
-const REVIEW_SUBMISSION_TOOLS = new Set(["submit_task_review", "submit_phase_review"])
+const REVIEW_SUBMISSION_TOOLS = new Set(["submit_task_review", "submit_phase_review", "submit_review_rubric_item"])
 
 // ---------------------------------------------------------------------------
 // task.getReviewContext — returns review prompt for pending task review
@@ -598,7 +600,19 @@ export const handleTaskGetReviewContext: MethodHandler = async (params, ctx) => 
 
   const prompt = await buildReviewContextForTask(state, taskId, ctx.projectDir ?? process.cwd(), ctx.openArtisanServices)
   if (!prompt) return null
-  const token = issueReviewSubmissionToken(ctx, p.sessionId, "task", taskId, taskReviewArtifactHash(state, taskId, ctx.projectDir ?? process.cwd()))
+  const artifactHash = taskReviewArtifactHash(state, taskId, ctx.projectDir ?? process.cwd())
+  await ctx.engine!.store.update(p.sessionId, (draft) => {
+    const existing = draft.reviewAttempts.find((attempt) => attempt.kind === "task" && attempt.subject === taskId && attempt.status === "started")
+    if (!existing) {
+      upsertReviewAttempt(draft, createReviewAttempt({
+        kind: "task",
+        subject: taskId,
+        rubricItems: buildTaskReviewRubricItems(buildAdjacentTasksForTask(draft.implDag, taskId).length > 0),
+        ...(artifactHash ? { artifactHash } : {}),
+      }))
+    }
+  })
+  const token = issueReviewSubmissionToken(ctx, p.sessionId, "task", taskId, artifactHash)
   return appendReviewerTokenInstruction(prompt, token)
 }
 
@@ -619,6 +633,12 @@ export const handlePhaseGetReviewContext: MethodHandler = async (params, ctx) =>
   if (!artifactHash) return null
   const prompt = buildPhaseReviewContext(state, directory)
   if (!prompt) return null
+  await ctx.engine!.store.update(p.sessionId, (draft) => {
+    const existing = draft.reviewAttempts.find((attempt) => attempt.kind === "phase" && attempt.subject === state.phase && attempt.status === "started")
+    if (!existing) {
+      upsertReviewAttempt(draft, createReviewAttempt({ kind: "phase", subject: state.phase, rubricItems: [], artifactHash }))
+    }
+  })
   const token = issueReviewSubmissionToken(ctx, p.sessionId, "phase", state.phase, artifactHash)
   return appendReviewerTokenInstruction(prompt, token)
 }

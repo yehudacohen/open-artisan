@@ -333,6 +333,7 @@ export const RequestReviewToolSchema = z.object({
   summary: z.string().min(1),
   artifact_description: z.string().min(1),
   artifact_files: z.array(z.string()).min(1, "artifact_files must list at least one on-disk artifact file"),
+  artifact_data_json: z.string().optional(),
 }).strict()
 
 export const MarkSatisfiedToolSchema = z.object({
@@ -429,6 +430,14 @@ export const SubmitPhaseReviewResultToolSchema = z.object({
     severity: z.enum(["blocking", "suggestion", "design-invariant"]).optional(),
     score: z.string().optional(),
   }).strict()),
+}).strict()
+export const SubmitReviewRubricItemToolSchema = z.object({
+  review_token: z.string().min(1).optional(),
+  criterion: z.string().min(1),
+  status: z.enum(["pending", "passed", "failed", "unknown"]),
+  evidence: z.string().optional(),
+  severity: z.enum(["blocking", "suggestion", "design-invariant"]).optional(),
+  score: z.union([z.string(), z.number()]).optional(),
 }).strict()
 export const SubmitChangeProposalReviewResultToolSchema = ChangeProposalReviewOutputSchema
 export const SubmitTaskDriftReviewResultToolSchema = TaskDriftReviewOutputSchema

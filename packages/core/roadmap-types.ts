@@ -157,6 +157,24 @@ export interface WorkflowRoadmapContext {
   attachedAt: string
 }
 
+export interface RoadmapContextAttachmentInput {
+  roadmapItemIds: string[]
+  featureName: string
+  executionSliceId?: string
+}
+
+export interface RoadmapContextWorkflowLinkInput {
+  featureName: string
+  roadmapContext: WorkflowRoadmapContext | null
+}
+
+export type RoadmapContextAttachmentResult = RoadmapResult<WorkflowRoadmapContext | null>
+
+export interface RoadmapContextAttachmentService {
+  deriveContext(input: RoadmapContextAttachmentInput): Promise<RoadmapContextAttachmentResult>
+  linkWorkflow(input: RoadmapContextWorkflowLinkInput): Promise<RoadmapResult<WorkflowRoadmapLink | null>>
+}
+
 export type RoadmapPersistenceKind = "filesystem" | "pglite"
 
 export interface RoadmapPGliteConnectionOptions {

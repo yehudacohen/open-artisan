@@ -58,6 +58,21 @@ function withAutoSkipBlockedReason(steps: RevisionStep[], reason: string | null)
   return steps.map((step) => ({ ...step, autoSkipBlockedReason: reason }))
 }
 
+function driftReportAutoSkipBlockedReason(reason: string): string | null {
+  const normalized = reason.toLowerCase()
+  if (
+    normalized.includes("artifact drift affects") ||
+    normalized.includes("artifact drift reported") ||
+    normalized.includes("changed files outside the approved allowlist") ||
+    normalized.includes("completed task drift affects") ||
+    normalized.includes("drift report") ||
+    normalized.includes("drift repair")
+  ) {
+    return "blocking drift report requires explicit artifact updates"
+  }
+  return null
+}
+
 function isBacktrackAuthoringState(state: WorkflowState): boolean {
   return (
     state.phaseState === "DRAFT" ||
@@ -148,7 +163,9 @@ export async function handleProposeBacktrack(
     }
   }
 
-  const autoSkipBlockedReason = getAutoSkipBlockedReasonForClassification(plan)
+  const autoSkipBlockedReason =
+    getAutoSkipBlockedReasonForClassification(plan) ??
+    driftReportAutoSkipBlockedReason(args.reason)
   const revisionSteps = withAutoSkipBlockedReason(plan.revisionSteps, autoSkipBlockedReason)
   const { classification } = plan
 

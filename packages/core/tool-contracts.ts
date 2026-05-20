@@ -336,6 +336,23 @@ export interface ToolContractOperationalDrift {
   affectedToolNames: readonly string[]
 }
 
+export type DriftBacktrackAutoSkipBlockReason =
+  | "scope-changing backtrack requires explicit artifact updates"
+  | "scope expansion requires explicit artifact updates"
+  | "blocking drift report requires explicit artifact updates"
+
+export type DriftBacktrackSignal =
+  | "artifact-drift"
+  | "allowlist-drift"
+  | "completed-task-drift"
+  | "drift-report"
+  | "drift-repair"
+
+export interface DriftBacktrackAutoSkipPolicy {
+  signals: readonly DriftBacktrackSignal[]
+  blockedReason: DriftBacktrackAutoSkipBlockReason
+}
+
 /** Metric names emitted for projection/validation observability. */
 export type ToolContractProjectionMetricName =
   | "tool-contracts.validation"

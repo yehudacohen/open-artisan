@@ -32,7 +32,7 @@ import {
   validateSubmitFeedbackGate,
   validateSubmitFeedbackImplPlanApproval,
 } from "../../core/tools/submit-feedback"
-import { persistTaskDispatchClaims } from "../../core/runtime-persistence"
+import { persistTaskDispatchClaims, persistTaskGraph } from "../../core/runtime-persistence"
 
 function requireState(ctx: BridgeContext, sessionId: string): WorkflowState {
   const state = ctx.engine!.store.get(sessionId)
@@ -307,6 +307,7 @@ function validateImplPlanApproval(
     effectiveAllowlist,
     cwd,
     parseFixInstruction: "Fix the plan format and re-submit request_review with corrected artifact_files.",
+    roadmapContext: state.roadmapContext,
   })
   return implPlanApprovalError ? `Error: ${implPlanApprovalError}` : null
 }
@@ -397,6 +398,22 @@ async function applyApprovalTransition(
     resolvedHumanGates.length > 0 &&
     approval.nextPhase === "DONE"
 
+  let approvedImplDagForApproval: WorkflowState["implDag"] | null = null
+  if (state.phase === "IMPL_PLAN" && materializedImplPlanForApproval?.success) {
+    approvedImplDagForApproval = materializedImplPlanForApproval.nodes
+    if (materializedImplPlanForApproval.currentTaskId) {
+      approvedImplDagForApproval = applyDispatch(
+        { implDag: approvedImplDagForApproval },
+        materializedImplPlanForApproval.currentTaskId,
+      )
+    }
+    const taskGraphResult = await persistTaskGraph(ctx.openArtisanServices, {
+      ...state,
+      implDag: approvedImplDagForApproval,
+    })
+    if (!taskGraphResult.ok) return `Error: ${taskGraphResult.error.message}`
+  }
+
   await store.update(toolCtx.sessionId, (draft) => {
     draft.phase = structuralTarget.phase
     draft.phaseState = structuralTarget.phaseState
@@ -431,10 +448,9 @@ async function applyApprovalTransition(
     }
     if (state.phase === "IMPL_PLAN") {
       if (materializedImplPlanForApproval?.success) {
-        draft.implDag = materializedImplPlanForApproval.nodes
+        draft.implDag = approvedImplDagForApproval
         draft.currentTaskId = materializedImplPlanForApproval.currentTaskId
         if (materializedImplPlanForApproval.currentTaskId) {
-          draft.implDag = applyDispatch(draft, materializedImplPlanForApproval.currentTaskId)
           draft.phaseState = "DRAFT"
         }
       }
@@ -459,7 +475,8 @@ async function applyApprovalTransition(
       draft.reviewArtifactFiles = []
     }
   })
-  await persistCurrentTaskClaim(ctx.openArtisanServices, store.get(toolCtx.sessionId), toolCtx.sessionId)
+  const updatedState = store.get(toolCtx.sessionId)
+  await persistCurrentTaskClaim(ctx.openArtisanServices, updatedState, toolCtx.sessionId)
 
   try {
     await createGitCheckpoint(

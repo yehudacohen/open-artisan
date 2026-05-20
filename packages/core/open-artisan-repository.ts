@@ -16,7 +16,18 @@ import type {
   WorkflowMode,
 } from "./workflow-primitives"
 import type { WorkflowState } from "./workflow-state-types"
-import type { RoadmapDocument, RoadmapItemKind, RoadmapItemStatus } from "./roadmap-types"
+import type {
+  RoadmapDeleteEdgeInput,
+  RoadmapDeleteItemInput,
+  RoadmapDocument,
+  RoadmapItemKind,
+  RoadmapItemStatus,
+  RoadmapMutationResult,
+  RoadmapReplaceInput,
+  RoadmapUpdateItemStatusInput,
+  RoadmapUpsertEdgeInput,
+  RoadmapUpsertItemInput,
+} from "./roadmap-types"
 
 export type DbRecordId = string
 export type IsoTimestamp = string
@@ -28,6 +39,7 @@ export type OpenArtisanDbErrorCode =
   | "conflict"
   | "invalid-state"
   | "invalid-input"
+  | "invalid-document"
   | "lock-timeout"
   | "schema-mismatch"
   | "storage-failure"
@@ -447,11 +459,17 @@ export interface OpenArtisanRepository {
   lockRoadmap(options?: OpenArtisanRepositoryLockOptions): Promise<OpenArtisanDbResult<OpenArtisanRepositoryLock>>
 
   createRoadmapItem(item: DbRoadmapItem): Promise<OpenArtisanDbResult<DbRoadmapItem>>
+  upsertRoadmapItem(input: RoadmapUpsertItemInput): Promise<OpenArtisanDbResult<RoadmapMutationResult>>
+  updateRoadmapItemStatus(input: RoadmapUpdateItemStatusInput): Promise<OpenArtisanDbResult<RoadmapMutationResult>>
+  deleteRoadmapItem(input: RoadmapDeleteItemInput): Promise<OpenArtisanDbResult<RoadmapMutationResult>>
   replaceRoadmap(document: RoadmapDocument): Promise<OpenArtisanDbResult<RoadmapDocument>>
+  replaceRoadmapDocument(input: RoadmapReplaceInput): Promise<OpenArtisanDbResult<RoadmapMutationResult>>
   readRoadmap(): Promise<OpenArtisanDbResult<RoadmapDocument | null>>
   deleteRoadmap(): Promise<OpenArtisanDbResult<null>>
+  deleteRoadmapDocument(): Promise<OpenArtisanDbResult<RoadmapMutationResult>>
   listRoadmapItems(query?: { featureName?: string; status?: RoadmapItemStatus }): Promise<OpenArtisanDbResult<DbRoadmapItem[]>>
-  upsertRoadmapEdge(edge: DbRoadmapEdge): Promise<OpenArtisanDbResult<DbRoadmapEdge>>
+  upsertRoadmapEdge(edge: DbRoadmapEdge | RoadmapUpsertEdgeInput): Promise<OpenArtisanDbResult<DbRoadmapEdge | RoadmapMutationResult>>
+  deleteRoadmapEdge(input: RoadmapDeleteEdgeInput): Promise<OpenArtisanDbResult<RoadmapMutationResult>>
   listRoadmapEdges(itemId?: DbRecordId): Promise<OpenArtisanDbResult<DbRoadmapEdge[]>>
   createExecutionSlice(slice: DbExecutionSlice, itemIds: DbRecordId[]): Promise<OpenArtisanDbResult<DbExecutionSlice>>
   getExecutionSlice(sliceId: DbRecordId): Promise<OpenArtisanDbResult<{ slice: DbExecutionSlice; itemIds: DbRecordId[] } | null>>

@@ -16,9 +16,21 @@ import type { ToolExecuteParams } from "../protocol"
 import { SESSION_NOT_FOUND, INVALID_PARAMS } from "../protocol"
 import type { WorkflowState } from "../../core/workflow-state-types"
 import type { ArtifactKey, WorkflowEvent } from "../../core/workflow-primitives"
-import type { OpenArtisanServices } from "../../core/open-artisan-services"
+import { createRoadmapContextAttachmentService, type OpenArtisanServices } from "../../core/open-artisan-services"
+import type { WorkflowRoadmapContext } from "../../core/roadmap-types"
 import type { ToolContext, ToolHandler } from "./tool-handler-types"
-import { handleRoadmapDeriveExecutionSlice, handleRoadmapQuery, handleRoadmapRead } from "./roadmap-tool-handlers"
+import {
+  handleRoadmapDelete,
+  handleRoadmapDeleteEdge,
+  handleRoadmapDeleteItem,
+  handleRoadmapDeriveExecutionSlice,
+  handleRoadmapQuery,
+  handleRoadmapRead,
+  handleRoadmapReplace,
+  handleRoadmapUpdateItemStatus,
+  handleRoadmapUpsertEdge,
+  handleRoadmapUpsertItem,
+} from "./roadmap-tool-handlers"
 import { createDriftToolHandlers } from "./drift-tool-handlers"
 import { handleApplyPatchSuggestion, handleResolvePatchSuggestion, handleRoutePatchSuggestions } from "./patch-suggestion-tool-handlers"
 import { handleProposeDirectApplication } from "./direct-application-tool-handlers"
@@ -280,6 +292,30 @@ function buildPhaseReviewContext(
 
 // ---- select_mode ----
 
+async function buildBridgeRoadmapContextForSelectMode(
+  ctx: BridgeContext,
+  input: { roadmapItemIds: string[]; executionSliceId: string | null; featureName: string },
+): Promise<{ ok: true; context: WorkflowRoadmapContext | null } | { ok: false; error: string }> {
+  if (input.roadmapItemIds.length === 0 && !input.executionSliceId) {
+    return { ok: true, context: null }
+  }
+  if (!ctx.roadmapService) {
+    return { ok: false, error: "Roadmap service was not initialized at lifecycle.init" }
+  }
+
+  const service = createRoadmapContextAttachmentService({
+    roadmapSliceService: ctx.roadmapService,
+    executionSlices: ctx.openArtisanServices?.executionSlices ?? null,
+    workflow: ctx.openArtisanServices?.workflow ?? null,
+  })
+  const context = await service.deriveContext({
+    roadmapItemIds: input.roadmapItemIds,
+    featureName: input.featureName,
+    ...(input.executionSliceId ? { executionSliceId: input.executionSliceId } : {}),
+  })
+  return context.ok ? { ok: true, context: context.value } : { ok: false, error: context.error.message }
+}
+
 const handleSelectMode: ToolHandler = async (args, toolCtx, ctx) => {
   const { store, sm } = ctx.engine!
   const parsed = parseSelectModeArgs(args)
@@ -344,14 +380,32 @@ const handleSelectMode: ToolHandler = async (args, toolCtx, ctx) => {
   const outcome = sm.transition("MODE_SELECT", "DRAFT", "mode_selected", parsed.mode)
   if (!outcome.ok) return `Error: ${outcome.message}`
 
+  const roadmapContextResult = await buildBridgeRoadmapContextForSelectMode(ctx, {
+    roadmapItemIds: parsed.roadmapItemIds,
+    executionSliceId: parsed.executionSliceId,
+    featureName,
+  })
+  if (!roadmapContextResult.ok) return `Error: ${roadmapContextResult.error}`
+  const roadmapContext = roadmapContextResult.context
+
   await store.update(toolCtx.sessionId, (draft) => {
     draft.mode = parsed.mode
     draft.featureName = featureName
+    draft.roadmapContext = roadmapContext
     draft.phase = outcome.nextPhase
     draft.phaseState = outcome.nextPhaseState
     draft.iterationCount = 0
     draft.retryCount = 0
   })
+
+  if (ctx.roadmapService) {
+    const link = await createRoadmapContextAttachmentService({
+      roadmapSliceService: ctx.roadmapService,
+      executionSlices: ctx.openArtisanServices?.executionSlices ?? null,
+      workflow: ctx.openArtisanServices?.workflow ?? null,
+    }).linkWorkflow({ featureName, roadmapContext })
+    if (!link.ok) return `Error: ${link.error.message}`
+  }
 
   // policyVersion bumped automatically by setPostUpdateHook on store.update
   if (switchingFeatures) {
@@ -573,6 +627,13 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
   roadmap_read: handleRoadmapRead,
   roadmap_query: handleRoadmapQuery,
   roadmap_derive_execution_slice: handleRoadmapDeriveExecutionSlice,
+  roadmap_upsert_item: handleRoadmapUpsertItem,
+  roadmap_update_item_status: handleRoadmapUpdateItemStatus,
+  roadmap_delete_item: handleRoadmapDeleteItem,
+  roadmap_upsert_edge: handleRoadmapUpsertEdge,
+  roadmap_delete_edge: handleRoadmapDeleteEdge,
+  roadmap_replace: handleRoadmapReplace,
+  roadmap_delete: handleRoadmapDelete,
 }
 
 const REVIEW_SUBMISSION_TOOLS = new Set(["submit_task_review", "submit_phase_review", "submit_review_rubric_item"])

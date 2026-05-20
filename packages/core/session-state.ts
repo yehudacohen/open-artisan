@@ -50,6 +50,7 @@ function freshState(sessionId: string): WorkflowState {
     intentBaseline: null,
     modeDetectionNote: null,
     discoveryReport: null,
+    roadmapContext: null,
     currentTaskId: null,
     feedbackHistory: [],
     backtrackContext: null,
@@ -197,6 +198,8 @@ function migrateState(migrated: Record<string, unknown>): void {
   migrated["reviewArtifactSubmissions"] ??= []
   // v30 → v31: add reviewer attempt/rubric progress history.
   migrated["reviewAttempts"] ??= []
+  // v31 → v32: add optional roadmap execution-slice context.
+  migrated["roadmapContext"] ??= null
   // retryCount is transient — reset on load so the idle handler starts fresh.
   // If the agent was stuck before a restart, it deserves a clean retry budget.
   migrated["retryCount"] = 0

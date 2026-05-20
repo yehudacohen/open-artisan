@@ -1879,6 +1879,24 @@ describe("experimental.chat.system.transform — injects workflow prompt", () =>
     expect(plugin._testStore.get(sid).phaseState).toBe("DRAFT")
   })
 
+  it("does not inject roadmap context into DISCOVERY prompts", async () => {
+    await writeRoadmapState()
+    const sid = `int-test-${Date.now()}-roadmap-context-discovery`
+    await plugin.event({ event: { type: "session.created", properties: { info: { id: sid } } } })
+    await plugin.tool.select_mode.execute(
+      { mode: "INCREMENTAL", feature_name: "roadmap-backed-workflow", roadmap_item_ids: ["item-1"] },
+      { directory: tempDir, sessionId: sid },
+    )
+
+    const output = { system: ["original"] }
+    await plugin["experimental.chat.system.transform"]({ sessionID: sid }, output)
+
+    const injected = output.system[output.system.length - 1]
+    expect(plugin._testStore.get(sid).phase).toBe("DISCOVERY")
+    expect(injected).not.toContain("Roadmap Context")
+    expect(injected).not.toContain("item-1")
+  })
+
   it("unknown session does not modify system array", async () => {
     const output = { system: ["original"] }
     await plugin["experimental.chat.system.transform"]({ sessionID: "truly-unknown-session-system" }, output)

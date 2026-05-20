@@ -30,8 +30,9 @@ const opencodePluginPackage = "@opencode-ai/plugin"
 const { tool } = await import(opencodePluginPackage) as { tool: any }
 
 import { createSessionStateStore, setPostUpdateHook, setSessionStateStoreTrace } from "../../../packages/core/session-state"
-import { migrateLegacyStateFile } from "../../../packages/core/state-backend-fs"
+import { createFileSystemRoadmapStateBackend, migrateLegacyStateFile } from "../../../packages/core/state-backend-fs"
 import { createOpenArtisanRuntimeBackend } from "../../../packages/core/open-artisan-runtime-backends"
+import { createRoadmapSliceService } from "../../../packages/core/roadmap-slice-service"
 import { handleToolExecute } from "../../../packages/bridge/methods/tool-execute"
 import { createSessionRegistry } from "../../../packages/core/session-registry"
 import { createStateMachine } from "../../../packages/core/state-machine"
@@ -90,6 +91,7 @@ import {
   persistFastForwardRecord,
   persistPhaseReviewResult,
   persistTaskDispatchClaims,
+  persistTaskGraph,
   persistTaskReviewResult,
   persistWorktreeObservations,
   loadWorkflowFileClaims,
@@ -116,6 +118,8 @@ import { buildWorkflowSwitchMessage } from "../../../packages/core/session-switc
 import { createHash } from "node:crypto"
 import type { SessionStateStore, WorkflowState } from "../../../packages/core/workflow-state-types"
 import type { WorkflowMode, ArtifactKey, Phase } from "../../../packages/core/workflow-primitives"
+import { createRoadmapContextAttachmentService, type OpenArtisanServices } from "../../../packages/core/open-artisan-services"
+import { matchesRoadmapQuery, roadmapOk, type RoadmapSliceService, type RoadmapStateBackend, type WorkflowRoadmapContext } from "../../../packages/core/roadmap-types"
 import type { RevisionStep } from "../../../packages/core/orchestrator-types"
 import type { CriterionResult, MarkSatisfiedArgs } from "../../../packages/core/review-types"
 import { VALID_PHASE_STATES } from "../../../packages/core/workflow-primitives"
@@ -172,6 +176,51 @@ function validatePlanningReviewArtifact(state: WorkflowState, artifactFiles: str
   const errors = validatePlannedReviewedInterfaceArtifacts(content)
   if (errors.length === 0) return null
   return `${source}: ${errors.join("; ")}`
+}
+
+async function buildRoadmapContextForSelectMode(input: {
+  roadmapSliceService: RoadmapSliceService
+  services?: OpenArtisanServices
+  roadmapItemIds: string[]
+  executionSliceId: string | null
+  featureName: string
+}): Promise<{ ok: true; context: WorkflowRoadmapContext | null } | { ok: false; error: string }> {
+  const service = createRoadmapContextAttachmentService({
+    roadmapSliceService: input.roadmapSliceService,
+    executionSlices: input.services?.executionSlices ?? null,
+    workflow: input.services?.workflow ?? null,
+  })
+  const context = await service.deriveContext({
+    roadmapItemIds: input.roadmapItemIds,
+    featureName: input.featureName,
+    ...(input.executionSliceId ? { executionSliceId: input.executionSliceId } : {}),
+  })
+  return context.ok ? { ok: true, context: context.value } : { ok: false, error: context.error.message }
+}
+
+function createSelectModeRoadmapSliceService(roadmapBackend: RoadmapStateBackend): RoadmapSliceService {
+  return createRoadmapSliceService(roadmapBackend, {
+    async queryRoadmapItems(query) {
+      const document = await roadmapBackend.readRoadmap()
+      if (!document.ok) return document
+      return roadmapOk((document.value?.items ?? []).filter((item) => matchesRoadmapQuery(item, query)))
+    },
+  })
+}
+
+async function linkWorkflowRoadmapContext(input: {
+  roadmapSliceService: RoadmapSliceService
+  services?: OpenArtisanServices
+  featureName: string
+  roadmapContext: WorkflowRoadmapContext | null
+}): Promise<string | null> {
+  const service = createRoadmapContextAttachmentService({
+    roadmapSliceService: input.roadmapSliceService,
+    executionSlices: input.services?.executionSlices ?? null,
+    workflow: input.services?.workflow ?? null,
+  })
+  const link = await service.linkWorkflow({ featureName: input.featureName, roadmapContext: input.roadmapContext })
+  return link.ok ? null : link.error.message
 }
 
 type ReviewResubmissionKind = "unchanged resubmission" | "in-place revision" | "regenerated artifact"
@@ -421,6 +470,8 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
     : join(import.meta.dirname, "..", "..", "..")  // project root fallback
   const stateDir = join(projectRoot, ".openartisan")
   const runtimeBackend = createOpenArtisanRuntimeBackend(stateDir)
+  const roadmapBackend = runtimeBackend.roadmapBackend ?? createFileSystemRoadmapStateBackend(stateDir)
+  const roadmapSliceService = createSelectModeRoadmapSliceService(roadmapBackend)
   const stateBackend = runtimeBackend.stateBackend
   const store = createSessionStateStore(stateBackend)
   const sm = createStateMachine()
@@ -672,8 +723,8 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
       pgliteDatabaseFileName: runtimeBackend.kind === "db" ? DEFAULT_OPEN_ARTISAN_DB_FILE_NAME : null,
       pgliteSchemaName: runtimeBackend.kind === "db" ? DEFAULT_OPEN_ARTISAN_DB_SCHEMA : null,
     },
-    roadmapBackend: runtimeBackend.roadmapBackend ?? null,
-    roadmapService: null,
+    roadmapBackend,
+    roadmapService: roadmapSliceService,
     openArtisanServices: runtimeBackend.services ?? null,
     runtimeBackendDispose: runtimeBackend.dispose,
     pinoLogger: null,
@@ -697,6 +748,55 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
     }, opencodeBridgeCtx)
     return typeof result === "string" ? result : JSON.stringify(result)
   }
+
+  async function executeOpenCodeBridgeTool(
+    name: string,
+    args: Record<string, unknown>,
+    context: ToolExecuteContext,
+  ): Promise<string> {
+    const sessionId = resolveSessionId(context)
+    if (!sessionId) return "Error: Could not determine session ID from tool context."
+    const result = await handleToolExecute({
+      name,
+      args,
+      context: { sessionId, directory: context.directory || projectRoot },
+    }, opencodeBridgeCtx)
+    return typeof result === "string" ? result : JSON.stringify(result)
+  }
+
+  function optionalOpenCodeSchema<T>(schema: T): T {
+    const optional = (schema as { optional?: unknown }).optional
+    return typeof optional === "function" ? optional.call(schema) : schema
+  }
+
+  const roadmapItemSchema = tool.schema.object({
+    id: tool.schema.string(),
+    kind: tool.schema.enum(["feature", "bug", "debt", "chore"]),
+    title: tool.schema.string(),
+    description: tool.schema.string().optional(),
+    status: tool.schema.enum(["todo", "in-progress", "blocked", "done", "dropped"]),
+    priority: tool.schema.number().describe("Numeric priority."),
+    featureName: tool.schema.string().optional(),
+    createdAt: tool.schema.string(),
+    updatedAt: tool.schema.string(),
+  })
+  const roadmapEdgeSchema = tool.schema.object({
+    from: tool.schema.string(),
+    to: tool.schema.string(),
+    kind: tool.schema.enum(["depends-on"]),
+  })
+  const roadmapDocumentSchema = tool.schema.object({
+    schemaVersion: tool.schema.number().describe("Positive integer roadmap schema version."),
+    items: tool.schema.array(roadmapItemSchema),
+    edges: tool.schema.array(roadmapEdgeSchema),
+  })
+  const roadmapQuerySchema = tool.schema.object({
+    itemIds: tool.schema.array(tool.schema.string()).optional(),
+    kinds: tool.schema.array(tool.schema.enum(["feature", "bug", "debt", "chore"])).optional(),
+    statuses: tool.schema.array(tool.schema.enum(["todo", "in-progress", "blocked", "done", "dropped"])).optional(),
+    featureName: tool.schema.string().optional(),
+    minPriority: tool.schema.number().optional().describe("Numeric minimum priority."),
+  })
 
   return {
     ...createPluginHooks({
@@ -892,9 +992,21 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
               "Used as a subdirectory under .openartisan/ to isolate this workflow's artifacts. " +
               "Derive from the user's request — no spaces, use hyphens.",
             ),
+          roadmap_item_ids: tool.schema.array(tool.schema.string()).optional().describe(
+            "Optional roadmap item ids to attach as planning and traceability context.",
+          ),
+          roadmapItemIds: tool.schema.array(tool.schema.string()).optional().describe(
+            "Optional camelCase alias for roadmap_item_ids.",
+          ),
+          execution_slice_id: tool.schema.string().optional().describe(
+            "Optional persisted execution slice id to attach as roadmap planning context.",
+          ),
+          executionSliceId: tool.schema.string().optional().describe(
+            "Optional camelCase alias for execution_slice_id.",
+          ),
         },
         async execute(
-          args: { mode: string; feature_name: string },
+          args: { mode: string; feature_name: string; roadmap_item_ids?: string[]; roadmapItemIds?: string[]; execution_slice_id?: string; executionSliceId?: string },
           context: ToolExecuteContext,
         ) {
           const { store, sm, log, notify, subagentDispatcher } = ctx
@@ -987,6 +1099,18 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             )
           }
 
+          const roadmapContextResult = await buildRoadmapContextForSelectMode({
+            roadmapSliceService,
+            ...(runtimeBackend.services ? { services: runtimeBackend.services } : {}),
+            roadmapItemIds: parsed.roadmapItemIds,
+            executionSliceId: parsed.executionSliceId,
+            featureName,
+          })
+          if (!roadmapContextResult.ok) {
+            return `Error: ${roadmapContextResult.error}`
+          }
+          const roadmapContext = roadmapContextResult.context
+
           // STEP 1: Check if this is an existing workflow (FIRST THING)
           // Sub-workflows skip this — they're new sessions created by spawn_sub_workflow,
           // not continuations of prior work. Their state was just created.
@@ -1077,6 +1201,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                 const updatedState = await store.update(sessionId, (draft) => {
                   draft.mode = mode
                   draft.featureName = featureName
+                  draft.roadmapContext = roadmapContext
                   draft.phase = ffResult.targetPhase
                   draft.phaseState = ffResult.targetPhaseState
                   draft.iterationCount = 0
@@ -1090,6 +1215,14 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                     )
                   }
                 })
+
+                const linkError = await linkWorkflowRoadmapContext({
+                  roadmapSliceService,
+                  ...(runtimeBackend.services ? { services: runtimeBackend.services } : {}),
+                  featureName,
+                  roadmapContext,
+                })
+                if (linkError) return `Error: ${linkError}`
 
                 await persistFastForwardRecord(
                   runtimeBackend.services,
@@ -1141,6 +1274,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
           await store.update(sessionId, (draft) => {
             draft.mode = mode
             draft.featureName = featureName
+            draft.roadmapContext = roadmapContext
             draft.phase = outcome.nextPhase
             draft.phaseState = outcome.nextPhaseState
             draft.iterationCount = 0
@@ -1159,6 +1293,14 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             }
           })
 
+          const linkError = await linkWorkflowRoadmapContext({
+            roadmapSliceService,
+            ...(runtimeBackend.services ? { services: runtimeBackend.services } : {}),
+            featureName,
+            roadmapContext,
+          })
+          if (linkError) return `Error: ${linkError}`
+
           const designDocNote = featureDesignDocPath
             ? ` Design document detected at \`${featureDesignDocPath}\` — it will be used as a constraint for all subsequent phases.`
             : ""
@@ -1174,6 +1316,102 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
           }
 
           return buildSelectModeResponse(mode) + ` Artifacts will be written to \`.openartisan/${featureName}/\`.` + designDocNote
+        },
+      }),
+
+      roadmap_read: tool({
+        description: "Read the current roadmap document.",
+        args: {},
+        async execute(args: Record<string, unknown>, context: ToolExecuteContext) {
+          return executeOpenCodeBridgeTool("roadmap_read", args, context)
+        },
+      }),
+
+      roadmap_query: tool({
+        description: "Query roadmap items by id, kind, status, feature name, or priority.",
+        args: { query: optionalOpenCodeSchema(roadmapQuerySchema) },
+        async execute(args: Record<string, unknown>, context: ToolExecuteContext) {
+          return executeOpenCodeBridgeTool("roadmap_query", args, context)
+        },
+      }),
+
+      roadmap_derive_execution_slice: tool({
+        description: "Derive a workflow execution slice from roadmap item ids.",
+        args: {
+          roadmap_item_ids: tool.schema.array(tool.schema.string()).optional(),
+          roadmapItemIds: tool.schema.array(tool.schema.string()).optional(),
+          feature_name: tool.schema.string().optional(),
+          featureName: tool.schema.string().optional(),
+          execution_slice_id: tool.schema.string().optional(),
+          executionSliceId: tool.schema.string().optional(),
+        },
+        async execute(args: Record<string, unknown>, context: ToolExecuteContext) {
+          return executeOpenCodeBridgeTool("roadmap_derive_execution_slice", args, context)
+        },
+      }),
+
+      roadmap_upsert_item: tool({
+        description: "Create or update one roadmap item without changing workflow phase state.",
+        args: { item: roadmapItemSchema },
+        async execute(args: Record<string, unknown>, context: ToolExecuteContext) {
+          return executeOpenCodeBridgeTool("roadmap_upsert_item", args, context)
+        },
+      }),
+
+      roadmap_update_item_status: tool({
+        description: "Update one roadmap item's status without implying workflow or task completion.",
+        args: {
+          item_id: tool.schema.string().optional(),
+          itemId: tool.schema.string().optional(),
+          status: tool.schema.enum(["todo", "in-progress", "blocked", "done", "dropped"]),
+          updated_at: tool.schema.string().optional(),
+          updatedAt: tool.schema.string().optional(),
+        },
+        async execute(args: Record<string, unknown>, context: ToolExecuteContext) {
+          return executeOpenCodeBridgeTool("roadmap_update_item_status", args, context)
+        },
+      }),
+
+      roadmap_delete_item: tool({
+        description: "Delete one roadmap item and its roadmap-only links without deleting workflows or artifacts.",
+        args: {
+          item_id: tool.schema.string().optional(),
+          itemId: tool.schema.string().optional(),
+        },
+        async execute(args: Record<string, unknown>, context: ToolExecuteContext) {
+          return executeOpenCodeBridgeTool("roadmap_delete_item", args, context)
+        },
+      }),
+
+      roadmap_upsert_edge: tool({
+        description: "Create or update one roadmap dependency edge.",
+        args: { edge: roadmapEdgeSchema },
+        async execute(args: Record<string, unknown>, context: ToolExecuteContext) {
+          return executeOpenCodeBridgeTool("roadmap_upsert_edge", args, context)
+        },
+      }),
+
+      roadmap_delete_edge: tool({
+        description: "Delete one roadmap dependency edge.",
+        args: { edge: roadmapEdgeSchema },
+        async execute(args: Record<string, unknown>, context: ToolExecuteContext) {
+          return executeOpenCodeBridgeTool("roadmap_delete_edge", args, context)
+        },
+      }),
+
+      roadmap_replace: tool({
+        description: "Replace the standalone roadmap document after full document validation.",
+        args: { document: roadmapDocumentSchema },
+        async execute(args: Record<string, unknown>, context: ToolExecuteContext) {
+          return executeOpenCodeBridgeTool("roadmap_replace", args, context)
+        },
+      }),
+
+      roadmap_delete: tool({
+        description: "Delete the standalone roadmap document without deleting workflow artifacts.",
+        args: {},
+        async execute(args: Record<string, unknown>, context: ToolExecuteContext) {
+          return executeOpenCodeBridgeTool("roadmap_delete", args, context)
         },
       }),
 
@@ -1382,8 +1620,8 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             )
           }
           const expectedBlocking = countExpectedBlockingCriteria(criteriaText)
-          // Parse string scores to numbers — tool.schema has no .number() so
-          // the schema declares score as string, but MarkSatisfiedArgs expects number.
+          // Review scores stay string-typed for reviewer output compatibility,
+          // but MarkSatisfiedArgs expects numeric scores internally.
           const parsedArgs: MarkSatisfiedArgs = {
             criteria_met: ensureAllowlistCriterion(
               args.criteria_met.map((c) => ({
@@ -3299,6 +3537,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                   effectiveAllowlist,
                   cwd: context.directory || process.cwd(),
                   parseFixInstruction: "Fix the plan format and re-submit approval with a corrected on-disk implementation plan.",
+                  roadmapContext: state.roadmapContext,
                 })
                 if (implPlanApprovalError) return `Error: ${implPlanApprovalError}`
                 materializedImplPlanForApproval = materializeForwardOnlyImplPlanDag(implPlanContentForApproval, context.directory || process.cwd(), state.implDag)
@@ -3327,6 +3566,22 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             )
 
             const isFinalImplementationApproval = state.phase === "IMPLEMENTATION" && effectiveNextPhase === "DONE"
+            let approvedImplDagForApproval: WorkflowState["implDag"] | null = null
+            if (state.phase === "IMPL_PLAN" && materializedImplPlanForApproval?.success) {
+              approvedImplDagForApproval = materializedImplPlanForApproval.nodes
+              if (materializedImplPlanForApproval.currentTaskId) {
+                approvedImplDagForApproval = applyDispatch(
+                  { implDag: approvedImplDagForApproval },
+                  materializedImplPlanForApproval.currentTaskId,
+                )
+              }
+              const taskGraphResult = await persistTaskGraph(runtimeBackend.services, {
+                ...state,
+                implDag: approvedImplDagForApproval,
+              })
+              if (!taskGraphResult.ok) return `Error: ${taskGraphResult.error.message}`
+            }
+
             await store.update(sessionId, (draft) => {
               draft.phase = effectiveNextPhase
               draft.phaseState = effectiveNextPhaseState
@@ -3396,10 +3651,9 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
               // DAG tracking.
               if (state.phase === "IMPL_PLAN" && implPlanContentForApproval) {
                 if (materializedImplPlanForApproval?.success) {
-                  draft.implDag = materializedImplPlanForApproval.nodes
+                  draft.implDag = approvedImplDagForApproval
                   draft.currentTaskId = materializedImplPlanForApproval.currentTaskId
                   if (materializedImplPlanForApproval.currentTaskId) {
-                    draft.implDag = applyDispatch(draft, materializedImplPlanForApproval.currentTaskId)
                     draft.phaseState = "DRAFT"
                   }
                 } else {

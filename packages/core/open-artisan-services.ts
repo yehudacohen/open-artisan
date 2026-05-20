@@ -30,12 +30,31 @@ import type {
   DbWorkflow,
   DbWorkflowEvent,
   DbWorktreeObservation,
+  OpenArtisanDbError,
   OpenArtisanDbResult,
   OpenArtisanRepository,
   PatchSuggestionStatus,
 } from "./open-artisan-repository"
 import type { Phase } from "./workflow-primitives"
-import type { RoadmapDocument, RoadmapItemStatus } from "./roadmap-types"
+import {
+  matchesRoadmapQuery,
+  roadmapError,
+  roadmapOk,
+  type DerivedExecutionSlice,
+  type RoadmapDocument,
+  type RoadmapErrorCode,
+  type RoadmapContextAttachmentService,
+  type RoadmapItem,
+  type RoadmapItemStatus,
+  type RoadmapMutationResult,
+  type RoadmapMutationService,
+  type RoadmapQuery,
+  type RoadmapResult,
+  type RoadmapSliceService,
+  type RoadmapStateBackend,
+  type WorkflowRoadmapContext,
+  type WorkflowRoadmapLink,
+} from "./roadmap-types"
 
 export interface RoadmapService {
   replaceRoadmap(document: RoadmapDocument): Promise<OpenArtisanDbResult<RoadmapDocument>>
@@ -43,7 +62,7 @@ export interface RoadmapService {
   deleteRoadmap(): Promise<OpenArtisanDbResult<null>>
   createItem(item: DbRoadmapItem): Promise<OpenArtisanDbResult<DbRoadmapItem>>
   listItems(query?: { featureName?: string; status?: RoadmapItemStatus }): Promise<OpenArtisanDbResult<DbRoadmapItem[]>>
-  upsertEdge(edge: DbRoadmapEdge): Promise<OpenArtisanDbResult<DbRoadmapEdge>>
+  upsertEdge(edge: DbRoadmapEdge): Promise<OpenArtisanDbResult<DbRoadmapEdge | RoadmapMutationResult>>
   listEdges(itemId?: DbRecordId): Promise<OpenArtisanDbResult<DbRoadmapEdge[]>>
 }
 
@@ -121,6 +140,7 @@ export interface FastForwardService {
 
 export interface OpenArtisanServices {
   roadmap: RoadmapService
+  roadmapMutations: RoadmapMutationService
   executionSlices: ExecutionSliceService
   workflow: WorkflowService
   artifacts: ArtifactService
@@ -131,6 +151,296 @@ export interface OpenArtisanServices {
   agentLeases: AgentLeaseService
   worktreeObservations: WorktreeObservationService
   fastForward: FastForwardService
+}
+
+function toRoadmapErrorCode(code: OpenArtisanDbError["code"]): RoadmapErrorCode {
+  switch (code) {
+    case "not-found":
+      return "not-found"
+    case "invalid-document":
+      return "invalid-document"
+    case "schema-mismatch":
+      return "schema-mismatch"
+    case "lock-timeout":
+      return "lock-timeout"
+    case "invalid-input":
+    case "invalid-state":
+      return "invalid-input"
+    default:
+      return "storage-failure"
+  }
+}
+
+function toRoadmapResult<T>(result: OpenArtisanDbResult<T>): RoadmapResult<T> {
+  return result.ok
+    ? roadmapOk(result.value)
+    : roadmapError(toRoadmapErrorCode(result.error.code), result.error.message, result.error.retryable)
+}
+
+function deriveExecutionSliceFromDocument(
+  document: RoadmapDocument,
+  input: { roadmapItemIds: string[]; featureName?: string; executionSliceId?: string },
+): RoadmapResult<DerivedExecutionSlice> {
+  if (input.roadmapItemIds.length === 0) {
+    return roadmapError("invalid-slice", "deriveExecutionSlice requires at least one roadmap item id", false)
+  }
+
+  const itemsById = new Map(document.items.map((item) => [item.id, item]))
+  const roadmapItems: RoadmapItem[] = []
+  for (const itemId of input.roadmapItemIds) {
+    const item = itemsById.get(itemId)
+    if (!item) return roadmapError("invalid-slice", `Unknown roadmap item id: ${itemId}`, false, { itemId })
+    roadmapItems.push(item)
+  }
+
+  const selectedIds = new Set(input.roadmapItemIds)
+  return roadmapOk({
+    roadmapItemIds: [...input.roadmapItemIds],
+    roadmapItems,
+    edges: document.edges.filter((edge) => selectedIds.has(edge.from) && selectedIds.has(edge.to)),
+    ...(input.featureName !== undefined ? { featureName: input.featureName } : {}),
+    ...(input.executionSliceId !== undefined ? { executionSliceId: input.executionSliceId } : {}),
+  })
+}
+
+export function createRoadmapContextAttachmentService(input: {
+  roadmapSliceService: RoadmapSliceService
+  executionSlices?: ExecutionSliceService | null
+  workflow?: WorkflowService | null
+}): RoadmapContextAttachmentService {
+  return {
+    async deriveContext(contextInput) {
+      if (contextInput.roadmapItemIds.length === 0 && !contextInput.executionSliceId) {
+        return roadmapOk(null)
+      }
+
+      let roadmapItemIds = contextInput.roadmapItemIds
+      if (roadmapItemIds.length === 0 && contextInput.executionSliceId) {
+        if (!input.executionSlices) {
+          return roadmapError(
+            "storage-failure",
+            `execution_slice_id requires repository-backed roadmap state: ${contextInput.executionSliceId}`,
+            false,
+          )
+        }
+        const slice = await input.executionSlices.getSlice(contextInput.executionSliceId)
+        if (!slice.ok) return toRoadmapResult(slice)
+        if (!slice.value) {
+          return roadmapError("not-found", `Unknown execution_slice_id: ${contextInput.executionSliceId}`, false)
+        }
+        roadmapItemIds = slice.value.itemIds
+      }
+
+      const slice = await input.roadmapSliceService.deriveExecutionSlice({
+        roadmapItemIds,
+        featureName: contextInput.featureName,
+        ...(contextInput.executionSliceId ? { executionSliceId: contextInput.executionSliceId } : {}),
+      })
+      if (!slice.ok) return slice
+
+      const context: WorkflowRoadmapContext = {
+        ...slice.value,
+        attachedAt: new Date().toISOString(),
+      }
+      return roadmapOk(context)
+    },
+
+    async linkWorkflow(linkInput) {
+      if (!input.workflow || !linkInput.roadmapContext) return roadmapOk(null)
+
+      const workflow = await input.workflow.getWorkflowByFeature(linkInput.featureName)
+      if (!workflow.ok) return toRoadmapResult(workflow)
+      if (!workflow.value) {
+        return roadmapError("not-found", `Workflow not found after selecting mode for feature: ${linkInput.featureName}`, false)
+      }
+
+      for (const itemId of linkInput.roadmapContext.roadmapItemIds) {
+        const link = await input.workflow.linkRoadmap(workflow.value.workflow.id, itemId)
+        if (!link.ok) return toRoadmapResult(link)
+      }
+
+      const linked: WorkflowRoadmapLink = {
+        featureName: linkInput.featureName,
+        roadmapItemIds: [...linkInput.roadmapContext.roadmapItemIds],
+      }
+      return roadmapOk(linked)
+    },
+  }
+}
+
+export function createRoadmapMutationService(repository: OpenArtisanRepository): RoadmapMutationService {
+  return {
+    async readRoadmap() {
+      return toRoadmapResult(await repository.readRoadmap())
+    },
+
+    async queryRoadmap(query: RoadmapQuery) {
+      const result = await repository.readRoadmap()
+      if (!result.ok) return toRoadmapResult(result)
+      if (result.value === null) return roadmapOk([])
+      return roadmapOk(result.value.items.filter((item) => matchesRoadmapQuery(item, query)))
+    },
+
+    async deriveExecutionSlice(input) {
+      const result = await repository.readRoadmap()
+      if (!result.ok) return toRoadmapResult(result)
+      if (result.value === null) return roadmapError("not-found", "No roadmap document exists", false)
+      return deriveExecutionSliceFromDocument(result.value, input)
+    },
+
+    async upsertItem(input) {
+      return toRoadmapResult(await repository.upsertRoadmapItem(input))
+    },
+
+    async updateItemStatus(input) {
+      return toRoadmapResult(await repository.updateRoadmapItemStatus(input))
+    },
+
+    async deleteItem(input) {
+      return toRoadmapResult(await repository.deleteRoadmapItem(input))
+    },
+
+    async upsertEdge(input) {
+      const result = await repository.upsertRoadmapEdge(input)
+      if (!result.ok) return toRoadmapResult(result)
+      return roadmapOk(result.value as RoadmapMutationResult)
+    },
+
+    async deleteEdge(input) {
+      return toRoadmapResult(await repository.deleteRoadmapEdge(input))
+    },
+
+    async replaceRoadmap(input) {
+      return toRoadmapResult(await repository.replaceRoadmapDocument(input))
+    },
+
+    async deleteRoadmap() {
+      return toRoadmapResult(await repository.deleteRoadmapDocument())
+    },
+  }
+}
+
+async function withRoadmapStateBackendLock<T>(
+  roadmapBackend: RoadmapStateBackend,
+  operation: () => Promise<RoadmapResult<T>>,
+): Promise<RoadmapResult<T>> {
+  const lock = await roadmapBackend.lockRoadmap()
+  if (!lock.ok) return lock
+  try {
+    return await operation()
+  } finally {
+    await lock.value.release()
+  }
+}
+
+export function createRoadmapStateBackendMutationService(
+  roadmapBackend: RoadmapStateBackend,
+  roadmapSliceService: RoadmapSliceService,
+): RoadmapMutationService {
+  return {
+    readRoadmap: () => roadmapBackend.readRoadmap(),
+
+    async queryRoadmap(query: RoadmapQuery) {
+      const result = await roadmapBackend.readRoadmap()
+      if (!result.ok) return result
+      if (result.value === null) return roadmapOk([])
+      return roadmapOk(result.value.items.filter((item) => matchesRoadmapQuery(item, query)))
+    },
+
+    deriveExecutionSlice: (input) => roadmapSliceService.deriveExecutionSlice(input),
+
+    async upsertItem(input) {
+      return withRoadmapStateBackendLock(roadmapBackend, async () => {
+        const current = await roadmapBackend.readRoadmap()
+        if (!current.ok) return current
+        const document = current.value ?? { schemaVersion: 1, items: [], edges: [] }
+        const existingIndex = document.items.findIndex((item) => item.id === input.item.id)
+        const items = existingIndex === -1
+          ? [...document.items, input.item]
+          : document.items.map((item, index) => index === existingIndex ? input.item : item)
+        const updated = await roadmapBackend.updateRoadmap({ ...document, items })
+        if (!updated.ok) return updated
+        return roadmapOk({ kind: "upsert-item", item: input.item, document: updated.value })
+      })
+    },
+
+    async updateItemStatus(input) {
+      return withRoadmapStateBackendLock(roadmapBackend, async () => {
+        const current = await roadmapBackend.readRoadmap()
+        if (!current.ok) return current
+        if (current.value === null) return roadmapError("not-found", "No roadmap document exists", false, { itemId: input.itemId, operation: "update-item-status" })
+        const item = current.value.items.find((candidate) => candidate.id === input.itemId)
+        if (!item) return roadmapError("not-found", `Roadmap item ${input.itemId} was not found`, false, { itemId: input.itemId, operation: "update-item-status" })
+        const updatedItem: RoadmapItem = { ...item, status: input.status, updatedAt: input.updatedAt ?? new Date().toISOString() }
+        const updated = await roadmapBackend.updateRoadmap({
+          ...current.value,
+          items: current.value.items.map((candidate) => candidate.id === input.itemId ? updatedItem : candidate),
+        })
+        if (!updated.ok) return updated
+        return roadmapOk({ kind: "update-item-status", item: updatedItem, document: updated.value })
+      })
+    },
+
+    async deleteItem(input) {
+      return withRoadmapStateBackendLock(roadmapBackend, async () => {
+        const current = await roadmapBackend.readRoadmap()
+        if (!current.ok) return current
+        if (current.value === null) return roadmapError("not-found", "No roadmap document exists", false, { itemId: input.itemId, operation: "delete-item" })
+        if (!current.value.items.some((item) => item.id === input.itemId)) {
+          return roadmapError("not-found", `Roadmap item ${input.itemId} was not found`, false, { itemId: input.itemId, operation: "delete-item" })
+        }
+        const updated = await roadmapBackend.updateRoadmap({
+          ...current.value,
+          items: current.value.items.filter((item) => item.id !== input.itemId),
+          edges: current.value.edges.filter((edge) => edge.from !== input.itemId && edge.to !== input.itemId),
+        })
+        if (!updated.ok) return updated
+        return roadmapOk({ kind: "delete-item", deletedItemId: input.itemId, document: updated.value })
+      })
+    },
+
+    async upsertEdge(input) {
+      return withRoadmapStateBackendLock(roadmapBackend, async () => {
+        const current = await roadmapBackend.readRoadmap()
+        if (!current.ok) return current
+        if (current.value === null) return roadmapError("not-found", "No roadmap document exists", false, { edge: input.edge, operation: "upsert-edge" })
+        const hasEdge = current.value.edges.some((edge) => edge.from === input.edge.from && edge.to === input.edge.to && edge.kind === input.edge.kind)
+        const updated = await roadmapBackend.updateRoadmap({
+          ...current.value,
+          edges: hasEdge ? current.value.edges : [...current.value.edges, input.edge],
+        })
+        if (!updated.ok) return updated
+        return roadmapOk({ kind: "upsert-edge", edge: input.edge, document: updated.value })
+      })
+    },
+
+    async deleteEdge(input) {
+      return withRoadmapStateBackendLock(roadmapBackend, async () => {
+        const current = await roadmapBackend.readRoadmap()
+        if (!current.ok) return current
+        if (current.value === null) return roadmapError("not-found", "No roadmap document exists", false, { edge: input.edge, operation: "delete-edge" })
+        const edges = current.value.edges.filter((edge) => edge.from !== input.edge.from || edge.to !== input.edge.to || edge.kind !== input.edge.kind)
+        if (edges.length === current.value.edges.length) {
+          return roadmapError("not-found", `Roadmap edge ${input.edge.from}->${input.edge.to}:${input.edge.kind} was not found`, false, { edge: input.edge, operation: "delete-edge" })
+        }
+        const updated = await roadmapBackend.updateRoadmap({ ...current.value, edges })
+        if (!updated.ok) return updated
+        return roadmapOk({ kind: "delete-edge", deletedEdge: input.edge, document: updated.value })
+      })
+    },
+
+    async replaceRoadmap(input) {
+      const document = await roadmapBackend.updateRoadmap(input.document)
+      if (!document.ok) return document
+      return roadmapOk({ kind: "replace-document", document: document.value })
+    },
+
+    async deleteRoadmap() {
+      const result = await roadmapBackend.deleteRoadmap()
+      if (!result.ok) return result
+      return roadmapOk({ kind: "delete-document", document: null })
+    },
+  }
 }
 
 export function createOpenArtisanServices(repository: OpenArtisanRepository): OpenArtisanServices {
@@ -144,6 +454,7 @@ export function createOpenArtisanServices(repository: OpenArtisanRepository): Op
       upsertEdge: (edge) => repository.upsertRoadmapEdge(edge),
       listEdges: (itemId) => repository.listRoadmapEdges(itemId),
     },
+    roadmapMutations: createRoadmapMutationService(repository),
     executionSlices: {
       createSlice: (slice, itemIds) => repository.createExecutionSlice(slice, itemIds),
       getSlice: (sliceId) => repository.getExecutionSlice(sliceId),

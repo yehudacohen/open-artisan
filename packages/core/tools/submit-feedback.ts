@@ -124,12 +124,13 @@ export function validateSubmitFeedbackImplPlanApproval(args: {
   effectiveAllowlist: string[]
   cwd: string
   parseFixInstruction: string
+  roadmapContext?: WorkflowState["roadmapContext"]
 }): string | null {
   const parseCheck = parseImplPlan(args.planContent)
   if (!parseCheck.success) {
     return `Failed to parse implementation plan into DAG: ${parseCheck.errors.join("; ")}. ${args.parseFixInstruction}`
   }
-  const contractErrors = validateExecutableImplPlan(args.planContent, args.mode, args.effectiveAllowlist, args.cwd)
+  const contractErrors = validateExecutableImplPlan(args.planContent, args.mode, args.effectiveAllowlist, args.cwd, args.roadmapContext)
   if (contractErrors.length > 0) {
     return (
       `IMPL_PLAN approval failed executable-contract validation: ${contractErrors.join("; ")}. ` +
@@ -166,6 +167,7 @@ function completedTaskRewriteReason(existing: TaskNode, planned: TaskNode): stri
     ["expectedTests", sameStringArray(existing.expectedTests, planned.expectedTests)],
     ["verificationCommands", sameStringArray(existing.verificationCommands ?? [], planned.verificationCommands ?? [])],
     ["expectedFiles", sameStringArray(existing.expectedFiles, planned.expectedFiles)],
+    ["roadmapItemIds", sameStringArray(existing.roadmapItemIds ?? [], planned.roadmapItemIds ?? [])],
     ["estimatedComplexity", existing.estimatedComplexity === planned.estimatedComplexity],
     ["category", (existing.category ?? "standalone") === (planned.category ?? "standalone")],
   ]
@@ -205,6 +207,7 @@ export function materializeForwardOnlyImplPlanDag(
       dependencies: [...task.dependencies],
       expectedTests: [...task.expectedTests],
       expectedFiles: [...task.expectedFiles],
+      ...(task.roadmapItemIds ? { roadmapItemIds: [...task.roadmapItemIds] } : {}),
       ...(task.verificationCommands ? { verificationCommands: [...task.verificationCommands] } : {}),
       ...(task.humanGate ? { humanGate: { ...task.humanGate } } : {}),
       ...(task.isolation ? { isolation: { ...task.isolation, writablePaths: [...task.isolation.writablePaths] } } : {}),

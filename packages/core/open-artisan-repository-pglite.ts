@@ -65,7 +65,18 @@ import {
 import type { TaskStatus } from "./dag"
 import { SCHEMA_VERSION, validateWorkflowState, type WorkflowState } from "./workflow-state-types"
 import { VALID_PHASE_STATES, type ArtifactKey, type Phase, type PhaseState } from "./workflow-primitives"
-import type { RoadmapDocument } from "./roadmap-types"
+import {
+  validateRoadmapDocumentResult,
+  type RoadmapDeleteEdgeInput,
+  type RoadmapDeleteItemInput,
+  type RoadmapDocument,
+  type RoadmapEdge,
+  type RoadmapItem,
+  type RoadmapMutationResult,
+  type RoadmapUpdateItemStatusInput,
+  type RoadmapUpsertEdgeInput,
+  type RoadmapUpsertItemInput,
+} from "./roadmap-types"
 
 export { OPEN_ARTISAN_DB_SCHEMA_VERSION } from "./open-artisan-repository-migrations"
 export {
@@ -112,6 +123,50 @@ function sleep(ms: number): Promise<void> {
 
 function edgeKey(edge: DbRoadmapEdge): string {
   return `${edge.fromItemId}->${edge.toItemId}:${edge.kind}`
+}
+
+function roadmapEdgeKey(edge: RoadmapEdge): string {
+  return `${edge.from}->${edge.to}:${edge.kind}`
+}
+
+function toDbRoadmapItem(item: RoadmapItem): DbRoadmapItem {
+  return {
+    id: item.id,
+    kind: item.kind,
+    title: item.title,
+    ...(item.description !== undefined ? { description: item.description } : {}),
+    status: item.status,
+    priority: item.priority,
+    ...(item.featureName !== undefined ? { featureName: item.featureName } : {}),
+    createdAt: item.createdAt,
+    updatedAt: item.updatedAt,
+  }
+}
+
+function toRoadmapItem(item: DbRoadmapItem): RoadmapItem {
+  return {
+    id: item.id,
+    kind: item.kind,
+    title: item.title,
+    ...(item.description !== undefined ? { description: item.description } : {}),
+    status: item.status,
+    priority: item.priority,
+    ...(item.featureName !== undefined ? { featureName: item.featureName } : {}),
+    createdAt: item.createdAt,
+    updatedAt: item.updatedAt,
+  }
+}
+
+function toDbRoadmapEdge(edge: RoadmapEdge): DbRoadmapEdge {
+  return { fromItemId: edge.from, toItemId: edge.to, kind: edge.kind }
+}
+
+function toRoadmapEdge(edge: DbRoadmapEdge): RoadmapEdge {
+  return { from: edge.fromItemId, to: edge.toItemId, kind: edge.kind }
+}
+
+function isRoadmapUpsertEdgeInput(value: DbRoadmapEdge | RoadmapUpsertEdgeInput): value is RoadmapUpsertEdgeInput {
+  return "edge" in value
 }
 
 function dbFailure<T>(message: string, error: unknown): OpenArtisanDbResult<T> {
@@ -268,7 +323,12 @@ function buildImportedTaskGraph(state: WorkflowState, workflowId: string): DbTas
     expectedTests: state.implDag.flatMap((task) =>
       unique(task.expectedTests).map((path) => ({ taskId: `${workflowId}:${task.id}`, path })),
     ),
-    roadmapLinks: [],
+    roadmapLinks: state.implDag.flatMap((task) =>
+      unique(task.roadmapItemIds ?? []).map((roadmapItemId) => ({
+        taskId: `${workflowId}:${task.id}`,
+        roadmapItemId,
+      })),
+    ),
   }
 }
 
@@ -514,6 +574,76 @@ export function createPGliteOpenArtisanRepository(
     }
   }
 
+  async function readRoadmapDocumentFromDb(db: DbExecutor): Promise<RoadmapDocument | null> {
+    const schemaDb = db.withSchema(schemaName)
+    const itemRows = await schemaDb.selectFrom("roadmap_items").selectAll().execute()
+    const edgeRows = await schemaDb.selectFrom("roadmap_edges").selectAll().execute()
+    if (itemRows.length === 0 && edgeRows.length === 0) return null
+    return {
+      schemaVersion: OPEN_ARTISAN_ROADMAP_DOCUMENT_SCHEMA_VERSION,
+      items: itemRows.map((row) => toRoadmapItem(rowRecord<DbRoadmapItem>(row))),
+      edges: edgeRows.map((row) => toRoadmapEdge(rowRecord<DbRoadmapEdge>(row))),
+    }
+  }
+
+  function validateRoadmapDocumentForDb<T>(document: RoadmapDocument): OpenArtisanDbResult<T> | null {
+    const validation = validateRoadmapDocumentResult(document)
+    return validation.ok
+      ? null
+      : openArtisanDbError("invalid-document", validation.error.message, validation.error.retryable)
+  }
+
+  async function replaceRoadmapDocumentInDb(db: DbExecutor, document: RoadmapDocument): Promise<OpenArtisanDbResult<RoadmapDocument>> {
+    const validationError = validateRoadmapDocumentForDb<RoadmapDocument>(document)
+    if (validationError) return validationError
+
+    const schemaDb = db.withSchema(schemaName)
+    await schemaDb.deleteFrom("workflow_roadmap_links").execute()
+    await schemaDb.deleteFrom("artifact_roadmap_links").execute()
+    await schemaDb.deleteFrom("task_roadmap_links").execute()
+    await schemaDb.deleteFrom("execution_slice_items").execute()
+    await schemaDb.deleteFrom("roadmap_edges").execute()
+    await schemaDb.deleteFrom("roadmap_items").execute()
+    if (document.items.length > 0) {
+      await schemaDb.insertInto("roadmap_items").values(document.items.map((item) => {
+        const dbItem = toDbRoadmapItem(item)
+        return {
+          id: dbItem.id,
+          feature_name: dbItem.featureName ?? null,
+          status: dbItem.status,
+          priority: dbItem.priority,
+          record: clone(dbItem),
+          created_at: dbItem.createdAt,
+          updated_at: dbItem.updatedAt,
+        }
+      })).execute()
+    }
+    if (document.edges.length > 0) {
+      await schemaDb.insertInto("roadmap_edges").values(document.edges.map((edge) => {
+        const dbEdge = toDbRoadmapEdge(edge)
+        return {
+          edge_key: roadmapEdgeKey(edge),
+          from_item_id: edge.from,
+          to_item_id: edge.to,
+          kind: edge.kind,
+          record: clone(dbEdge),
+        }
+      })).execute()
+    }
+    return openArtisanDbOk(clone(document))
+  }
+
+  async function deleteRoadmapDocumentInDb(db: DbExecutor): Promise<OpenArtisanDbResult<null>> {
+    const schemaDb = db.withSchema(schemaName)
+    await schemaDb.deleteFrom("workflow_roadmap_links").execute()
+    await schemaDb.deleteFrom("artifact_roadmap_links").execute()
+    await schemaDb.deleteFrom("task_roadmap_links").execute()
+    await schemaDb.deleteFrom("execution_slice_items").execute()
+    await schemaDb.deleteFrom("roadmap_edges").execute()
+    await schemaDb.deleteFrom("roadmap_items").execute()
+    return openArtisanDbOk(null)
+  }
+
   async function replaceTaskGraphInDb(db: DbExecutor, workflowId: string, graph: DbTaskGraph): Promise<OpenArtisanDbResult<DbTaskGraph>> {
     const schemaDb = db.withSchema(schemaName)
     const workflow = await schemaDb.selectFrom("workflows").select("id").where("id", "=", workflowId).executeTakeFirst()
@@ -702,86 +832,120 @@ export function createPGliteOpenArtisanRepository(
       })
     },
 
-    replaceRoadmap(document: RoadmapDocument) {
+    upsertRoadmapItem(input: RoadmapUpsertItemInput) {
       return withInitializedDb(async (db) => {
         return withTransaction(db, async (db) => {
-        const schemaDb = db.withSchema(schemaName)
-        const itemIds = new Set(document.items.map((item) => item.id))
-        for (const edge of document.edges) {
-          if (!itemIds.has(edge.from)) return invalidInput(`Roadmap edge references missing item ${edge.from}`)
-          if (!itemIds.has(edge.to)) return invalidInput(`Roadmap edge references missing item ${edge.to}`)
-        }
-        await schemaDb.deleteFrom("workflow_roadmap_links").execute()
-        await schemaDb.deleteFrom("artifact_roadmap_links").execute()
-        await schemaDb.deleteFrom("task_roadmap_links").execute()
-        await schemaDb.deleteFrom("execution_slice_items").execute()
-        await schemaDb.deleteFrom("roadmap_edges").execute()
-        await schemaDb.deleteFrom("roadmap_items").execute()
-        if (document.items.length > 0) {
-          await schemaDb.insertInto("roadmap_items").values(document.items.map((item) => ({
-            id: item.id,
-            feature_name: item.featureName ?? null,
-            status: item.status,
-            priority: item.priority,
-            record: clone(item),
-            created_at: item.createdAt,
-            updated_at: item.updatedAt,
-          }))).execute()
-        }
-        if (document.edges.length > 0) {
-          await schemaDb.insertInto("roadmap_edges").values(document.edges.map((edge) => ({
-            edge_key: `${edge.from}->${edge.to}:${edge.kind}`,
-            from_item_id: edge.from,
-            to_item_id: edge.to,
-            kind: edge.kind,
-            record: clone({ fromItemId: edge.from, toItemId: edge.to, kind: edge.kind } satisfies DbRoadmapEdge),
-          }))).execute()
-        }
-        return openArtisanDbOk(clone(document))
+          const current = await readRoadmapDocumentFromDb(db)
+          const item = input.item
+          const items = current?.items.filter((candidate) => candidate.id !== item.id) ?? []
+          const document: RoadmapDocument = {
+            schemaVersion: current?.schemaVersion ?? OPEN_ARTISAN_ROADMAP_DOCUMENT_SCHEMA_VERSION,
+            items: [...items, item],
+            edges: current?.edges ?? [],
+          }
+          const validationError = validateRoadmapDocumentForDb<RoadmapMutationResult>(document)
+          if (validationError) return validationError
+
+          const schemaDb = db.withSchema(schemaName)
+          const dbItem = toDbRoadmapItem(item)
+          await schemaDb.deleteFrom("roadmap_items").where("id", "=", item.id).execute()
+          await schemaDb.insertInto("roadmap_items").values({
+            id: dbItem.id,
+            feature_name: dbItem.featureName ?? null,
+            status: dbItem.status,
+            priority: dbItem.priority,
+            record: clone(dbItem),
+            created_at: dbItem.createdAt,
+            updated_at: dbItem.updatedAt,
+          }).execute()
+          return openArtisanDbOk({ kind: "upsert-item", item: clone(item), document: clone(document) })
+        })
+      })
+    },
+
+    updateRoadmapItemStatus(input: RoadmapUpdateItemStatusInput) {
+      return withInitializedDb(async (db) => {
+        return withTransaction(db, async (db) => {
+          const schemaDb = db.withSchema(schemaName)
+          const row = await schemaDb.selectFrom("roadmap_items").selectAll().where("id", "=", input.itemId).executeTakeFirst()
+          if (!row) return notFound(`Roadmap item ${input.itemId} was not found`)
+          const existing = rowRecord<DbRoadmapItem>(row)
+          const item = toRoadmapItem({ ...existing, status: input.status, updatedAt: input.updatedAt ?? nowIso() })
+          const current = await readRoadmapDocumentFromDb(db)
+          const document: RoadmapDocument = {
+            schemaVersion: current?.schemaVersion ?? OPEN_ARTISAN_ROADMAP_DOCUMENT_SCHEMA_VERSION,
+            items: current?.items.map((candidate) => candidate.id === input.itemId ? item : candidate) ?? [item],
+            edges: current?.edges ?? [],
+          }
+          const validationError = validateRoadmapDocumentForDb<RoadmapMutationResult>(document)
+          if (validationError) return validationError
+          const dbItem = toDbRoadmapItem(item)
+          await schemaDb.updateTable("roadmap_items")
+            .set({ status: dbItem.status, priority: dbItem.priority, feature_name: dbItem.featureName ?? null, record: clone(dbItem), updated_at: dbItem.updatedAt })
+            .where("id", "=", input.itemId)
+            .execute()
+          return openArtisanDbOk({ kind: "update-item-status", item: clone(item), document: clone(document) })
+        })
+      })
+    },
+
+    deleteRoadmapItem(input: RoadmapDeleteItemInput) {
+      return withInitializedDb(async (db) => {
+        return withTransaction(db, async (db) => {
+          const schemaDb = db.withSchema(schemaName)
+          const row = await schemaDb.selectFrom("roadmap_items").select("id").where("id", "=", input.itemId).executeTakeFirst()
+          if (!row) return notFound(`Roadmap item ${input.itemId} was not found`)
+          await schemaDb.deleteFrom("workflow_roadmap_links").where("roadmap_item_id", "=", input.itemId).execute()
+          await schemaDb.deleteFrom("artifact_roadmap_links").where("roadmap_item_id", "=", input.itemId).execute()
+          await schemaDb.deleteFrom("task_roadmap_links").where("roadmap_item_id", "=", input.itemId).execute()
+          await schemaDb.deleteFrom("execution_slice_items").where("roadmap_item_id", "=", input.itemId).execute()
+          await schemaDb.deleteFrom("roadmap_edges").where((eb) => eb.or([
+            eb("from_item_id", "=", input.itemId),
+            eb("to_item_id", "=", input.itemId),
+          ])).execute()
+          await schemaDb.deleteFrom("roadmap_items").where("id", "=", input.itemId).execute()
+          const document = await readRoadmapDocumentFromDb(db)
+          return openArtisanDbOk({ kind: "delete-item", deletedItemId: input.itemId, document: document ? clone(document) : null })
+        })
+      })
+    },
+
+    replaceRoadmap(document: RoadmapDocument) {
+      return withInitializedDb(async (db) => {
+        return withTransaction(db, (db) => replaceRoadmapDocumentInDb(db, document))
+      })
+    },
+
+    replaceRoadmapDocument(input) {
+      return withInitializedDb(async (db) => {
+        return withTransaction(db, async (db) => {
+          const result = await replaceRoadmapDocumentInDb(db, input.document)
+          return result.ok
+            ? openArtisanDbOk({ kind: "replace-document", document: result.value })
+            : result
         })
       })
     },
 
     readRoadmap() {
       return withInitializedDb(async (db) => {
-        const schemaDb = db.withSchema(schemaName)
-        const itemRows = await schemaDb.selectFrom("roadmap_items").selectAll().execute()
-        const edgeRows = await schemaDb.selectFrom("roadmap_edges").selectAll().execute()
-        if (itemRows.length === 0 && edgeRows.length === 0) return openArtisanDbOk(null)
-        const document: RoadmapDocument = {
-          schemaVersion: OPEN_ARTISAN_ROADMAP_DOCUMENT_SCHEMA_VERSION,
-          items: itemRows.map((row) => rowRecord<DbRoadmapItem>(row)).map((item) => ({
-            id: item.id,
-            kind: item.kind,
-            title: item.title,
-            ...(item.description ? { description: item.description } : {}),
-            status: item.status,
-            priority: item.priority,
-            ...(item.featureName ? { featureName: item.featureName } : {}),
-            createdAt: item.createdAt,
-            updatedAt: item.updatedAt,
-          })),
-          edges: edgeRows.map((row) => rowRecord<DbRoadmapEdge>(row)).map((edge) => ({
-            from: edge.fromItemId,
-            to: edge.toItemId,
-            kind: edge.kind,
-          })),
-        }
-        return openArtisanDbOk(document)
+        return openArtisanDbOk(await readRoadmapDocumentFromDb(db))
       })
     },
 
     deleteRoadmap() {
       return withInitializedDb(async (db) => {
+        return withTransaction(db, (db) => deleteRoadmapDocumentInDb(db))
+      })
+    },
+
+    deleteRoadmapDocument() {
+      return withInitializedDb(async (db) => {
         return withTransaction(db, async (db) => {
-        const schemaDb = db.withSchema(schemaName)
-        await schemaDb.deleteFrom("workflow_roadmap_links").execute()
-        await schemaDb.deleteFrom("artifact_roadmap_links").execute()
-        await schemaDb.deleteFrom("task_roadmap_links").execute()
-        await schemaDb.deleteFrom("execution_slice_items").execute()
-        await schemaDb.deleteFrom("roadmap_edges").execute()
-        await schemaDb.deleteFrom("roadmap_items").execute()
-        return openArtisanDbOk(null)
+          const result = await deleteRoadmapDocumentInDb(db)
+          return result.ok
+            ? openArtisanDbOk({ kind: "delete-document", document: null })
+            : result
         })
       })
     },
@@ -801,24 +965,65 @@ export function createPGliteOpenArtisanRepository(
       })
     },
 
-    upsertRoadmapEdge(edge: DbRoadmapEdge) {
+    upsertRoadmapEdge(edge: DbRoadmapEdge | RoadmapUpsertEdgeInput) {
       return withInitializedDb(async (db) => {
         return withTransaction(db, async (db) => {
-        const schemaDb = db.withSchema(schemaName)
-        const itemRows = await schemaDb.selectFrom("roadmap_items").select("id").where("id", "in", [edge.fromItemId, edge.toItemId]).execute()
-        const itemIds = new Set(itemRows.map((row) => row.id))
-        if (!itemIds.has(edge.fromItemId)) return notFound(`Roadmap item ${edge.fromItemId} was not found`)
-        if (!itemIds.has(edge.toItemId)) return notFound(`Roadmap item ${edge.toItemId} was not found`)
-        const key = edgeKey(edge)
-        await schemaDb.deleteFrom("roadmap_edges").where("edge_key", "=", key).execute()
-        await schemaDb.insertInto("roadmap_edges").values({
-          edge_key: key,
-          from_item_id: edge.fromItemId,
-          to_item_id: edge.toItemId,
-          kind: edge.kind,
-          record: clone(edge),
-        }).execute()
-        return openArtisanDbOk(clone(edge))
+          const schemaDb = db.withSchema(schemaName)
+          const isMutationInput = isRoadmapUpsertEdgeInput(edge)
+          const dbEdge = isMutationInput ? toDbRoadmapEdge(edge.edge) : edge
+          const itemRows = await schemaDb.selectFrom("roadmap_items").select("id").where("id", "in", [dbEdge.fromItemId, dbEdge.toItemId]).execute()
+          const itemIds = new Set(itemRows.map((row) => row.id))
+          if (!itemIds.has(dbEdge.fromItemId)) return notFound(`Roadmap item ${dbEdge.fromItemId} was not found`)
+          if (!itemIds.has(dbEdge.toItemId)) return notFound(`Roadmap item ${dbEdge.toItemId} was not found`)
+
+          if (isMutationInput) {
+            const current = await readRoadmapDocumentFromDb(db)
+            const roadmapEdge = edge.edge
+            const edges = current?.edges.filter((candidate) => roadmapEdgeKey(candidate) !== roadmapEdgeKey(roadmapEdge)) ?? []
+            const document: RoadmapDocument = {
+              schemaVersion: current?.schemaVersion ?? OPEN_ARTISAN_ROADMAP_DOCUMENT_SCHEMA_VERSION,
+              items: current?.items ?? [],
+              edges: [...edges, roadmapEdge],
+            }
+            const validationError = validateRoadmapDocumentForDb<RoadmapMutationResult>(document)
+            if (validationError) return validationError
+            const key = edgeKey(dbEdge)
+            await schemaDb.deleteFrom("roadmap_edges").where("edge_key", "=", key).execute()
+            await schemaDb.insertInto("roadmap_edges").values({
+              edge_key: key,
+              from_item_id: dbEdge.fromItemId,
+              to_item_id: dbEdge.toItemId,
+              kind: dbEdge.kind,
+              record: clone(dbEdge),
+            }).execute()
+            return openArtisanDbOk({ kind: "upsert-edge", edge: clone(roadmapEdge), document: clone(document) })
+          }
+
+          const key = edgeKey(dbEdge)
+          await schemaDb.deleteFrom("roadmap_edges").where("edge_key", "=", key).execute()
+          await schemaDb.insertInto("roadmap_edges").values({
+            edge_key: key,
+            from_item_id: dbEdge.fromItemId,
+            to_item_id: dbEdge.toItemId,
+            kind: dbEdge.kind,
+            record: clone(dbEdge),
+          }).execute()
+          return openArtisanDbOk(clone(dbEdge))
+        })
+      })
+    },
+
+    deleteRoadmapEdge(input: RoadmapDeleteEdgeInput) {
+      return withInitializedDb(async (db) => {
+        return withTransaction(db, async (db) => {
+          const schemaDb = db.withSchema(schemaName)
+          const dbEdge = toDbRoadmapEdge(input.edge)
+          const key = edgeKey(dbEdge)
+          const existing = await schemaDb.selectFrom("roadmap_edges").select("edge_key").where("edge_key", "=", key).executeTakeFirst()
+          if (!existing) return notFound(`Roadmap edge ${key} was not found`)
+          await schemaDb.deleteFrom("roadmap_edges").where("edge_key", "=", key).execute()
+          const document = await readRoadmapDocumentFromDb(db)
+          return openArtisanDbOk({ kind: "delete-edge", deletedEdge: clone(input.edge), document: document ? clone(document) : null })
         })
       })
     },
@@ -1677,6 +1882,12 @@ export function createPGliteOpenArtisanRepository(
         }
         const graph = await loadTaskGraph(db, workflow.id)
         if (graph) {
+          const roadmapItemIdsByTaskId = new Map<string, string[]>()
+          for (const link of graph.roadmapLinks) {
+            const existing = roadmapItemIdsByTaskId.get(link.taskId) ?? []
+            existing.push(link.roadmapItemId)
+            roadmapItemIdsByTaskId.set(link.taskId, existing)
+          }
           const gateRows = await schemaDb.selectFrom("human_gates").selectAll().where("workflow_id", "=", workflow.id).execute()
           const gatesByTaskId = new Map(gateRows.map((gateRow) => {
             const gate = rowRecord<DbHumanGate>(gateRow)
@@ -1691,6 +1902,7 @@ export function createPGliteOpenArtisanRepository(
             estimatedComplexity: task.complexity,
             status: task.status,
             category: task.category,
+            ...(roadmapItemIdsByTaskId.has(task.id) ? { roadmapItemIds: roadmapItemIdsByTaskId.get(task.id)! } : {}),
             ...(gatesByTaskId.has(task.id)
               ? {
                   humanGate: {

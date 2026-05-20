@@ -102,6 +102,7 @@ function validateImplPlanExecutableContract(state: WorkflowState, planContent: s
     state.mode,
     deriveImplPlanExecutableAllowlist(state, cwd),
     cwd,
+    state.roadmapContext,
   ))
   return errors
 }

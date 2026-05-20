@@ -27,6 +27,7 @@ function createSchema() {
 
 tool.schema = {
   string: () => createSchema(),
+  number: () => createSchema(),
   boolean: () => createSchema(),
   enum: (_values: string[]) => createSchema(),
   array: (inner: unknown) => ({

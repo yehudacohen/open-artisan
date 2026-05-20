@@ -34,6 +34,7 @@
 
 import { createImplDAG } from "./dag"
 import type { ImplDAG, TaskNode, TaskComplexity, TaskCategory } from "./dag"
+import type { WorkflowRoadmapContext } from "./roadmap-types"
 import type { WorkflowMode } from "./workflow-primitives"
 import { findInvalidWorkflowPaths, normalizeWorkflowPaths } from "./path-normalization"
 
@@ -90,6 +91,9 @@ const COMPLEXITY_RE = /^\s*(?:-\s*)?\*{0,2}Complexity[*:\s]+(.*)$/i
 
 /** Matches "**Category:** scaffold" or "**Category:** human-gate" */
 const CATEGORY_RE = /^\s*(?:-\s*)?\*{0,2}Category[*:\s]+(.*)$/i
+
+/** Matches "**Roadmap items:** item-1, item-2" */
+const ROADMAP_ITEMS_RE = /^\s*(?:-\s*)?\*{0,2}Roadmap\s+items?[*:\s]+(.*)$/i
 
 /** Matches "**Files:** src/foo.ts, src/bar.ts" or "**Expected files:** ..." */
 const FILES_RE = /^\s*(?:-\s*)?\*{0,2}(?:Expected\s+)?files?[*:\s]+(.*)$/i
@@ -175,6 +179,7 @@ interface RawBlock {
   rawCommands: string
   rawComplexity: string
   rawCategory: string
+  rawRoadmapItems: string
   hasDepsField: boolean
   hasTestsField: boolean
   hasFilesField: boolean
@@ -190,7 +195,7 @@ function extractRawBlocks(text: string): RawBlock[] {
   const blocks: RawBlock[] = []
   let current: RawBlock | null = null
   let inCodeBlock = false
-  let pendingListField: "deps" | "tests" | "files" | "commands" | null = null
+  let pendingListField: "deps" | "tests" | "files" | "commands" | "roadmapItems" | null = null
 
   for (const line of lines) {
     // Track fenced code blocks — ignore task headers inside them
@@ -219,6 +224,7 @@ function extractRawBlocks(text: string): RawBlock[] {
         rawCommands: "",
         rawComplexity: "",
         rawCategory: "",
+        rawRoadmapItems: "",
         hasDepsField: false,
         hasTestsField: false,
         hasFilesField: false,
@@ -275,6 +281,13 @@ function extractRawBlocks(text: string): RawBlock[] {
       continue
     }
 
+    const roadmapItemsMatch = ROADMAP_ITEMS_RE.exec(line)
+    if (roadmapItemsMatch) {
+      current.rawRoadmapItems = roadmapItemsMatch[1]!.trim()
+      pendingListField = current.rawRoadmapItems === "" ? "roadmapItems" : null
+      continue
+    }
+
     const listItemMatch = pendingListField ? LIST_ITEM_RE.exec(line) : null
     if (pendingListField && listItemMatch) {
       const value = normalizeListEntry(listItemMatch[1]!.trim())
@@ -285,8 +298,10 @@ function extractRawBlocks(text: string): RawBlock[] {
           current.rawTests = current.rawTests ? `${current.rawTests}, ${value}` : value
         } else if (pendingListField === "commands") {
           current.rawCommands = current.rawCommands ? `${current.rawCommands}, ${value}` : value
-        } else {
+        } else if (pendingListField === "files") {
           current.rawFiles = current.rawFiles ? `${current.rawFiles}, ${value}` : value
+        } else {
+          current.rawRoadmapItems = current.rawRoadmapItems ? `${current.rawRoadmapItems}, ${value}` : value
         }
       }
       continue
@@ -351,6 +366,7 @@ export function parseImplPlan(artifactText: string): ParseResult {
 
     const category = parseCategory(block.rawCategory)
     const expectedFiles = parseList(block.rawFiles)
+    const roadmapItemIds = parseList(block.rawRoadmapItems)
     for (const file of extractBoundaryRepairFiles(block.bodyLines)) {
       if (!expectedFiles.includes(file)) expectedFiles.push(file)
     }
@@ -364,6 +380,7 @@ export function parseImplPlan(artifactText: string): ParseResult {
       expectedFiles,
       estimatedComplexity: parseComplexity(block.rawComplexity),
       status: "pending",
+      ...(roadmapItemIds.length > 0 ? { roadmapItemIds } : {}),
       // Only set category if explicitly specified; undefined = defaults to "standalone"
       // semantics in stub detection and scheduler logic
       ...(category ? { category } : {}),
@@ -390,6 +407,7 @@ export function validateExecutableImplPlan(
   mode: WorkflowMode | null,
   fileAllowlist: string[],
   cwd: string,
+  roadmapContext?: Pick<WorkflowRoadmapContext, "roadmapItemIds"> | null,
 ): string[] {
   const errors: string[] = []
   const rawBlocks = extractRawBlocks(artifactText)
@@ -424,6 +442,18 @@ export function validateExecutableImplPlan(
       errors.push(
         `Task "${task.id}" references files outside the project root or invalid paths: ${invalidPaths.join(", ")}`,
       )
+    }
+    if ((task.roadmapItemIds?.length ?? 0) > 0) {
+      if (!roadmapContext || roadmapContext.roadmapItemIds.length === 0) {
+        errors.push(`Task "${task.id}" references roadmap items, but the workflow has no attached roadmap context.`)
+      } else {
+        const attachedIds = new Set(roadmapContext.roadmapItemIds)
+        for (const roadmapItemId of task.roadmapItemIds ?? []) {
+          if (!attachedIds.has(roadmapItemId)) {
+            errors.push(`Task "${task.id}" references unknown roadmap item "${roadmapItemId}".`)
+          }
+        }
+      }
     }
   }
 

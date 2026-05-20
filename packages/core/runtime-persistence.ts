@@ -9,7 +9,7 @@ import type { Phase, PhaseState } from "./workflow-primitives"
 import type { CriterionResult } from "./review-types"
 import type { TaskReviewSuccess } from "./task-review"
 import type { OpenArtisanServices } from "./open-artisan-services"
-import type { DbAgentLease, DbReviewObservation, DbWorktreeObservation, ReviewRecommendation } from "./open-artisan-repository"
+import { openArtisanDbOk, type DbAgentLease, type DbReviewObservation, type DbTaskGraph, type DbWorktreeObservation, type OpenArtisanDbResult, type ReviewRecommendation } from "./open-artisan-repository"
 import type { WorktreeFileClaim } from "./worktree-observation"
 import { DB_TASK_LEASE_TTL_MS } from "./constants"
 
@@ -19,6 +19,10 @@ function nowIso(): string {
 
 function stableId(...parts: string[]): string {
   return createHash("sha256").update(parts.join("\0")).digest("hex").slice(0, 24)
+}
+
+function unique(values: string[]): string[] {
+  return [...new Set(values)]
 }
 
 export function workflowDbId(state: Pick<WorkflowState, "featureName" | "sessionId">): string {
@@ -31,6 +35,54 @@ export function taskDbId(state: Pick<WorkflowState, "featureName" | "sessionId">
 
 export function taskLeaseId(state: Pick<WorkflowState, "featureName" | "sessionId">, taskId: string, sessionId: string): string {
   return stableId(workflowDbId(state), "lease", taskId, sessionId)
+}
+
+export function materializeTaskGraph(state: WorkflowState): DbTaskGraph | null {
+  if (!state.implDag || state.implDag.length === 0) return null
+  const workflowId = workflowDbId(state)
+  const createdAt = nowIso()
+  return {
+    tasks: state.implDag.map((task) => ({
+      id: taskDbId(state, task.id),
+      workflowId,
+      taskKey: task.id,
+      description: task.description,
+      status: task.status,
+      category: task.humanGate ? "human-gate" : (task.category ?? "standalone"),
+      complexity: task.estimatedComplexity,
+      createdAt,
+      updatedAt: createdAt,
+    })),
+    dependencies: state.implDag.flatMap((task) =>
+      unique(task.dependencies).map((dependency) => ({
+        workflowId,
+        fromTaskId: taskDbId(state, dependency),
+        toTaskId: taskDbId(state, task.id),
+      })),
+    ),
+    ownedFiles: state.implDag.flatMap((task) =>
+      unique(task.expectedFiles).map((path) => ({ taskId: taskDbId(state, task.id), path })),
+    ),
+    expectedTests: state.implDag.flatMap((task) =>
+      unique(task.expectedTests).map((path) => ({ taskId: taskDbId(state, task.id), path })),
+    ),
+    roadmapLinks: state.implDag.flatMap((task) =>
+      unique(task.roadmapItemIds ?? []).map((roadmapItemId) => ({
+        taskId: taskDbId(state, task.id),
+        roadmapItemId,
+      })),
+    ),
+  }
+}
+
+export async function persistTaskGraph(
+  services: OpenArtisanServices | null | undefined,
+  state: WorkflowState,
+): Promise<OpenArtisanDbResult<DbTaskGraph | null>> {
+  if (!services) return openArtisanDbOk(null)
+  const graph = materializeTaskGraph(state)
+  if (!graph) return openArtisanDbOk(null)
+  return services.taskGraph.replaceTaskGraph(workflowDbId(state), graph)
 }
 
 function recommendation(passed: boolean, issueCount: number): ReviewRecommendation {

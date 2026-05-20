@@ -34,6 +34,16 @@ tools:
   - oa_report_drift
   - oa_plan_drift_repair
   - oa_apply_drift_repair
+  - oa_roadmap_read
+  - oa_roadmap_query
+  - oa_roadmap_derive_execution_slice
+  - oa_roadmap_upsert_item
+  - oa_roadmap_update_item_status
+  - oa_roadmap_delete_item
+  - oa_roadmap_upsert_edge
+  - oa_roadmap_delete_edge
+  - oa_roadmap_replace
+  - oa_roadmap_delete
   - oa_query_parent_workflow
   - oa_query_child_workflow
   - oa_state

@@ -24,6 +24,7 @@ function deriveSlice(
   document: RoadmapDocument,
   roadmapItemIds: string[],
   featureName?: string,
+  executionSliceId?: string,
 ): RoadmapResult<DerivedExecutionSlice> {
   if (roadmapItemIds.length === 0) {
     return roadmapError("invalid-slice", "deriveExecutionSlice requires at least one roadmap item id", false)
@@ -50,6 +51,7 @@ function deriveSlice(
     roadmapItems,
     edges,
     ...(featureName !== undefined ? { featureName } : {}),
+    ...(executionSliceId !== undefined ? { executionSliceId } : {}),
   })
 }
 
@@ -76,10 +78,11 @@ export function createRoadmapSliceService(
     async deriveExecutionSlice(input: {
       roadmapItemIds: string[]
       featureName?: string
+      executionSliceId?: string
     }): Promise<RoadmapResult<DerivedExecutionSlice>> {
       const document = await loadRoadmapDocument(roadmapBackend)
       if (!document.ok) return document
-      return deriveSlice(document.value, input.roadmapItemIds, input.featureName)
+      return deriveSlice(document.value, input.roadmapItemIds, input.featureName, input.executionSliceId)
     },
   }
 }

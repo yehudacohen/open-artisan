@@ -11,6 +11,8 @@
  * This module provides the foundations for sequential scheduling only.
  */
 
+import type { TaskRoadmapTraceability } from "./roadmap-types"
+
 // ---------------------------------------------------------------------------
 // Core types
 // ---------------------------------------------------------------------------
@@ -60,7 +62,7 @@ export interface HumanGateInfo {
   resolvedAt?: string
 }
 
-export interface TaskNode {
+export interface TaskNode extends TaskRoadmapTraceability {
   /** Unique identifier within this DAG — e.g. "T1", "T2", "auth-service" */
   id: string
 
@@ -205,6 +207,7 @@ export function createImplDAG(tasks: TaskNode[]): ImplDAG {
     expectedTests: [...t.expectedTests],
     verificationCommands: [...(t.verificationCommands ?? [])],
     expectedFiles: [...(t.expectedFiles ?? [])],
+    ...(t.roadmapItemIds !== undefined ? { roadmapItemIds: [...t.roadmapItemIds] } : {}),
     ...(t.isolation
       ? {
           isolation: {
@@ -246,6 +249,11 @@ export function createImplDAG(tasks: TaskNode[]): ImplDAG {
         }
         if (t.isolation.writablePaths.length === 0) {
           errors.push(`Task "${t.id}" is marked parallel-safe but has no writablePaths`)
+        }
+      }
+      for (const roadmapItemId of t.roadmapItemIds ?? []) {
+        if (!roadmapItemId.trim()) {
+          errors.push(`Task "${t.id}" has an empty roadmap item id`)
         }
       }
       for (const dep of t.dependencies) {

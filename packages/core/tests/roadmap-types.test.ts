@@ -4,15 +4,18 @@ import {
   validateRoadmapDocumentResult,
   validateRoadmapDocument,
   type DerivedExecutionSlice,
+  type RoadmapContextAttachmentService,
   type RoadmapDiagnosticEvent,
   type RoadmapDocument,
   type RoadmapMutationInput,
   type RoadmapMutationResult,
   type RoadmapResult,
+  type RoadmapSliceService,
   type TaskRoadmapTraceability,
   type WorkflowRoadmapContext,
   type WorkflowRoadmapLink,
 } from "#core/roadmap-types"
+import { createRoadmapContextAttachmentService, type WorkflowService } from "#core/open-artisan-services"
 
 const NOW = "2026-04-16T00:00:00.000Z"
 
@@ -205,5 +208,77 @@ describe("roadmap type contracts", () => {
     expect(context.roadmapItemIds).toEqual(["item-1", "item-2"])
     expect(taskTraceability.roadmapItemIds).toEqual(["item-1"])
     expect(diagnostic).toEqual({ operation: "update-item-status", status: "ready", roadmapItemIds: ["item-1"] })
+  })
+
+  it("models shared roadmap context attachment and workflow linking as typed service seams", async () => {
+    const document = makeDocument()
+    const context: WorkflowRoadmapContext = {
+      roadmapItemIds: ["item-1", "item-2"],
+      roadmapItems: document.items.slice(0, 2),
+      edges: document.edges,
+      featureName: "persistent-roadmap-dag",
+      executionSliceId: "slice-1",
+      attachedAt: NOW,
+    }
+    const service: RoadmapContextAttachmentService = {
+      async deriveContext(input) {
+        expect(input).toEqual({ roadmapItemIds: ["item-1", "item-2"], featureName: "persistent-roadmap-dag", executionSliceId: "slice-1" })
+        return { ok: true, value: context }
+      },
+      async linkWorkflow(input) {
+        expect(input.roadmapContext?.roadmapItemIds).toEqual(["item-1", "item-2"])
+        return { ok: true, value: { featureName: input.featureName, roadmapItemIds: input.roadmapContext?.roadmapItemIds ?? [] } }
+      },
+    }
+
+    const derived = await service.deriveContext({ roadmapItemIds: ["item-1", "item-2"], featureName: "persistent-roadmap-dag", executionSliceId: "slice-1" })
+    expect(derived).toEqual({ ok: true, value: context })
+
+    const linked = await service.linkWorkflow({ featureName: "persistent-roadmap-dag", roadmapContext: context })
+    expect(linked).toEqual({ ok: true, value: { featureName: "persistent-roadmap-dag", roadmapItemIds: ["item-1", "item-2"] } })
+  })
+
+  it("derives and links roadmap context through the shared attachment service", async () => {
+    const document = makeDocument()
+    const roadmapSliceService: RoadmapSliceService = {
+      async queryRoadmap() {
+        return { ok: true, value: document.items }
+      },
+      async deriveExecutionSlice(input: { roadmapItemIds: string[]; featureName?: string; executionSliceId?: string }) {
+        expect(input).toEqual({ roadmapItemIds: ["item-1", "item-2"], featureName: "persistent-roadmap-dag" })
+        return {
+          ok: true,
+          value: {
+            roadmapItemIds: input.roadmapItemIds,
+            roadmapItems: document.items.slice(0, 2),
+            edges: document.edges,
+            ...(input.featureName !== undefined ? { featureName: input.featureName } : {}),
+          },
+        }
+      },
+    }
+    const linkedItemIds: string[] = []
+    const workflow = {
+      async getWorkflowByFeature(featureName: string) {
+        expect(featureName).toBe("persistent-roadmap-dag")
+        return { ok: true, value: { workflow: { id: "workflow-1" } } }
+      },
+      async linkRoadmap(workflowId: string, roadmapItemId: string) {
+        expect(workflowId).toBe("workflow-1")
+        linkedItemIds.push(roadmapItemId)
+        return { ok: true, value: { workflowId, roadmapItemId } }
+      },
+    } as Pick<WorkflowService, "getWorkflowByFeature" | "linkRoadmap"> as WorkflowService
+
+    const service = createRoadmapContextAttachmentService({ roadmapSliceService, workflow })
+    const context = await service.deriveContext({ roadmapItemIds: ["item-1", "item-2"], featureName: "persistent-roadmap-dag" })
+    expect(context.ok).toBeTrue()
+    if (!context.ok) throw new Error(context.error.message)
+    expect(context.value?.attachedAt).toBeString()
+    expect(context.value?.roadmapItemIds).toEqual(["item-1", "item-2"])
+
+    const link = await service.linkWorkflow({ featureName: "persistent-roadmap-dag", roadmapContext: context.value })
+    expect(link).toEqual({ ok: true, value: { featureName: "persistent-roadmap-dag", roadmapItemIds: ["item-1", "item-2"] } })
+    expect(linkedItemIds).toEqual(["item-1", "item-2"])
   })
 })

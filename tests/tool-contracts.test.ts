@@ -1,4 +1,6 @@
 import { describe, expect, it } from "bun:test"
+import { readFileSync } from "node:fs"
+import { join } from "node:path"
 
 import { TOOL_HANDLERS } from "#bridge/methods/tool-execute"
 import { TOOLS as MCP_TOOLS } from "#claude-code/bin/artisan-mcp-tools"
@@ -16,6 +18,7 @@ import {
   TOOL_CONTRACTS,
   validateToolContracts,
   WORKFLOW_TOOL_CONTRACTS,
+  type DriftBacktrackAutoSkipPolicy,
 } from "#core/tool-contracts"
 
 describe("tool contract registry", () => {
@@ -98,6 +101,13 @@ describe("tool contract registry", () => {
     expect(hermesToolContractCount()).toBe(HERMES_AUTHOR_TOOL_CONTRACTS.length)
   })
 
+  it("keeps the generated Hermes tool contract artifact aligned with the author projection", () => {
+    const generatedPath = join(process.cwd(), "packages", "adapter-hermes", "hermes_adapter", "tool_contracts.json")
+    const generatedContracts = JSON.parse(readFileSync(generatedPath, "utf-8"))
+
+    expect(generatedContracts).toEqual(JSON.parse(buildHermesToolContractsArtifact()))
+  })
+
   it("keeps reviewer and control tools out of the Hermes author projection", () => {
     const hermesBridgeNames = HERMES_AUTHOR_TOOL_CONTRACTS.map((contract) => contract.name).sort()
     expect(hermesBridgeNames).not.toContain("mark_satisfied")
@@ -144,6 +154,16 @@ describe("tool contract registry", () => {
     expect(MCP_TOOL_CONTRACTS.map((contract) => contract.name)).toEqual(expect.arrayContaining(roadmapToolNames))
     expect(OPENCODE_TOOL_CONTRACTS.map((contract) => contract.name)).toEqual(expect.arrayContaining(roadmapToolNames))
     expect(HERMES_AUTHOR_TOOL_CONTRACTS.map((contract) => contract.name)).toEqual(expect.arrayContaining(roadmapToolNames))
+  })
+
+  it("models drift backtrack auto-skip policy as explicit operational contract data", () => {
+    const policy: DriftBacktrackAutoSkipPolicy = {
+      signals: ["artifact-drift", "allowlist-drift", "completed-task-drift", "drift-report", "drift-repair"],
+      blockedReason: "blocking drift report requires explicit artifact updates",
+    }
+
+    expect(policy.signals).toEqual(["artifact-drift", "allowlist-drift", "completed-task-drift", "drift-report", "drift-repair"])
+    expect(policy.blockedReason).toBe("blocking drift report requires explicit artifact updates")
   })
 
   it("keeps OpenCode-local result capture tools out of bridge dispatch", () => {

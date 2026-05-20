@@ -574,6 +574,7 @@ pgliteShardDescribe("PGlite Open Artisan repository", () => {
       edges: [{ from: "roadmap-1", to: "missing-roadmap", kind: "depends-on" as const }],
     })
     expect(result.ok).toBe(false)
+    expect(!result.ok && result.error.code).toBe("invalid-document")
     expect(valueOf(await repo.readRoadmap())?.items.map((item) => item.id)).toEqual(["roadmap-1"])
   })
 
@@ -659,6 +660,67 @@ pgliteShardDescribe("PGlite Open Artisan repository", () => {
     expect(valueOf(await repo.getTaskGraph("workflow:db-runtime"))?.roadmapLinks).toEqual([
       { taskId: "workflow:db-runtime:T1", roadmapItemId: "roadmap-1" },
     ])
+  })
+
+  it("returns typed runtime persistence errors for missing task roadmap items", async () => {
+    const repo = tempRepo()
+    const state = makeWorkflowState({
+      sessionId: "runtime-session",
+      featureName: "db-runtime",
+      mode: "INCREMENTAL",
+      phase: "IMPL_PLAN",
+      phaseState: "USER_GATE",
+      implDag: [
+        {
+          id: "T1",
+          description: "Implement missing roadmap task links",
+          dependencies: [],
+          expectedTests: ["tests/open-artisan-repository-pglite.test.ts"],
+          expectedFiles: ["packages/core/runtime-persistence.ts"],
+          estimatedComplexity: "small",
+          status: "pending",
+          roadmapItemIds: ["missing-roadmap"],
+        },
+      ],
+    })
+    await repo.createWorkflow(workflow({ id: "workflow:db-runtime" }))
+
+    const runtimePersistence = await import("#core/runtime-persistence")
+    const result = await runtimePersistence.persistTaskGraph(createOpenArtisanServices(repo), state)
+
+    expect(result.ok).toBe(false)
+    expect(!result.ok && result.error.code).toBe("not-found")
+    expect(valueOf(await repo.getTaskGraph("workflow:db-runtime"))).toBeNull()
+  })
+
+  it("round-trips WorkflowState implDag roadmapItemIds through import and export", async () => {
+    const repo = tempRepo()
+    await repo.createRoadmapItem({ id: "roadmap-1", kind: "feature" as const, title: "DB", status: "todo" as const, priority: 5, createdAt: now(), updatedAt: now() })
+    const state = makeWorkflowState({
+      sessionId: "runtime-session",
+      featureName: "db-runtime",
+      mode: "INCREMENTAL",
+      phase: "IMPL_PLAN",
+      phaseState: "USER_GATE",
+      implDag: [
+        {
+          id: "T1",
+          description: "Implement roadmap task links",
+          dependencies: [],
+          expectedTests: ["tests/open-artisan-repository-pglite.test.ts"],
+          expectedFiles: ["packages/core/open-artisan-repository-pglite.ts"],
+          estimatedComplexity: "small",
+          status: "pending",
+          roadmapItemIds: ["roadmap-1"],
+        },
+      ],
+    })
+
+    expect((await repo.importWorkflowState(state)).ok).toBe(true)
+    expect(valueOf(await repo.getTaskGraph("workflow:db-runtime"))?.roadmapLinks).toEqual([
+      { taskId: "workflow:db-runtime:T1", roadmapItemId: "roadmap-1" },
+    ])
+    expect(valueOf(await repo.exportWorkflowState("workflow:db-runtime")).implDag?.[0]?.roadmapItemIds).toEqual(["roadmap-1"])
   })
 
   it("rejects missing task claims without creating orphan leases", async () => {
@@ -1225,6 +1287,15 @@ pgliteShardDescribe("PGlite Open Artisan repository", () => {
     expect(valueOf(await services.workflow.listWorkflows()).map((item) => item.id)).toEqual(["workflow-1"])
     expect((await services.workflow.setPhase("workflow-1", "TESTS", "DRAFT")).ok).toBe(true)
     expect((await services.roadmap.createItem({ id: "roadmap-1", kind: "feature", title: "DB", status: "todo", priority: 1, createdAt: now(), updatedAt: now() })).ok).toBe(true)
+    expect((await services.roadmapMutations.updateItemStatus({ itemId: "roadmap-1", status: "in-progress", updatedAt: now() }))).toEqual({
+      ok: true,
+      value: {
+        kind: "update-item-status",
+        item: expect.objectContaining({ id: "roadmap-1", status: "in-progress" }),
+        document: expect.objectContaining({ items: [expect.objectContaining({ id: "roadmap-1", status: "in-progress" })] }),
+      },
+    })
+    expect((await services.roadmapMutations.replaceRoadmap({ document: { schemaVersion: 1, items: [{ id: "roadmap-1", kind: "feature", title: "DB", status: "todo", priority: 1, createdAt: now(), updatedAt: now() }], edges: [] } })).ok).toBe(true)
     expect((await services.executionSlices.createSlice({ id: "slice-1", title: "Slice", status: "active", createdAt: now(), updatedAt: now() }, ["roadmap-1"])).ok).toBe(true)
     expect(valueOf(await services.executionSlices.getSlice("slice-1"))?.itemIds).toEqual(["roadmap-1"])
     expect((await services.taskGraph.replaceTaskGraph("workflow-1", taskGraph())).ok).toBe(true)

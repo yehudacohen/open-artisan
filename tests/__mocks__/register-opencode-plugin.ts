@@ -42,6 +42,7 @@ plugin({
 
       tool.schema = {
         string: () => createChainable(),
+        number: () => createChainable(),
         boolean: () => createChainable(),
         enum: (_values: string[]) => createChainable(),
         array: (_inner: unknown) => createChainable(),

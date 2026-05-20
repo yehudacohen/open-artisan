@@ -40,6 +40,28 @@
         "feature_name": {
           "type": "string",
           "minLength": 1
+        },
+        "roadmap_item_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "roadmapItemIds": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "execution_slice_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "executionSliceId": {
+          "type": "string",
+          "minLength": 1
         }
       },
       "required": [
@@ -778,6 +800,458 @@
       "required": [
         "repair_plan_id"
       ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "hermes_name": "oa_roadmap_read",
+    "bridge_name": "roadmap_read",
+    "description": "Read the current roadmap document.",
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    }
+  },
+  {
+    "hermes_name": "oa_roadmap_query",
+    "bridge_name": "roadmap_query",
+    "description": "Query roadmap items by id, kind, status, feature name, or priority.",
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "object",
+          "properties": {
+            "itemIds": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "kinds": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "feature",
+                  "bug",
+                  "debt",
+                  "chore"
+                ]
+              }
+            },
+            "statuses": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "todo",
+                  "in-progress",
+                  "blocked",
+                  "done",
+                  "dropped"
+                ]
+              }
+            },
+            "featureName": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minPriority": {
+              "type": "number"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "hermes_name": "oa_roadmap_derive_execution_slice",
+    "bridge_name": "roadmap_derive_execution_slice",
+    "description": "Derive a workflow execution slice from roadmap item ids.",
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "roadmap_item_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "roadmapItemIds": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "feature_name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "featureName": {
+          "type": "string",
+          "minLength": 1
+        },
+        "execution_slice_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "executionSliceId": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "hermes_name": "oa_roadmap_upsert_item",
+    "bridge_name": "roadmap_upsert_item",
+    "description": "Create or update one roadmap item without changing workflow phase state.",
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "item": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "feature",
+                "bug",
+                "debt",
+                "chore"
+              ]
+            },
+            "title": {
+              "type": "string",
+              "minLength": 1
+            },
+            "description": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string",
+              "enum": [
+                "todo",
+                "in-progress",
+                "blocked",
+                "done",
+                "dropped"
+              ]
+            },
+            "priority": {
+              "type": "number"
+            },
+            "featureName": {
+              "type": "string",
+              "minLength": 1
+            },
+            "createdAt": {
+              "type": "string",
+              "minLength": 1
+            },
+            "updatedAt": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "id",
+            "kind",
+            "title",
+            "status",
+            "priority",
+            "createdAt",
+            "updatedAt"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "item"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "hermes_name": "oa_roadmap_update_item_status",
+    "bridge_name": "roadmap_update_item_status",
+    "description": "Update one roadmap item's status without implying workflow or task completion.",
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "item_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "itemId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "todo",
+            "in-progress",
+            "blocked",
+            "done",
+            "dropped"
+          ]
+        },
+        "updated_at": {
+          "type": "string",
+          "minLength": 1
+        },
+        "updatedAt": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "hermes_name": "oa_roadmap_delete_item",
+    "bridge_name": "roadmap_delete_item",
+    "description": "Delete one roadmap item and its roadmap-only links without deleting workflows or artifacts.",
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "item_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "itemId": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "hermes_name": "oa_roadmap_upsert_edge",
+    "bridge_name": "roadmap_upsert_edge",
+    "description": "Create or update one roadmap dependency edge.",
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "edge": {
+          "type": "object",
+          "properties": {
+            "from": {
+              "type": "string",
+              "minLength": 1
+            },
+            "to": {
+              "type": "string",
+              "minLength": 1
+            },
+            "kind": {
+              "type": "string",
+              "const": "depends-on"
+            }
+          },
+          "required": [
+            "from",
+            "to",
+            "kind"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "edge"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "hermes_name": "oa_roadmap_delete_edge",
+    "bridge_name": "roadmap_delete_edge",
+    "description": "Delete one roadmap dependency edge.",
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "edge": {
+          "type": "object",
+          "properties": {
+            "from": {
+              "type": "string",
+              "minLength": 1
+            },
+            "to": {
+              "type": "string",
+              "minLength": 1
+            },
+            "kind": {
+              "type": "string",
+              "const": "depends-on"
+            }
+          },
+          "required": [
+            "from",
+            "to",
+            "kind"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "edge"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "hermes_name": "oa_roadmap_replace",
+    "bridge_name": "roadmap_replace",
+    "description": "Replace the standalone roadmap document after full document validation.",
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "document": {
+          "type": "object",
+          "properties": {
+            "schemaVersion": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "feature",
+                      "bug",
+                      "debt",
+                      "chore"
+                    ]
+                  },
+                  "title": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "status": {
+                    "type": "string",
+                    "enum": [
+                      "todo",
+                      "in-progress",
+                      "blocked",
+                      "done",
+                      "dropped"
+                    ]
+                  },
+                  "priority": {
+                    "type": "number"
+                  },
+                  "featureName": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "createdAt": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "updatedAt": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "id",
+                  "kind",
+                  "title",
+                  "status",
+                  "priority",
+                  "createdAt",
+                  "updatedAt"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "edges": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "from": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "to": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "kind": {
+                    "type": "string",
+                    "const": "depends-on"
+                  }
+                },
+                "required": [
+                  "from",
+                  "to",
+                  "kind"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          "required": [
+            "schemaVersion",
+            "items",
+            "edges"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "document"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "hermes_name": "oa_roadmap_delete",
+    "bridge_name": "roadmap_delete",
+    "description": "Delete the standalone roadmap document without deleting workflow artifacts.",
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {},
       "additionalProperties": false
     }
   },

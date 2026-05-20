@@ -303,6 +303,28 @@ describe("propose_backtrack — orchestrator routing", () => {
     expect(result.pendingRevisionSteps.some((step) => step.autoSkipBlockedReason)).toBe(false)
   })
 
+  it("blocks auto-skip for tool-generated drift report backtracks", async () => {
+    const state = makeState({ phase: "IMPLEMENTATION", phaseState: "REVISE" })
+    const orchestrator = makeOrchestrator({
+      classification: "strategic",
+      revisionSteps: [
+        { artifact: "plan", phase: "PLANNING", phaseState: "REVISE", instructions: "Synchronize approved scope." },
+        { artifact: "impl_plan", phase: "IMPL_PLAN", phaseState: "REVISE", instructions: "Add forward corrective work." },
+      ],
+    })
+
+    const result = await handleProposeBacktrack(
+      { target_phase: "PLANNING", reason: "Artifact drift affects plan, implementation, interfaces, tests, impl_plan." },
+      state,
+      orchestrator,
+    )
+
+    expect(result.action).toBe("execute")
+    if (result.action !== "execute") throw new Error("unreachable")
+    expect(result.autoSkipBlockedReason).toBe("blocking drift report requires explicit artifact updates")
+    expect(result.pendingRevisionSteps.every((step) => step.autoSkipBlockedReason === result.autoSkipBlockedReason)).toBe(true)
+  })
+
   it("blocks auto-skip when orchestrator reports scope_expansion trigger", async () => {
     const state = makeState({ phase: "IMPLEMENTATION", phaseState: "TASK_REVISE" })
     const orchestrator = makeOrchestrator({

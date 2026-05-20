@@ -15,7 +15,7 @@ import { join } from "node:path"
 import { existsSync, readFileSync } from "node:fs"
 import type { WorkflowState } from "../workflow-state-types"
 import type { Phase, PhaseState, WorkflowMode } from "../workflow-primitives"
-import { MAX_CONVENTIONS_CHARS, MAX_REPORT_CHARS } from "../constants"
+import { MAX_CONVENTIONS_CHARS, MAX_REPORT_CHARS, PHASE_ORDER } from "../constants"
 import { createImplDAG } from "../dag"
 import { nextSchedulerDecision } from "../scheduler"
 import { getPhaseToolPolicy } from "./tool-guard"
@@ -34,6 +34,11 @@ import {
 const PROMPTS_DIR = join(import.meta.dirname, "..", "prompts")
 
 const promptCache = new Map<string, string>()
+const PLANNING_PHASE_INDEX = PHASE_ORDER.indexOf("PLANNING")
+
+function shouldRenderRoadmapContext(phase: Phase): boolean {
+  return PHASE_ORDER.indexOf(phase) >= PLANNING_PHASE_INDEX
+}
 
 function loadPrompt(filename: string): string {
   if (promptCache.has(filename)) return promptCache.get(filename)!
@@ -248,6 +253,22 @@ function buildStateHeader(state: WorkflowState): string {
   })
   if (scenarioBlock.success && scenarioBlock.block) {
     lines.push(scenarioBlock.block)
+    lines.push("")
+  }
+
+  if (state.roadmapContext && shouldRenderRoadmapContext(state.phase)) {
+    lines.push("### Roadmap Context")
+    lines.push("This workflow is attached to roadmap items for planning and traceability only. Roadmap context does not approve artifacts, complete tasks, or change roadmap item status.")
+    lines.push(`- Roadmap item IDs: ${state.roadmapContext.roadmapItemIds.map((id) => `\`${id}\``).join(", ")}`)
+    if (state.roadmapContext.featureName) lines.push(`- Feature: ${state.roadmapContext.featureName}`)
+    if (state.roadmapContext.executionSliceId) lines.push(`- Execution slice: ${state.roadmapContext.executionSliceId}`)
+    lines.push("- Items:")
+    for (const item of state.roadmapContext.roadmapItems) {
+      lines.push(`  - ${item.id}: ${item.title} (${item.kind}, ${item.status}, priority ${item.priority})`)
+    }
+    if (state.roadmapContext.edges.length > 0) {
+      lines.push(`- Internal dependencies: ${state.roadmapContext.edges.map((edge) => `${edge.from} ${edge.kind} ${edge.to}`).join(", ")}`)
+    }
     lines.push("")
   }
 

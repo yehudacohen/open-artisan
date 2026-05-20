@@ -8,6 +8,13 @@
 import type { WorkflowMode } from "../workflow-primitives"
 import type { SelectModeArgs } from "../tool-types"
 
+export interface ParsedSelectModeArgs {
+  mode: WorkflowMode
+  featureName: string | null
+  roadmapItemIds: string[]
+  executionSliceId: string | null
+}
+
 export const VALID_MODES: WorkflowMode[] = ["GREENFIELD", "REFACTOR", "INCREMENTAL"]
 
 export const SELECT_MODE_DESCRIPTION = `
@@ -25,7 +32,7 @@ The auto-detection suggests a mode based on git history and file count, but you 
  * Validates and parses the select_mode tool arguments.
  * Returns the mode if valid, or an error string.
  */
-export function parseSelectModeArgs(args: unknown): { mode: WorkflowMode; featureName: string | null } | { error: string } {
+export function parseSelectModeArgs(args: unknown): ParsedSelectModeArgs | { error: string } {
   if (!args || typeof args !== "object") {
     return { error: "Invalid arguments: expected an object" }
   }
@@ -43,7 +50,20 @@ export function parseSelectModeArgs(args: unknown): { mode: WorkflowMode; featur
     return { error: "Invalid feature_name: expected a string" }
   }
   const featureName = typeof rawFeatureName === "string" ? rawFeatureName.trim() || null : null
-  return { mode: mode as WorkflowMode, featureName }
+  const rawRoadmapItemIds = obj["roadmap_item_ids"] ?? obj["roadmapItemIds"]
+  if (rawRoadmapItemIds !== undefined && (!Array.isArray(rawRoadmapItemIds) || rawRoadmapItemIds.some((item) => typeof item !== "string" || item.trim().length === 0))) {
+    return { error: "Invalid roadmap_item_ids: expected an array of non-empty strings" }
+  }
+  const rawExecutionSliceId = obj["execution_slice_id"] ?? obj["executionSliceId"]
+  if (rawExecutionSliceId !== undefined && (typeof rawExecutionSliceId !== "string" || rawExecutionSliceId.trim().length === 0)) {
+    return { error: "Invalid execution_slice_id: expected a non-empty string" }
+  }
+  return {
+    mode: mode as WorkflowMode,
+    featureName,
+    roadmapItemIds: Array.isArray(rawRoadmapItemIds) ? rawRoadmapItemIds.map((item) => item.trim()) : [],
+    executionSliceId: typeof rawExecutionSliceId === "string" ? rawExecutionSliceId.trim() : null,
+  }
 }
 
 /**

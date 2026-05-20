@@ -327,6 +327,10 @@ export const ApplyDriftRepairToolSchema = z.object({
 export const SelectModeToolSchema = z.object({
   mode: z.enum(["GREENFIELD", "REFACTOR", "INCREMENTAL"]),
   feature_name: z.string().min(1),
+  roadmap_item_ids: z.array(z.string().min(1)).optional(),
+  roadmapItemIds: z.array(z.string().min(1)).optional(),
+  execution_slice_id: z.string().min(1).optional(),
+  executionSliceId: z.string().min(1).optional(),
 }).strict()
 
 export const RequestReviewToolSchema = z.object({
@@ -477,11 +481,44 @@ export const ResetTaskToolSchema = z.object({
 }).strict()
 export const StateToolSchema = z.object({}).strict()
 
+export const RoadmapFeatureNameSchema = z.string().min(1).refine(
+  (value) => !value.includes("..") && !value.includes("/") && !value.includes("\\"),
+  { message: "featureName must not contain path traversal or path separators" },
+)
+
+export const RoadmapItemKindSchema = z.enum(["feature", "bug", "debt", "chore"])
+export const RoadmapItemStatusSchema = z.enum(["todo", "in-progress", "blocked", "done", "dropped"])
+export const RoadmapEdgeKindSchema = z.literal("depends-on")
+
+export const RoadmapItemSchema = z.object({
+  id: z.string().min(1),
+  kind: RoadmapItemKindSchema,
+  title: z.string().min(1),
+  description: z.string().optional(),
+  status: RoadmapItemStatusSchema,
+  priority: z.number().finite(),
+  featureName: RoadmapFeatureNameSchema.optional(),
+  createdAt: z.string().min(1),
+  updatedAt: z.string().min(1),
+}).strict()
+
+export const RoadmapEdgeSchema = z.object({
+  from: z.string().min(1),
+  to: z.string().min(1),
+  kind: RoadmapEdgeKindSchema,
+}).strict()
+
+export const RoadmapDocumentSchema = z.object({
+  schemaVersion: z.number().int().positive(),
+  items: z.array(RoadmapItemSchema),
+  edges: z.array(RoadmapEdgeSchema),
+}).strict()
+
 export const RoadmapQuerySchema = z.object({
   itemIds: z.array(z.string()).optional(),
-  kinds: z.array(z.enum(["feature", "bug", "debt", "chore"])).optional(),
-  statuses: z.array(z.enum(["todo", "in-progress", "blocked", "done", "dropped"])).optional(),
-  featureName: z.string().optional(),
+  kinds: z.array(RoadmapItemKindSchema).optional(),
+  statuses: z.array(RoadmapItemStatusSchema).optional(),
+  featureName: RoadmapFeatureNameSchema.optional(),
   minPriority: z.number().optional(),
 }).strict()
 
@@ -490,10 +527,55 @@ export const RoadmapQueryToolSchema = z.object({
 }).strict()
 
 export const RoadmapDeriveExecutionSliceToolSchema = z.object({
-  roadmap_item_ids: z.array(z.string()).optional(),
-  roadmapItemIds: z.array(z.string()).optional(),
-  feature_name: z.string().optional(),
-  featureName: z.string().optional(),
+  roadmap_item_ids: z.array(z.string().min(1)).optional(),
+  roadmapItemIds: z.array(z.string().min(1)).optional(),
+  feature_name: RoadmapFeatureNameSchema.optional(),
+  featureName: RoadmapFeatureNameSchema.optional(),
+  execution_slice_id: z.string().min(1).optional(),
+  executionSliceId: z.string().min(1).optional(),
+}).strict().superRefine((value, ctx) => {
+  const itemIds = value.roadmap_item_ids ?? value.roadmapItemIds ?? []
+  const executionSliceId = value.execution_slice_id ?? value.executionSliceId
+  if (itemIds.length === 0 && !executionSliceId) {
+    ctx.addIssue({ code: "custom", message: "roadmap item ids or execution slice id is required" })
+  }
+})
+
+export const RoadmapUpsertItemToolSchema = z.object({
+  item: RoadmapItemSchema,
+}).strict()
+
+export const RoadmapUpdateItemStatusToolSchema = z.object({
+  item_id: z.string().min(1).optional(),
+  itemId: z.string().min(1).optional(),
+  status: RoadmapItemStatusSchema,
+  updated_at: z.string().min(1).optional(),
+  updatedAt: z.string().min(1).optional(),
+}).strict().superRefine((value, ctx) => {
+  if (!value.item_id && !value.itemId) {
+    ctx.addIssue({ code: "custom", message: "item_id or itemId is required" })
+  }
+})
+
+export const RoadmapDeleteItemToolSchema = z.object({
+  item_id: z.string().min(1).optional(),
+  itemId: z.string().min(1).optional(),
+}).strict().superRefine((value, ctx) => {
+  if (!value.item_id && !value.itemId) {
+    ctx.addIssue({ code: "custom", message: "item_id or itemId is required" })
+  }
+})
+
+export const RoadmapUpsertEdgeToolSchema = z.object({
+  edge: RoadmapEdgeSchema,
+}).strict()
+
+export const RoadmapDeleteEdgeToolSchema = z.object({
+  edge: RoadmapEdgeSchema,
+}).strict()
+
+export const RoadmapReplaceToolSchema = z.object({
+  document: RoadmapDocumentSchema,
 }).strict()
 
 export type LifecycleInitParamsFromSchema = z.infer<typeof LifecycleInitParamsSchema>
@@ -521,6 +603,15 @@ export type DisableOpenArtisanToolInput = z.infer<typeof DisableOpenArtisanToolS
 export type ReportDriftToolInput = z.infer<typeof ReportDriftToolSchema>
 export type PlanDriftRepairToolInput = z.infer<typeof PlanDriftRepairToolSchema>
 export type ApplyDriftRepairToolInput = z.infer<typeof ApplyDriftRepairToolSchema>
+export type RoadmapItemFromSchema = z.infer<typeof RoadmapItemSchema>
+export type RoadmapEdgeFromSchema = z.infer<typeof RoadmapEdgeSchema>
+export type RoadmapDocumentFromSchema = z.infer<typeof RoadmapDocumentSchema>
+export type RoadmapUpsertItemInput = z.infer<typeof RoadmapUpsertItemToolSchema>
+export type RoadmapUpdateItemStatusInput = z.infer<typeof RoadmapUpdateItemStatusToolSchema>
+export type RoadmapDeleteItemInput = z.infer<typeof RoadmapDeleteItemToolSchema>
+export type RoadmapUpsertEdgeInput = z.infer<typeof RoadmapUpsertEdgeToolSchema>
+export type RoadmapDeleteEdgeInput = z.infer<typeof RoadmapDeleteEdgeToolSchema>
+export type RoadmapReplaceInput = z.infer<typeof RoadmapReplaceToolSchema>
 
 export function formatZodError(error: z.ZodError): string {
   return error.issues.map((issue) => `${issue.path.join(".") || "<root>"}: ${issue.message}`).join("; ")

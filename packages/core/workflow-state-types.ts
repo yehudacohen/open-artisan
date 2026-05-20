@@ -6,6 +6,7 @@ import type { RevisionStep } from "./orchestrator-types"
 import { VALID_PHASE_STATES } from "./types"
 import type { ArtifactKey, Phase, PhaseState, WorkflowMode } from "./types"
 import { createImplDAG } from "./dag"
+import type { WorkflowRoadmapContext } from "./roadmap-types"
 
 // ---------------------------------------------------------------------------
 // Core workflow state
@@ -72,8 +73,11 @@ import { createImplDAG } from "./dag"
  *        payloads alongside on-disk artifact files.
  *   v31: added reviewAttempts to persist reviewer attempts, rubric item status,
  *        and timeout/error outcomes across retries.
+ *   v32: added roadmapContext to persist optional roadmap execution-slice
+ *        traceability for workflows started from roadmap item IDs or slices;
+ *        migrations default missing roadmapContext to null.
  */
-export const SCHEMA_VERSION = 31
+export const SCHEMA_VERSION = 32
 
 /**
  * Runtime concurrency policy for nested or delegated workflow execution.
@@ -356,6 +360,14 @@ export interface WorkflowState {
   discoveryReport: string | null
 
   /**
+   * Roadmap execution-slice context attached to this workflow.
+   * This is planning/traceability input only: it must not imply artifact
+   * approval, task completion, or roadmap status transitions.
+   * Migrated workflows without roadmap context store null.
+   */
+  roadmapContext?: WorkflowRoadmapContext | null
+
+  /**
    * Structured real-world acceptance scenario captured from the PLANNING artifact.
    * null before capture and for migrated workflows that have not re-submitted planning.
    */
@@ -390,7 +402,7 @@ export interface WorkflowState {
    * The sequential scheduler reads this to find the next ready task.
    * Stored as a plain object (TaskNode[]) for JSON serializability.
    */
-  implDag: import("./dag").TaskNode[] | null
+  implDag: Array<import("./dag").TaskNode & { roadmapItemIds?: string[] }> | null
 
   /**
    * Per-phase approval counts for tag versioning (M11).
@@ -843,6 +855,42 @@ export function validateWorkflowStateResult(state: WorkflowState): WorkflowState
   if (state.conventions !== null && typeof state.conventions !== "string") {
     return { success: false, error: workflowStateValidationError(`conventions must be null or a string, got ${typeof state.conventions}`) }
   }
+  if (state.roadmapContext !== undefined && state.roadmapContext !== null) {
+    if (typeof state.roadmapContext !== "object" || Array.isArray(state.roadmapContext)) {
+      return { success: false, error: workflowStateValidationError("roadmapContext must be null or an object") }
+    }
+    if (!Array.isArray(state.roadmapContext.roadmapItemIds) || !Array.isArray(state.roadmapContext.roadmapItems) || !Array.isArray(state.roadmapContext.edges)) {
+      return { success: false, error: workflowStateValidationError("roadmapContext must include roadmapItemIds, roadmapItems, and edges arrays") }
+    }
+    for (let i = 0; i < state.roadmapContext.roadmapItemIds.length; i++) {
+      if (typeof state.roadmapContext.roadmapItemIds[i] !== "string" || state.roadmapContext.roadmapItemIds[i]!.trim().length === 0) {
+        return { success: false, error: workflowStateValidationError(`roadmapContext.roadmapItemIds[${i}] must be a non-empty string`) }
+      }
+    }
+    const roadmapItemIds = new Set(state.roadmapContext.roadmapItemIds)
+    for (const item of state.roadmapContext.roadmapItems) {
+      if (!item || typeof item !== "object" || typeof item.id !== "string" || !roadmapItemIds.has(item.id)) {
+        return { success: false, error: workflowStateValidationError("roadmapContext.roadmapItems must match selected roadmapItemIds") }
+      }
+    }
+    for (const edge of state.roadmapContext.edges) {
+      if (!edge || typeof edge !== "object" || typeof edge.from !== "string" || typeof edge.to !== "string" || edge.kind !== "depends-on") {
+        return { success: false, error: workflowStateValidationError("roadmapContext.edges must contain valid depends-on edges") }
+      }
+      if (!roadmapItemIds.has(edge.from) || !roadmapItemIds.has(edge.to)) {
+        return { success: false, error: workflowStateValidationError("roadmapContext.edges may only reference selected roadmapItemIds") }
+      }
+    }
+    if (state.roadmapContext.featureName !== undefined && typeof state.roadmapContext.featureName !== "string") {
+      return { success: false, error: workflowStateValidationError("roadmapContext.featureName must be a string when provided") }
+    }
+    if (state.roadmapContext.executionSliceId !== undefined && typeof state.roadmapContext.executionSliceId !== "string") {
+      return { success: false, error: workflowStateValidationError("roadmapContext.executionSliceId must be a string when provided") }
+    }
+    if (typeof state.roadmapContext.attachedAt !== "string" || state.roadmapContext.attachedAt.trim().length === 0) {
+      return { success: false, error: workflowStateValidationError("roadmapContext.attachedAt must be a non-empty string") }
+    }
+  }
   if (typeof state.priorWorkflowChecked !== "boolean") {
     return { success: false, error: workflowStateValidationError(`priorWorkflowChecked must be a boolean, got ${typeof state.priorWorkflowChecked}`) }
   }
@@ -946,6 +994,19 @@ export function validateWorkflowStateResult(state: WorkflowState): WorkflowState
         for (let j = 0; j < node.expectedFiles.length; j++) {
           if (typeof node.expectedFiles[j] !== "string") {
             return { success: false, error: workflowStateValidationError(`implDag task "${node.id}" expectedFiles[${j}] must be a string`) }
+          }
+        }
+      }
+      if (node.roadmapItemIds !== undefined && node.roadmapItemIds !== null) {
+        if (!Array.isArray(node.roadmapItemIds)) {
+          return { success: false, error: workflowStateValidationError(`implDag task "${node.id}" roadmapItemIds must be an array`) }
+        }
+        for (let j = 0; j < node.roadmapItemIds.length; j++) {
+          if (typeof node.roadmapItemIds[j] !== "string" || node.roadmapItemIds[j]!.trim().length === 0) {
+            return { success: false, error: workflowStateValidationError(`implDag task "${node.id}" roadmapItemIds[${j}] must be a non-empty string`) }
+          }
+          if (state.roadmapContext && !state.roadmapContext.roadmapItemIds.includes(node.roadmapItemIds[j]!)) {
+            return { success: false, error: workflowStateValidationError(`implDag task "${node.id}" references unknown roadmap item "${node.roadmapItemIds[j]}"`) }
           }
         }
       }

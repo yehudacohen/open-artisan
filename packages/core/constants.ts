@@ -108,17 +108,17 @@ export const SELF_REVIEW_TIMEOUT_MS = 600_000
 
 /**
  * Maximum wall-clock time for a per-task review subagent session (ms).
- * Set to 3 minutes — the task reviewer runs tests and checks 4 criteria.
- * Shorter than full self-review since scope is a single DAG task.
+ * Set to 10 minutes — task reviewers may need to run full regression gates,
+ * inspect DAG boundaries, and evaluate integration seams.
  */
-export const TASK_REVIEW_TIMEOUT_MS = 180_000
+export const TASK_REVIEW_TIMEOUT_MS = 600_000
 
 /**
  * Maximum wall-clock time for an isolated change-proposal reviewer (ms).
- * Change proposals are routing decisions, not full artifact reviews, so they
- * share the per-task review timeout rather than the longer phase-review budget.
+ * Change proposals can inspect workflow state and task boundaries, so they use
+ * the same review budget as task and phase reviews.
  */
-export const CHANGE_PROPOSAL_REVIEW_TIMEOUT_MS = 180_000
+export const CHANGE_PROPOSAL_REVIEW_TIMEOUT_MS = 600_000
 
 /** Number of random bytes in one-time bridge reviewer submission tokens. */
 export const REVIEW_SUBMISSION_TOKEN_BYTES = 32

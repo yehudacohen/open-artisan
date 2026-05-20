@@ -36,8 +36,14 @@ import {
   ResetTaskToolSchema,
   ResolveHumanGateToolSchema,
   ResolvePatchSuggestionSchema,
+  RoadmapDeleteEdgeToolSchema,
+  RoadmapDeleteItemToolSchema,
   RoadmapDeriveExecutionSliceToolSchema,
+  RoadmapReplaceToolSchema,
   RoadmapQueryToolSchema,
+  RoadmapUpdateItemStatusToolSchema,
+  RoadmapUpsertEdgeToolSchema,
+  RoadmapUpsertItemToolSchema,
   RoutePatchSuggestionsSchema,
   SelectModeToolSchema,
   SpawnSubWorkflowToolSchema,
@@ -263,6 +269,13 @@ export function assertValidToolContracts(
   return validation.contracts
 }
 
+/** Structured non-throwing variant for tests, diagnostics, and adapters that need result envelopes. */
+export function validateToolContractsForStartup(
+  contracts: readonly ToolContract[],
+): ToolContractValidationResult {
+  return validateToolContracts(contracts)
+}
+
 /**
  * Pure projection contract for deriving adapter-facing tool surfaces from the
  * canonical registry.
@@ -406,9 +419,16 @@ export const TOOL_CONTRACTS: readonly ToolContract[] = [
   { name: "report_drift", description: "Report workflow drift using artifact, task, worktree, DB, and changed-file signals.", schema: ReportDriftToolSchema, workflowGuard: true, exposeTo: ["bridge", "mcp", "opencode"], hermesSurfaceRole: "author", mcpName: "oa_report_drift" },
   { name: "plan_drift_repair", description: "Build a graph-native repair plan for reported workflow drift.", schema: PlanDriftRepairToolSchema, workflowGuard: true, exposeTo: ["bridge", "mcp", "opencode"], hermesSurfaceRole: "author", mcpName: "oa_plan_drift_repair" },
   { name: "apply_drift_repair", description: "Apply approved drift repair actions through existing workflow tools.", schema: ApplyDriftRepairToolSchema, workflowGuard: true, exposeTo: ["bridge", "mcp", "opencode"], hermesSurfaceRole: "author", mcpName: "oa_apply_drift_repair" },
-  { name: "roadmap_read", description: "Read the current roadmap document.", schema: StateToolSchema, workflowGuard: false, exposeTo: ["bridge"], hermesSurfaceRole: "none" },
-  { name: "roadmap_query", description: "Query roadmap items by id, kind, status, feature name, or priority.", schema: RoadmapQueryToolSchema, workflowGuard: false, exposeTo: ["bridge"], hermesSurfaceRole: "none" },
-  { name: "roadmap_derive_execution_slice", description: "Derive a workflow execution slice from roadmap item ids.", schema: RoadmapDeriveExecutionSliceToolSchema, workflowGuard: false, exposeTo: ["bridge"], hermesSurfaceRole: "none" },
+  { name: "roadmap_read", description: "Read the current roadmap document.", schema: StateToolSchema, workflowGuard: false, exposeTo: ["bridge", "mcp", "opencode"], hermesSurfaceRole: "author", mcpName: "oa_roadmap_read" },
+  { name: "roadmap_query", description: "Query roadmap items by id, kind, status, feature name, or priority.", schema: RoadmapQueryToolSchema, workflowGuard: false, exposeTo: ["bridge", "mcp", "opencode"], hermesSurfaceRole: "author", mcpName: "oa_roadmap_query" },
+  { name: "roadmap_derive_execution_slice", description: "Derive a workflow execution slice from roadmap item ids.", schema: RoadmapDeriveExecutionSliceToolSchema, workflowGuard: false, exposeTo: ["bridge", "mcp", "opencode"], hermesSurfaceRole: "author", mcpName: "oa_roadmap_derive_execution_slice" },
+  { name: "roadmap_upsert_item", description: "Create or update one roadmap item without changing workflow phase state.", schema: RoadmapUpsertItemToolSchema, workflowGuard: false, exposeTo: ["bridge", "mcp", "opencode"], hermesSurfaceRole: "author", mcpName: "oa_roadmap_upsert_item" },
+  { name: "roadmap_update_item_status", description: "Update one roadmap item's status without implying workflow or task completion.", schema: RoadmapUpdateItemStatusToolSchema, workflowGuard: false, exposeTo: ["bridge", "mcp", "opencode"], hermesSurfaceRole: "author", mcpName: "oa_roadmap_update_item_status" },
+  { name: "roadmap_delete_item", description: "Delete one roadmap item and its roadmap-only links without deleting workflows or artifacts.", schema: RoadmapDeleteItemToolSchema, workflowGuard: false, exposeTo: ["bridge", "mcp", "opencode"], hermesSurfaceRole: "author", mcpName: "oa_roadmap_delete_item" },
+  { name: "roadmap_upsert_edge", description: "Create or update one roadmap dependency edge.", schema: RoadmapUpsertEdgeToolSchema, workflowGuard: false, exposeTo: ["bridge", "mcp", "opencode"], hermesSurfaceRole: "author", mcpName: "oa_roadmap_upsert_edge" },
+  { name: "roadmap_delete_edge", description: "Delete one roadmap dependency edge.", schema: RoadmapDeleteEdgeToolSchema, workflowGuard: false, exposeTo: ["bridge", "mcp", "opencode"], hermesSurfaceRole: "author", mcpName: "oa_roadmap_delete_edge" },
+  { name: "roadmap_replace", description: "Replace the standalone roadmap document after full document validation.", schema: RoadmapReplaceToolSchema, workflowGuard: false, exposeTo: ["bridge", "mcp", "opencode"], hermesSurfaceRole: "author", mcpName: "oa_roadmap_replace" },
+  { name: "roadmap_delete", description: "Delete the standalone roadmap document without deleting workflow artifacts.", schema: StateToolSchema, workflowGuard: false, exposeTo: ["bridge", "mcp", "opencode"], hermesSurfaceRole: "author", mcpName: "oa_roadmap_delete" },
   { name: "_state_get", description: "Show the current workflow state.", schema: StateToolSchema, workflowGuard: false, exposeTo: ["mcp"], hermesSurfaceRole: "author", mcpName: "oa_state" },
 ]
 

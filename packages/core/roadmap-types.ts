@@ -17,6 +17,7 @@ export type RoadmapEdgeKind = "depends-on"
 
 export type RoadmapErrorCode =
   | "not-found"
+  | "invalid-input"
   | "invalid-document"
   | "invalid-slice"
   | "schema-mismatch"
@@ -31,6 +32,7 @@ export interface RoadmapError {
     itemId?: string
     edge?: { from: string; to: string }
     schemaVersion?: number
+    operation?: RoadmapMutationKind | "read" | "query" | "derive-slice"
   }
 }
 
@@ -93,6 +95,68 @@ export interface RoadmapDocument {
   edges: RoadmapEdge[]
 }
 
+export type RoadmapMutationKind =
+  | "upsert-item"
+  | "update-item-status"
+  | "delete-item"
+  | "upsert-edge"
+  | "delete-edge"
+  | "replace-document"
+  | "delete-document"
+
+export interface RoadmapUpsertItemInput {
+  item: RoadmapItem
+}
+
+export interface RoadmapUpdateItemStatusInput {
+  itemId: string
+  status: RoadmapItemStatus
+  updatedAt?: string
+}
+
+export interface RoadmapDeleteItemInput {
+  itemId: string
+}
+
+export interface RoadmapUpsertEdgeInput {
+  edge: RoadmapEdge
+}
+
+export interface RoadmapDeleteEdgeInput {
+  edge: RoadmapEdge
+}
+
+export interface RoadmapReplaceInput {
+  document: RoadmapDocument
+}
+
+export type RoadmapMutationInput =
+  | ({ kind: "upsert-item" } & RoadmapUpsertItemInput)
+  | ({ kind: "update-item-status" } & RoadmapUpdateItemStatusInput)
+  | ({ kind: "delete-item" } & RoadmapDeleteItemInput)
+  | ({ kind: "upsert-edge" } & RoadmapUpsertEdgeInput)
+  | ({ kind: "delete-edge" } & RoadmapDeleteEdgeInput)
+  | ({ kind: "replace-document" } & RoadmapReplaceInput)
+  | { kind: "delete-document" }
+
+export interface RoadmapMutationResult {
+  kind: RoadmapMutationKind
+  document?: RoadmapDocument | null
+  item?: RoadmapItem
+  edge?: RoadmapEdge
+  deletedItemId?: string
+  deletedEdge?: RoadmapEdge
+}
+
+export interface WorkflowRoadmapContext {
+  roadmapItemIds: string[]
+  roadmapItems: RoadmapItem[]
+  edges: RoadmapEdge[]
+  featureName?: string
+  executionSliceId?: string
+  attachedAt: string
+}
+
 export type RoadmapPersistenceKind = "filesystem" | "pglite"
 
 export interface RoadmapPGliteConnectionOptions {
@@ -121,6 +185,19 @@ export interface RoadmapRepository {
   updateRoadmap(document: RoadmapDocument): Promise<RoadmapResult<RoadmapDocument>>
   deleteRoadmap(): Promise<RoadmapResult<null>>
   queryRoadmapItems(query: RoadmapQuery): Promise<RoadmapResult<RoadmapItem[]>>
+  upsertRoadmapItem?(input: RoadmapUpsertItemInput): Promise<RoadmapResult<RoadmapMutationResult>>
+  updateRoadmapItemStatus?(input: RoadmapUpdateItemStatusInput): Promise<RoadmapResult<RoadmapMutationResult>>
+  deleteRoadmapItem?(input: RoadmapDeleteItemInput): Promise<RoadmapResult<RoadmapMutationResult>>
+  upsertRoadmapEdge?(input: RoadmapUpsertEdgeInput): Promise<RoadmapResult<RoadmapMutationResult>>
+  deleteRoadmapEdge?(input: RoadmapDeleteEdgeInput): Promise<RoadmapResult<RoadmapMutationResult>>
+}
+
+export interface RoadmapRepositoryMutationBoundary extends RoadmapRepository {
+  upsertRoadmapItem(input: RoadmapUpsertItemInput): Promise<RoadmapResult<RoadmapMutationResult>>
+  updateRoadmapItemStatus(input: RoadmapUpdateItemStatusInput): Promise<RoadmapResult<RoadmapMutationResult>>
+  deleteRoadmapItem(input: RoadmapDeleteItemInput): Promise<RoadmapResult<RoadmapMutationResult>>
+  upsertRoadmapEdge(input: RoadmapUpsertEdgeInput): Promise<RoadmapResult<RoadmapMutationResult>>
+  deleteRoadmapEdge(input: RoadmapDeleteEdgeInput): Promise<RoadmapResult<RoadmapMutationResult>>
 }
 
 /**
@@ -145,7 +222,20 @@ export interface RoadmapStateBackend {
   readRoadmap(): Promise<RoadmapResult<RoadmapDocument | null>>
   updateRoadmap(document: RoadmapDocument): Promise<RoadmapResult<RoadmapDocument>>
   deleteRoadmap(): Promise<RoadmapResult<null>>
+  upsertRoadmapItem?(input: RoadmapUpsertItemInput): Promise<RoadmapResult<RoadmapMutationResult>>
+  updateRoadmapItemStatus?(input: RoadmapUpdateItemStatusInput): Promise<RoadmapResult<RoadmapMutationResult>>
+  deleteRoadmapItem?(input: RoadmapDeleteItemInput): Promise<RoadmapResult<RoadmapMutationResult>>
+  upsertRoadmapEdge?(input: RoadmapUpsertEdgeInput): Promise<RoadmapResult<RoadmapMutationResult>>
+  deleteRoadmapEdge?(input: RoadmapDeleteEdgeInput): Promise<RoadmapResult<RoadmapMutationResult>>
   lockRoadmap(): Promise<RoadmapResult<{ release(): Promise<void> }>>
+}
+
+export interface RoadmapStateMutationBackend extends RoadmapStateBackend {
+  upsertRoadmapItem(input: RoadmapUpsertItemInput): Promise<RoadmapResult<RoadmapMutationResult>>
+  updateRoadmapItemStatus(input: RoadmapUpdateItemStatusInput): Promise<RoadmapResult<RoadmapMutationResult>>
+  deleteRoadmapItem(input: RoadmapDeleteItemInput): Promise<RoadmapResult<RoadmapMutationResult>>
+  upsertRoadmapEdge(input: RoadmapUpsertEdgeInput): Promise<RoadmapResult<RoadmapMutationResult>>
+  deleteRoadmapEdge(input: RoadmapDeleteEdgeInput): Promise<RoadmapResult<RoadmapMutationResult>>
 }
 
 export interface RoadmapQuery {
@@ -170,6 +260,7 @@ export interface DerivedExecutionSlice {
   roadmapItems: RoadmapItem[]
   edges: RoadmapEdge[]
   featureName?: string
+  executionSliceId?: string
 }
 
 export interface RoadmapSliceService {
@@ -177,7 +268,40 @@ export interface RoadmapSliceService {
   deriveExecutionSlice(input: {
     roadmapItemIds: string[]
     featureName?: string
+    executionSliceId?: string
   }): Promise<RoadmapResult<DerivedExecutionSlice>>
+}
+
+export interface RoadmapMutationService {
+  readRoadmap(): Promise<RoadmapResult<RoadmapDocument | null>>
+  queryRoadmap(query: RoadmapQuery): Promise<RoadmapResult<RoadmapItem[]>>
+  deriveExecutionSlice(input: {
+    roadmapItemIds: string[]
+    featureName?: string
+    executionSliceId?: string
+  }): Promise<RoadmapResult<DerivedExecutionSlice>>
+  upsertItem(input: RoadmapUpsertItemInput): Promise<RoadmapResult<RoadmapMutationResult>>
+  updateItemStatus(input: RoadmapUpdateItemStatusInput): Promise<RoadmapResult<RoadmapMutationResult>>
+  deleteItem(input: RoadmapDeleteItemInput): Promise<RoadmapResult<RoadmapMutationResult>>
+  upsertEdge(input: RoadmapUpsertEdgeInput): Promise<RoadmapResult<RoadmapMutationResult>>
+  deleteEdge(input: RoadmapDeleteEdgeInput): Promise<RoadmapResult<RoadmapMutationResult>>
+  replaceRoadmap(input: RoadmapReplaceInput): Promise<RoadmapResult<RoadmapMutationResult>>
+  deleteRoadmap(): Promise<RoadmapResult<RoadmapMutationResult>>
+}
+
+export interface TaskRoadmapTraceability {
+  /** Phase-legal task metadata contract; the TaskNode owner module adopts this during implementation. */
+  roadmapItemIds?: string[]
+}
+
+export type RoadmapHealthStatus = "ready" | "missing-backend" | "storage-failure" | "invalid-document"
+
+export interface RoadmapDiagnosticEvent {
+  operation: RoadmapMutationKind | "read" | "query" | "derive-slice"
+  status: RoadmapHealthStatus
+  roadmapItemIds?: string[]
+  edge?: RoadmapEdge
+  error?: RoadmapError
 }
 
 export interface WorkflowRoadmapLink {
@@ -185,9 +309,21 @@ export interface WorkflowRoadmapLink {
   roadmapItemIds: string[]
 }
 
+export type RoadmapDocumentValidationResult = RoadmapResult<null>
+
 /**
- * Validates that a RoadmapDocument is internally consistent.
- * Returns null if valid, or an error message describing the first violation found.
+ * Structured roadmap document validation contract for new roadmap integration.
+ */
+export function validateRoadmapDocumentResult(document: RoadmapDocument): RoadmapDocumentValidationResult {
+  const message = validateRoadmapDocument(document)
+  return message === null
+    ? roadmapOk(null)
+    : roadmapError("invalid-document", message, false, { schemaVersion: document.schemaVersion, operation: "replace-document" })
+}
+
+/**
+ * Legacy message helper. New roadmap tooling should prefer validateRoadmapDocumentResult.
+ * Returns null if valid, or a human-readable validation message for compatibility.
  */
 export function validateRoadmapDocument(document: RoadmapDocument): string | null {
   if (!Number.isInteger(document.schemaVersion) || document.schemaVersion < 1) {

@@ -167,6 +167,25 @@ describe("roadmap slice service contracts", () => {
     }
   })
 
+  it("preserves a caller-supplied execution slice id in derived context", async () => {
+    const stateDir = await makeTempStateDir()
+    const roadmapBackend = createFileSystemRoadmapStateBackend(stateDir)
+    await roadmapBackend.createRoadmap(makeRoadmapDocument())
+
+    const service = await loadRoadmapSliceService(stateDir)
+    const result = await service.deriveExecutionSlice({
+      roadmapItemIds: ["item-1", "item-2"],
+      featureName: "persistent-roadmap-dag",
+      executionSliceId: "slice-1",
+    })
+
+    expect(result.ok).toBeTrue()
+    if (result.ok) {
+      expect(result.value.executionSliceId).toBe("slice-1")
+      expect(result.value.roadmapItemIds).toEqual(["item-1", "item-2"])
+    }
+  })
+
   it("rejects empty or unknown roadmap selections with invalid-slice", async () => {
     const stateDir = await makeTempStateDir()
     const roadmapBackend = createFileSystemRoadmapStateBackend(stateDir)

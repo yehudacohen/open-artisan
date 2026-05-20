@@ -1,10 +1,16 @@
 import { describe, expect, it } from "bun:test"
 
 import {
+  validateRoadmapDocumentResult,
   validateRoadmapDocument,
   type DerivedExecutionSlice,
+  type RoadmapDiagnosticEvent,
   type RoadmapDocument,
+  type RoadmapMutationInput,
+  type RoadmapMutationResult,
   type RoadmapResult,
+  type TaskRoadmapTraceability,
+  type WorkflowRoadmapContext,
   type WorkflowRoadmapLink,
 } from "#core/roadmap-types"
 
@@ -158,5 +164,46 @@ describe("roadmap type contracts", () => {
 
     expect(link.featureName).toBe("persistent-roadmap-dag")
     expect(link.roadmapItemIds).toEqual(["item-1", "item-2"])
+  })
+
+  it("returns structured roadmap document validation results for new tool paths", () => {
+    const valid = validateRoadmapDocumentResult(makeDocument())
+    expect(valid).toEqual({ ok: true, value: null })
+
+    const invalid = validateRoadmapDocumentResult(makeDocument({
+      edges: [{ from: "item-1", to: "missing-item", kind: "depends-on" }],
+    }))
+    expect(invalid.ok).toBeFalse()
+    if (!invalid.ok) {
+      expect(invalid.error.code).toBe("invalid-document")
+      expect(invalid.error.retryable).toBeFalse()
+      expect(invalid.error.details).toEqual({ schemaVersion: 1, operation: "replace-document" })
+    }
+  })
+
+  it("models roadmap mutation inputs, diagnostics, workflow context, and task traceability without implying completion", () => {
+    const document = makeDocument()
+    const mutation: RoadmapMutationInput = { kind: "update-item-status", itemId: "item-1", status: "in-progress" }
+    const result: RoadmapMutationResult = { kind: "update-item-status", item: { ...document.items[0]!, status: "in-progress" } }
+    const context: WorkflowRoadmapContext = {
+      roadmapItemIds: ["item-1", "item-2"],
+      roadmapItems: document.items.slice(0, 2),
+      edges: document.edges,
+      featureName: "persistent-roadmap-dag",
+      executionSliceId: "slice-1",
+      attachedAt: NOW,
+    }
+    const taskTraceability: TaskRoadmapTraceability = { roadmapItemIds: ["item-1"] }
+    const diagnostic: RoadmapDiagnosticEvent = {
+      operation: "update-item-status",
+      status: "ready",
+      roadmapItemIds: ["item-1"],
+    }
+
+    expect(mutation.kind).toBe("update-item-status")
+    expect(result.item?.status).toBe("in-progress")
+    expect(context.roadmapItemIds).toEqual(["item-1", "item-2"])
+    expect(taskTraceability.roadmapItemIds).toEqual(["item-1"])
+    expect(diagnostic).toEqual({ operation: "update-item-status", status: "ready", roadmapItemIds: ["item-1"] })
   })
 })

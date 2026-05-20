@@ -157,6 +157,21 @@ Expose accepted parser expectations in prompts.
     expect(task.expectedFiles).toEqual(["packages/core/impl-plan-parser.ts", "packages/core/prompts/impl-plan.txt"])
     expect(task.category).toBe("standalone")
   })
+
+  it("parses roadmap item metadata on implementation tasks", () => {
+    const plan = `
+## Task T1: Wire roadmap traceability
+**Dependencies:** none
+**Files:** packages/core/dag.ts, packages/core/impl-plan-parser.ts
+**Expected tests:** tests/impl-plan-parser.test.ts
+**Roadmap items:** item-1, item-2
+**Complexity:** small
+`
+    const result = parseImplPlan(plan)
+    if (!result.success) throw new Error(result.errors.join("; "))
+    const task = Array.from(result.dag.tasks)[0]! as { roadmapItemIds?: string[] }
+    expect(task.roadmapItemIds).toEqual(["item-1", "item-2"])
+  })
 })
 
 describe("parseImplPlan — ignores non-task section headings", () => {
@@ -416,6 +431,37 @@ describe("validateExecutableImplPlan", () => {
     )
 
     expect(errors).toEqual([])
+  })
+
+  it("rejects roadmap item metadata that is not attached to the workflow roadmap context", () => {
+    const plan = `
+## Task T1: Wire roadmap traceability
+**Dependencies:** none
+**Files:** packages/core/dag.ts, packages/core/impl-plan-parser.ts
+**Expected tests:** tests/impl-plan-parser.test.ts
+**Roadmap items:** item-1, missing-item
+**Complexity:** small
+`
+
+    const errors = (validateExecutableImplPlan as unknown as (
+      artifactText: string,
+      mode: string,
+      fileAllowlist: string[],
+      cwd: string,
+      roadmapContext: { roadmapItemIds: string[] },
+    ) => string[])(
+      plan,
+      "INCREMENTAL",
+      [
+        "/project/packages/core/dag.ts",
+        "/project/packages/core/impl-plan-parser.ts",
+        "/project/tests/impl-plan-parser.test.ts",
+      ],
+      "/project",
+      { roadmapItemIds: ["item-1"] },
+    )
+
+    expect(errors).toContain('Task "T1" references unknown roadmap item "missing-item".')
   })
 })
 

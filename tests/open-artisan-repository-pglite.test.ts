@@ -588,6 +588,79 @@ pgliteShardDescribe("PGlite Open Artisan repository", () => {
     expect(valueOf(await repo.getWorkflow("workflow-1"))?.roadmapItemIds).toEqual([])
   })
 
+  it("supports granular roadmap item and edge mutations while preserving workflow records", async () => {
+    const repo = tempRepo()
+    await repo.createWorkflow(workflow())
+    const item = { id: "roadmap-1", kind: "feature" as const, title: "DB", status: "todo" as const, priority: 5, createdAt: now(), updatedAt: now() }
+    const blocker = { id: "roadmap-2", kind: "bug" as const, title: "Blocker", status: "todo" as const, priority: 9, createdAt: now(), updatedAt: now() }
+
+    expect((await (repo as any).upsertRoadmapItem({ item })).ok).toBe(true)
+    expect((await (repo as any).upsertRoadmapItem({ item: blocker })).ok).toBe(true)
+    expect((await repo.linkWorkflowToRoadmap("workflow-1", "roadmap-1")).ok).toBe(true)
+    const linkedGraph = taskGraph()
+    linkedGraph.roadmapLinks = [{ taskId: "task-2", roadmapItemId: "roadmap-1" }]
+    expect((await repo.replaceTaskGraph("workflow-1", linkedGraph)).ok).toBe(true)
+    expect((await (repo as any).updateRoadmapItemStatus({ itemId: "roadmap-1", status: "in-progress", updatedAt: now() })).ok).toBe(true)
+    expect(valueOf(await repo.listRoadmapItems({ status: "in-progress" })).map((row) => row.id)).toEqual(["roadmap-1"])
+
+    expect((await (repo as any).upsertRoadmapEdge({ edge: { from: "roadmap-1", to: "roadmap-2", kind: "depends-on" } })).ok).toBe(true)
+    expect(valueOf(await repo.listRoadmapEdges("roadmap-1")).length).toBe(1)
+    expect((await (repo as any).deleteRoadmapEdge({ edge: { from: "roadmap-1", to: "roadmap-2", kind: "depends-on" } })).ok).toBe(true)
+    expect(valueOf(await repo.listRoadmapEdges("roadmap-1"))).toEqual([])
+
+    expect((await (repo as any).deleteRoadmapItem({ itemId: "roadmap-1" })).ok).toBe(true)
+    expect(valueOf(await repo.getWorkflow("workflow-1"))?.workflow.id).toBe("workflow-1")
+    expect(valueOf(await repo.getWorkflow("workflow-1"))?.roadmapItemIds).toEqual([])
+    expect(valueOf(await repo.getTaskGraph("workflow-1"))?.roadmapLinks).toEqual([])
+  })
+
+  it("persists task-roadmap links when replacing task graphs", async () => {
+    const repo = tempRepo()
+    await repo.createWorkflow(workflow())
+    await repo.createRoadmapItem({ id: "roadmap-1", kind: "feature" as const, title: "DB", status: "todo" as const, priority: 5, createdAt: now(), updatedAt: now() })
+
+    const graph = taskGraph()
+    graph.roadmapLinks = [{ taskId: "task-2", roadmapItemId: "roadmap-1" }]
+    expect((await repo.replaceTaskGraph("workflow-1", graph)).ok).toBe(true)
+
+    expect(valueOf(await repo.getTaskGraph("workflow-1"))?.roadmapLinks).toEqual([
+      { taskId: "task-2", roadmapItemId: "roadmap-1" },
+    ])
+  })
+
+  it("materializes WorkflowState implDag roadmapItemIds through runtime persistence", async () => {
+    const repo = tempRepo()
+    const state = makeWorkflowState({
+      sessionId: "runtime-session",
+      featureName: "db-runtime",
+      mode: "INCREMENTAL",
+      phase: "IMPL_PLAN",
+      phaseState: "USER_GATE",
+      implDag: [
+        {
+          id: "T1",
+          description: "Implement roadmap task links",
+          dependencies: [],
+          expectedTests: ["tests/open-artisan-repository-pglite.test.ts"],
+          expectedFiles: ["packages/core/runtime-persistence.ts"],
+          estimatedComplexity: "small",
+          status: "pending",
+          roadmapItemIds: ["roadmap-1"],
+        } as any,
+      ],
+    })
+    await repo.createWorkflow(workflow({ id: "workflow:db-runtime" }))
+    await repo.createRoadmapItem({ id: "roadmap-1", kind: "feature" as const, title: "DB", status: "todo" as const, priority: 5, createdAt: now(), updatedAt: now() })
+
+    const runtimePersistence = await import("#core/runtime-persistence") as any
+    expect(runtimePersistence.persistTaskGraph).toBeFunction()
+    await runtimePersistence.persistTaskGraph(createOpenArtisanServices(repo), state)
+
+    expect(valueOf(await repo.getTaskGraph("workflow:db-runtime"))?.roadmapLinks).toEqual([
+      { taskId: "workflow:db-runtime:T1", roadmapItemId: "roadmap-1" },
+    ])
+  })
+
   it("rejects missing task claims without creating orphan leases", async () => {
     const repo = tempRepo()
     await repo.createWorkflow(workflow())

@@ -172,6 +172,42 @@ A maintainer needs the workflow to preserve the user's motivating use case acros
 - Do not infer scenarios from arbitrary chat
 `
 
+const ROADMAP_NOW = "2026-04-16T00:00:00.000Z"
+
+function roadmapDocument() {
+  return {
+    schemaVersion: 1,
+    items: [
+      {
+        id: "item-1",
+        kind: "feature",
+        title: "Roadmap-backed workflow",
+        status: "todo",
+        priority: 10,
+        featureName: "roadmap-backed-workflow",
+        createdAt: ROADMAP_NOW,
+        updatedAt: ROADMAP_NOW,
+      },
+      {
+        id: "item-2",
+        kind: "bug",
+        title: "Preserve workflow gates",
+        status: "blocked",
+        priority: 8,
+        createdAt: ROADMAP_NOW,
+        updatedAt: ROADMAP_NOW,
+      },
+    ],
+    edges: [{ from: "item-1", to: "item-2", kind: "depends-on" }],
+  }
+}
+
+async function writeRoadmapState() {
+  const roadmapDir = join(tempDir, ".openartisan", "roadmap")
+  mkdirSync(roadmapDir, { recursive: true })
+  await Bun.write(join(roadmapDir, "roadmap-state.json"), JSON.stringify(roadmapDocument(), null, 2))
+}
+
 function withRealWorldAcceptanceScenario(content: string): string {
   return content.includes("## Real-World Acceptance Scenario")
     ? content
@@ -640,6 +676,75 @@ describe("Plugin shape — returned object has all required keys", () => {
     expect(Object.keys(tools).sort()).toEqual(OPENCODE_TOOL_CONTRACTS.map((contract) => contract.name).sort())
   })
 
+  it("exposes roadmap author tools through the OpenCode plugin surface", () => {
+    const roadmapToolNames = [
+      "roadmap_read",
+      "roadmap_query",
+      "roadmap_derive_execution_slice",
+      "roadmap_upsert_item",
+      "roadmap_update_item_status",
+      "roadmap_delete_item",
+      "roadmap_upsert_edge",
+      "roadmap_delete_edge",
+      "roadmap_replace",
+      "roadmap_delete",
+    ]
+
+    for (const toolName of roadmapToolNames) {
+      expect(plugin.tool[toolName]).toBeDefined()
+      expect(plugin.tool[toolName].execute).toBeFunction()
+      expect(TOOL_HANDLERS[toolName as keyof typeof TOOL_HANDLERS]).toBeFunction()
+    }
+  })
+
+  it("executes OpenCode roadmap read tools with typed results without corrupting workflow state", async () => {
+    await writeRoadmapState()
+    const sid = `int-test-${Date.now()}-opencode-roadmap-read`
+    await plugin.event({ event: { type: "session.created", properties: { info: { id: sid } } } })
+    const before = JSON.parse(JSON.stringify(plugin._testStore.get(sid)))
+
+    const response = await plugin.tool.roadmap_read.execute({}, { directory: tempDir, sessionId: sid })
+
+    expect(JSON.parse(response)).toEqual({ ok: true, value: roadmapDocument() })
+    const after = plugin._testStore.get(sid)
+    expect(after.phase).toBe(before.phase)
+    expect(after.phaseState).toBe(before.phaseState)
+    expect(after.implDag).toEqual(before.implDag)
+  })
+
+  it("executes OpenCode roadmap query, derive, and mutation tools with typed roadmap results", async () => {
+    await writeRoadmapState()
+    const sid = `int-test-${Date.now()}-opencode-roadmap-tools`
+    await plugin.event({ event: { type: "session.created", properties: { info: { id: sid } } } })
+    const item = { ...roadmapDocument().items[0], status: "in-progress", updatedAt: ROADMAP_NOW }
+
+    const query = await plugin.tool.roadmap_query.execute(
+      { query: { featureName: "roadmap-backed-workflow", minPriority: 9 } },
+      { directory: tempDir, sessionId: sid },
+    )
+    expect(JSON.parse(query)).toEqual({ ok: true, value: [roadmapDocument().items[0]] })
+
+    const derive = await plugin.tool.roadmap_derive_execution_slice.execute(
+      { roadmap_item_ids: ["item-1", "item-2"], feature_name: "roadmap-backed-workflow" },
+      { directory: tempDir, sessionId: sid },
+    )
+    expect(JSON.parse(derive)).toEqual({
+      ok: true,
+      value: {
+        roadmapItemIds: ["item-1", "item-2"],
+        roadmapItems: roadmapDocument().items,
+        edges: roadmapDocument().edges,
+        featureName: "roadmap-backed-workflow",
+      },
+    })
+
+    const status = await plugin.tool.roadmap_update_item_status.execute(
+      { item_id: "item-1", status: "in-progress", updated_at: ROADMAP_NOW },
+      { directory: tempDir, sessionId: sid },
+    )
+    expect(JSON.parse(status)).toEqual({ ok: true, value: { kind: "update-item-status", item, document: expect.any(Object) } })
+  })
+
   it("keeps OpenCode tool arg names aligned with core contracts", () => {
     for (const contract of OPENCODE_TOOL_CONTRACTS) {
       expect(Object.keys(plugin.tool[contract.name].args ?? {}).sort()).toEqual(schemaPropertyNames(contract.schema))
@@ -1101,6 +1206,45 @@ describe("select_mode tool — full integration", () => {
     )
     expect(result).toContain("INCREMENTAL")
     expect(result).toContain("DISCOVERY")
+  })
+
+  it("select_mode with roadmap item ids stores roadmapContext and enters the normal workflow", async () => {
+    await writeRoadmapState()
+    const sid = `int-test-${Date.now()}-roadmap-select-mode`
+    await plugin.event({ event: { type: "session.created", properties: { info: { id: sid } } } })
+
+    const result = await plugin.tool.select_mode.execute(
+      { mode: "INCREMENTAL", feature_name: "roadmap-backed-workflow", roadmap_item_ids: ["item-1", "item-2"] },
+      { directory: tempDir, sessionId: sid },
+    )
+
+    expect(result).toContain("INCREMENTAL")
+    expect(result).toContain("DISCOVERY")
+    const state = plugin._testStore.get(sid)
+    expect(state.phase).toBe("DISCOVERY")
+    expect(state.roadmapContext).toMatchObject({
+      roadmapItemIds: ["item-1", "item-2"],
+      featureName: "roadmap-backed-workflow",
+      edges: [{ from: "item-1", to: "item-2", kind: "depends-on" }],
+    })
+  })
+
+  it("select_mode with unknown roadmap ids fails before mode adoption", async () => {
+    await writeRoadmapState()
+    const sid = `int-test-${Date.now()}-roadmap-select-mode-missing`
+    await plugin.event({ event: { type: "session.created", properties: { info: { id: sid } } } })
+
+    const result = await plugin.tool.select_mode.execute(
+      { mode: "INCREMENTAL", feature_name: "roadmap-backed-workflow", roadmap_item_ids: ["missing-item"] },
+      { directory: tempDir, sessionId: sid },
+    )
+
+    expect(result).toContain("Error")
+    expect(result).toContain("missing-item")
+    const state = plugin._testStore.get(sid)
+    expect(state.phase).toBe("MODE_SELECT")
+    expect(state.mode).toBeNull()
+    expect(state.roadmapContext ?? null).toBeNull()
   })
 
   it("resumes an incomplete prior workflow instead of restarting discovery", async () => {
@@ -1701,6 +1845,38 @@ describe("experimental.chat.system.transform — injects workflow prompt", () =>
     const last = output.system[output.system.length - 1]
     expect(last).toContain("STRUCTURED WORKFLOW")
     expect(last).toContain("PLANNING")
+  })
+
+  it("injects roadmap context into PLANNING prompts without changing workflow gates", async () => {
+    const sid = `int-test-${Date.now()}-roadmap-context-prompt`
+    await plugin.event({ event: { type: "session.created", properties: { info: { id: sid } } } })
+    await plugin.tool.select_mode.execute(
+      { mode: "GREENFIELD", feature_name: "roadmap-backed-workflow" },
+      { directory: tempDir, sessionId: sid },
+    )
+    await plugin._testStore.update(sid, (draft: any) => {
+      draft.phase = "PLANNING"
+      draft.phaseState = "DRAFT"
+      draft.roadmapContext = {
+        roadmapItemIds: ["item-1", "item-2"],
+        roadmapItems: roadmapDocument().items,
+        edges: roadmapDocument().edges,
+        featureName: "roadmap-backed-workflow",
+        executionSliceId: "slice-1",
+        attachedAt: ROADMAP_NOW,
+      }
+    })
+
+    const output = { system: ["original"] }
+    await plugin["experimental.chat.system.transform"]({ sessionID: sid }, output)
+
+    const injected = output.system[output.system.length - 1]
+    expect(injected).toContain("Roadmap")
+    expect(injected).toContain("item-1")
+    expect(injected).toContain("Roadmap-backed workflow")
+    expect(injected).toContain("blocked")
+    expect(plugin._testStore.get(sid).phase).toBe("PLANNING")
+    expect(plugin._testStore.get(sid).phaseState).toBe("DRAFT")
   })
 
   it("unknown session does not modify system array", async () => {

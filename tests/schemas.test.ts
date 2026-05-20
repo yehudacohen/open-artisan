@@ -3,8 +3,15 @@ import { describe, expect, it } from "bun:test"
 import {
   AnalyzeTaskBoundaryChangeSchema,
   RequestReviewToolSchema,
+  RoadmapDeleteEdgeToolSchema,
+  RoadmapDeleteItemToolSchema,
   RoadmapDeriveExecutionSliceToolSchema,
+  RoadmapReplaceToolSchema,
+  RoadmapUpdateItemStatusToolSchema,
+  RoadmapUpsertEdgeToolSchema,
+  RoadmapUpsertItemToolSchema,
   RoadmapQueryToolSchema,
+  SelectModeToolSchema,
   SubmitPhaseReviewToolSchema,
   toJsonSchema,
 } from "#core/schemas"
@@ -93,5 +100,54 @@ describe("shared tool schemas", () => {
       roadmapItemIds: ["item-1"],
       featureName: "runtime-cleanup",
     }).success).toBe(true)
+  })
+
+  it("requires roadmap item ids or an execution slice id when deriving roadmap execution slices", () => {
+    expect(RoadmapDeriveExecutionSliceToolSchema.safeParse({}).success).toBe(false)
+    expect(RoadmapDeriveExecutionSliceToolSchema.safeParse({ execution_slice_id: "slice-1" }).success).toBe(true)
+    expect(RoadmapDeriveExecutionSliceToolSchema.safeParse({ executionSliceId: "slice-1" }).success).toBe(true)
+  })
+
+  it("accepts select_mode roadmap attachment aliases without changing the base mode contract", () => {
+    expect(SelectModeToolSchema.safeParse({
+      mode: "INCREMENTAL",
+      feature_name: "roadmap-integration",
+      roadmap_item_ids: ["item-1"],
+      execution_slice_id: "slice-1",
+    }).success).toBe(true)
+
+    expect(SelectModeToolSchema.safeParse({
+      mode: "INCREMENTAL",
+      feature_name: "roadmap-integration",
+      roadmapItemIds: ["item-1"],
+      executionSliceId: "slice-1",
+    }).success).toBe(true)
+  })
+
+  it("validates roadmap mutation tool schemas and rejects unsafe feature names", () => {
+    const item = {
+      id: "item-1",
+      kind: "feature",
+      title: "Roadmap tools",
+      status: "todo",
+      priority: 10,
+      featureName: "roadmap-integration",
+      createdAt: "2026-04-16T00:00:00.000Z",
+      updatedAt: "2026-04-16T00:00:00.000Z",
+    }
+    const edge = { from: "item-2", to: "item-1", kind: "depends-on" }
+
+    expect(RoadmapUpsertItemToolSchema.safeParse({ item }).success).toBe(true)
+    expect(RoadmapUpdateItemStatusToolSchema.safeParse({ item_id: "item-1", status: "in-progress" }).success).toBe(true)
+    expect(RoadmapUpdateItemStatusToolSchema.safeParse({ itemId: "item-1", status: "blocked", updatedAt: item.updatedAt }).success).toBe(true)
+    expect(RoadmapDeleteItemToolSchema.safeParse({ item_id: "item-1" }).success).toBe(true)
+    expect(RoadmapDeleteItemToolSchema.safeParse({ itemId: "item-1" }).success).toBe(true)
+    expect(RoadmapUpsertEdgeToolSchema.safeParse({ edge }).success).toBe(true)
+    expect(RoadmapDeleteEdgeToolSchema.safeParse({ edge }).success).toBe(true)
+    expect(RoadmapReplaceToolSchema.safeParse({ document: { schemaVersion: 1, items: [item], edges: [] } }).success).toBe(true)
+
+    expect(RoadmapUpdateItemStatusToolSchema.safeParse({ status: "done" }).success).toBe(false)
+    expect(RoadmapDeleteItemToolSchema.safeParse({}).success).toBe(false)
+    expect(RoadmapUpsertItemToolSchema.safeParse({ item: { ...item, featureName: "../secrets" } }).success).toBe(false)
   })
 })

@@ -12,6 +12,7 @@ import {
   HERMES_AUTHOR_TOOL_CONTRACTS,
   HERMES_AUTHOR_PROJECTION_CONFIG,
   MCP_TOOL_CONTRACTS,
+  OPENCODE_TOOL_CONTRACTS,
   TOOL_CONTRACTS,
   validateToolContracts,
   WORKFLOW_TOOL_CONTRACTS,
@@ -114,6 +115,35 @@ describe("tool contract registry", () => {
     expect(hermesBridgeNames).not.toContain("submit_intent_comparison_result")
     expect(hermesBridgeNames).toContain("request_review")
     expect(hermesBridgeNames).toContain("submit_feedback")
+  })
+
+  it("projects roadmap tools as author-facing bridge, MCP, OpenCode, and Hermes tools without workflow guarding", () => {
+    const roadmapToolNames = [
+      "roadmap_read",
+      "roadmap_query",
+      "roadmap_derive_execution_slice",
+      "roadmap_upsert_item",
+      "roadmap_update_item_status",
+      "roadmap_delete_item",
+      "roadmap_upsert_edge",
+      "roadmap_delete_edge",
+      "roadmap_replace",
+      "roadmap_delete",
+    ]
+
+    for (const name of roadmapToolNames) {
+      const contract = TOOL_CONTRACTS.find((candidate) => candidate.name === name)
+      expect(contract).toBeDefined()
+      expect(contract?.workflowGuard).toBe(false)
+      expect(contract?.hermesSurfaceRole).toBe("author")
+      expect(contract?.exposeTo).toEqual(["bridge", "mcp", "opencode"])
+      expect(contract?.mcpName).toBe(`oa_${name}`)
+    }
+
+    expect(BRIDGE_TOOL_CONTRACTS.map((contract) => contract.name)).toEqual(expect.arrayContaining(roadmapToolNames))
+    expect(MCP_TOOL_CONTRACTS.map((contract) => contract.name)).toEqual(expect.arrayContaining(roadmapToolNames))
+    expect(OPENCODE_TOOL_CONTRACTS.map((contract) => contract.name)).toEqual(expect.arrayContaining(roadmapToolNames))
+    expect(HERMES_AUTHOR_TOOL_CONTRACTS.map((contract) => contract.name)).toEqual(expect.arrayContaining(roadmapToolNames))
   })
 
   it("keeps OpenCode-local result capture tools out of bridge dispatch", () => {

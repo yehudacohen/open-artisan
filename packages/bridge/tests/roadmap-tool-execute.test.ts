@@ -175,6 +175,88 @@ pgliteShardDescribe("bridge roadmap tool execution", () => {
     })
   })
 
+  it("mutates roadmap items and edges through author tools without changing workflow phase state", async () => {
+    await ctx.roadmapBackend!.createRoadmap(makeRoadmapDocument({ items: [], edges: [] }))
+    const before = JSON.parse(JSON.stringify(ctx.engine!.store.get("s1")))
+    const item = makeRoadmapDocument().items[0]!
+    const edge = { from: "item-2", to: "item-1", kind: "depends-on" as const }
+
+    const upsertItem = await handleToolExecute({
+      name: "roadmap_upsert_item",
+      args: { item },
+      context: { sessionId: "s1", directory: tmpDir },
+    }, ctx)
+    expect(JSON.parse(upsertItem as string)).toEqual({ ok: true, value: { kind: "upsert-item", item, document: expect.any(Object) } })
+
+    const updateStatus = await handleToolExecute({
+      name: "roadmap_update_item_status",
+      args: { item_id: "item-1", status: "in-progress", updated_at: NOW },
+      context: { sessionId: "s1", directory: tmpDir },
+    }, ctx)
+    expect(JSON.parse(updateStatus as string)).toEqual({
+      ok: true,
+      value: { kind: "update-item-status", item: { ...item, status: "in-progress", updatedAt: NOW }, document: expect.any(Object) },
+    })
+
+    const upsertSecond = await handleToolExecute({
+      name: "roadmap_upsert_item",
+      args: { item: makeRoadmapDocument().items[1]! },
+      context: { sessionId: "s1", directory: tmpDir },
+    }, ctx)
+    expect(JSON.parse(upsertSecond as string).ok).toBe(true)
+
+    const upsertEdge = await handleToolExecute({
+      name: "roadmap_upsert_edge",
+      args: { edge },
+      context: { sessionId: "s1", directory: tmpDir },
+    }, ctx)
+    expect(JSON.parse(upsertEdge as string)).toEqual({ ok: true, value: { kind: "upsert-edge", edge, document: expect.any(Object) } })
+
+    const deleteEdge = await handleToolExecute({
+      name: "roadmap_delete_edge",
+      args: { edge },
+      context: { sessionId: "s1", directory: tmpDir },
+    }, ctx)
+    expect(JSON.parse(deleteEdge as string)).toEqual({ ok: true, value: { kind: "delete-edge", deletedEdge: edge, document: expect.any(Object) } })
+
+    const deleteItem = await handleToolExecute({
+      name: "roadmap_delete_item",
+      args: { item_id: "item-2" },
+      context: { sessionId: "s1", directory: tmpDir },
+    }, ctx)
+    expect(JSON.parse(deleteItem as string)).toEqual({ ok: true, value: { kind: "delete-item", deletedItemId: "item-2", document: expect.any(Object) } })
+
+    const after = ctx.engine!.store.get("s1")
+    expect(after?.phase).toBe(before?.phase)
+    expect(after?.phaseState).toBe(before?.phaseState)
+    expect(after?.implDag).toEqual(before?.implDag)
+  })
+
+  it("replaces and deletes the standalone roadmap document through author tools", async () => {
+    const document = makeRoadmapDocument()
+
+    const replaceResponse = await handleToolExecute({
+      name: "roadmap_replace",
+      args: { document },
+      context: { sessionId: "s1", directory: tmpDir },
+    }, ctx)
+    expect(JSON.parse(replaceResponse as string)).toEqual({ ok: true, value: { kind: "replace-document", document } })
+
+    const deleteResponse = await handleToolExecute({
+      name: "roadmap_delete",
+      args: {},
+      context: { sessionId: "s1", directory: tmpDir },
+    }, ctx)
+    expect(JSON.parse(deleteResponse as string)).toEqual({ ok: true, value: { kind: "delete-document", document: null } })
+
+    const readResponse = await handleToolExecute({
+      name: "roadmap_read",
+      args: {},
+      context: { sessionId: "s1", directory: tmpDir },
+    }, ctx)
+    expect(JSON.parse(readResponse as string)).toEqual({ ok: true, value: null })
+  })
+
   it("derives an execution slice through tool.execute without bypassing the existing execution DAG path", async () => {
     await ctx.roadmapBackend!.createRoadmap(makeRoadmapDocument())
 
@@ -216,6 +298,32 @@ pgliteShardDescribe("bridge roadmap tool execution", () => {
     const after = ctx.engine!.store.get("s1")
     expect(after?.currentTaskId).toBe(before?.currentTaskId)
     expect(after?.implDag).toEqual(before?.implDag)
+  })
+
+  it("select_mode can attach roadmap context from a persisted execution slice without bypassing discovery", async () => {
+    await ctx.roadmapBackend!.createRoadmap(makeRoadmapDocument())
+    await ctx.openArtisanServices!.executionSlices.createSlice({
+      id: "slice-1",
+      title: "Ready work",
+      status: "active",
+      createdAt: NOW,
+      updatedAt: NOW,
+    }, ["item-1", "item-2"])
+
+    const response = await handleToolExecute({
+      name: "select_mode",
+      args: { mode: "INCREMENTAL", feature_name: "persistent-roadmap-dag", execution_slice_id: "slice-1" },
+      context: { sessionId: "s1", directory: tmpDir },
+    }, ctx)
+
+    expect(response).toContain("Mode set to INCREMENTAL")
+    const state = ctx.engine!.store.get("s1")
+    expect(state?.phase).toBe("DISCOVERY")
+    expect(state?.roadmapContext).toMatchObject({
+      roadmapItemIds: ["item-1", "item-2"],
+      executionSliceId: "slice-1",
+      featureName: "persistent-roadmap-dag",
+    })
   })
 
   it("requires a bridge-owned stateDir for roadmap tool execution", async () => {

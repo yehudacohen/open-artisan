@@ -2,6 +2,13 @@ import { describe, expect, it } from "bun:test"
 
 import {
   AnalyzeTaskBoundaryChangeSchema,
+  ProductManagementQueueItemResultSchema,
+  ProductManagementQueueItemToolSchema,
+  ProductManagementAssessRequestToolSchema,
+  ProductManagementHealthSchema,
+  ProductManagementListWorkToolSchema,
+  ProductManagementLogEventPayloadSchema,
+  ProductManagementMetricEventSchema,
   RequestReviewToolSchema,
   RoadmapDeleteEdgeToolSchema,
   RoadmapDeleteItemToolSchema,
@@ -149,5 +156,149 @@ describe("shared tool schemas", () => {
     expect(RoadmapUpdateItemStatusToolSchema.safeParse({ status: "done" }).success).toBe(false)
     expect(RoadmapDeleteItemToolSchema.safeParse({}).success).toBe(false)
     expect(RoadmapUpsertItemToolSchema.safeParse({ item: { ...item, featureName: "../secrets" } }).success).toBe(false)
+  })
+
+  it("validates product-management queue item input with workflow provenance aliases", () => {
+    const parsed = ProductManagementQueueItemToolSchema.safeParse({
+      title: "File a follow-up for gate-safe chat",
+      description: "A user noticed a follow-up while reviewing a workflow artifact.",
+      kind: "follow-up",
+      priority: 7,
+      source: {
+        workflowId: "workflow-1",
+        featureName: "autonomous-product-management",
+        sessionId: "session-1",
+        taskId: "task-1",
+        artifactKey: "plan",
+        artifactPath: "/tmp/plan.md",
+        messageId: "message-1",
+      },
+      discovered_while: {
+        request: "queue this for later",
+        currentFeatureName: "autonomous-product-management",
+        currentPhase: "PLANNING",
+        currentPhaseState: "USER_GATE",
+        currentMode: "INCREMENTAL",
+        currentTaskId: "task-1",
+        roadmapItemIds: ["apm-1"],
+        executionSliceId: "slice-1",
+      },
+      suggested_edges: [{ from: "item-2", to: "item-1", kind: "depends-on" }],
+    })
+
+    expect(parsed.success).toBe(true)
+  })
+
+  it("rejects invalid product-management queue item kinds", () => {
+    const parsed = ProductManagementQueueItemToolSchema.safeParse({
+      title: "Missing kind",
+      description: "This should not accept arbitrary product memory kinds.",
+      kind: "idea",
+    })
+
+    expect(parsed.success).toBe(false)
+  })
+
+  it("validates product-management queue item results preserve workflow state", () => {
+    const item = {
+      id: "queued-1",
+      kind: "chore",
+      title: "Capture gate-safe chat",
+      description: "Queued from a user gate without approving the artifact.",
+      status: "todo",
+      priority: 6,
+      featureName: "autonomous-product-management",
+      createdAt: "2026-05-21T00:00:00.000Z",
+      updatedAt: "2026-05-21T00:00:00.000Z",
+    }
+
+    const parsed = ProductManagementQueueItemResultSchema.safeParse({
+      ok: true,
+      value: {
+        queuedNode: {
+          node: { item, lifecycle: "proposed", reason: "queued from chat" },
+          requestedKind: "follow-up",
+          persistedKind: "chore",
+        },
+        appliedEdges: [],
+        suggestedEdges: [{ from: "queued-1", to: "apm-1", kind: "depends-on" }],
+        provenance: [{ source: "user-request", reference: "message-1" }],
+        diagnostics: ["current workflow remains at PLANNING/USER_GATE"],
+        followUpWorkflowActionRequired: false,
+        currentWorkflowUnchanged: true,
+        currentWorkflow: {
+          workflowId: "workflow-1",
+          featureName: "autonomous-product-management",
+          mode: "INCREMENTAL",
+          phase: "PLANNING",
+          phaseState: "USER_GATE",
+          roadmapItemIds: ["apm-1"],
+          unresolvedHumanGateCount: 0,
+          pendingPatchSuggestionCount: 0,
+          activeFileClaims: [],
+          safeToSwitch: false,
+          blockedReasons: ["at user gate"],
+        },
+      },
+    })
+
+    expect(parsed.success).toBe(true)
+  })
+
+  it("validates product-management assess/list aliases and boundaries", () => {
+    expect(ProductManagementAssessRequestToolSchema.safeParse({
+      request: "what should we do next?",
+      roadmap_item_ids: ["apm-1"],
+      feature_name: "autonomous-product-management",
+      include_workflow_candidates: true,
+    }).success).toBe(true)
+    expect(ProductManagementAssessRequestToolSchema.safeParse({
+      request: "what should we do next?",
+      roadmapItemIds: ["apm-1"],
+      featureName: "autonomous-product-management",
+      includeWorkflowCandidates: true,
+    }).success).toBe(true)
+    expect(ProductManagementAssessRequestToolSchema.safeParse({ request: "" }).success).toBe(false)
+
+    expect(ProductManagementListWorkToolSchema.safeParse({
+      lifecycles: ["active", "frozen", "abandoned"],
+      statuses: ["todo", "blocked", "done", "dropped"],
+      min_priority: 1,
+      max_candidates: 100,
+    }).success).toBe(true)
+    expect(ProductManagementListWorkToolSchema.safeParse({ max_candidates: 0 }).success).toBe(false)
+    expect(ProductManagementListWorkToolSchema.safeParse({ max_candidates: 101 }).success).toBe(false)
+    expect(ProductManagementListWorkToolSchema.safeParse({ lifecycles: ["revived"] }).success).toBe(false)
+  })
+
+  it("validates product-management health, log, and metric operational contracts", () => {
+    expect(ProductManagementHealthSchema.safeParse({
+      status: "degraded",
+      signals: ["degraded-context", "queued-item-proposed"],
+      diagnostics: ["repository projection unavailable"],
+    }).success).toBe(true)
+
+    expect(ProductManagementLogEventPayloadSchema.safeParse({
+      signal: "queued-item-created",
+      status: "ready",
+      featureName: "autonomous-product-management",
+      roadmapItemIds: ["apm-1"],
+      message: "queued product-management item",
+      userRequestLogged: false,
+    }).success).toBe(true)
+    expect(ProductManagementLogEventPayloadSchema.safeParse({
+      signal: "queued-item-created",
+      status: "ready",
+      message: "must not log raw user request text",
+      userRequestLogged: true,
+    }).success).toBe(false)
+
+    expect(ProductManagementMetricEventSchema.safeParse({
+      name: "product-management.queue-item",
+      status: "ready",
+      decision: "queue-roadmap-item",
+      requiredGateCount: 0,
+      queuedItemKind: "issue",
+    }).success).toBe(true)
   })
 })

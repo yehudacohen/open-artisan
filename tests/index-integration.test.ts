@@ -697,6 +697,54 @@ describe("Plugin shape — returned object has all required keys", () => {
     }
   })
 
+  it("exposes product-management tools through the OpenCode plugin surface", () => {
+    const productManagementToolNames = [
+      "product_management_assess_request",
+      "product_management_list_work",
+      "product_management_queue_item",
+    ]
+
+    for (const toolName of productManagementToolNames) {
+      expect(plugin.tool[toolName]).toBeDefined()
+      expect(plugin.tool[toolName].execute).toBeFunction()
+      expect(TOOL_HANDLERS[toolName as keyof typeof TOOL_HANDLERS]).toBeFunction()
+    }
+  })
+
+  it("executes OpenCode product-management tools with the same typed JSON envelope as bridge", async () => {
+    await writeRoadmapState()
+    const sid = `int-test-${Date.now()}-opencode-product-management-tools`
+    await plugin.event({ event: { type: "session.created", properties: { info: { id: sid } } } })
+    const before = JSON.parse(JSON.stringify(plugin._testStore.get(sid)))
+
+    const assess = JSON.parse(await plugin.tool["product_management_assess_request"].execute({
+      request: "we should file a bug for this edge case and keep reviewing",
+      feature_name: "autonomous-product-management",
+      include_workflow_candidates: true,
+    }, { directory: tempDir, sessionId: sid }))
+    const list = JSON.parse(await plugin.tool["product_management_list_work"].execute({
+      lifecycles: ["active", "frozen", "abandoned"],
+      max_candidates: 10,
+    }, { directory: tempDir, sessionId: sid }))
+    const queue = JSON.parse(await plugin.tool["product_management_queue_item"].execute({
+      title: "Capture OpenCode product-management chat",
+      description: "Queue through the OpenCode tool surface while preserving workflow state.",
+      kind: "bug",
+      source: { sessionId: sid, artifactKey: "plan" },
+      discovered_while: {
+        request: "file this bug for later",
+        currentPhase: before.phase,
+        currentPhaseState: before.phaseState,
+      },
+    }, { directory: tempDir, sessionId: sid }))
+
+    expect(assess).toMatchObject({ ok: true, value: { decision: "queue-roadmap-item", suggestedToolCalls: expect.any(Array), diagnostics: expect.any(Array) } })
+    expect(list).toMatchObject({ ok: true, value: { candidates: expect.any(Array), diagnostics: expect.any(Array) } })
+    expect(queue).toMatchObject({ ok: true, value: { queuedNode: expect.any(Object), currentWorkflowUnchanged: true, diagnostics: expect.any(Array) } })
+    expect(plugin._testStore.get(sid)?.phase).toBe(before.phase)
+    expect(plugin._testStore.get(sid)?.phaseState).toBe(before.phaseState)
+  })
+
   it("executes OpenCode roadmap read tools with typed results without corrupting workflow state", async () => {
     await writeRoadmapState()
     const sid = `int-test-${Date.now()}-opencode-roadmap-read`

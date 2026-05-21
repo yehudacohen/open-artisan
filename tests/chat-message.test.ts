@@ -167,6 +167,28 @@ describe("processUserMessage — at USER_GATE, review clarification", () => {
     expect(result.intercepted).toBe(true)
     expect(result.feedbackType).toBe("feedback")
   })
+
+  it("does not route product-management queueing chat as artifact feedback", () => {
+    const state = makeState({ phase: "PLANNING", phaseState: "USER_GATE" })
+    const parts = [{ type: "text", text: "we should file a bug for this edge case and handle it later" }]
+
+    const result = processUserMessage(state, parts)
+
+    expect(result.intercepted).toBe(false)
+    expect(result.feedbackType).toBeNull()
+    expect(result.parts).toBe(parts)
+  })
+
+  it("does not route future-feature chat as artifact feedback while gated", () => {
+    const state = makeState({ phase: "INTERFACES", phaseState: "USER_GATE" })
+    const parts = [{ type: "text", text: "later we need a feature for cross-workflow queueing" }]
+
+    const result = processUserMessage(state, parts)
+
+    expect(result.intercepted).toBe(false)
+    expect(result.feedbackType).toBeNull()
+    expect(result.parts).toBe(parts)
+  })
 })
 
 describe("processUserMessage — ESCAPE_HATCH clarification", () => {

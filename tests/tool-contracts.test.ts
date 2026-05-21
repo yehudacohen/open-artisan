@@ -5,7 +5,7 @@ import { join } from "node:path"
 import { TOOL_HANDLERS } from "#bridge/methods/tool-execute"
 import { TOOLS as MCP_TOOLS } from "#claude-code/bin/artisan-mcp-tools"
 import { buildHermesToolContractsArtifact, hermesToolContractCount } from "../tools/hermes-tool-contract-artifact"
-import { RequestReviewToolSchema, toJsonSchema } from "#core/schemas"
+import { ProductManagementQueueItemToolSchema, RequestReviewToolSchema, toJsonSchema } from "#core/schemas"
 import { WORKFLOW_TOOL_NAMES } from "#core/workflow-tool-names"
 import {
   assertValidToolContracts,
@@ -154,6 +154,30 @@ describe("tool contract registry", () => {
     expect(MCP_TOOL_CONTRACTS.map((contract) => contract.name)).toEqual(expect.arrayContaining(roadmapToolNames))
     expect(OPENCODE_TOOL_CONTRACTS.map((contract) => contract.name)).toEqual(expect.arrayContaining(roadmapToolNames))
     expect(HERMES_AUTHOR_TOOL_CONTRACTS.map((contract) => contract.name)).toEqual(expect.arrayContaining(roadmapToolNames))
+  })
+
+  it("projects product-management tools as author-facing chat-safe bridge, MCP, OpenCode, and Hermes tools", () => {
+    const productManagementToolNames = [
+      "product_management_assess_request",
+      "product_management_list_work",
+      "product_management_queue_item",
+    ]
+
+    for (const name of productManagementToolNames) {
+      const contract = TOOL_CONTRACTS.find((candidate) => candidate.name === name)
+      expect(contract).toBeDefined()
+      expect(contract?.workflowGuard).toBe(false)
+      expect(contract?.hermesSurfaceRole).toBe("author")
+      expect(contract?.exposeTo).toEqual(["bridge", "mcp", "opencode"])
+      expect(contract?.mcpName).toBe(`oa_${name}`)
+    }
+
+    const queueContract = TOOL_CONTRACTS.find((contract) => contract.name === "product_management_queue_item")
+    expect(queueContract?.schema).toBe(ProductManagementQueueItemToolSchema)
+    expect(BRIDGE_TOOL_CONTRACTS.map((contract) => contract.name)).toEqual(expect.arrayContaining(productManagementToolNames))
+    expect(MCP_TOOL_CONTRACTS.map((contract) => contract.name)).toEqual(expect.arrayContaining(productManagementToolNames))
+    expect(OPENCODE_TOOL_CONTRACTS.map((contract) => contract.name)).toEqual(expect.arrayContaining(productManagementToolNames))
+    expect(HERMES_AUTHOR_TOOL_CONTRACTS.map((contract) => contract.name)).toEqual(expect.arrayContaining(productManagementToolNames))
   })
 
   it("models drift backtrack auto-skip policy as explicit operational contract data", () => {

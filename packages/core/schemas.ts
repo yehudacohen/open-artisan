@@ -526,6 +526,295 @@ export const RoadmapQueryToolSchema = z.object({
   query: RoadmapQuerySchema.optional(),
 }).strict()
 
+export const ProductManagementAssessRequestToolSchema = z.object({
+  request: z.string().trim().min(1),
+  roadmap_item_ids: z.array(z.string().min(1)).optional(),
+  roadmapItemIds: z.array(z.string().min(1)).optional(),
+  feature_name: RoadmapFeatureNameSchema.optional(),
+  featureName: RoadmapFeatureNameSchema.optional(),
+  include_workflow_candidates: z.boolean().optional(),
+  includeWorkflowCandidates: z.boolean().optional(),
+}).strict()
+
+export const ProductManagementListWorkToolSchema = z.object({
+  roadmap_item_ids: z.array(z.string().min(1)).optional(),
+  roadmapItemIds: z.array(z.string().min(1)).optional(),
+  lifecycles: z.array(z.enum(["proposed", "active", "frozen", "abandoned"])).optional(),
+  statuses: z.array(RoadmapItemStatusSchema).optional(),
+  feature_name: RoadmapFeatureNameSchema.optional(),
+  featureName: RoadmapFeatureNameSchema.optional(),
+  min_priority: z.number().finite().optional(),
+  minPriority: z.number().finite().optional(),
+  max_candidates: z.number().int().positive().max(100).optional(),
+  maxCandidates: z.number().int().positive().max(100).optional(),
+}).strict()
+
+export const ProductManagementQueuedItemKindSchema = z.enum(["feature", "bug", "issue", "debt", "chore", "follow-up"])
+
+export const ProductManagementDecisionKindSchema = z.enum([
+  "continue-current-workflow",
+  "revise-current-artifact",
+  "backtrack-current-artifact",
+  "request-allowlist-expansion",
+  "queue-roadmap-item",
+  "propose-roadmap-item",
+  "propose-roadmap-edge",
+  "freeze-roadmap-node",
+  "abandon-roadmap-node",
+  "supersede-roadmap-node",
+  "reopen-roadmap-node",
+  "switch-workflow",
+  "ask-user",
+])
+
+export const ProductManagementConfidenceSchema = z.enum(["high", "medium", "low"])
+export const ProductManagementGateKindSchema = z.enum([
+  "user-approval",
+  "artifact-review",
+  "allowlist-approval",
+  "task-review",
+  "human-gate",
+  "backtrack-approval",
+  "roadmap-mutation",
+  "workflow-switch",
+])
+export const ProductManagementWorkStatusSchema = z.enum(["ready", "active", "blocked", "gated", "complete", "dropped", "frozen", "abandoned"])
+export const ProductManagementRoadmapNodeLifecycleSchema = z.enum(["proposed", "active", "frozen", "abandoned"])
+export const ProductManagementHealthStatusSchema = z.enum(["ready", "degraded", "unavailable"])
+export const ProductManagementOperationalSignalSchema = z.enum([
+  "generated-contract-drift",
+  "invalid-input",
+  "missing-roadmap-service",
+  "missing-workflow-service",
+  "degraded-context",
+  "unsafe-switch",
+  "queued-item-created",
+  "queued-item-proposed",
+])
+export const ProductManagementMetricNameSchema = z.enum([
+  "product-management.assess-request",
+  "product-management.list-work",
+  "product-management.queue-item",
+  "product-management.degraded-context",
+  "product-management.unsafe-switch",
+])
+export const WorkflowPhaseSchema = z.enum([
+  "MODE_SELECT",
+  "DISCOVERY",
+  "PLANNING",
+  "INTERFACES",
+  "TESTS",
+  "IMPL_PLAN",
+  "IMPLEMENTATION",
+  "DONE",
+])
+export const WorkflowPhaseStateSchema = z.enum([
+  "SCAN",
+  "ANALYZE",
+  "CONVENTIONS",
+  "DRAFT",
+  "REVIEW",
+  "USER_GATE",
+  "ESCAPE_HATCH",
+  "REVISE",
+  "REDRAFT",
+  "SKIP_CHECK",
+  "CASCADE_CHECK",
+  "SCHEDULING",
+  "TASK_REVIEW",
+  "TASK_REVISE",
+  "HUMAN_GATE",
+  "DELEGATED_WAIT",
+])
+
+export const ProductManagementRequestContextSchema = z.object({
+  request: z.string().trim().min(1),
+  currentFeatureName: RoadmapFeatureNameSchema.optional(),
+  currentPhase: WorkflowPhaseSchema.optional(),
+  currentPhaseState: WorkflowPhaseStateSchema.optional(),
+  currentMode: z.enum(["GREENFIELD", "REFACTOR", "INCREMENTAL"]).optional(),
+  currentTaskId: z.string().min(1).optional(),
+  roadmapItemIds: z.array(z.string().min(1)).optional(),
+  executionSliceId: z.string().min(1).optional(),
+}).strict()
+
+export const ProductManagementQueueItemSourceSchema = z.object({
+  workflowId: z.string().min(1).optional(),
+  featureName: RoadmapFeatureNameSchema.optional(),
+  sessionId: z.string().min(1).optional(),
+  taskId: z.string().min(1).optional(),
+  artifactKey: ArtifactKeySchema.optional(),
+  artifactPath: z.string().min(1).optional(),
+  messageId: z.string().min(1).optional(),
+}).strict()
+
+export const ProductManagementQueueItemToolSchema = z.object({
+  title: z.string().trim().min(1),
+  description: z.string().trim().min(1),
+  kind: ProductManagementQueuedItemKindSchema,
+  priority: z.number().finite().optional(),
+  source: ProductManagementQueueItemSourceSchema.optional(),
+  discovered_while: ProductManagementRequestContextSchema.optional(),
+  discoveredWhile: ProductManagementRequestContextSchema.optional(),
+  suggested_edges: z.array(RoadmapEdgeSchema).optional(),
+  suggestedEdges: z.array(RoadmapEdgeSchema).optional(),
+}).strict()
+
+export const ProductManagementToolCallSuggestionSchema = z.object({
+  toolName: z.string().min(1),
+  reason: z.string().min(1),
+  args: z.record(z.string(), z.unknown()).optional(),
+}).strict()
+
+export const ProductManagementRequiredGateSchema = z.object({
+  kind: ProductManagementGateKindSchema,
+  reason: z.string().min(1),
+  toolName: z.string().min(1).optional(),
+}).strict()
+
+export const ProductManagementRejectedAlternativeSchema = z.object({
+  decision: ProductManagementDecisionKindSchema,
+  reason: z.string().min(1),
+}).strict()
+
+export const ProductManagementProvenanceSchema = z.object({
+  source: z.enum(["workflow-state", "roadmap", "repository", "artifact", "user-request", "fallback"]),
+  reference: z.string().min(1),
+}).strict()
+
+export const ProductManagementRoadmapNodeSchema = z.object({
+  item: RoadmapItemSchema,
+  lifecycle: ProductManagementRoadmapNodeLifecycleSchema,
+  reason: z.string().min(1).optional(),
+}).strict()
+
+export const ProductManagementRoadmapGraphSchema = z.object({
+  nodes: z.array(ProductManagementRoadmapNodeSchema),
+  edges: z.array(RoadmapEdgeSchema),
+  activeNodeIds: z.array(z.string().min(1)),
+  frozenNodeIds: z.array(z.string().min(1)),
+  abandonedNodeIds: z.array(z.string().min(1)),
+}).strict()
+
+export const ProductManagementRoadmapSummarySchema = z.object({
+  graph: ProductManagementRoadmapGraphSchema,
+  items: z.array(RoadmapItemSchema),
+  edges: z.array(RoadmapEdgeSchema),
+  selectedItemIds: z.array(z.string().min(1)),
+}).strict()
+
+export const ProductManagementExecutionSliceSummarySchema = z.object({
+  executionSliceId: z.string().min(1).optional(),
+  workflowId: z.string().min(1).optional(),
+  featureName: RoadmapFeatureNameSchema.optional(),
+  roadmapItemIds: z.array(z.string().min(1)),
+}).strict()
+
+export const ProductManagementWorkflowSummarySchema = z.object({
+  workflowId: z.string().min(1).optional(),
+  featureName: RoadmapFeatureNameSchema,
+  executionSlice: ProductManagementExecutionSliceSummarySchema.optional(),
+  mode: z.enum(["GREENFIELD", "REFACTOR", "INCREMENTAL"]).optional(),
+  phase: WorkflowPhaseSchema,
+  phaseState: WorkflowPhaseStateSchema,
+  roadmapItemIds: z.array(z.string().min(1)),
+  currentTaskId: z.string().min(1).optional(),
+  unresolvedHumanGateCount: z.number().int().min(0),
+  pendingPatchSuggestionCount: z.number().int().min(0),
+  activeFileClaims: z.array(z.string().min(1)),
+  safeToSwitch: z.boolean(),
+  blockedReasons: z.array(z.string().min(1)),
+}).strict()
+
+export const ProductManagementDecisionSchema = z.object({
+  decision: ProductManagementDecisionKindSchema,
+  rationale: z.string().min(1),
+  confidence: ProductManagementConfidenceSchema,
+  targetFeatureName: RoadmapFeatureNameSchema.optional(),
+  targetRoadmapItemIds: z.array(z.string().min(1)).optional(),
+  suggestedToolCalls: z.array(ProductManagementToolCallSuggestionSchema),
+  requiredGates: z.array(ProductManagementRequiredGateSchema),
+  rejectedAlternatives: z.array(ProductManagementRejectedAlternativeSchema),
+  provenance: z.array(ProductManagementProvenanceSchema),
+  diagnostics: z.array(z.string().min(1)),
+}).strict()
+
+export const ProductManagementQueuedRoadmapNodeSchema = z.object({
+  node: ProductManagementRoadmapNodeSchema,
+  requestedKind: ProductManagementQueuedItemKindSchema,
+  persistedKind: RoadmapItemKindSchema,
+}).strict()
+
+export const ProductManagementQueueItemResultValueSchema = z.object({
+  queuedNode: ProductManagementQueuedRoadmapNodeSchema,
+  appliedEdges: z.array(RoadmapEdgeSchema),
+  suggestedEdges: z.array(RoadmapEdgeSchema),
+  provenance: z.array(ProductManagementProvenanceSchema),
+  diagnostics: z.array(z.string().min(1)),
+  followUpWorkflowActionRequired: z.boolean(),
+  currentWorkflowUnchanged: z.boolean(),
+  currentWorkflow: ProductManagementWorkflowSummarySchema.optional(),
+}).strict()
+
+export const ProductManagementWorkCandidateSchema = z.object({
+  roadmapNode: ProductManagementRoadmapNodeSchema.optional(),
+  workflow: ProductManagementWorkflowSummarySchema.optional(),
+  status: ProductManagementWorkStatusSchema,
+  priority: z.number().finite(),
+  safeToStart: z.boolean(),
+  reasons: z.array(z.string().min(1)),
+}).strict()
+
+export const ProductManagementWorkListSchema = z.object({
+  candidates: z.array(ProductManagementWorkCandidateSchema),
+  diagnostics: z.array(z.string().min(1)),
+}).strict()
+
+export const ProductManagementHealthSchema = z.object({
+  status: ProductManagementHealthStatusSchema,
+  signals: z.array(ProductManagementOperationalSignalSchema),
+  diagnostics: z.array(z.string().min(1)),
+}).strict()
+
+export const ProductManagementLogEventPayloadSchema = z.object({
+  signal: ProductManagementOperationalSignalSchema,
+  status: ProductManagementHealthStatusSchema,
+  featureName: RoadmapFeatureNameSchema.optional(),
+  roadmapItemIds: z.array(z.string().min(1)).optional(),
+  message: z.string().min(1),
+  userRequestLogged: z.literal(false),
+}).strict()
+
+export const ProductManagementMetricEventSchema = z.object({
+  name: ProductManagementMetricNameSchema,
+  status: ProductManagementHealthStatusSchema,
+  decision: ProductManagementDecisionKindSchema.optional(),
+  candidateCount: z.number().int().min(0).optional(),
+  requiredGateCount: z.number().int().min(0).optional(),
+  queuedItemKind: ProductManagementQueuedItemKindSchema.optional(),
+}).strict()
+
+export const ProductManagementErrorSchema = z.object({
+  code: z.enum(["invalid-input", "not-found", "storage-failure"]),
+  message: z.string().min(1),
+  retryable: z.boolean(),
+}).strict()
+
+export const ProductManagementAssessRequestResultSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), value: ProductManagementDecisionSchema }).strict(),
+  z.object({ ok: z.literal(false), error: ProductManagementErrorSchema }).strict(),
+])
+
+export const ProductManagementListWorkResultSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), value: ProductManagementWorkListSchema }).strict(),
+  z.object({ ok: z.literal(false), error: ProductManagementErrorSchema }).strict(),
+])
+
+export const ProductManagementQueueItemResultSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), value: ProductManagementQueueItemResultValueSchema }).strict(),
+  z.object({ ok: z.literal(false), error: ProductManagementErrorSchema }).strict(),
+])
+
 export const RoadmapDeriveExecutionSliceToolSchema = z.object({
   roadmap_item_ids: z.array(z.string().min(1)).optional(),
   roadmapItemIds: z.array(z.string().min(1)).optional(),
@@ -606,6 +895,19 @@ export type ApplyDriftRepairToolInput = z.infer<typeof ApplyDriftRepairToolSchem
 export type RoadmapItemFromSchema = z.infer<typeof RoadmapItemSchema>
 export type RoadmapEdgeFromSchema = z.infer<typeof RoadmapEdgeSchema>
 export type RoadmapDocumentFromSchema = z.infer<typeof RoadmapDocumentSchema>
+export type ProductManagementAssessRequestInput = z.infer<typeof ProductManagementAssessRequestToolSchema>
+export type ProductManagementListWorkInput = z.infer<typeof ProductManagementListWorkToolSchema>
+export type ProductManagementQueueItemInput = z.infer<typeof ProductManagementQueueItemToolSchema>
+export type ProductManagementRoadmapSummaryFromSchema = z.infer<typeof ProductManagementRoadmapSummarySchema>
+export type ProductManagementWorkflowSummaryFromSchema = z.infer<typeof ProductManagementWorkflowSummarySchema>
+export type ProductManagementDecisionFromSchema = z.infer<typeof ProductManagementDecisionSchema>
+export type ProductManagementWorkListFromSchema = z.infer<typeof ProductManagementWorkListSchema>
+export type ProductManagementAssessRequestResult = z.infer<typeof ProductManagementAssessRequestResultSchema>
+export type ProductManagementListWorkResult = z.infer<typeof ProductManagementListWorkResultSchema>
+export type ProductManagementQueueItemResult = z.infer<typeof ProductManagementQueueItemResultSchema>
+export type ProductManagementHealthFromSchema = z.infer<typeof ProductManagementHealthSchema>
+export type ProductManagementLogEventPayloadFromSchema = z.infer<typeof ProductManagementLogEventPayloadSchema>
+export type ProductManagementMetricEventFromSchema = z.infer<typeof ProductManagementMetricEventSchema>
 export type RoadmapUpsertItemInput = z.infer<typeof RoadmapUpsertItemToolSchema>
 export type RoadmapUpdateItemStatusInput = z.infer<typeof RoadmapUpdateItemStatusToolSchema>
 export type RoadmapDeleteItemInput = z.infer<typeof RoadmapDeleteItemToolSchema>

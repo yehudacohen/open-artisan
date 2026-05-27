@@ -269,6 +269,50 @@ describe("createOpenCodeSubagentDispatcher", () => {
     ])
   })
 
+  it("returns captured reviewer tool submissions while prompt is still pending", async () => {
+    const calls: string[] = []
+    let submittedPayload: string | null = null
+    const submissions = {
+      begin(sessionId: string, toolName: string) {
+        calls.push(`begin:${sessionId}:${toolName}`)
+        setTimeout(() => {
+          submittedPayload = JSON.stringify({
+            satisfied: true,
+            criteria_results: [{ criterion: "Runtime", met: true, evidence: "tool submitted", severity: "blocking" }],
+          })
+        }, 10)
+      },
+      recordRubricItem(sessionId: string, item: unknown) {
+        calls.push(`progress:${sessionId}:${JSON.stringify(item)}`)
+        return { success: true as const }
+      },
+      take(sessionId: string, toolName: string) {
+        calls.push(`take:${sessionId}:${toolName}`)
+        const payload = submittedPayload
+        submittedPayload = null
+        return payload
+      },
+      clear(sessionId: string) {
+        calls.push(`clear:${sessionId}`)
+      },
+    }
+    const client = makeClient()
+    ;(client.session.prompt as ReturnType<typeof mock>).mockImplementation(async () => {
+      await new Promise(() => {})
+    })
+    const dispatcher = createOpenCodeSubagentDispatcher(client as any, { reviewerToolSubmissions: submissions })
+    const session = await dispatcher.createSession({ title: "test", agent: "workflow-reviewer" })
+    const text = await session.prompt("hello", { submissionTool: { name: "submit_phase_review_result" } })
+    const decoded = decodeSubagentToolSubmission(text, "submit_phase_review_result")
+
+    expect(decoded.success).toBe(true)
+    if (!decoded.success) return
+    expect(JSON.parse(decoded.payload).criteria_results[0].evidence).toBe("tool submitted")
+    expect(calls[0]).toBe("begin:sess-1:submit_phase_review_result")
+    expect(calls.at(-1)).toBe("clear:sess-1")
+    expect(calls.some((call) => call === "take:sess-1:submit_phase_review_result")).toBe(true)
+  })
+
   it("allows reviewer progress submissions without satisfying the final submission", async () => {
     const calls: string[] = []
     const submissions = {
@@ -302,6 +346,7 @@ describe("createOpenCodeSubagentDispatcher", () => {
       "begin:sess-1:submit_task_review_result:parent-1:task:T2:attempt-1",
       "take:sess-1:submit_task_review_result",
       "take:sess-1:submit_task_review_result",
+      "take:sess-1:submit_task_review_result",
       "clear:sess-1",
     ])
   })
@@ -332,6 +377,7 @@ describe("createOpenCodeSubagentDispatcher", () => {
       .rejects.toThrow("must call submit_task_review_result")
     expect(calls).toEqual([
       "begin:sess-1:submit_task_review_result",
+      "take:sess-1:submit_task_review_result",
       "take:sess-1:submit_task_review_result",
       "take:sess-1:submit_task_review_result",
       "clear:sess-1",

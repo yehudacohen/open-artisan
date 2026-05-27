@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test"
-import { mkdir, mkdtemp, readFile, rm, stat } from "node:fs/promises"
+import { mkdir, mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 
@@ -272,5 +272,25 @@ describe("createFileSystemRoadmapStateBackend", () => {
     if (!deleteResult.ok) {
       expect(deleteResult.error.code).toBe("storage-failure")
     }
+  })
+})
+
+describe("createFileSystemStateBackend", () => {
+  it("writes workflow state without leaving temporary files behind", async () => {
+    const stateDir = await makeTempStateDir()
+    const backend = createFileSystemStateBackend(stateDir)
+
+    await backend.write("feature-a", JSON.stringify({ ok: true }))
+
+    expect(await backend.read("feature-a")).toBe(JSON.stringify({ ok: true }))
+    expect(await readdir(join(stateDir, "feature-a"))).toEqual(["workflow-state.json"])
+  })
+
+  it("surfaces workflow-state read errors instead of treating them as absent state", async () => {
+    const stateDir = await makeTempStateDir()
+    const backend = createFileSystemStateBackend(stateDir)
+    await mkdir(join(stateDir, "feature-b", "workflow-state.json"), { recursive: true })
+
+    await expect(backend.read("feature-b")).rejects.toThrow()
   })
 })

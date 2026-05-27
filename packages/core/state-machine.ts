@@ -55,7 +55,7 @@ function buildTable(): TableEntry[] {
   table.push({
     from: ["MODE_SELECT", "DRAFT"],
     event: "mode_selected",
-    modePredicate: (m) => m !== "GREENFIELD",
+    modePredicate: (m) => m === "REFACTOR" || m === "INCREMENTAL",
     to: ["DISCOVERY", "SCAN"],
   })
 
@@ -99,7 +99,7 @@ function buildTable(): TableEntry[] {
     } else {
       table.push({ from: [phase, "USER_GATE"], event: "user_approve", modePredicate: (m) => m === "INCREMENTAL", to: [next, "SKIP_CHECK"] })
     }
-    table.push({ from: [phase, "USER_GATE"], event: "user_approve", modePredicate: (m) => m !== "INCREMENTAL", to: [next, "DRAFT"] })
+    table.push({ from: [phase, "USER_GATE"], event: "user_approve", modePredicate: (m) => m === "GREENFIELD" || m === "REFACTOR", to: [next, "DRAFT"] })
 
     table.push({ from: [phase, "SKIP_CHECK"], event: "scheduling_complete", modePredicate: null, to: [phase, "DRAFT"] })
     table.push({ from: [phase, "CASCADE_CHECK"], event: "scheduling_complete", modePredicate: null, to: [phase, "REVISE"] })
@@ -123,6 +123,17 @@ function buildTable(): TableEntry[] {
   table.push({ from: ["IMPLEMENTATION", "TASK_REVISE"], event: "revision_complete", modePredicate: null, to: ["IMPLEMENTATION", "TASK_REVIEW"] })
   table.push({ from: ["IMPLEMENTATION", "HUMAN_GATE"], event: "human_gate_resolved", modePredicate: null, to: ["IMPLEMENTATION", "SCHEDULING"] })
   table.push({ from: ["IMPLEMENTATION", "DELEGATED_WAIT"], event: "delegated_task_completed", modePredicate: null, to: ["IMPLEMENTATION", "SCHEDULING"] })
+
+  for (const state of ["DRAFT", "REVISE", "SKIP_CHECK", "CASCADE_CHECK"] as const) {
+    table.push({ from: ["IMPL_PLAN", state], event: "allowlist_expansion_requested", modePredicate: (m) => m === "INCREMENTAL", to: ["IMPL_PLAN", "USER_GATE"] })
+  }
+  for (const state of ["DRAFT", "REVISE", "SCHEDULING", "TASK_REVISE"] as const) {
+    table.push({ from: ["IMPLEMENTATION", state], event: "allowlist_expansion_requested", modePredicate: (m) => m === "INCREMENTAL", to: ["IMPLEMENTATION", "USER_GATE"] })
+  }
+  table.push({ from: ["IMPL_PLAN", "USER_GATE"], event: "scope_expansion_approved", modePredicate: (m) => m === "INCREMENTAL", to: ["IMPL_PLAN", "DRAFT"] })
+  for (const state of ["DRAFT", "SCHEDULING", "TASK_REVISE", "USER_GATE"] as const) {
+    table.push({ from: ["IMPLEMENTATION", state], event: "scope_expansion_approved", modePredicate: null, to: ["IMPLEMENTATION", "DRAFT"] })
+  }
 
   return table
 }
@@ -187,6 +198,14 @@ export function createStateMachine(): StateMachine {
         }
       }
 
+      if (currentPhase !== "MODE_SELECT" && mode === null) {
+        return {
+          ok: false,
+          code: "INVALID_EVENT",
+          message: `Mode must be selected before handling event "${event}" in ${currentPhase}/${currentPhaseState}`,
+        }
+      }
+
       const result = findTransition(currentPhase, currentPhaseState, event, mode)
       if (!result) {
         return {
@@ -206,6 +225,7 @@ export function createStateMachine(): StateMachine {
     },
 
     validEvents(phase: Phase, phaseState: PhaseState, mode?: WorkflowMode | null): WorkflowEvent[] {
+      if (phase !== "MODE_SELECT" && mode === null) return []
       return TRANSITION_TABLE
         .filter((e) =>
           e.from[0] === phase &&

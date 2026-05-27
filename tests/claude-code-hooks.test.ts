@@ -8,8 +8,8 @@ import { describe, expect, it, beforeAll, afterAll } from "bun:test"
 import { join } from "node:path"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { existsSync, mkdirSync, writeFileSync } from "node:fs"
-import { execFileSync, spawn, type ChildProcess } from "node:child_process"
+import { chmodSync, existsSync, mkdirSync, writeFileSync } from "node:fs"
+import { execFileSync, spawn, spawnSync, type ChildProcess } from "node:child_process"
 
 import { sendSocketRequest } from "#claude-code/src/socket-transport"
 import { getSocketPath, getEnabledPath, getActiveSessionPath, DEFAULT_STATE_DIR_NAME } from "#claude-code/src/constants"
@@ -24,6 +24,7 @@ import {
 
 const REPO_ROOT = join(import.meta.dirname, "..")
 const SERVER_SCRIPT = join(REPO_ROOT, "packages", "claude-code", "bin", "artisan-server.ts")
+const HOOK_SCRIPT = join(REPO_ROOT, "packages", "claude-code", "bin", "artisan-hook.ts")
 
 let tmpDir: string
 let stateDir: string
@@ -90,6 +91,16 @@ function passingPlanningCriteria() {
     severity: "blocking",
     score: 9,
   }))
+}
+
+function fakePassingReviewerScript(): string {
+  const criteria = Array.from({ length: 30 }, (_, i) => ({
+    criterion: `Criterion ${i + 1}`,
+    met: true,
+    evidence: "verified by Claude smoke reviewer",
+    severity: "blocking",
+  }))
+  return `#!/usr/bin/env node\nconsole.log(${JSON.stringify(JSON.stringify({ satisfied: true, criteria_results: criteria }))})\n`
 }
 
 function extractReviewToken(prompt: string): string {
@@ -182,6 +193,55 @@ async function moveSessionToPlanningRedraft(sessionId: string): Promise<void> {
   })
 }
 
+async function moveSessionToPlanningReview(sessionId: string): Promise<void> {
+  const featureName = `hook-review-${Date.now()}`
+  await sendSocketRequest(socketPath, {
+    jsonrpc: "2.0",
+    method: "lifecycle.sessionCreated",
+    params: { sessionId },
+    id: Date.now(),
+  })
+  await sendSocketRequest(socketPath, {
+    jsonrpc: "2.0",
+    method: "tool.execute",
+    params: {
+      name: "select_mode",
+      args: { mode: "GREENFIELD", feature_name: featureName },
+      context: { sessionId, directory: tmpDir },
+    },
+    id: Date.now() + 1,
+  })
+  const artifactDir = join(tmpDir, ".openartisan", featureName)
+  mkdirSync(artifactDir, { recursive: true })
+  const planPath = join(artifactDir, "plan.md")
+  const reviewPlanPath = join(".openartisan", featureName, "plan.md")
+  writeFileSync(planPath, "# Plan\n\nA structurally valid planning artifact for Claude smoke review.", "utf-8")
+  const reviewResponse = await sendSocketRequest(socketPath, {
+    jsonrpc: "2.0",
+    method: "tool.execute",
+    params: {
+      name: "request_review",
+      args: { summary: "Plan", artifact_description: "Plan", artifact_files: [reviewPlanPath] },
+      context: { sessionId, directory: tmpDir },
+    },
+    id: Date.now() + 2,
+  }) as { result?: string } | null
+  if (typeof reviewResponse?.result === "string" && reviewResponse.result.startsWith("Error:")) {
+    throw new Error(reviewResponse.result)
+  }
+}
+
+async function readWorkflowState(sessionId: string): Promise<Record<string, unknown>> {
+  const response = await sendSocketRequest(socketPath, {
+    jsonrpc: "2.0",
+    method: "state.get",
+    params: { sessionId },
+    id: Date.now(),
+  }) as { result?: Record<string, unknown> } | null
+  const result = response?.result ?? {}
+  return (result.state as Record<string, unknown> | undefined) ?? result
+}
+
 // ---------------------------------------------------------------------------
 // PreToolUse
 // ---------------------------------------------------------------------------
@@ -267,6 +327,67 @@ describe("hook: PreToolUse", () => {
     }
   })
 
+  it("fails closed for package-manager writes when enabled bridge is unavailable", async () => {
+    const isolatedDir = await mkdtemp(join(tmpdir(), "artisan-hook-no-bridge-"))
+    try {
+      const isolatedStateDir = join(isolatedDir, DEFAULT_STATE_DIR_NAME)
+      mkdirSync(isolatedStateDir, { recursive: true })
+      writeFileSync(getEnabledPath(isolatedStateDir), "1")
+      const result = await handlePreToolUse({
+        session_id: "missing-bridge-session",
+        cwd: isolatedDir,
+        tool_name: "Bash",
+        tool_input: { command: "bun install" },
+      })
+      expect(result.exitCode).toBe(2)
+      expect(result.stderr).toContain("bridge guard is unavailable")
+    } finally {
+      await rm(isolatedDir, { recursive: true, force: true })
+    }
+  })
+
+  it("fails closed for formatter writes when enabled bridge is unavailable", async () => {
+    const isolatedDir = await mkdtemp(join(tmpdir(), "artisan-hook-no-bridge-"))
+    try {
+      const isolatedStateDir = join(isolatedDir, DEFAULT_STATE_DIR_NAME)
+      mkdirSync(isolatedStateDir, { recursive: true })
+      writeFileSync(getEnabledPath(isolatedStateDir), "1")
+      const result = await handlePreToolUse({
+        session_id: "missing-bridge-session",
+        cwd: isolatedDir,
+        tool_name: "Bash",
+        tool_input: { command: "eslint src --fix" },
+      })
+      expect(result.exitCode).toBe(2)
+      expect(result.stderr).toContain("bridge guard is unavailable")
+    } finally {
+      await rm(isolatedDir, { recursive: true, force: true })
+    }
+  })
+
+  it("CLI fails closed for write-like PreToolUse handler crashes", async () => {
+    const isolatedDir = await mkdtemp(join(tmpdir(), "artisan-hook-crash-"))
+    try {
+      const isolatedStateDir = join(isolatedDir, DEFAULT_STATE_DIR_NAME)
+      mkdirSync(isolatedStateDir, { recursive: true })
+      writeFileSync(getEnabledPath(isolatedStateDir), "1")
+      mkdirSync(getActiveSessionPath(isolatedStateDir))
+      const result = spawnSync("bun", ["run", HOOK_SCRIPT, "pre-tool-use"], {
+        input: JSON.stringify({
+          cwd: isolatedDir,
+          tool_name: "Write",
+          tool_input: { file_path: "src/file.ts", content: "x" },
+        }),
+        encoding: "utf-8",
+      })
+
+      expect(result.status).toBe(2)
+      expect(result.stderr).toContain("Blocking to preserve workflow safety")
+    } finally {
+      await rm(isolatedDir, { recursive: true, force: true })
+    }
+  })
+
   it("includes phase context when allowing", async () => {
     const result = await handlePreToolUse(makeInput({
       tool_name: "Read",
@@ -334,6 +455,36 @@ describe("hook: Stop", () => {
     expect(result.exitCode).toBe(2)
     expect(result.stderr).not.toBeNull()
     expect(result.stderr).toContain("not yet complete")
+  })
+
+  it("smoke: dispatches an isolated phase review through a real bridge", async () => {
+    const sessionId = `claude-phase-smoke-${Date.now()}`
+    await moveSessionToPlanningReview(sessionId)
+    const fakeBin = await mkdtemp(join(tmpdir(), "fake-claude-"))
+    const fakeClaude = join(fakeBin, "claude")
+    const oldPath = process.env.PATH
+    try {
+      writeFileSync(fakeClaude, fakePassingReviewerScript(), "utf-8")
+      chmodSync(fakeClaude, 0o755)
+      writeFileSync(getEnabledPath(stateDir), "1")
+      process.env.PATH = `${fakeBin}:${oldPath ?? ""}`
+      expect(execFileSync("claude", ["--smoke"], { encoding: "utf-8", env: process.env })).toContain("criteria_results")
+
+      const result = await handleStop({ session_id: sessionId, cwd: tmpDir })
+
+      expect(result.exitCode).toBe(2)
+      if (!result.stderr?.includes("Phase review completed")) {
+        const state = await readWorkflowState(sessionId)
+        throw new Error(`${result.stderr}\n${JSON.stringify(state.latestReviewResults ?? state.toolFailureHistory ?? state)}`)
+      }
+      expect(result.stderr).toContain("Phase review completed")
+      const state = await readWorkflowState(sessionId)
+      expect(state.phase).toBe("PLANNING")
+      expect(state.phaseState).toBe("USER_GATE")
+    } finally {
+      process.env.PATH = oldPath
+      await rm(fakeBin, { recursive: true, force: true })
+    }
   })
 })
 

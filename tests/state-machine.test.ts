@@ -171,6 +171,13 @@ describe("StateMachine — greenfield mode skips discovery", () => {
     expect(result.nextPhase).toBe("DISCOVERY")
     expect(result.nextPhaseState).toBe("SCAN")
   })
+
+  it("MODE_SELECT/DRAFT + mode_selected rejects null mode", () => {
+    const result = sm.transition("MODE_SELECT", "DRAFT", "mode_selected", null)
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.code).toBe("INVALID_EVENT")
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -266,6 +273,13 @@ describe("StateMachine — invalid transitions", () => {
 
   it("user_approve in DRAFT state is invalid", () => {
     const result = sm.transition("PLANNING", "DRAFT", "user_approve", "GREENFIELD")
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.code).toBe("INVALID_EVENT")
+  })
+
+  it("user_approve does not treat null mode as non-incremental", () => {
+    const result = sm.transition("PLANNING", "USER_GATE", "user_approve", null)
     expect(result.ok).toBe(false)
     if (result.ok) return
     expect(result.code).toBe("INVALID_EVENT")
@@ -502,6 +516,22 @@ describe("StateMachine — structural workflow states", () => {
     if (!result.ok) return
     expect(result.nextPhase).toBe("IMPLEMENTATION")
     expect(result.nextPhaseState).toBe("TASK_REVIEW")
+  })
+
+  it("IMPLEMENTATION/TASK_REVISE + scope_expansion_approved → IMPLEMENTATION/DRAFT", () => {
+    const result = sm.transition("IMPLEMENTATION", "TASK_REVISE", "scope_expansion_approved", "INCREMENTAL")
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.nextPhase).toBe("IMPLEMENTATION")
+    expect(result.nextPhaseState).toBe("DRAFT")
+  })
+
+  it("IMPLEMENTATION/DRAFT + allowlist_expansion_requested → IMPLEMENTATION/USER_GATE", () => {
+    const result = sm.transition("IMPLEMENTATION", "DRAFT", "allowlist_expansion_requested", "INCREMENTAL")
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.nextPhase).toBe("IMPLEMENTATION")
+    expect(result.nextPhaseState).toBe("USER_GATE")
   })
 
   it("IMPLEMENTATION/HUMAN_GATE + human_gate_resolved → IMPLEMENTATION/SCHEDULING", () => {

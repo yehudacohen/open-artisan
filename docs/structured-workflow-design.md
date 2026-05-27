@@ -169,11 +169,12 @@ Phase           Valid Sub-States
 ─────────────   ──────────────────────────────────────────────
 MODE_SELECT     DRAFT (sentinel only)
 DISCOVERY       SCAN, ANALYZE, CONVENTIONS, REVIEW, USER_GATE, ESCAPE_HATCH, REVISE
-PLANNING        DRAFT, REVIEW, USER_GATE, ESCAPE_HATCH, REVISE
-INTERFACES      DRAFT, REVIEW, USER_GATE, ESCAPE_HATCH, REVISE
-TESTS           DRAFT, REVIEW, USER_GATE, ESCAPE_HATCH, REVISE
-IMPL_PLAN       DRAFT, REVIEW, USER_GATE, ESCAPE_HATCH, REVISE
-IMPLEMENTATION  DRAFT, REVIEW, USER_GATE, ESCAPE_HATCH, REVISE
+PLANNING        DRAFT, REDRAFT, SKIP_CHECK, CASCADE_CHECK, REVIEW, USER_GATE, ESCAPE_HATCH, REVISE
+INTERFACES      DRAFT, REDRAFT, SKIP_CHECK, CASCADE_CHECK, REVIEW, USER_GATE, ESCAPE_HATCH, REVISE
+TESTS           DRAFT, REDRAFT, SKIP_CHECK, CASCADE_CHECK, REVIEW, USER_GATE, ESCAPE_HATCH, REVISE
+IMPL_PLAN       DRAFT, REDRAFT, SKIP_CHECK, CASCADE_CHECK, REVIEW, USER_GATE, ESCAPE_HATCH, REVISE
+IMPLEMENTATION  DRAFT, REVIEW, USER_GATE, ESCAPE_HATCH, REVISE, SCHEDULING, TASK_REVIEW,
+                TASK_REVISE, HUMAN_GATE, DELEGATED_WAIT
 DONE            DRAFT (sentinel only)
 ```
 
@@ -192,6 +193,8 @@ DONE            DRAFT (sentinel only)
 | `user_feedback` | User requests changes | `submit_feedback(revise)` → orchestrator |
 | `escape_hatch_triggered` | Strategic pivot detected at USER_GATE | Orchestrator diverge → strategic classification |
 | `revision_complete` | Revision done, ready for re-review | `request_review` tool |
+| `allowlist_expansion_requested` | INCREMENTAL scope expansion must pause for approval | `request_allowlist_expansion` |
+| `scope_expansion_approved` | Approved scope repair returns to implementation/plan authoring | `submit_feedback(approve)`, current-task scope tools |
 
 ### 5.3 Phase Pattern (Repeating Unit)
 

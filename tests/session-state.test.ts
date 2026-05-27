@@ -220,6 +220,31 @@ describe("SessionStateStore — update", () => {
     expect(s?.approvalCount).toBe(3)
   })
 
+  it("refuses to overwrite a feature that was claimed by another persisted session", async () => {
+    await store.create("stale-session")
+    await store.update("stale-session", (d) => {
+      d.featureName = "stale-owner"
+      d.mode = "GREENFIELD"
+      d.phase = "PLANNING"
+      d.phaseState = "DRAFT"
+    })
+    writePerFeatureState(tmpDir, "stale-owner", makeState("new-owner", "stale-owner", {
+      mode: "GREENFIELD",
+      phase: "INTERFACES",
+      phaseState: "DRAFT",
+    }))
+
+    await expect(
+      store.update("stale-session", (d) => {
+        d.phase = "TESTS"
+      }),
+    ).rejects.toThrow(/already owned by session "new-owner"/)
+
+    const persisted = JSON.parse(readFileSync(join(tmpDir, "stale-owner", "workflow-state.json"), "utf-8")) as WorkflowState
+    expect(persisted.sessionId).toBe("new-owner")
+    expect(persisted.phase).toBe("INTERFACES")
+  })
+
   it("throws for unknown session", async () => {
     await expect(store.update("ghost", () => {})).rejects.toThrow()
   })
@@ -527,14 +552,20 @@ describe("SessionStateStore — concurrent update serialization (G22)", () => {
     expect(failingStore.get("s-fail")?.phase).toBe("MODE_SELECT")
   })
 
-  it("times out a wedged durable update and allows later updates on the same feature", async () => {
+  it("times out a wedged durable update without overlapping later updates on the same feature", async () => {
     process.env[SESSION_STORE_OPERATION_TIMEOUT_ENV] = "10"
-    let hangWrites = false
+    let hangNextWrite = false
+    let releaseWrite: () => void = () => {
+      throw new Error("write was not blocked")
+    }
     const backing = new Map<string, string>()
     const backend: StateBackend = {
       async read(key) { return backing.get(key) ?? null },
       async write(key, value) {
-        if (hangWrites) await new Promise(() => {})
+        if (hangNextWrite) {
+          hangNextWrite = false
+          await new Promise<void>((resolve) => { releaseWrite = resolve })
+        }
         backing.set(key, value)
       },
       async remove(key) { backing.delete(key) },
@@ -550,16 +581,20 @@ describe("SessionStateStore — concurrent update serialization (G22)", () => {
       draft.phaseState = "DRAFT"
     })
 
-    hangWrites = true
+    hangNextWrite = true
     await expect(wedgedStore.update("s-wedged", (draft) => {
       draft.iterationCount = 1
     })).rejects.toThrow("timed out")
 
-    hangWrites = false
-    const recovered = await wedgedStore.update("s-wedged", (draft) => {
+    await expect(wedgedStore.update("s-wedged", (draft) => {
       draft.iterationCount = 2
+    })).rejects.toThrow("timed out")
+
+    releaseWrite()
+    const recovered = await wedgedStore.update("s-wedged", (draft) => {
+      draft.iterationCount = 3
     })
-    expect(recovered.iterationCount).toBe(2)
+    expect(recovered.iterationCount).toBe(3)
   })
 
   it("times out a wedged persisted feature lookup", async () => {

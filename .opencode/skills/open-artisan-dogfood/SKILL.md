@@ -113,6 +113,17 @@ At natural boundaries inspect:
 
 Driver subskills may add runtime-specific logs and freshness checks.
 
+## Current Gate-Integrity Checks
+
+Treat these as must-check invariants during dogfooding:
+
+- `INCREMENTAL` interface and test authoring must stay inside the approved allowlist.
+- Scope expansion must happen through a real `USER_GATE`; supervisor or driver tool calls that expand scope without user approval are recovery defects, not valid workflow progress.
+- A native OpenCode automatic reviewed-artifact allowlist repair counts only when an isolated scope reviewer approved both architectural fit and execution-DAG safety.
+- Reviewer submissions must come from isolated review contexts with valid tokens; invalid-token submissions must not alter state.
+- Claude Code write-like `PreToolUse` failures must block, not allow.
+- Persisted workflow ownership must win over stale in-memory state on resume or reattach.
+
 ## End-of-Slice Summary
 
 For each meaningful slice, summarize:
@@ -125,6 +136,7 @@ For each meaningful slice, summarize:
 6. fixes applied, if any
 7. tests run
 8. exact remaining workflow state
+9. whether any commits were requested by the user and created
 
 ## Success Criteria
 

@@ -34,11 +34,14 @@ Markdown artifacts are valid only for markdown phases:
 - DISCOVERY conventions: .openartisan/<feature>/conventions.md
 - PLANNING plan: .openartisan/<feature>/plan.md
 - IMPL_PLAN: .openartisan/<feature>/impl-plan.md
+- IMPLEMENTATION: project README.md docs are valid review sources; other
+  Markdown/docs files are valid only when declared by completed task expected
+  files or already accumulated in reviewArtifactFiles
 
 File-based source phases must point at real project files:
 - INTERFACES: interface/type/schema files, not markdown
 - TESTS: runnable test files, not markdown test plans
-- IMPLEMENTATION: changed implementation files
+- IMPLEMENTATION: changed implementation files, including declared docs
 
 If a phase is not applicable, do not invent placeholder source files. Write the
 phase's appropriate on-disk artifact with a specific pass-through/fast-forward

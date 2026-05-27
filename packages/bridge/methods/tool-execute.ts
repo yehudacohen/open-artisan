@@ -33,6 +33,7 @@ import {
 } from "./roadmap-tool-handlers"
 import { createDriftToolHandlers } from "./drift-tool-handlers"
 import { handleApplyPatchSuggestion, handleResolvePatchSuggestion, handleRoutePatchSuggestions } from "./patch-suggestion-tool-handlers"
+import { handleProductManagementAssessRequest, handleProductManagementListWork, handleProductManagementQueueItem } from "./product-management-tool-handlers"
 import { handleProposeDirectApplication } from "./direct-application-tool-handlers"
 import { handleQueryChildWorkflow, handleQueryParentWorkflow } from "./query-workflow-tool-handlers"
 import { handleAnalyzeTaskBoundaryChange, handleApplyTaskBoundaryChange } from "./task-boundary-tool-handlers"
@@ -622,6 +623,9 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
   report_drift: handleReportDrift,
   plan_drift_repair: handlePlanDriftRepair,
   apply_drift_repair: handleApplyDriftRepair,
+  product_management_assess_request: handleProductManagementAssessRequest,
+  product_management_list_work: handleProductManagementListWork,
+  product_management_queue_item: handleProductManagementQueueItem,
   query_parent_workflow: handleQueryParentWorkflow,
   query_child_workflow: handleQueryChildWorkflow,
   roadmap_read: handleRoadmapRead,

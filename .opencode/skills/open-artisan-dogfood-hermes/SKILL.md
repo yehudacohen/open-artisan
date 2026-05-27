@@ -51,6 +51,7 @@ Look for:
 - socket refusal or no-response
 - `.bridge-meta.json` advertising a PID/socket while the PID is not running or `.bridge.sock` is absent
 - stale attached clients
+- persisted workflow feature ownership changing under a resumed session
 - continuation that starts a new session instead of resuming the real one
 - repeated supervisor kicks between runnable states
 - mismatch between Hermes output and persisted workflow state
@@ -99,5 +100,6 @@ Before returning control after a fix:
 2. Confirm bridge metadata and clients are fresh: PID is running, socket exists when transport is `unix-socket`, and stale clients are not the only apparent owner.
 3. Confirm Hermes will attach to updated code/runtime state.
 4. Resume through the same native session path, not a new one-shot prompt.
+5. Confirm resumed Hermes state is attached to the persisted feature owner, not stale in-memory state from an old session.
 
 After resuming, observe at least one Hermes-native action before counting the fix as proven. A supervisor-side smoke test is useful evidence, but it is not enough by itself.

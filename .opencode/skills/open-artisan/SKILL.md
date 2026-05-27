@@ -71,6 +71,18 @@ When Open Artisan is active:
 - Respect guarded write tools and phase file policies.
 - Stop at `USER_GATE` unless the active agent is intentionally `robot-artisan`.
 
+## Current Enforcement Truths
+
+These are structural rules, not suggestions:
+
+- In `INCREMENTAL` mode, `INTERFACES` and `TESTS` writes must satisfy both the phase file-shape rule and the approved file allowlist.
+- `approve_current_task_scope_expansion` is not an author-side shortcut. It requires `IMPLEMENTATION/USER_GATE` and a real recorded user response before changing the active task boundary or allowlist.
+- `request_allowlist_expansion` records a request and routes to approval; pending allowlist expansions must not be applied outside a real user-gated approval.
+- Native OpenCode `submit_feedback approve` can automatically dispatch an isolated scope reviewer for reviewed `INTERFACES`/`TESTS` artifacts that are missing from the INCREMENTAL allowlist; it may expand only exactly those reviewed files when architecture and DAG safety both pass.
+- Bridge reviewer submissions validate isolated-review tokens and reviewed artifact hashes before any reviewer-output parsing or state mutation.
+- Claude Code `PreToolUse` hook crashes fail closed for write-like tools while Open Artisan is enabled.
+- Persisted feature ownership is authoritative. A stale in-memory session must not overwrite a feature now owned by a different persisted session.
+
 ## Debugging Checklist
 
 When behavior is surprising, inspect:
@@ -94,6 +106,11 @@ Treat these as Open Artisan defects until proven otherwise:
 - A dormant build session still receives workflow prompt injection.
 - A dormant build session is blocked by workflow write guards.
 - An active workflow can write outside the current phase policy.
+- An `INCREMENTAL` workflow can write interface or test files outside the approved allowlist.
+- Current task scope or allowlist can be expanded without a real `USER_GATE` response.
+- Invalid or mismatched isolated-review tokens can mutate workflow state.
+- Claude Code allows a write-like `PreToolUse` call after the enabled hook crashes.
+- A stale in-memory session overwrites another persisted owner of the same feature.
 - Runtime state and persisted `.openartisan/<feature>/workflow-state.json` disagree about the current phase.
 - DB operation lease failures wedge workflow attach, resume, or `select_mode` beyond the configured retry window.
 

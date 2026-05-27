@@ -15,6 +15,7 @@ import { join } from "node:path"
 import { existsSync, readFileSync } from "node:fs"
 import type { WorkflowState } from "../workflow-state-types"
 import type { Phase, PhaseState, WorkflowMode } from "../workflow-primitives"
+import type { RoadmapItem, WorkflowRoadmapContext } from "../roadmap-types"
 import { MAX_CONVENTIONS_CHARS, MAX_REPORT_CHARS, PHASE_ORDER } from "../constants"
 import { createImplDAG } from "../dag"
 import { nextSchedulerDecision } from "../scheduler"
@@ -164,6 +165,34 @@ function buildPhaseToolGuide(state: WorkflowState): string | null {
   return lines.join("\n")
 }
 
+function roadmapLifecycleLabel(item: RoadmapItem): "active" | "frozen" | "abandoned" {
+  const description = item.description?.toLowerCase() ?? ""
+  if (item.status === "dropped" || description.includes("lifecycle:abandoned")) return "abandoned"
+  if (item.status === "done" || description.includes("lifecycle:frozen")) return "frozen"
+  return "active"
+}
+
+function buildRoadmapContextPromptBlock(context: WorkflowRoadmapContext): string {
+  const lines: string[] = []
+  lines.push("### Roadmap Context")
+  lines.push("Treat these roadmap items as product goals and constraints for planning, implementation, and review decisions. They are long-lived product memory; they do not approve artifacts, complete tasks, grant allowlist scope, resolve gates, or switch workflows.")
+  lines.push("Before completing a task, submitting review, or summarizing readiness, self-check that the work advances the active roadmap goals and does not revive frozen/abandoned context unless the user explicitly asks for that gated roadmap mutation.")
+  lines.push("Use `product_management_assess_request`, `product_management_list_work`, or `product_management_queue_item` for product-memory questions or follow-ups; use workflow tools only for workflow gates.")
+  lines.push(`- Roadmap item IDs: ${context.roadmapItemIds.map((id) => `\`${id}\``).join(", ")}`)
+  if (context.featureName) lines.push(`- Feature: ${context.featureName}`)
+  if (context.executionSliceId) lines.push(`- Execution slice: ${context.executionSliceId}`)
+  lines.push("- Items:")
+  for (const item of context.roadmapItems) {
+    lines.push(`  - ${item.id}: ${item.title} (${item.kind}, ${item.status}, ${roadmapLifecycleLabel(item)}, priority ${item.priority})`)
+    const description = item.description?.trim().replace(/\s+/g, " ")
+    if (description) lines.push(`    Description: ${description}`)
+  }
+  if (context.edges.length > 0) {
+    lines.push(`- Internal dependencies: ${context.edges.map((edge) => `${edge.from} ${edge.kind} ${edge.to}`).join(", ")}`)
+  }
+  return lines.join("\n")
+}
+
 // ---------------------------------------------------------------------------
 // State header builder
 // ---------------------------------------------------------------------------
@@ -257,18 +286,7 @@ function buildStateHeader(state: WorkflowState): string {
   }
 
   if (state.roadmapContext && shouldRenderRoadmapContext(state.phase)) {
-    lines.push("### Roadmap Context")
-    lines.push("This workflow is attached to roadmap items for planning and traceability only. Roadmap context does not approve artifacts, complete tasks, or change roadmap item status.")
-    lines.push(`- Roadmap item IDs: ${state.roadmapContext.roadmapItemIds.map((id) => `\`${id}\``).join(", ")}`)
-    if (state.roadmapContext.featureName) lines.push(`- Feature: ${state.roadmapContext.featureName}`)
-    if (state.roadmapContext.executionSliceId) lines.push(`- Execution slice: ${state.roadmapContext.executionSliceId}`)
-    lines.push("- Items:")
-    for (const item of state.roadmapContext.roadmapItems) {
-      lines.push(`  - ${item.id}: ${item.title} (${item.kind}, ${item.status}, priority ${item.priority})`)
-    }
-    if (state.roadmapContext.edges.length > 0) {
-      lines.push(`- Internal dependencies: ${state.roadmapContext.edges.map((edge) => `${edge.from} ${edge.kind} ${edge.to}`).join(", ")}`)
-    }
+    lines.push(buildRoadmapContextPromptBlock(state.roadmapContext))
     lines.push("")
   }
 
@@ -511,6 +529,11 @@ export function buildSubagentContext(parentState: WorkflowState): string {
     lines.push("")
   }
 
+  if (parentState.roadmapContext && shouldRenderRoadmapContext(parentState.phase)) {
+    lines.push(buildRoadmapContextPromptBlock(parentState.roadmapContext))
+    lines.push("")
+  }
+
   // Artifact disk paths — so the subagent can reference upstream artifacts
   const pathEntries = Object.entries(parentState.artifactDiskPaths).filter(([, v]) => v)
   if (pathEntries.length > 0) {
@@ -675,7 +698,7 @@ function buildSubStateContext(state: WorkflowState, reviewMode: "agent" | "isola
         } else if (planPath && existsSync(planPath)) {
           lines.push(`Read the plan at \`${planPath}\` for implementation details.`)
         }
-        lines.push("Implement all tasks described in the plan, then call `request_review` with `artifact_files` listing changed implementation files.")
+        lines.push("Implement all tasks described in the plan, then call `request_review` with `artifact_files` listing changed implementation files. Project Markdown/docs files are valid implementation artifacts when they are declared in completed task expected files.")
       }
       if (state.phase === "IMPLEMENTATION" && state.implDag) {
         try {
@@ -688,7 +711,7 @@ function buildSubStateContext(state: WorkflowState, reviewMode: "agent" | "isola
           } else if (decision.action === "complete") {
             lines.push("")
             lines.push(`**DAG status: All tasks complete.** ${decision.message}`)
-            lines.push("Call `request_review` now with `artifact_files` listing changed implementation files to submit the completed implementation for review.")
+            lines.push("Call `request_review` now with `artifact_files` listing changed implementation files, including declared docs/Markdown expected files, to submit the completed implementation for review.")
           } else if (decision.action === "blocked") {
             lines.push("")
             if (decision.blockedTasks.length > 0) {

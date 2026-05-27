@@ -44,9 +44,9 @@ export function normalizeCriterionSeverity(input: {
   severity?: string | null | undefined
 }): CriterionResult["severity"] {
   if (isDesignInvariantCriterion(input.criterion)) return "design-invariant"
-  if (isQualityCriterion(input.criterion)) return "blocking"
   if (input.severity === "suggestion") return "suggestion"
   if (input.severity === "design-invariant") return "design-invariant"
+  if (isQualityCriterion(input.criterion)) return "blocking"
   return "blocking"
 }
 

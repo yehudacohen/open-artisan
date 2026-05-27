@@ -46,6 +46,20 @@ describe("OpenCode dogfood skills", () => {
     expect(content).toContain("artisan` agent")
     expect(content).toContain("robot-artisan` agent")
     expect(content).toContain("not just a normal Build session")
+    expect(content).toContain("Open Artisan workflow state is coherent")
+    expect(content).not.toContain("TypeKro")
+  })
+
+  it("captures current gate-integrity checks", () => {
+    const meta = readSkill("open-artisan-dogfood")
+    const openArtisan = readSkill("open-artisan")
+
+    expect(meta).toContain("Current Gate-Integrity Checks")
+    expect(meta).toContain("`INCREMENTAL` interface and test authoring must stay inside the approved allowlist")
+    expect(meta).toContain("Scope expansion must happen through a real `USER_GATE`")
+    expect(openArtisan).toContain("`approve_current_task_scope_expansion` is not an author-side shortcut")
+    expect(openArtisan).toContain("Bridge reviewer submissions validate isolated-review tokens")
+    expect(openArtisan).toContain("Claude Code `PreToolUse` hook crashes fail closed")
   })
 
   it("requires Hermes proof to come from Hermes, not supervisor recovery", () => {
@@ -75,5 +89,7 @@ describe("OpenCode dogfood skills", () => {
     expect(content).toContain("They do not prove Hermes dogfooding")
     expect(content).toContain("latest review results are present for the artifact being approved")
     expect(content).toContain("`.bridge-meta.json` advertising a PID/socket while the PID is not running or `.bridge.sock` is absent")
+    expect(content).toContain("Commit a checkpoint only when the user explicitly asks for a commit")
+    expect(content).not.toContain("Commit the checkpoint")
   })
 })

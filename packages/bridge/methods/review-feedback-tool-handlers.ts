@@ -10,7 +10,7 @@ import { SESSION_NOT_FOUND } from "../protocol"
 import type { WorkflowState } from "../../core/workflow-state-types"
 import type { ToolHandler } from "./tool-handler-types"
 import { PHASE_TO_ARTIFACT } from "../../core/artifacts"
-import { validateFileBasedReviewArtifacts } from "../../core/tools/file-artifact-validation"
+import { collectImplementationReviewArtifactFiles, mergeImplementationReviewArtifactFiles, validateFileBasedReviewArtifacts } from "../../core/tools/file-artifact-validation"
 import { validatePlannedReviewedInterfaceArtifacts } from "../../core/tools/planning-interface-artifacts"
 import { extractApprovedFileAllowlist } from "../../core/tools/plan-allowlist"
 import { parseToolArgs } from "../../core/tool-args"
@@ -221,6 +221,7 @@ export const handleRequestReview: ToolHandler = async (args, toolCtx, ctx) => {
     let artifactFiles = parsedArgs.data.artifact_files.map((file) =>
       file.startsWith("/") ? file : resolve(toolCtx.directory, file),
     )
+    artifactFiles = mergeImplementationReviewArtifactFiles(state, artifactFiles, toolCtx.directory)
     const artifactKey = PHASE_TO_ARTIFACT[state.phase]
     if (artifactFiles.length === 0) {
       return "Error: request_review at REVIEW state requires artifact_files so the review source of truth can be updated."
@@ -231,6 +232,7 @@ export const handleRequestReview: ToolHandler = async (args, toolCtx, ctx) => {
       artifactFiles,
       cwd: toolCtx.directory,
       featureName: state.featureName,
+      implementationArtifactFiles: collectImplementationReviewArtifactFiles(state, toolCtx.directory),
     })
     if (artifactValidationError) return `Error: ${artifactValidationError}`
     const planningContractError = validatePlanningReviewArtifact(state, toolCtx.directory, artifactFiles)
@@ -297,11 +299,13 @@ export const handleRequestReview: ToolHandler = async (args, toolCtx, ctx) => {
   let artifactFiles = parsedArgs.data.artifact_files.map((file) =>
     file.startsWith("/") ? file : resolve(toolCtx.directory, file),
   )
+  artifactFiles = mergeImplementationReviewArtifactFiles(state, artifactFiles, toolCtx.directory)
   const artifactValidationError = validateFileBasedReviewArtifacts({
     phase: state.phase,
     artifactFiles,
     cwd: toolCtx.directory,
     featureName: state.featureName,
+    implementationArtifactFiles: collectImplementationReviewArtifactFiles(state, toolCtx.directory),
   })
   if (artifactValidationError) return `Error: ${artifactValidationError}`
   const planningContractError = validatePlanningReviewArtifact(state, toolCtx.directory, artifactFiles)

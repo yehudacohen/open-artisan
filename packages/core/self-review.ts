@@ -101,7 +101,8 @@ export function buildReviewPrompt(req: SelfReviewRequest): string {
     lines.push(
       "Read each of the following files before evaluating. " +
       "These are the exact artifact files selected by the workflow. Markdown planning artifacts may live under .openartisan/; " +
-      "source/interface/test/implementation artifacts must be real project files according to the current phase.",
+      "source/interface/test/implementation artifacts must be real project files according to the current phase. " +
+      "IMPLEMENTATION may include project Markdown/docs files only when they are explicitly listed here by the workflow.",
     )
     lines.push(
       "Evaluate ONLY these listed files as the reviewed artifact set. Imported modules, augmented modules, " +

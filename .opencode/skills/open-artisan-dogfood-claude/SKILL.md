@@ -52,6 +52,8 @@ Look for:
 - hooks disabled when the run claims enforcement
 - CLI commands bypassing intended guard behavior
 - stale bridge or incompatible protocol metadata
+- write-like `PreToolUse` failures allowing instead of blocking
+- isolated reviewer submissions without valid review tokens
 - user-gate stops without clear artifact summaries
 - weak self-review in agent-only mode
 
@@ -73,3 +75,4 @@ Before returning control after a fix:
 2. Restart the Claude bridge if stale code or metadata is possible.
 3. Confirm `.openartisan/.enabled` and active session state match the intended run.
 4. Resume through Claude's hook-backed session, not supervisor-only CLI execution.
+5. If hooks or review submission changed, verify write-like hook failures fail closed and invalid review tokens do not mutate state.

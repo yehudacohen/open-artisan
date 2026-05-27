@@ -2,6 +2,7 @@ import type { RequestAllowlistExpansionArgs } from "../tool-types"
 import type { WorkflowState } from "../workflow-state-types"
 import { isTestFile } from "../hooks/tool-guard"
 import { findInvalidWorkflowPaths, normalizeWorkflowPaths } from "../path-normalization"
+import { applyValidatedStructuralTransition } from "./structural-transition"
 
 export function normalizeAllowlistExpansionFiles(files: string[], cwd: string): string[] {
   return normalizeWorkflowPaths(files, cwd, { allowOutsideProject: false })
@@ -30,17 +31,19 @@ export function recordAllowlistExpansionRequest(
   if (requestedFiles.length === 0) {
     return { success: false, error: "All requested files are already in the approved INCREMENTAL allowlist." }
   }
+  const requestedAtPhase = state.phase
+  if ((state.phase === "IMPL_PLAN" || state.phase === "IMPLEMENTATION") && state.phaseState !== "USER_GATE") {
+    const transition = applyValidatedStructuralTransition(state, "allowlist_expansion_requested")
+    if (!transition.success) return transition
+    state.userGateMessageReceived = false
+  }
   state.pendingAllowlistExpansions.push({
     files: requestedFiles,
     reason: args.reason.trim(),
     sourceArtifact: args.source_artifact,
-    requestedAtPhase: state.phase,
+    requestedAtPhase,
     requestedAt: now,
   })
-  if ((state.phase === "IMPL_PLAN" || state.phase === "IMPLEMENTATION") && state.phaseState !== "USER_GATE") {
-    state.phaseState = "USER_GATE"
-    state.userGateMessageReceived = false
-  }
   return {
     success: true,
     files: requestedFiles,
@@ -60,6 +63,12 @@ export function applyPendingAllowlistExpansions(
   if (state.pendingAllowlistExpansions.length === 0) {
     return { success: false, error: "No pending allowlist expansion requests to apply." }
   }
+  if ((state.phase === "IMPL_PLAN" || state.phase === "IMPLEMENTATION") && state.phaseState !== "USER_GATE") {
+    return { success: false, error: `Pending allowlist expansions require USER_GATE approval before they can be applied (current: ${state.phase}/${state.phaseState}).` }
+  }
+  if ((state.phase === "IMPL_PLAN" || state.phase === "IMPLEMENTATION") && !state.userGateMessageReceived) {
+    return { success: false, error: "Pending allowlist expansions require a real user response at USER_GATE; the agent cannot self-approve allowlist changes." }
+  }
   const normalize = (paths: string[]) => cwd ? normalizeWorkflowPaths(paths, cwd) : Array.from(new Set(paths))
   const previousAllowlist = normalize(state.fileAllowlist)
   const expanded = new Set(previousAllowlist)
@@ -67,6 +76,11 @@ export function applyPendingAllowlistExpansions(
     for (const file of normalize(request.files)) expanded.add(file)
   }
   const files = Array.from(expanded).filter((file) => !previousAllowlist.includes(file))
+  if (state.phase === "IMPL_PLAN" || state.phase === "IMPLEMENTATION") {
+    const transition = applyValidatedStructuralTransition(state, "scope_expansion_approved")
+    if (!transition.success) return transition
+    state.userGateMessageReceived = false
+  }
   state.fileAllowlist = Array.from(expanded)
   state.pendingAllowlistExpansions = []
   let boundaryMessage = ""
@@ -79,10 +93,6 @@ export function applyPendingAllowlistExpansions(
       task.expectedTests = Array.from(new Set([...normalize(task.expectedTests ?? []), ...expectedTests]))
       boundaryMessage = ` Updated current task boundary for ${task.id}: files ${expectedFiles.join(", ") || "none"}; expected tests ${expectedTests.join(", ") || "none"}.`
     }
-  }
-  if (state.phase === "IMPL_PLAN" || state.phase === "IMPLEMENTATION") {
-    state.phaseState = "DRAFT"
-    state.userGateMessageReceived = false
   }
   return {
     success: true,

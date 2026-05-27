@@ -13,7 +13,8 @@ export type Phase =
 /**
  * Sub-states within a phase.
  * SCAN/ANALYZE/CONVENTIONS are only valid in the DISCOVERY phase.
- * DRAFT/REVIEW/USER_GATE/REVISE are valid in PLANNING, INTERFACES, TESTS, IMPL_PLAN, IMPLEMENTATION.
+ * Artifact phases also use structural states such as REDRAFT, SKIP_CHECK, and CASCADE_CHECK.
+ * IMPLEMENTATION adds scheduler/task states for DAG review, revision, human gates, and delegation.
  * MODE_SELECT and DONE have no sub-state (use "DRAFT" as a sentinel).
  */
 export type PhaseState =
@@ -68,6 +69,8 @@ export type WorkflowEvent =
   | "human_gate_resolved"
   | "delegated_task_completed"
   | "scheduling_complete"
+  | "allowlist_expansion_requested"
+  | "scope_expansion_approved"
 
 export type ArtifactKey =
   | "design"

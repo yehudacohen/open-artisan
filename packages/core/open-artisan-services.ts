@@ -35,6 +35,8 @@ import type {
   OpenArtisanRepository,
   PatchSuggestionStatus,
 } from "./open-artisan-repository"
+import { createProductManagementService } from "./product-management-service"
+import type { ProductManagementService } from "./product-management-types"
 import type { Phase } from "./workflow-primitives"
 import {
   matchesRoadmapQuery,
@@ -139,6 +141,7 @@ export interface FastForwardService {
 }
 
 export interface OpenArtisanServices {
+  productManagement: ProductManagementService
   roadmap: RoadmapService
   roadmapMutations: RoadmapMutationService
   executionSlices: ExecutionSliceService
@@ -444,7 +447,7 @@ export function createRoadmapStateBackendMutationService(
 }
 
 export function createOpenArtisanServices(repository: OpenArtisanRepository): OpenArtisanServices {
-  return {
+  const services: Omit<OpenArtisanServices, "productManagement"> = {
     roadmap: {
       replaceRoadmap: (document) => repository.replaceRoadmap(document),
       readRoadmap: () => repository.readRoadmap(),
@@ -517,5 +520,15 @@ export function createOpenArtisanServices(repository: OpenArtisanRepository): Op
       recordFastForward: (record) => repository.recordFastForward(record),
       listFastForwards: (workflowId) => repository.listFastForwards(workflowId),
     },
+  }
+  return {
+    productManagement: createProductManagementService({
+      roadmap: services.roadmap,
+      workflow: services.workflow,
+      humanGates: services.humanGates,
+      patchSuggestions: services.patchSuggestions,
+      agentLeases: services.agentLeases,
+    }),
+    ...services,
   }
 }

@@ -252,6 +252,48 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
+type PromptOrSubmissionResult =
+  | { kind: "prompt"; result: unknown }
+  | { kind: "submission"; payload: string }
+
+async function waitForPromptOrSubmission(args: {
+  promptPromise: Promise<unknown>
+  takeSubmission?: () => string | null | undefined
+}): Promise<PromptOrSubmissionResult> {
+  if (!args.takeSubmission) {
+    return { kind: "prompt", result: await args.promptPromise }
+  }
+
+  let promptSettled = false
+  const promptResult = args.promptPromise.then(
+    (result): PromptOrSubmissionResult => {
+      promptSettled = true
+      return { kind: "prompt", result }
+    },
+    (error) => {
+      promptSettled = true
+      throw error
+    },
+  )
+
+  const submissionResult = (async (): Promise<PromptOrSubmissionResult> => {
+    while (!promptSettled) {
+      const payload = args.takeSubmission?.()
+      if (payload) {
+        // The OpenCode prompt request can remain open after a local tool result is
+        // captured. Swallow its eventual rejection so returning the tool payload
+        // does not leave an unhandled promise behind.
+        void args.promptPromise.catch(() => {})
+        return { kind: "submission", payload }
+      }
+      await sleep(250)
+    }
+    return promptResult
+  })()
+
+  return await Promise.race([promptResult, submissionResult])
+}
+
 export function createOpenCodeSubagentDispatcher(client: OpencodeClient, options: OpenCodeSubagentDispatcherOptions = {}): SubagentDispatcher {
   return {
     async createSession(opts: SubagentCreateOptions): Promise<SubagentSession> {
@@ -322,7 +364,7 @@ export function createOpenCodeSubagentDispatcher(client: OpencodeClient, options
           let result: unknown = null
           try {
             try {
-              result = await client.session!.prompt({
+              const promptPromise = client.session!.prompt({
                 path: { id: sessionId },
                 body: {
                   noReply: false,
@@ -333,6 +375,14 @@ export function createOpenCodeSubagentDispatcher(client: OpencodeClient, options
                   parts: [{ type: "text", text, id: partId }],
                 },
               })
+              const promptOrSubmission = await waitForPromptOrSubmission({
+                promptPromise,
+                ...(submissionToolName ? { takeSubmission: () => options.reviewerToolSubmissions?.take(sessionId, submissionToolName) } : {}),
+              })
+              if (promptOrSubmission.kind === "submission") {
+                return formatSubmissionPayload(submissionToolName, promptOrSubmission.payload, requireSubmissionTool)
+              }
+              result = promptOrSubmission.result
             } catch (promptError) {
               const submitted = submissionToolName ? options.reviewerToolSubmissions?.take(sessionId, submissionToolName) : null
               if (submitted) return formatSubmissionPayload(submissionToolName, submitted, requireSubmissionTool)

@@ -296,6 +296,18 @@ describe("Tool policy — INTERFACES allows .ts/.tsx/.d.ts writes only (G1)", ()
     expect(policy.writePathPredicate?.("/project/src/server.ts")).toBe(false)
   })
 
+  it("INTERFACES/INCREMENTAL requires interface files to be in the allowlist", () => {
+    const policy = getPhaseToolPolicy("INTERFACES", "DRAFT", "INCREMENTAL", ["/project/src/types.ts"])
+    expect(policy.writePathPredicate?.("/project/src/types.ts")).toBe(true)
+    expect(policy.writePathPredicate?.("/project/src/models.ts")).toBe(false)
+    expect(policy.writePathPredicate?.("/project/src/server.ts")).toBe(false)
+  })
+
+  it("INTERFACES/INCREMENTAL blocks interface writes when the allowlist is empty", () => {
+    const policy = getPhaseToolPolicy("INTERFACES", "DRAFT", "INCREMENTAL", [])
+    expect(policy.writePathPredicate?.("/project/src/types.ts")).toBe(false)
+  })
+
   it("predicate allows .ts files with interface-like names", () => {
     const policy = getPhaseToolPolicy("INTERFACES", "DRAFT", "GREENFIELD", [])
     expect(policy.writePathPredicate?.("/project/src/types.ts")).toBe(true)
@@ -399,6 +411,18 @@ describe("Tool policy — TESTS allows .test.ts/.test.tsx writes only (G1)", () 
     expect(policy.writePathPredicate).toBeDefined()
     expect(policy.writePathPredicate?.("/project/tests/foo.test.ts")).toBe(true)
     expect(policy.writePathPredicate?.("/project/src/index.ts")).toBe(false)
+  })
+
+  it("TESTS/INCREMENTAL requires test files to be in the allowlist", () => {
+    const policy = getPhaseToolPolicy("TESTS", "DRAFT", "INCREMENTAL", ["/project/tests/foo.test.ts"])
+    expect(policy.writePathPredicate?.("/project/tests/foo.test.ts")).toBe(true)
+    expect(policy.writePathPredicate?.("/project/tests/bar.test.ts")).toBe(false)
+    expect(policy.writePathPredicate?.("/project/src/index.ts")).toBe(false)
+  })
+
+  it("TESTS/INCREMENTAL blocks test writes when the allowlist is empty", () => {
+    const policy = getPhaseToolPolicy("TESTS", "DRAFT", "INCREMENTAL", [])
+    expect(policy.writePathPredicate?.("/project/tests/foo.test.ts")).toBe(false)
   })
 
   it("predicate allows .test.ts files", () => {
@@ -627,6 +651,8 @@ describe("Tool policy — IMPLEMENTATION/INCREMENTAL bashCommandPredicate", () =
     expect(policy.bashCommandPredicate!("tar -xf archive.tar")).toBe(false)
     expect(policy.bashCommandPredicate!("rsync -a src/ dest/")).toBe(false)
     expect(policy.bashCommandPredicate!("git restore src/file.ts")).toBe(false)
+    expect(policy.bashCommandPredicate!("bun install")).toBe(false)
+    expect(policy.bashCommandPredicate!("eslint src --fix")).toBe(false)
     expect(policy.bashCommandPredicate!("python -c \"from pathlib import Path; Path('x').write_text('bad')\"")).toBe(false)
   })
 

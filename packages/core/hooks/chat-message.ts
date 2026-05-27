@@ -156,6 +156,18 @@ function looksLikeConditionalApproval(text: string): boolean {
   )
 }
 
+function looksLikeProductManagementQueueingChat(text: string): boolean {
+  const normalized = text.trim().toLowerCase().replace(/\s+/g, " ")
+  if (!normalized) return false
+  return (
+    /\b(?:file|capture|queue|track|record)\b.*\b(?:bug|issue|feature|follow[- ]?up|debt|chore)\b/.test(normalized) ||
+    /\b(?:bug|issue|feature|follow[- ]?up|debt|chore)\b.*\b(?:later|future|backlog|roadmap|queue)\b/.test(normalized) ||
+    /\b(?:handle|do|address)\s+it\s+later\b/.test(normalized) ||
+    /\blater\s+we\s+need\b/.test(normalized) ||
+    /\bfor\s+later\b/.test(normalized)
+  )
+}
+
 // ---------------------------------------------------------------------------
 // Main export
 // ---------------------------------------------------------------------------
@@ -202,6 +214,10 @@ export function processUserMessage(
   // In ESCAPE_HATCH, non-clarification user messages are decisions/feedback
   // (approval is structurally blocked by the state machine).
   if (state.phaseState !== "ESCAPE_HATCH" && !approvalWithMeta && !isConditionalApproval && looksLikeUserGateMetaQuestion(textContent)) {
+    return { parts, intercepted: false, feedbackType: null }
+  }
+
+  if (state.phaseState === "USER_GATE" && !approvalWithMeta && !isConditionalApproval && looksLikeProductManagementQueueingChat(textContent)) {
     return { parts, intercepted: false, feedbackType: null }
   }
 
@@ -299,7 +315,7 @@ export function buildUserGateHint(phase: Phase, _phaseState: PhaseState): string
     `  → Call \`submit_feedback(feedback_type="approve", feedback_text=<their message>)\`\n` +
     `- If the user requests artifact changes or gives review feedback:\n` +
     `  → Call \`submit_feedback(feedback_type="revise", feedback_text=<their exact message>)\`\n\n` +
-    `**Do not call \`submit_feedback\` for clarification/meta questions.** For example, if the user asks "what am I reviewing?", "have we implemented all tasks?", or "how was Open Artisan?", answer normally and continue waiting at USER_GATE.\n\n` +
+    `**Do not call \`submit_feedback\` for clarification/meta questions or product-management queueing.** For example, if the user asks "what am I reviewing?", "have we implemented all tasks?", "how was Open Artisan?", or "file this bug for later", answer normally or use product-management tools while continuing to wait at USER_GATE.\n\n` +
     `Do not do research, file reads, or artifact changes before routing a real approval/revision decision through \`submit_feedback\`.\n` +
     `---`
   )

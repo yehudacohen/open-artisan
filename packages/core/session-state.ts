@@ -436,12 +436,26 @@ export function createSessionStateStore(backend: StateBackend): SessionStateStor
   }
 
   function acquireInProcessLock(key: string, work: () => Promise<unknown>): Promise<unknown> {
-    const current = locks.get(key) ?? Promise.resolve()
-    const waitForPrevious = boundedStoreOperation(`${key}:previous`, () => current.then(() => undefined, () => undefined))
-      .catch(() => undefined)
-    const next = waitForPrevious.then(() => boundedStoreOperation(key, work))
-    locks.set(key, next)
-    return next
+    const previous = locks.get(key) ?? Promise.resolve()
+    let abandonedBeforeStart = false
+
+    const operation = (async () => {
+      await previous.then(() => undefined, () => undefined)
+      if (abandonedBeforeStart) {
+        throw new Error(`Session state operation for "${key}" was abandoned after timing out while waiting for a previous operation`)
+      }
+      return work()
+    })()
+
+    const chain = operation.catch(() => undefined).finally(() => {
+      if (locks.get(key) === chain) locks.delete(key)
+    })
+    locks.set(key, chain)
+
+    return boundedStoreOperation(key, () => operation).catch((error) => {
+      abandonedBeforeStart = true
+      throw error
+    })
   }
 
   /**
@@ -463,8 +477,16 @@ export function createSessionStateStore(backend: StateBackend): SessionStateStor
   async function readPersistedState(featureName: string, sessionId: string): Promise<WorkflowState | null> {
     const raw = await backend.read(featureName)
     if (!raw) return null
-    const { state } = parseAndMigrateWorkflowStateJson(raw)
-    if (!state || state.featureName !== featureName || state.sessionId !== sessionId) return null
+    const { state, error } = parseAndMigrateWorkflowStateJson(raw)
+    if (!state) {
+      throw new Error(`Persisted state for feature "${featureName}" is invalid and cannot be overwritten by session "${sessionId}": ${error ?? "state failed validation or migration"}`)
+    }
+    if (state.featureName !== featureName) {
+      throw new Error(`Persisted state for feature "${featureName}" belongs to feature "${state.featureName}" and cannot be overwritten by session "${sessionId}"`)
+    }
+    if (state.sessionId !== sessionId) {
+      throw new Error(`Feature "${featureName}" is already owned by session "${state.sessionId}"; refusing stale update from session "${sessionId}"`)
+    }
     return state
   }
 

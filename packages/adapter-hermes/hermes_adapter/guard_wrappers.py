@@ -58,13 +58,12 @@ def register_guard_wrappers(
         ctx: Hermes plugin context for tool registration.
         bridge: Active bridge client for guard.check calls.
     """
-    if not hasattr(ctx, "get_tool_handler"):
-        return
+    get_tool_handler = getattr(ctx, "get_tool_handler", None)
 
     for tool_name in GUARDED_TOOLS:
-        original = ctx.get_tool_handler(tool_name)
+        original = get_tool_handler(tool_name) if callable(get_tool_handler) else None
         if original is None:
-            # Built-in tool not registered — skip wrapping
+            _register_fail_closed_wrapper(ctx, tool_name)
             continue
 
         # Capture tool_name and original in closure
@@ -87,6 +86,27 @@ def register_guard_wrappers(
             ),
             description=f"(guarded) {tool_name}",
         )
+
+
+def _register_fail_closed_wrapper(ctx: HermesContext, tool_name: str) -> None:
+    """Register a blocker when a guarded built-in cannot be wrapped."""
+    ctx.register_tool(
+        name=tool_name,
+        toolset=TOOLSET_NAME,
+        schema={
+            "name": tool_name,
+            "description": f"(guarded unavailable) {tool_name}",
+            "parameters": GUARDED_TOOL_SCHEMAS.get(tool_name, {"type": "object", "additionalProperties": True}),
+        },
+        handler=lambda args, _tn=tool_name: _missing_original_handler(_tn, args),
+        description=f"(guarded unavailable) {tool_name}",
+    )
+
+
+async def _missing_original_handler(tool_name: str, _args: dict[str, Any]) -> str:
+    return make_error_response(
+        f"Workflow guard failed closed: Hermes built-in handler for {tool_name} was unavailable, so the write-like tool was not executed."
+    )
 
 
 async def _guarded_handler(

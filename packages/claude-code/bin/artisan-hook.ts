@@ -19,6 +19,7 @@ import {
   handleSessionStart,
   handlePreCompact,
   handlePostToolUse,
+  isWriteLikeTool,
   type HookInput,
 } from "#claude-code/src/hook-handlers"
 
@@ -61,7 +62,17 @@ async function main() {
 
   const input = await readStdin()
   const handler = HANDLERS[command]!
-  const output = await handler(input)
+  let output: import("#claude-code/src/hook-handlers").HookOutput
+  try {
+    output = await handler(input)
+  } catch (err) {
+    process.stderr.write(`[artisan-hook] Error: ${err instanceof Error ? err.message : String(err)}\n`)
+    if (command === "pre-tool-use" && isWriteLikeTool(input.tool_name ?? "", input.tool_input ?? {})) {
+      process.stderr.write("Open Artisan hook failed while checking a write-like tool call. Blocking to preserve workflow safety.\n")
+      process.exit(2)
+    }
+    process.exit(0)
+  }
 
   if (output.stdout) process.stdout.write(output.stdout + "\n")
   if (output.stderr) process.stderr.write(output.stderr + "\n")
@@ -69,7 +80,8 @@ async function main() {
 }
 
 main().catch((err) => {
-  // Log error for debugging, but exit 0 to avoid blocking Claude
+  // Startup/read errors cannot reliably be attributed to a tool call. Log and
+  // allow rather than blocking all Claude activity.
   process.stderr.write(`[artisan-hook] Error: ${err?.message ?? err}\n`)
   process.exit(0)
 })

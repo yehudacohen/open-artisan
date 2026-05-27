@@ -9,7 +9,7 @@
  */
 import { dirname, join } from "node:path"
 import { existsSync, readdirSync, lstatSync } from "node:fs"
-import { open, writeFile, readFile, mkdir, unlink } from "node:fs/promises"
+import { open, readFile, mkdir, unlink, rename } from "node:fs/promises"
 import { roadmapError, roadmapOk, validateRoadmapDocument, type RoadmapDocument, type RoadmapResult, type RoadmapStateBackend } from "./roadmap-types"
 import type { StateBackend } from "./state-backend-types"
 import { LOCK_TIMEOUT_MS, LOCK_POLL_MS } from "./constants"
@@ -22,6 +22,27 @@ const ROADMAP_SCHEMA_VERSION = 1
 const WORKFLOW_DB_DIR = "workflow-db"
 const WORKFLOW_DB_LOCKS_DIR = "workflow-db-locks"
 const RESERVED_ROOT_SCAN_DIRS = new Set([WORKFLOW_DB_DIR, WORKFLOW_DB_LOCKS_DIR])
+
+async function writeFileAtomic(target: string, data: string): Promise<void> {
+  const dir = dirname(target)
+  const temp = join(dir, `${target.split("/").at(-1) ?? "state"}.${process.pid}.${Date.now()}.tmp`)
+  const handle = await open(temp, "w")
+  try {
+    await handle.writeFile(data, "utf-8")
+    await handle.sync()
+  } catch (error) {
+    try { await unlink(temp) } catch {}
+    throw error
+  } finally {
+    await handle.close()
+  }
+  try {
+    await rename(temp, target)
+  } catch (error) {
+    try { await unlink(temp) } catch {}
+    throw error
+  }
+}
 
 export interface FileLockOptions {
   timeoutMs?: number
@@ -166,15 +187,17 @@ export function createFileSystemStateBackend(baseDir: string): StateBackend {
       if (!existsSync(filePath)) return null
       try {
         return await readFile(filePath, "utf-8")
-      } catch {
-        return null
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return null
+        throw error
       }
     },
 
     async write(featureName: string, data: string): Promise<void> {
       const dir = join(baseDir, featureName)
       await mkdir(dir, { recursive: true })
-      await writeFile(join(dir, STATE_FILE), data, "utf-8")
+      const target = join(dir, STATE_FILE)
+      await writeFileAtomic(target, data)
     },
 
     async remove(featureName: string): Promise<void> {
@@ -242,7 +265,7 @@ export function createFileSystemRoadmapStateBackend(
 
     try {
       await mkdir(dirname(roadmapPath), { recursive: true })
-      await writeFile(roadmapPath, JSON.stringify(document, null, 2), "utf-8")
+      await writeFileAtomic(roadmapPath, JSON.stringify(document, null, 2))
       return roadmapOk(document)
     } catch (error) {
       return roadmapError(

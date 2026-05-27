@@ -11,6 +11,37 @@ function makeState(overrides: Partial<WorkflowState> = {}): WorkflowState {
   return makeWorkflowState(overrides)
 }
 
+const roadmapContext: NonNullable<WorkflowState["roadmapContext"]> = {
+  roadmapItemIds: ["apm-1", "apm-2"],
+  roadmapItems: [
+    {
+      id: "apm-1",
+      kind: "feature",
+      title: "Autonomous product management",
+      description: "Agents should know product goals and critique their work against them.",
+      status: "todo",
+      priority: 10,
+      featureName: "autonomous-product-management",
+      createdAt: "2026-05-21T00:00:00.000Z",
+      updatedAt: "2026-05-21T00:00:00.000Z",
+    },
+    {
+      id: "apm-2",
+      kind: "debt",
+      title: "Abandoned dashboard approach",
+      description: "lifecycle:abandoned",
+      status: "dropped",
+      priority: 1,
+      createdAt: "2026-05-21T00:00:00.000Z",
+      updatedAt: "2026-05-21T00:00:00.000Z",
+    },
+  ],
+  edges: [{ from: "apm-1", to: "apm-2", kind: "depends-on" }],
+  featureName: "autonomous-product-management",
+  executionSliceId: "apm-slice-1",
+  attachedAt: "2026-05-21T00:00:00.000Z",
+}
+
 // ---------------------------------------------------------------------------
 // State header
 // ---------------------------------------------------------------------------
@@ -67,6 +98,22 @@ describe("buildWorkflowSystemPrompt — state header", () => {
 
     expect(prompt).not.toContain("A maintainer needs reviewers")
     expect(prompt).not.toContain("Scenario Sufficiency")
+  })
+
+  it("frames roadmap context as product goals and self-critique constraints", () => {
+    const prompt = buildWorkflowSystemPrompt(makeState({
+      phase: "IMPLEMENTATION",
+      phaseState: "DRAFT",
+      roadmapContext,
+    }))
+
+    expect(prompt).toContain("Roadmap Context")
+    expect(prompt).toContain("product goals and constraints")
+    expect(prompt).toContain("self-check that the work advances the active roadmap goals")
+    expect(prompt).toContain("product_management_assess_request")
+    expect(prompt).toContain("apm-1: Autonomous product management (feature, todo, active, priority 10)")
+    expect(prompt).toContain("Agents should know product goals")
+    expect(prompt).toContain("apm-2: Abandoned dashboard approach (debt, dropped, abandoned, priority 1)")
   })
 })
 
@@ -596,6 +643,21 @@ describe("buildSubagentContext — implementation scoring visibility", () => {
     expect(context).toContain("minimum 9/10")
     expect(context).toContain("No helper-only or half-integrated implementations")
     expect(context).toContain("Bespoke structural gate — Implementation review")
+  })
+
+  it("shows implementation subagents roadmap goals and self-critique constraints", () => {
+    const context = buildSubagentContext(makeState({
+      phase: "IMPLEMENTATION",
+      phaseState: "DRAFT",
+      roadmapContext,
+    }))
+
+    expect(context).toContain("Roadmap Context")
+    expect(context).toContain("product goals and constraints")
+    expect(context).toContain("self-check that the work advances the active roadmap goals")
+    expect(context).toContain("product_management_queue_item")
+    expect(context).toContain("apm-1: Autonomous product management")
+    expect(context).toContain("apm-2: Abandoned dashboard approach")
   })
 })
 

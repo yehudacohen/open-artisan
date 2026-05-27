@@ -1,6 +1,7 @@
 import type { ApproveCurrentTaskScopeExpansionInput } from "../schemas"
 import type { WorkflowState } from "../workflow-state-types"
 import { findInvalidWorkflowPaths, normalizeWorkflowPaths } from "../path-normalization"
+import { applyValidatedStructuralTransition } from "./structural-transition"
 
 function addUnique(existing: string[], additions: string[]): string[] {
   return Array.from(new Set([...existing, ...additions]))
@@ -13,6 +14,12 @@ export function approveCurrentTaskScopeExpansion(
 ): { success: true; message: string; files: string[]; expectedTests: string[] } | { success: false; error: string } {
   if (state.phase !== "IMPLEMENTATION") {
     return { success: false, error: `approve_current_task_scope_expansion is only valid during IMPLEMENTATION (current: ${state.phase}).` }
+  }
+  if (state.phaseState !== "USER_GATE") {
+    return { success: false, error: `approve_current_task_scope_expansion requires USER_GATE approval before changing task scope (current: ${state.phaseState}).` }
+  }
+  if (!state.userGateMessageReceived) {
+    return { success: false, error: "approve_current_task_scope_expansion requires a real user response at USER_GATE; the agent cannot self-approve scope changes." }
   }
   if (!state.implDag || state.implDag.length === 0) {
     return { success: false, error: "No implementation DAG is available to repair." }
@@ -39,6 +46,9 @@ export function approveCurrentTaskScopeExpansion(
     return { success: false, error: "Provide at least one file or expected_tests entry to approve." }
   }
 
+  const transition = applyValidatedStructuralTransition(state, "scope_expansion_approved")
+  if (!transition.success) return transition
+
   task.expectedFiles = addUnique(normalizeWorkflowPaths(task.expectedFiles, cwd), files)
   task.expectedTests = addUnique(normalizeWorkflowPaths(task.expectedTests, cwd), expectedTests)
 
@@ -55,7 +65,6 @@ export function approveCurrentTaskScopeExpansion(
     })
   }
 
-  state.phaseState = "DRAFT"
   state.userGateMessageReceived = false
   state.latestReviewResults = null
 

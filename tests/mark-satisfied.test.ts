@@ -156,6 +156,18 @@ describe("evaluateMarkSatisfied — suggestion severity (G9)", () => {
     })
     expect(withExplicit.passed).toBe(withDefault.passed)
   })
+
+  it("keeps explicitly advisory [Q] quality suggestions non-blocking", () => {
+    const result = evaluateMarkSatisfied({
+      criteria_met: [
+        { criterion: "Core behavior", met: true, evidence: "verified", severity: "blocking" },
+        { criterion: "[Q] Polish suggestion", met: false, evidence: "nice-to-have only", severity: "suggestion", score: 7 },
+      ],
+    })
+
+    expect(result.passed).toBe(true)
+    expect(result.unmetCriteria[0]?.severity).toBe("suggestion")
+  })
 })
 
 // ---------------------------------------------------------------------------

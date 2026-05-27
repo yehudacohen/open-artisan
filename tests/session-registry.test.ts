@@ -58,6 +58,19 @@ describe("SessionRegistry — child sessions", () => {
     expect(registry.count()).toBe(0)
   })
 
+  it("unregistering a parent removes orphan child mappings", () => {
+    registry.registerPrimary("parent")
+    registry.registerChild("child-1", "parent")
+    registry.registerChild("child-2", "parent")
+
+    registry.unregister("parent")
+
+    expect(registry.isChild("child-1")).toBe(false)
+    expect(registry.isChild("child-2")).toBe(false)
+    expect(registry.getParent("child-1")).toBeNull()
+    expect(registry.count()).toBe(0)
+  })
+
   it("getParent returns null for primary sessions", () => {
     registry.registerPrimary("s1")
     expect(registry.getParent("s1")).toBeNull()

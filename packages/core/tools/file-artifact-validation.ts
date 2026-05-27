@@ -1,7 +1,9 @@
 import type { Phase } from "../workflow-primitives"
+import type { WorkflowState } from "../workflow-state-types"
 import { isInterfaceFile, isOpenArtisanFile, isTestFile } from "../hooks/tool-guard"
+import { normalizeWorkflowPaths } from "../path-normalization"
 import { existsSync } from "node:fs"
-import { resolve } from "node:path"
+import { basename, resolve } from "node:path"
 
 const FILE_BASED_PHASES = new Set<Phase>(["INTERFACES", "TESTS", "IMPLEMENTATION"])
 const MARKDOWN_ARTIFACT_NAMES: Partial<Record<Phase, string>> = {
@@ -14,15 +16,40 @@ export function isStructurallyFileBasedPhase(phase: Phase): boolean {
   return FILE_BASED_PHASES.has(phase)
 }
 
+export function collectImplementationReviewArtifactFiles(state: WorkflowState, cwd?: string): string[] {
+  if (state.phase !== "IMPLEMENTATION") return []
+  const projectRoot = cwd ?? process.cwd()
+  const files = new Set(normalizeWorkflowPaths(state.reviewArtifactFiles, projectRoot))
+  for (const task of state.implDag ?? []) {
+    if (task.status !== "complete") continue
+    for (const file of normalizeWorkflowPaths(task.expectedFiles ?? [], projectRoot)) files.add(file)
+    for (const file of normalizeWorkflowPaths(task.expectedTests ?? [], projectRoot)) files.add(file)
+  }
+  return Array.from(files)
+}
+
+export function mergeImplementationReviewArtifactFiles(state: WorkflowState, artifactFiles: string[], cwd?: string): string[] {
+  if (state.phase !== "IMPLEMENTATION") return artifactFiles
+  const projectRoot = cwd ?? process.cwd()
+  return Array.from(new Set([
+    ...collectImplementationReviewArtifactFiles(state, projectRoot),
+    ...normalizeWorkflowPaths(artifactFiles, projectRoot),
+  ]))
+}
+
 export function validateFileBasedReviewArtifacts(input: {
   phase: Phase
   artifactFiles: string[]
   cwd?: string
   featureName?: string | null
+  implementationArtifactFiles?: string[]
 }): string | null {
   if (input.artifactFiles.length === 0) {
     return `request_review for ${input.phase} requires artifact_files listing the files to review.`
   }
+
+  const cwd = input.cwd ?? process.cwd()
+  const allowedImplementationMarkdownFiles = new Set(normalizeWorkflowPaths(input.implementationArtifactFiles ?? [], cwd))
 
   for (const file of input.artifactFiles) {
     if (!existsSync(file)) {
@@ -38,7 +65,6 @@ export function validateFileBasedReviewArtifacts(input: {
     if (input.artifactFiles.length !== 1) {
       return `request_review for ${input.phase} requires exactly one markdown artifact file: .openartisan/${input.featureName}/${markdownArtifactName}`
     }
-    const cwd = input.cwd ?? process.cwd()
     const expected = resolve(cwd, ".openartisan", input.featureName, markdownArtifactName)
     if (resolve(input.artifactFiles[0]!) !== expected) {
       return `request_review for ${input.phase} must use .openartisan/${input.featureName}/${markdownArtifactName}; invalid artifact file: ${input.artifactFiles[0]}`
@@ -59,7 +85,11 @@ export function validateFileBasedReviewArtifacts(input: {
       return `request_review for TESTS only accepts runnable test/spec files; invalid artifact file: ${file}`
     }
     if (input.phase === "IMPLEMENTATION" && file.toLowerCase().endsWith(".md")) {
-      return `request_review for IMPLEMENTATION accepts changed implementation files, not markdown summaries; invalid artifact file: ${file}`
+      if (basename(file).toLowerCase() === "readme.md") continue
+      const normalized = normalizeWorkflowPaths([file], cwd)[0]
+      if (!normalized || !allowedImplementationMarkdownFiles.has(normalized)) {
+        return `request_review for IMPLEMENTATION accepts Markdown only for README.md files or when it is part of the completed task expected files/review artifact set; invalid artifact file: ${file}`
+      }
     }
   }
 

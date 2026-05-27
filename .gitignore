@@ -13,6 +13,8 @@ __pycache__/
 .opencode/openartisan-errors.log
 .opencode/package-lock.json
 artisan
+!.claude/skills/artisan/
+!.claude/skills/artisan/SKILL.md
 
 # Local Claude Code permissions
 .claude/settings.local.json

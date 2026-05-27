@@ -1130,6 +1130,32 @@ describe("tool.execute — mark_task_complete", () => {
     expect(ctx.reviewSubmissionTokens.has("retry-token")).toBe(false)
   })
 
+  it("rejects invalid task review tokens before recording reviewer-output failures", async () => {
+    await exec("select_mode", { mode: "GREENFIELD", feature_name: "str-invalid-token-first" })
+    await ctx.engine!.store.update("s1", (d) => {
+      d.phase = "IMPLEMENTATION"
+      d.phaseState = "TASK_REVIEW"
+      d.implDag = [{ id: "T1", description: "Setup", dependencies: [], expectedTests: [], expectedFiles: [], estimatedComplexity: "small", status: "complete" }]
+      d.currentTaskId = "T1"
+      d.taskCompletionInProgress = "T1"
+      d.taskReviewCount = 1
+      d.latestReviewResults = null
+      d.toolFailureHistory = []
+    })
+
+    const result = await handleToolExecute({
+      name: "submit_task_review",
+      args: { review_output: "not json", review_token: "missing-token" },
+      context: { sessionId: "s1", directory: tmpDir, invocation: "isolated-reviewer" },
+    }, ctx) as string
+
+    const state = ctx.engine!.store.get("s1")
+    expect(result).toContain("Invalid or expired isolated reviewer token")
+    expect(state?.latestReviewResults).toBeNull()
+    expect(state?.toolFailureHistory).toEqual([])
+    expect(state?.phaseState).toBe("TASK_REVIEW")
+  })
+
   it("does not consume task review tokens on scope mismatch", async () => {
     await exec("select_mode", { mode: "GREENFIELD", feature_name: "str-token-scope" })
     await ctx.engine!.store.update("s1", (d) => {
@@ -1699,7 +1725,7 @@ describe("tool.execute — agent-only mode", () => {
     expect(ctx.engine!.store.get("s1")?.phaseState).toBe("DRAFT")
   })
 
-  it("rejects markdown summaries for IMPLEMENTATION request_review", async () => {
+  it("rejects markdown summaries not declared as IMPLEMENTATION review artifacts", async () => {
     await exec("select_mode", { mode: "GREENFIELD", feature_name: `implementation-markdown-${Date.now()}` })
     await ctx.engine!.store.update("s1", (d) => {
       d.phase = "IMPLEMENTATION"
@@ -1715,8 +1741,95 @@ describe("tool.execute — agent-only mode", () => {
     })
 
     expect(result).toContain("Error")
-    expect(result).toContain("not markdown summaries")
+    expect(result).toContain("Markdown only for README.md files or when it is part of the completed task expected files")
     expect(ctx.engine!.store.get("s1")?.phaseState).toBe("DRAFT")
+  })
+
+  it("allows IMPLEMENTATION request_review to include project README docs", async () => {
+    await exec("select_mode", { mode: "GREENFIELD", feature_name: `implementation-readme-${Date.now()}` })
+    await ctx.engine!.store.update("s1", (d) => {
+      d.phase = "IMPLEMENTATION"
+      d.phaseState = "DRAFT"
+    })
+    await mkdir(join(tmpDir, "examples", "starter"), { recursive: true })
+    await Bun.write(join(tmpDir, "examples", "starter", "README.md"), "# Starter docs\n")
+
+    const result = await exec("request_review", {
+      summary: "Implementation docs",
+      artifact_description: "README docs",
+      artifact_files: ["examples/starter/README.md"],
+    })
+
+    expect(result).toContain("Artifact submitted for review")
+    expect(ctx.engine!.store.get("s1")?.phaseState).toBe("REVIEW")
+  })
+
+  it("allows IMPLEMENTATION request_review to include completed task docs", async () => {
+    await exec("select_mode", { mode: "GREENFIELD", feature_name: `implementation-docs-${Date.now()}` })
+    await ctx.engine!.store.update("s1", (d) => {
+      d.phase = "IMPLEMENTATION"
+      d.phaseState = "DRAFT"
+      d.implDag = [
+        {
+          id: "T1",
+          description: "Document runtime behavior",
+          dependencies: [],
+          expectedTests: [],
+          expectedFiles: [join(tmpDir, "docs", "runtime.md")],
+          estimatedComplexity: "small",
+          status: "complete",
+        },
+      ]
+      d.reviewArtifactFiles = [join(tmpDir, "docs", "runtime.md")]
+    })
+    await mkdir(join(tmpDir, "docs"), { recursive: true })
+    await Bun.write(join(tmpDir, "docs", "runtime.md"), "# Runtime behavior\n")
+
+    const result = await exec("request_review", {
+      summary: "Implementation docs",
+      artifact_description: "Runtime documentation",
+      artifact_files: ["docs/runtime.md"],
+    })
+
+    expect(result).toContain("Artifact submitted for review")
+    const state = ctx.engine!.store.get("s1")
+    expect(state?.phaseState).toBe("REVIEW")
+    expect(state?.reviewArtifactFiles).toContain(join(tmpDir, "docs", "runtime.md"))
+  })
+
+  it("merges accumulated IMPLEMENTATION review files when request_review omits declared docs", async () => {
+    await exec("select_mode", { mode: "GREENFIELD", feature_name: `implementation-merge-docs-${Date.now()}` })
+    const sourcePath = join(tmpDir, "src", "feature.ts")
+    const docsPath = join(tmpDir, "docs", "runtime.md")
+    await ctx.engine!.store.update("s1", (d) => {
+      d.phase = "IMPLEMENTATION"
+      d.phaseState = "DRAFT"
+      d.implDag = [
+        {
+          id: "T1",
+          description: "Build and document feature",
+          dependencies: [],
+          expectedTests: [],
+          expectedFiles: [sourcePath, docsPath],
+          estimatedComplexity: "small",
+          status: "complete",
+        },
+      ]
+      d.reviewArtifactFiles = [sourcePath, docsPath]
+    })
+    await mkdir(join(tmpDir, "src"), { recursive: true })
+    await mkdir(join(tmpDir, "docs"), { recursive: true })
+    await Bun.write(sourcePath, "export const feature = true\n")
+    await Bun.write(docsPath, "# Runtime behavior\n")
+
+    const result = await exec("request_review", {
+      summary: "Implementation",
+      artifact_description: "Implementation files",
+      artifact_files: ["src/feature.ts"],
+    })
+
+    expect(result).toContain("Artifact submitted for review")
+    expect(ctx.engine!.store.get("s1")?.reviewArtifactFiles).toEqual([sourcePath, docsPath])
   })
 
   it("rejects IMPLEMENTATION request_review while agent DAG tasks are incomplete", async () => {
@@ -1941,6 +2054,32 @@ describe("tool.execute — agent-only mode", () => {
     expect(state?.latestReviewResults?.[0]?.criterion).toContain("Isolated reviewer failed")
     expect(state?.latestReviewResults?.[0]?.evidence).toContain("Reviewer output was not valid phase-review JSON")
     expect(state?.latestReviewResults?.[0]?.evidence).toContain("not json")
+  })
+
+  it("rejects invalid phase review tokens before routing malformed output", async () => {
+    await exec("select_mode", { mode: "GREENFIELD", feature_name: `phase-invalid-token-${Date.now()}` })
+    const planPath = await writeCurrentPlanArtifact("s1", ctx)
+    await exec("request_review", {
+      summary: "Plan",
+      artifact_description: "Plan artifact",
+      artifact_files: [planPath],
+    })
+    await ctx.engine!.store.update("s1", (d) => {
+      d.latestReviewResults = null
+      d.toolFailureHistory = []
+    })
+
+    const result = await handleToolExecute({
+      name: "submit_phase_review",
+      args: { review_output: "not json", review_token: "missing-token" },
+      context: { sessionId: "s1", directory: tmpDir, invocation: "isolated-reviewer" },
+    }, ctx) as string
+
+    const state = ctx.engine!.store.get("s1")
+    expect(result).toContain("Invalid or expired isolated reviewer token")
+    expect(state?.latestReviewResults).toBeNull()
+    expect(state?.toolFailureHistory).toEqual([])
+    expect(state?.phaseState).toBe("REVIEW")
   })
 
   it("submit_phase_review blocks incomplete reviewer criteria as reviewer infrastructure failure", async () => {
@@ -2275,6 +2414,8 @@ describe("tool.execute — submit_feedback human gate handling", () => {
 
   it("completes IMPLEMENTATION cleanly when the final human gate is resolved", async () => {
     await ctx.engine!.store.update("s1", (d) => {
+      d.mode = "INCREMENTAL"
+      d.featureName = "human-gate-final-approval"
       d.phase = "IMPLEMENTATION"
       d.phaseState = "USER_GATE"
       d.userGateMessageReceived = true

@@ -41,10 +41,42 @@ class TestWrapperRegistration:
                 f"Wrapper not registered for {tool_name}"
             )
 
-    def test_skips_missing_original_handler(self, mock_ctx, mock_bridge):
-        """If a built-in tool doesn't exist, skip wrapping (don't crash)."""
-        # Don't set any original handlers — register should not raise
+    def test_missing_original_handlers_register_fail_closed_blockers(self, mock_ctx, mock_bridge):
+        """If built-ins are unavailable, wrappers still block guarded tool names."""
         register_guard_wrappers(mock_ctx, mock_bridge)
+        for tool_name in GUARDED_TOOLS:
+            assert tool_name in mock_ctx.registered_tool_names
+
+    @pytest.mark.asyncio
+    async def test_missing_original_handler_blocks_execution(self, mock_ctx, mock_bridge):
+        register_guard_wrappers(mock_ctx, mock_bridge)
+        tool = mock_ctx.get_registered_tool("write_file")
+        assert tool is not None
+
+        result = await tool["handler"]({"path": "src/main.py", "content": "hello"})
+        parsed = json.loads(result)
+
+        assert "error" in parsed
+        assert "failed closed" in parsed["error"]
+
+    @pytest.mark.asyncio
+    async def test_missing_get_tool_handler_registers_fail_closed_blockers(self, mock_bridge):
+        class NoGetterContext:
+            session_id = "test-session"
+
+            def __init__(self):
+                self._tools = {}
+
+            def register_tool(self, **kwargs):
+                self._tools[kwargs["name"]] = kwargs
+
+        ctx = NoGetterContext()
+        register_guard_wrappers(ctx, mock_bridge)
+        result = await ctx._tools["execute_command"]["handler"]({"command": "touch x"})
+        parsed = json.loads(result)
+
+        assert set(ctx._tools) == set(GUARDED_TOOLS)
+        assert "failed closed" in parsed["error"]
 
 
 # ---------------------------------------------------------------------------

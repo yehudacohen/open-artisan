@@ -33,7 +33,7 @@ export interface ParallelIsolationAssessment {
 
 // Predicates ---------------------------------------------------------------
 
-const BASH_WRITE_OPS = /(?:>>|>[^&]|\btee\b|\bsed\s+-i\b|\bdd\b.*\bof=|<<-?\s*['"]?[A-Za-z_][A-Za-z0-9_]*['"]?|(?:^|[;&|]\s*)(?:touch|mkdir|cp|mv|rm|rmdir|install|chmod|chown|ln|truncate|rsync|patch|cpio|unzip|tar\s+(?:-[A-Za-z]*x[A-Za-z]*|x[A-Za-z]*|--extract)|git\s+(?:add|commit|checkout|restore|reset|clean|mv|rm|apply|am)|(?:curl|wget)\b(?=.*\s(?:-o|-O|--output(?:=|\s)|--output-document(?:=|\s)))|(?:npm|pnpm|yarn|bun)\s+(?:install|add|remove|update|x)|(?:prettier|eslint|ruff|black|isort)\b.*\b(?:--write|--fix|--apply))\b|\b(?:python|python3|node|ruby|perl)\b.*\b(?:writeFile|open\s*\(|File\.write|fs\.write|write\s*\(|write_text\s*\(|write_bytes\s*\(|append_text\s*\(|append_bytes\s*\())/
+const BASH_WRITE_OPS = /(?:>>|>[^&]|\btee\b|\bsed\s+-i\b|\bdd\b.*\bof=|<<-?\s*['"]?[A-Za-z_][A-Za-z0-9_]*['"]?|(?:^|[;&|]\s*)(?:touch|mkdir|cp|mv|rm|rmdir|install|chmod|chown|ln|truncate|rsync|patch|cpio|unzip|tar\s+(?:-[A-Za-z]*x[A-Za-z]*|x[A-Za-z]*|--extract)|git\s+(?:add|commit|checkout|restore|reset|clean|mv|rm|apply|am)|(?:curl|wget)\b(?=.*\s(?:-o|-O|--output(?:=|\s)|--output-document(?:=|\s)))|(?:npm|pnpm|yarn|bun)\s+(?:install|add|remove|update|x)|(?:prettier|eslint|ruff|black|isort)\b.*(?:^|\s)(?:--write|--fix|--apply))\b|\b(?:python|python3|node|ruby|perl)\b.*\b(?:writeFile|open\s*\(|File\.write|fs\.write|write\s*\(|write_text\s*\(|write_bytes\s*\(|append_text\s*\(|append_bytes\s*\())/
 
 function readOnlyBash(command: string): boolean {
   return !BASH_WRITE_OPS.test(command)
@@ -456,16 +456,24 @@ export function getPhaseToolPolicy(
       const interfacesBashBlocked = phaseState === "REVISE" || phaseState === "REVIEW"
         ? []
         : ["bash"] as const
+      const interfaceAllowSet = mode === "INCREMENTAL"
+        ? new Set(normalizeWorkflowPaths(fileAllowlist, cwd))
+        : null
       return {
         blocked: [...interfacesBashBlocked],
         writePathPredicate: (filePath: string) => {
           if (isEnvFile(filePath)) return false
-          return isInterfaceFile(filePath)
+          if (!isInterfaceFile(filePath)) return false
+          if (!interfaceAllowSet) return true
+          const normalized = normalizeWorkflowPath(filePath, cwd)
+          return normalized ? interfaceAllowSet.has(normalized) : false
         },
         ...(interfacesBashBlocked.length === 0 ? { bashCommandPredicate: readOnlyBash } : {}),
-        allowedDescription: phaseState === "REVISE" || phaseState === "REVIEW"
-          ? "Only interface/type/schema files may be written. bash is allowed for read-only verification. .env writes are always blocked."
-          : "Only interface/type/schema files may be written (.ts, .d.ts, .py, .go, .rs, .java, .proto, .graphql, .json, .yaml, etc.). bash is blocked. .env writes are always blocked.",
+        allowedDescription: mode === "INCREMENTAL"
+          ? `INCREMENTAL interfaces phase: only interface/type/schema files that are also in the approved allowlist may be written (${fileAllowlist.length} files). .env writes are always blocked.`
+          : phaseState === "REVISE" || phaseState === "REVIEW"
+            ? "Only interface/type/schema files may be written. bash is allowed for read-only verification. .env writes are always blocked."
+            : "Only interface/type/schema files may be written (.ts, .d.ts, .py, .go, .rs, .java, .proto, .graphql, .json, .yaml, etc.). bash is blocked. .env writes are always blocked.",
       }
     }
 
@@ -484,16 +492,24 @@ export function getPhaseToolPolicy(
       const testsBashBlocked = phaseState === "REVISE" || phaseState === "REVIEW"
         ? []
         : ["bash"] as const
+      const testAllowSet = mode === "INCREMENTAL"
+        ? new Set(normalizeWorkflowPaths(fileAllowlist, cwd))
+        : null
       return {
         blocked: [...testsBashBlocked],
         writePathPredicate: (filePath: string) => {
           if (isEnvFile(filePath)) return false
-          return isTestFile(filePath)
+          if (!isTestFile(filePath)) return false
+          if (!testAllowSet) return true
+          const normalized = normalizeWorkflowPath(filePath, cwd)
+          return normalized ? testAllowSet.has(normalized) : false
         },
         ...(testsBashBlocked.length === 0 ? { bashCommandPredicate: readOnlyBash } : {}),
-        allowedDescription: phaseState === "REVISE" || phaseState === "REVIEW"
-          ? "Only test files may be written. bash is allowed for read-only verification. .env writes are always blocked."
-          : "Only test files may be written (files containing 'test' or 'spec' in name, or in test/tests/__tests__/spec directories). bash is blocked. .env writes are always blocked.",
+        allowedDescription: mode === "INCREMENTAL"
+          ? `INCREMENTAL tests phase: only test files that are also in the approved allowlist may be written (${fileAllowlist.length} files). .env writes are always blocked.`
+          : phaseState === "REVISE" || phaseState === "REVIEW"
+            ? "Only test files may be written. bash is allowed for read-only verification. .env writes are always blocked."
+            : "Only test files may be written (files containing 'test' or 'spec' in name, or in test/tests/__tests__/spec directories). bash is blocked. .env writes are always blocked.",
       }
     }
 

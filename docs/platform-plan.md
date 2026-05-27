@@ -1,6 +1,6 @@
 # Open Artisan — Platform-Agnostic Refactor Plan
 
-**Status:** Phases 1-4 complete. Phase 5a (Claude Code) complete. Phase 5b (Hermes) in progress. Phase 6 (Parallel DAG) next. Phase 7 (OpenClaw) last.
+**Status:** Core extraction, concurrent sessions, nested sub-workflows, bridge runtime, Claude Code adapter, and the Hermes adapter are implemented and covered by the current verification suite. Parallel DAG support is partially represented in scheduler/isolation contracts and tests, but full worktree-backed parallel execution remains future work. OpenClaw remains unimplemented.
 
 ## Overview
 
@@ -89,7 +89,7 @@ JSON-RPC 2.0 server for out-of-process adapters.
 - **Compaction:** PreCompact hook preserves workflow state
 - Design doc: `packages/claude-code/README.md`
 
-### Phase 5b: Hermes Agent Adapter 🔄 (in progress)
+### Phase 5b: Hermes Agent Adapter ✅
 
 `packages/adapter-hermes/` — Python plugin + stdio subprocess.
 
@@ -100,7 +100,7 @@ JSON-RPC 2.0 server for out-of-process adapters.
 - **Session lifecycle:** `on_session_start`/`on_session_end` hooks
 - Design doc: `packages/adapter-hermes/README.md`
 
-### Phase 6: Parallel DAG Execution 📋 (planned, next after 5b)
+### Phase 6: Parallel DAG Execution 📋 (partially designed; full worktree execution pending)
 
 Concurrent task execution within the IMPLEMENTATION phase.
 

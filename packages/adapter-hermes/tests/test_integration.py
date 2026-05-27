@@ -811,6 +811,96 @@ class TestPhaseProgression:
         assert parsed["phase"] == "INTERFACES"
         assert parsed["mode"] == "GREENFIELD"
 
+    @pytest.mark.asyncio
+    async def test_live_smoke_guard_and_isolated_phase_review(
+        self, live_bridge_server, monkeypatch, tmp_path
+    ):
+        """Hermes author tools, guard wrappers, and review dispatch work against a real bridge."""
+        project_dir, _ = live_bridge_server
+        session_id = f"hermes-smoke-{int(time.time() * 1000)}"
+        feature_name = f"hermes-smoke-feature-{int(time.time() * 1000)}"
+        reviewer_script = tmp_path / "reviewer.py"
+        criteria = [
+            {
+                "criterion": f"Criterion {i + 1}",
+                "met": True,
+                "evidence": "verified by Hermes smoke reviewer",
+                "severity": "blocking",
+            }
+            for i in range(30)
+        ]
+        reviewer_payload = {"satisfied": True, "criteria_results": criteria}
+        reviewer_script.write_text(
+            f"print({json.dumps(json.dumps(reviewer_payload))})\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv(
+            "OPENARTISAN_REVIEWER_COMMAND",
+            f"{sys.executable} {reviewer_script} {{prompt}}",
+        )
+
+        bridge = StdioBridgeClient()
+        try:
+            bridge.start(str(project_dir))
+            ctx = MockHermesContext(session_id=session_id, project_dir=str(project_dir))
+            original_write = AsyncMock(return_value="should not run")
+            ctx.set_original_handler("write_file", original_write)
+            register_workflow_tools(ctx, bridge)
+            register_guard_wrappers(ctx, bridge)
+
+            select_tool = ctx.get_registered_tool("oa_select_mode")
+            assert select_tool is not None
+            select_result = select_tool["handler"](
+                {"mode": "GREENFIELD", "feature_name": feature_name},
+                session_id=session_id,
+                cwd=str(project_dir),
+            )
+            assert "GREENFIELD" in select_result
+
+            write_tool = ctx.get_registered_tool("write_file")
+            assert write_tool is not None
+            blocked_write = await write_tool["handler"](
+                {"path": str(project_dir / "blocked.txt"), "content": "blocked"}
+            )
+            parsed_block = json.loads(blocked_write)
+            assert "error" in parsed_block
+            assert (
+                "PLANNING" in parsed_block.get("phase", "")
+                or "blocked" in parsed_block["error"].lower()
+            )
+            original_write.assert_not_called()
+
+            artifact_dir = project_dir / ".openartisan" / feature_name
+            artifact_dir.mkdir(parents=True, exist_ok=True)
+            plan_path = artifact_dir / "plan.md"
+            review_plan_path = f".openartisan/{feature_name}/plan.md"
+            plan_path.write_text(
+                "# Plan\n\nA structurally valid planning artifact for Hermes smoke review.",
+                encoding="utf-8",
+            )
+            request_review_tool = ctx.get_registered_tool("oa_request_review")
+            assert request_review_tool is not None
+            request_result = request_review_tool["handler"](
+                {
+                    "summary": "Plan",
+                    "artifact_description": "Plan artifact",
+                    "artifact_files": [review_plan_path],
+                },
+                session_id=session_id,
+                cwd=str(project_dir),
+            )
+            assert not request_result.startswith("Error:"), request_result
+            assert "review" in request_result.lower()
+
+            state = bridge.call("state.get", {"sessionId": session_id})
+            assert isinstance(state, dict)
+            state_payload = state.get("state", state)
+            assert isinstance(state_payload, dict)
+            assert state_payload["phase"] == "PLANNING"
+            assert state_payload["phaseState"] == "USER_GATE"
+        finally:
+            bridge.shutdown()
+
     def test_docs_only_drift_does_not_create_synthetic_runtime_contract(
         self, started_bridge
     ):

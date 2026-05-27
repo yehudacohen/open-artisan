@@ -9,6 +9,7 @@ describe("approveCurrentTaskScopeExpansion", () => {
       mode: "INCREMENTAL",
       phase: "IMPLEMENTATION",
       phaseState: "USER_GATE",
+      userGateMessageReceived: true,
       currentTaskId: "T8",
       fileAllowlist: ["/repo/src/existing.ts"],
       pendingAllowlistExpansions: [{
@@ -48,7 +49,8 @@ describe("approveCurrentTaskScopeExpansion", () => {
     const state = makeWorkflowState({
       mode: "INCREMENTAL",
       phase: "IMPLEMENTATION",
-      phaseState: "TASK_REVISE",
+      phaseState: "USER_GATE",
+      userGateMessageReceived: true,
       currentTaskId: "T1",
       fileAllowlist: ["src/existing.ts"],
       pendingAllowlistExpansions: [{
@@ -80,9 +82,73 @@ describe("approveCurrentTaskScopeExpansion", () => {
     expect(state.pendingAllowlistExpansions).toEqual([])
   })
 
+  it("rejects direct scope expansion outside USER_GATE without mutating task or allowlist state", () => {
+    const state = makeWorkflowState({
+      mode: "INCREMENTAL",
+      phase: "IMPLEMENTATION",
+      phaseState: "TASK_REVISE",
+      userGateMessageReceived: true,
+      currentTaskId: "T1",
+      fileAllowlist: ["/repo/src/existing.ts"],
+      implDag: [{
+        id: "T1",
+        description: "Update scoped files",
+        dependencies: [],
+        expectedFiles: ["/repo/src/existing.ts"],
+        expectedTests: [],
+        estimatedComplexity: "medium",
+        status: "in-flight",
+      }],
+    })
+
+    const result = approveCurrentTaskScopeExpansion(state, {
+      files: ["src/new.ts"],
+      reason: "User explicitly approved the missing generated example files for T1.",
+    }, "/repo")
+
+    expect(result.success).toBe(false)
+    expect(result.success ? "" : result.error).toContain("USER_GATE")
+    expect(state.fileAllowlist).toEqual(["/repo/src/existing.ts"])
+    expect(state.implDag?.[0]?.expectedFiles).toEqual(["/repo/src/existing.ts"])
+    expect(state.phaseState).toBe("TASK_REVISE")
+  })
+
+  it("rejects scope expansion at USER_GATE until a real user response is recorded", () => {
+    const state = makeWorkflowState({
+      mode: "INCREMENTAL",
+      phase: "IMPLEMENTATION",
+      phaseState: "USER_GATE",
+      userGateMessageReceived: false,
+      currentTaskId: "T1",
+      fileAllowlist: ["/repo/src/existing.ts"],
+      implDag: [{
+        id: "T1",
+        description: "Update scoped files",
+        dependencies: [],
+        expectedFiles: ["/repo/src/existing.ts"],
+        expectedTests: [],
+        estimatedComplexity: "medium",
+        status: "in-flight",
+      }],
+    })
+
+    const result = approveCurrentTaskScopeExpansion(state, {
+      files: ["src/new.ts"],
+      reason: "Attempting to approve a scope expansion without real user input.",
+    }, "/repo")
+
+    expect(result.success).toBe(false)
+    expect(result.success ? "" : result.error).toContain("real user response")
+    expect(state.fileAllowlist).toEqual(["/repo/src/existing.ts"])
+    expect(state.implDag?.[0]?.expectedFiles).toEqual(["/repo/src/existing.ts"])
+    expect(state.phaseState).toBe("USER_GATE")
+  })
+
   it("rejects scope expansion paths outside the project root", () => {
     const state = makeWorkflowState({
       phase: "IMPLEMENTATION",
+      phaseState: "USER_GATE",
+      userGateMessageReceived: true,
       currentTaskId: "T1",
       implDag: [{
         id: "T1",
@@ -107,6 +173,8 @@ describe("approveCurrentTaskScopeExpansion", () => {
   it("rejects non-current task repairs", () => {
     const state = makeWorkflowState({
       phase: "IMPLEMENTATION",
+      phaseState: "USER_GATE",
+      userGateMessageReceived: true,
       currentTaskId: "T1",
       implDag: [{
         id: "T2",

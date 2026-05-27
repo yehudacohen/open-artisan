@@ -5,23 +5,21 @@ entry_point: hermes_adapter
 author: Open Artisan
 
 tools:
+  - oa_check_prior_workflow
   - oa_select_mode
   - oa_mark_scan_complete
   - oa_mark_analyze_complete
-  - oa_mark_satisfied
-  - oa_mark_task_complete
-  - oa_submit_task_review
-  - oa_submit_auto_approve
-  - oa_reset_task
   - oa_request_review
   - oa_submit_feedback
   - oa_scheduling_complete
   - oa_phase_skipped
-  - oa_check_prior_workflow
+  - oa_mark_task_complete
+  - oa_reset_task
   - oa_resolve_human_gate
   - oa_propose_backtrack
   - oa_propose_direct_application
-  - oa_spawn_sub_workflow
+  - oa_query_parent_workflow
+  - oa_query_child_workflow
   - oa_analyze_task_boundary_change
   - oa_apply_task_boundary_change
   - oa_approve_current_task_scope_expansion
@@ -34,6 +32,9 @@ tools:
   - oa_report_drift
   - oa_plan_drift_repair
   - oa_apply_drift_repair
+  - oa_product_management_assess_request
+  - oa_product_management_list_work
+  - oa_product_management_queue_item
   - oa_roadmap_read
   - oa_roadmap_query
   - oa_roadmap_derive_execution_slice
@@ -44,8 +45,6 @@ tools:
   - oa_roadmap_delete_edge
   - oa_roadmap_replace
   - oa_roadmap_delete
-  - oa_query_parent_workflow
-  - oa_query_child_workflow
   - oa_state
   - oa_list_projects
   - oa_select_project

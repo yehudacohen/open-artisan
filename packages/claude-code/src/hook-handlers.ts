@@ -98,12 +98,12 @@ async function bridgeCall(
 /** Permissive default — allow everything when disabled or server unavailable. */
 const ALLOW: HookOutput = { stdout: null, stderr: null, exitCode: 0 }
 
-function isWriteLikeTool(toolName: string, toolInput: Record<string, unknown>): boolean {
+export function isWriteLikeTool(toolName: string, toolInput: Record<string, unknown>): boolean {
   const normalized = toolName.toLowerCase()
   if (["write", "edit", "multiedit", "notebookedit"].includes(normalized)) return true
   if (normalized !== "bash") return false
   const command = String(toolInput.command ?? toolInput.cmd ?? "")
-  return /(?:>>|>[^&]|\btee\b|\bsed\s+-i\b|\bdd\b.*\bof=|<<-?\s*['"]?[A-Za-z_][A-Za-z0-9_]*['"]?|(?:^|[;&|]\s*)(?:touch|mkdir|cp|mv|rm|rmdir|install|chmod|chown|ln|truncate|rsync|patch|cpio|unzip|tar\s+(?:-[A-Za-z]*x[A-Za-z]*|x[A-Za-z]*|--extract)|git\s+(?:add|commit|checkout|restore|reset|clean|mv|rm|apply|am)|(?:curl|wget)\b(?=.*\s(?:-o|-O|--output(?:=|\s)|--output-document(?:=|\s))))|\b(?:python|python3|node|ruby|perl)\b.*\b(?:writeFile|open\s*\(|File\.write|fs\.write|write\s*\(|write_text\s*\(|write_bytes\s*\(|append_text\s*\(|append_bytes\s*\())/.test(command)
+  return /(?:>>|>[^&]|\btee\b|\bsed\s+-i\b|\bdd\b.*\bof=|<<-?\s*['"]?[A-Za-z_][A-Za-z0-9_]*['"]?|(?:^|[;&|]\s*)(?:touch|mkdir|cp|mv|rm|rmdir|install|chmod|chown|ln|truncate|rsync|patch|cpio|unzip|tar\s+(?:-[A-Za-z]*x[A-Za-z]*|x[A-Za-z]*|--extract)|git\s+(?:add|commit|checkout|restore|reset|clean|mv|rm|apply|am)|(?:curl|wget)\b(?=.*\s(?:-o|-O|--output(?:=|\s)|--output-document(?:=|\s)))|(?:npm|pnpm|yarn|bun)\s+(?:install|add|remove|update|x)|(?:prettier|eslint|ruff|black|isort)\b.*(?:^|\s)(?:--write|--fix|--apply))\b|\b(?:python|python3|node|ruby|perl)\b.*\b(?:writeFile|open\s*\(|File\.write|fs\.write|write\s*\(|write_text\s*\(|write_bytes\s*\(|append_text\s*\(|append_bytes\s*\())/.test(command)
 }
 
 function bridgeUnavailableDecision(toolName: string, toolInput: Record<string, unknown>): HookOutput {
@@ -253,6 +253,7 @@ export async function handleStop(input: HookInput): Promise<HookOutput> {
         const reviewOutput = execFileSync("claude", ["--print", "--max-turns", "1", "-p", reviewPrompt], {
           timeout: 180_000,
           encoding: "utf-8",
+          env: process.env,
           stdio: ["pipe", "pipe", "pipe"],
         })
         // Submit review results to bridge
@@ -316,6 +317,7 @@ export async function handleStop(input: HookInput): Promise<HookOutput> {
         const reviewOutput = execFileSync("claude", ["--print", "--max-turns", "1", "-p", reviewPrompt], {
           timeout: 300_000,
           encoding: "utf-8",
+          env: process.env,
           stdio: ["pipe", "pipe", "pipe"],
         })
         const submitResult = await bridgeCall(stateDir, "tool.execute", {
@@ -377,6 +379,7 @@ export async function handleStop(input: HookInput): Promise<HookOutput> {
         const approveOutput = execFileSync("claude", ["--print", "--max-turns", "1", "-p", approvePrompt], {
           timeout: 120_000,
           encoding: "utf-8",
+          env: process.env,
           stdio: ["pipe", "pipe", "pipe"],
         })
         await bridgeCall(stateDir, "tool.execute", {

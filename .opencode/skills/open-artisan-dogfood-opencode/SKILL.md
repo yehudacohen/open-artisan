@@ -82,6 +82,6 @@ Treat these as Open Artisan defects unless evidence shows external causes:
 Before returning control to an OpenCode driver after a fix:
 
 1. Run targeted Open Artisan verification when code changed.
-2. Confirm the TypeKro workflow state is coherent.
+2. Confirm the Open Artisan workflow state is coherent.
 3. Restart or reload OpenCode if plugin/agent/skill code changed and stale runtime is possible.
 4. Confirm the next driver action is a true workflow resume point.

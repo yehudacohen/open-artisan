@@ -32,6 +32,9 @@ export function createSessionRegistry(): SessionRegistry {
     unregister(sessionId: string): void {
       primarySessions.delete(sessionId)
       childToParent.delete(sessionId)
+      for (const [childId, parentId] of childToParent.entries()) {
+        if (parentId === sessionId) childToParent.delete(childId)
+      }
       if (activeId === sessionId) {
         activeId = undefined
       }

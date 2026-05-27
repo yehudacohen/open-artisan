@@ -81,7 +81,7 @@ import { createPluginHooks } from "./plugin-hooks"
 import { createImplDAG, type TaskCategory, type HumanGateInfo } from "../../../packages/core/dag"
 import { applyDispatch, nextSchedulerDecision, nextSchedulerDecisionForInput, readDecisionInput } from "../../../packages/core/scheduler"
 import { resolveArtifactPaths } from "../../../packages/core/tools/artifact-paths"
-import { validateFileBasedReviewArtifacts } from "../../../packages/core/tools/file-artifact-validation"
+import { collectImplementationReviewArtifactFiles, mergeImplementationReviewArtifactFiles, validateFileBasedReviewArtifacts } from "../../../packages/core/tools/file-artifact-validation"
 import { validatePlannedReviewedInterfaceArtifacts } from "../../../packages/core/tools/planning-interface-artifacts"
 import { writeArtifact, detectDesignDoc } from "../../../packages/core/artifact-store"
 import { buildAdjacentTasksForTask, classifyTaskReviewResult, dispatchTaskReview } from "../../../packages/core/task-review"
@@ -100,6 +100,7 @@ import {
 import { ApproveCurrentTaskScopeExpansionToolSchema, ChangeProposalToolSchema, DisableOpenArtisanToolSchema, RepairCurrentTaskBoundaryFromImplPlanToolSchema, RequestAllowlistExpansionToolSchema, SummarizeWorkflowIncidentToolSchema, formatZodError } from "../../../packages/core/schemas"
 import type { DriftToolCallPlan } from "../../../packages/core/drift"
 import { dispatchChangeProposalReview } from "../../../packages/core/change-proposal"
+import { dispatchReviewArtifactAllowlistExpansionReview, precheckReviewArtifactAllowlistExpansion, validateReviewArtifactAllowlistExpansionDecision } from "../../../packages/core/review-artifact-allowlist-expansion"
 import { captureRevisionBaseline, hasArtifactChanged } from "../../../packages/core/revision-baseline"
 import { writeStatusFile } from "../../../packages/core/status-writer"
 import { deriveReviewFileAllowlist, extractApprovedFileAllowlist } from "../../../packages/core/tools/plan-allowlist"
@@ -797,6 +798,25 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
     featureName: tool.schema.string().optional(),
     minPriority: tool.schema.number().optional().describe("Numeric minimum priority."),
   })
+  const productManagementRequestContextSchema = tool.schema.object({
+    request: tool.schema.string(),
+    currentFeatureName: tool.schema.string().optional(),
+    currentPhase: tool.schema.enum(["MODE_SELECT", "DISCOVERY", "PLANNING", "INTERFACES", "TESTS", "IMPL_PLAN", "IMPLEMENTATION", "DONE"]).optional(),
+    currentPhaseState: tool.schema.enum(["SCAN", "ANALYZE", "CONVENTIONS", "DRAFT", "REVIEW", "USER_GATE", "ESCAPE_HATCH", "REVISE", "REDRAFT", "SKIP_CHECK", "CASCADE_CHECK", "SCHEDULING", "TASK_REVIEW", "TASK_REVISE", "HUMAN_GATE", "DELEGATED_WAIT"]).optional(),
+    currentMode: tool.schema.enum(["GREENFIELD", "REFACTOR", "INCREMENTAL"]).optional(),
+    currentTaskId: tool.schema.string().optional(),
+    roadmapItemIds: tool.schema.array(tool.schema.string()).optional(),
+    executionSliceId: tool.schema.string().optional(),
+  })
+  const productManagementQueueItemSourceSchema = tool.schema.object({
+    workflowId: tool.schema.string().optional(),
+    featureName: tool.schema.string().optional(),
+    sessionId: tool.schema.string().optional(),
+    taskId: tool.schema.string().optional(),
+    artifactKey: tool.schema.enum(["design", "conventions", "plan", "interfaces", "tests", "impl_plan", "implementation"]).optional(),
+    artifactPath: tool.schema.string().optional(),
+    messageId: tool.schema.string().optional(),
+  })
 
   return {
     ...createPluginHooks({
@@ -1415,6 +1435,59 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
         },
       }),
 
+      product_management_assess_request: tool({
+        description: "Assess whether a request should continue current work, queue product memory, revise/backtrack, request allowlist expansion, switch workflows, or ask the user.",
+        args: {
+          request: tool.schema.string(),
+          roadmap_item_ids: tool.schema.array(tool.schema.string()).optional(),
+          roadmapItemIds: tool.schema.array(tool.schema.string()).optional(),
+          feature_name: tool.schema.string().optional(),
+          featureName: tool.schema.string().optional(),
+          include_workflow_candidates: tool.schema.boolean().optional(),
+          includeWorkflowCandidates: tool.schema.boolean().optional(),
+        },
+        async execute(args: Record<string, unknown>, context: ToolExecuteContext) {
+          return executeOpenCodeBridgeTool("product_management_assess_request", args, context)
+        },
+      }),
+
+      product_management_list_work: tool({
+        description: "List product-management roadmap and workflow candidates with lifecycle, priority, safety, and degraded-context diagnostics.",
+        args: {
+          roadmap_item_ids: tool.schema.array(tool.schema.string()).optional(),
+          roadmapItemIds: tool.schema.array(tool.schema.string()).optional(),
+          lifecycles: tool.schema.array(tool.schema.enum(["proposed", "active", "frozen", "abandoned"])).optional(),
+          statuses: tool.schema.array(tool.schema.enum(["todo", "in-progress", "blocked", "done", "dropped"])).optional(),
+          feature_name: tool.schema.string().optional(),
+          featureName: tool.schema.string().optional(),
+          min_priority: tool.schema.number().optional(),
+          minPriority: tool.schema.number().optional(),
+          max_candidates: tool.schema.number().optional(),
+          maxCandidates: tool.schema.number().optional(),
+        },
+        async execute(args: Record<string, unknown>, context: ToolExecuteContext) {
+          return executeOpenCodeBridgeTool("product_management_list_work", args, context)
+        },
+      }),
+
+      product_management_queue_item: tool({
+        description: "Queue a bug, issue, feature, debt, chore, or follow-up into roadmap product memory without mutating current workflow gates or task state.",
+        args: {
+          title: tool.schema.string(),
+          description: tool.schema.string(),
+          kind: tool.schema.enum(["feature", "bug", "issue", "debt", "chore", "follow-up"]),
+          priority: tool.schema.number().optional(),
+          source: optionalOpenCodeSchema(productManagementQueueItemSourceSchema),
+          discovered_while: optionalOpenCodeSchema(productManagementRequestContextSchema),
+          discoveredWhile: optionalOpenCodeSchema(productManagementRequestContextSchema),
+          suggested_edges: tool.schema.array(roadmapEdgeSchema).optional(),
+          suggestedEdges: tool.schema.array(roadmapEdgeSchema).optional(),
+        },
+        async execute(args: Record<string, unknown>, context: ToolExecuteContext) {
+          return executeOpenCodeBridgeTool("product_management_queue_item", args, context)
+        },
+      }),
+
       // -----------------------------------------------------------------------
       // mark_scan_complete — signals end of DISCOVERY/SCAN
       // -----------------------------------------------------------------------
@@ -1701,6 +1774,14 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             await store.update(sessionId, (draft) => {
               upsertReviewAttempt(draft, phaseReviewAttempt)
             })
+            const reviewArtifactDiskPaths = Object.fromEntries(
+              Object.entries(state.artifactDiskPaths).filter(([key, value]) => {
+                if (!value) return false
+                if (key === "design") return true
+                if (!state.featureName) return true
+                return value.includes(`/.openartisan/${state.featureName}/`)
+              }),
+            ) as Partial<Record<ArtifactKey, string>>
             let reviewResult: Awaited<ReturnType<typeof dispatchSelfReview>> | null = null
             try {
               reviewResult = await dispatchSelfReview(subagentDispatcher, {
@@ -1715,7 +1796,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                 ...(state.sessionModel ? { parentModel: state.sessionModel } : {}),
                 ...(reviewAllowlist.allowlist.length > 0 ? { fileAllowlist: reviewAllowlist.allowlist, fileAllowlistSource: reviewAllowlist.source } : {}),
                 ...(Object.keys(state.approvedArtifacts).length > 0 ? { approvedArtifacts: state.approvedArtifacts } : {}),
-                ...(Object.keys(state.artifactDiskPaths).length > 0 ? { artifactDiskPaths: state.artifactDiskPaths } : {}),
+                ...(Object.keys(reviewArtifactDiskPaths).length > 0 ? { artifactDiskPaths: reviewArtifactDiskPaths } : {}),
                 ...(Object.keys(state.approvedArtifactFiles ?? {}).length > 0 ? { approvedArtifactFiles: state.approvedArtifactFiles ?? {} } : {}),
                 realWorldAcceptanceScenario: state.realWorldAcceptanceScenario,
                 requireToolSubmission: true,
@@ -2865,7 +2946,8 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             .describe(
               "Required file paths of artifacts produced in this phase. " +
               "Relative paths are resolved from the project directory before being stored. " +
-              "Markdown phases must use .openartisan/<feature>/{conventions.md,plan.md,impl-plan.md}; source phases must use real project files.",
+              "Markdown phases must use .openartisan/<feature>/{conventions.md,plan.md,impl-plan.md}; source phases must use real project files. " +
+              "IMPLEMENTATION may include project docs/Markdown only when declared by completed task expected files.",
             ),
           artifact_data_json: tool.schema
             .string()
@@ -2887,6 +2969,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
           await detectActiveAgent(store, sessionId, context)
           const cwd = context.directory || process.cwd()
           let artifactFiles = normalizeArtifactFiles(args.artifact_files, cwd)
+          artifactFiles = mergeImplementationReviewArtifactFiles(state, artifactFiles, cwd)
 
           if (Object.prototype.hasOwnProperty.call(args, "artifact_content")) {
             return "Error: request_review no longer accepts inline artifact content. Write the artifact to disk and pass artifact_files."
@@ -2913,6 +2996,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
               artifactFiles,
               cwd,
               featureName: state.featureName,
+              implementationArtifactFiles: collectImplementationReviewArtifactFiles(state, cwd),
             })
             if (artifactValidationError) return `Error: ${artifactValidationError}`
             const planningContractError = validatePlanningReviewArtifact(state, artifactFiles)
@@ -3059,6 +3143,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
               artifactFiles,
               cwd,
               featureName: state.featureName,
+              implementationArtifactFiles: collectImplementationReviewArtifactFiles(state, cwd),
           })
           if (artifactValidationError) return `Error: ${artifactValidationError}`
           const planningContractError = validatePlanningReviewArtifact(state, artifactFiles)
@@ -3219,7 +3304,7 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                 draft.userGateMessageReceived = true
               })
             }
-            const approvalWarning = ""
+            let approvalWarning = ""
 
             if (args.dry_run && state.phase === "IMPLEMENTATION" && state.implDag && resolvedHumanGates.length > 0) {
               const resolutionResult = resolveSubmitFeedbackHumanGates(state, resolvedHumanGates)
@@ -3442,7 +3527,8 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
             // Using the stale value caused computeForwardSkip to always return null
             // at PLANNING approval time, forcing the agent through INTERFACES/TESTS/IMPL_PLAN
             // even when approved_files was intentionally empty (operational-only tasks).
-            const effectiveAllowlist: string[] = await (async () => {
+            let autoExpandedReviewAllowlistFiles: string[] = []
+            let effectiveAllowlist: string[] = await (async () => {
               if (state.pendingAllowlistExpansions.length > 0 && (state.phase === "INTERFACES" || state.phase === "TESTS")) {
                 return buildAllowlistWithPendingExpansions(state, context.directory || process.cwd())
               }
@@ -3480,10 +3566,54 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
                 cwd: context.directory || process.cwd(),
               })
               if (reviewedOutsideAllowlist.length > 0) {
-                return (
-                  `Error: ${state.phase} approval failed allowlist validation: reviewed artifact files fall outside the approved INCREMENTAL allowlist: ` +
-                  `${reviewedOutsideAllowlist.join(", ")}. Update the planning allowlist or narrow the artifact scope before approval.`
-                )
+                const precheck = precheckReviewArtifactAllowlistExpansion({
+                  state,
+                  cwd: context.directory || process.cwd(),
+                  effectiveAllowlist,
+                  missingFiles: reviewedOutsideAllowlist,
+                })
+                if (!precheck.success) {
+                  return (
+                    `Error: ${state.phase} approval failed allowlist validation: reviewed artifact files fall outside the approved INCREMENTAL allowlist: ` +
+                    `${reviewedOutsideAllowlist.join(", ")}. Automatic reviewed-artifact scope repair was rejected: ${precheck.error}`
+                  )
+                }
+                if (args.dry_run) {
+                  return (
+                    `Dry-run approval validation found ${precheck.files.length} reviewed artifact file(s) that require automatic scope review before allowlist expansion: ` +
+                    `${precheck.files.join(", ")}. No reviewer was dispatched and workflow state was not mutated.`
+                  )
+                }
+                const parentModel = getActiveSessionModel()
+                const scopeReview = await dispatchReviewArtifactAllowlistExpansionReview(subagentDispatcher, {
+                  state,
+                  cwd: context.directory || process.cwd(),
+                  files: precheck.files,
+                  evidence: precheck.evidence,
+                  parentSessionId: sessionId,
+                  ...(parentModel ? { parentModel } : {}),
+                })
+                if (!scopeReview.success) {
+                  return (
+                    `Error: ${state.phase} approval failed allowlist validation: reviewed artifact files fall outside the approved INCREMENTAL allowlist: ` +
+                    `${reviewedOutsideAllowlist.join(", ")}. Automatic scope review was required, ` +
+                    `but the isolated scope reviewer could not approve it: ${scopeReview.error}`
+                  )
+                }
+                const reviewerApproval = validateReviewArtifactAllowlistExpansionDecision({
+                  files: precheck.files,
+                  decision: scopeReview.decision,
+                  cwd: context.directory || process.cwd(),
+                })
+                if (!reviewerApproval.success) {
+                  return (
+                    `Error: ${state.phase} approval failed allowlist validation: reviewed artifact files fall outside the approved INCREMENTAL allowlist: ` +
+                    `${reviewedOutsideAllowlist.join(", ")}. Automatic reviewed-artifact allowlist expansion was rejected: ${reviewerApproval.error}`
+                  )
+                }
+                autoExpandedReviewAllowlistFiles = precheck.files
+                effectiveAllowlist = Array.from(new Set([...effectiveAllowlist, ...precheck.files]))
+                approvalWarning += `\n\nAutomatic scope reviewer approved adding reviewed artifact file(s) to the INCREMENTAL allowlist: ${precheck.files.join(", ")}.`
               }
             }
             const forwardSkip = approval.nextPhaseState === "SKIP_CHECK"
@@ -3617,6 +3747,8 @@ export const OpenArtisanPlugin: Plugin = async ({ client: rawClient, directory, 
               // (e.g. ".gitignore" instead of "/project/.gitignore"). The validator
               // rejects relative paths, so we resolve them against the project dir.
               if (state.phase === "PLANNING" && state.mode === "INCREMENTAL") {
+                draft.fileAllowlist = effectiveAllowlist
+              } else if (state.mode === "INCREMENTAL" && autoExpandedReviewAllowlistFiles.length > 0 && (state.phase === "INTERFACES" || state.phase === "TESTS")) {
                 draft.fileAllowlist = effectiveAllowlist
               } else if (state.mode === "INCREMENTAL" && state.pendingAllowlistExpansions.length > 0 && (state.phase === "INTERFACES" || state.phase === "TESTS")) {
                 draft.fileAllowlist = effectiveAllowlist

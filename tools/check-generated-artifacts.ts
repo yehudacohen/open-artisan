@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises"
 
-import { buildHermesToolContractsArtifact, HERMES_TOOL_CONTRACTS_OUTPUT_PATH } from "./hermes-tool-contract-artifact"
+import { buildHermesPluginManifestArtifact, buildHermesToolContractsArtifact, HERMES_PLUGIN_MANIFEST_OUTPUT_PATH, HERMES_TOOL_CONTRACTS_OUTPUT_PATH } from "./hermes-tool-contract-artifact"
 import { generateWorkflowTemplate } from "../packages/core/workflow-template"
 
 async function checkGeneratedFile(path: string, expected: string, command: string): Promise<boolean> {
@@ -19,6 +19,7 @@ async function checkFileDoesNotContain(path: string, forbidden: string, replacem
 
 let ok = true
 ok = await checkGeneratedFile(HERMES_TOOL_CONTRACTS_OUTPUT_PATH, buildHermesToolContractsArtifact(), "bun run generate:hermes-tools") && ok
+ok = await checkGeneratedFile(HERMES_PLUGIN_MANIFEST_OUTPUT_PATH, buildHermesPluginManifestArtifact(), "bun run generate:hermes-tools") && ok
 
 const hermesWorkflowTemplate = generateWorkflowTemplate({
   toolPrefix: "oa_",

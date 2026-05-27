@@ -60,11 +60,6 @@ export function createOpenArtisanDbStateBackend(
     return migratedRaw
   }
 
-  async function readLegacyFallback(featureName: string): Promise<string | null> {
-    if (!options.legacyFallback) return null
-    return options.legacyFallback.read(featureName)
-  }
-
   return {
     dispose() {
       return repository.dispose()
@@ -72,11 +67,11 @@ export function createOpenArtisanDbStateBackend(
 
     async read(featureName: string) {
       const projectionResult = await repository.getWorkflowByFeature(featureName)
-      if (isRecoverableDbStateFailure(projectionResult)) return readLegacyFallback(featureName)
+      if (!projectionResult.ok) throw new Error(projectionResult.error.message)
       const projection = assertOk(projectionResult)
       if (!projection) return importLegacyFallback(featureName)
       const stateResult = await exportLegacyWorkflowState(repository, projection.workflow.id)
-      if (isRecoverableDbStateFailure(stateResult)) return readLegacyFallback(featureName)
+      if (!stateResult.ok) throw new Error(stateResult.error.message)
       const state = assertOk(stateResult)
       return JSON.stringify(state)
     },
@@ -92,7 +87,7 @@ export function createOpenArtisanDbStateBackend(
         )
       }
       const importResult = await importLegacyWorkflowState(repository, state, { bestEffort: true })
-      if (!importResult.ok && (!options.legacyFallback || !isRecoverableDbStateFailure(importResult))) {
+      if (!importResult.ok) {
         throw new Error(importResult.error.message)
       }
       if (options.legacyFallback) {
@@ -118,7 +113,7 @@ export function createOpenArtisanDbStateBackend(
     async list() {
       const listResult = await repository.listWorkflows()
       const features = new Set(listResult.ok ? listResult.value.map((workflow) => workflow.featureName) : [])
-      if (!listResult.ok && (!options.legacyFallback || !isRecoverableDbStateFailure(listResult))) {
+      if (!listResult.ok) {
         throw new Error(listResult.error.message)
       }
       if (options.legacyFallback) {
@@ -134,7 +129,6 @@ export function createOpenArtisanDbStateBackend(
         ...(options.allowSameProcessLockReclaim === undefined ? {} : { allowSameProcessReclaim: options.allowSameProcessLockReclaim }),
       })
       if (lockResult.ok) return lockResult.value
-      if (options.legacyFallback && isRecoverableDbStateFailure(lockResult)) return options.legacyFallback.lock(featureName)
       throw new Error(lockResult.error.message)
     },
   }

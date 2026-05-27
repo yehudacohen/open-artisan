@@ -804,6 +804,409 @@
     }
   },
   {
+    "hermes_name": "oa_product_management_assess_request",
+    "bridge_name": "product_management_assess_request",
+    "description": "Assess whether a request should continue current work, queue product memory, revise/backtrack, request allowlist expansion, switch workflows, or ask the user.",
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "request": {
+          "type": "string",
+          "minLength": 1
+        },
+        "roadmap_item_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "roadmapItemIds": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "feature_name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "featureName": {
+          "type": "string",
+          "minLength": 1
+        },
+        "include_workflow_candidates": {
+          "type": "boolean"
+        },
+        "includeWorkflowCandidates": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "request"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "hermes_name": "oa_product_management_list_work",
+    "bridge_name": "product_management_list_work",
+    "description": "List product-management roadmap and workflow candidates with lifecycle, priority, safety, and degraded-context diagnostics.",
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "roadmap_item_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "roadmapItemIds": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "lifecycles": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "proposed",
+              "active",
+              "frozen",
+              "abandoned"
+            ]
+          }
+        },
+        "statuses": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "todo",
+              "in-progress",
+              "blocked",
+              "done",
+              "dropped"
+            ]
+          }
+        },
+        "feature_name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "featureName": {
+          "type": "string",
+          "minLength": 1
+        },
+        "min_priority": {
+          "type": "number"
+        },
+        "minPriority": {
+          "type": "number"
+        },
+        "max_candidates": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 100
+        },
+        "maxCandidates": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 100
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "hermes_name": "oa_product_management_queue_item",
+    "bridge_name": "product_management_queue_item",
+    "description": "Queue a bug, issue, feature, debt, chore, or follow-up into roadmap product memory without mutating current workflow gates or task state.",
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "feature",
+            "bug",
+            "issue",
+            "debt",
+            "chore",
+            "follow-up"
+          ]
+        },
+        "priority": {
+          "type": "number"
+        },
+        "source": {
+          "type": "object",
+          "properties": {
+            "workflowId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "featureName": {
+              "type": "string",
+              "minLength": 1
+            },
+            "sessionId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "taskId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "artifactKey": {
+              "type": "string",
+              "enum": [
+                "design",
+                "conventions",
+                "plan",
+                "interfaces",
+                "tests",
+                "impl_plan",
+                "implementation"
+              ]
+            },
+            "artifactPath": {
+              "type": "string",
+              "minLength": 1
+            },
+            "messageId": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "additionalProperties": false
+        },
+        "discovered_while": {
+          "type": "object",
+          "properties": {
+            "request": {
+              "type": "string",
+              "minLength": 1
+            },
+            "currentFeatureName": {
+              "type": "string",
+              "minLength": 1
+            },
+            "currentPhase": {
+              "type": "string",
+              "enum": [
+                "MODE_SELECT",
+                "DISCOVERY",
+                "PLANNING",
+                "INTERFACES",
+                "TESTS",
+                "IMPL_PLAN",
+                "IMPLEMENTATION",
+                "DONE"
+              ]
+            },
+            "currentPhaseState": {
+              "type": "string",
+              "enum": [
+                "SCAN",
+                "ANALYZE",
+                "CONVENTIONS",
+                "DRAFT",
+                "REVIEW",
+                "USER_GATE",
+                "ESCAPE_HATCH",
+                "REVISE",
+                "REDRAFT",
+                "SKIP_CHECK",
+                "CASCADE_CHECK",
+                "SCHEDULING",
+                "TASK_REVIEW",
+                "TASK_REVISE",
+                "HUMAN_GATE",
+                "DELEGATED_WAIT"
+              ]
+            },
+            "currentMode": {
+              "type": "string",
+              "enum": [
+                "GREENFIELD",
+                "REFACTOR",
+                "INCREMENTAL"
+              ]
+            },
+            "currentTaskId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "roadmapItemIds": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "executionSliceId": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "request"
+          ],
+          "additionalProperties": false
+        },
+        "discoveredWhile": {
+          "type": "object",
+          "properties": {
+            "request": {
+              "type": "string",
+              "minLength": 1
+            },
+            "currentFeatureName": {
+              "type": "string",
+              "minLength": 1
+            },
+            "currentPhase": {
+              "type": "string",
+              "enum": [
+                "MODE_SELECT",
+                "DISCOVERY",
+                "PLANNING",
+                "INTERFACES",
+                "TESTS",
+                "IMPL_PLAN",
+                "IMPLEMENTATION",
+                "DONE"
+              ]
+            },
+            "currentPhaseState": {
+              "type": "string",
+              "enum": [
+                "SCAN",
+                "ANALYZE",
+                "CONVENTIONS",
+                "DRAFT",
+                "REVIEW",
+                "USER_GATE",
+                "ESCAPE_HATCH",
+                "REVISE",
+                "REDRAFT",
+                "SKIP_CHECK",
+                "CASCADE_CHECK",
+                "SCHEDULING",
+                "TASK_REVIEW",
+                "TASK_REVISE",
+                "HUMAN_GATE",
+                "DELEGATED_WAIT"
+              ]
+            },
+            "currentMode": {
+              "type": "string",
+              "enum": [
+                "GREENFIELD",
+                "REFACTOR",
+                "INCREMENTAL"
+              ]
+            },
+            "currentTaskId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "roadmapItemIds": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "executionSliceId": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "request"
+          ],
+          "additionalProperties": false
+        },
+        "suggested_edges": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "from": {
+                "type": "string",
+                "minLength": 1
+              },
+              "to": {
+                "type": "string",
+                "minLength": 1
+              },
+              "kind": {
+                "type": "string",
+                "const": "depends-on"
+              }
+            },
+            "required": [
+              "from",
+              "to",
+              "kind"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "suggestedEdges": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "from": {
+                "type": "string",
+                "minLength": 1
+              },
+              "to": {
+                "type": "string",
+                "minLength": 1
+              },
+              "kind": {
+                "type": "string",
+                "const": "depends-on"
+              }
+            },
+            "required": [
+              "from",
+              "to",
+              "kind"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "title",
+        "description",
+        "kind"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
     "hermes_name": "oa_roadmap_read",
     "bridge_name": "roadmap_read",
     "description": "Read the current roadmap document.",

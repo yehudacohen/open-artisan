@@ -253,10 +253,11 @@ export const DB_OPERATION_LEASE_MS = 300_000
 
 /**
  * Timeout for one SessionStateStore operation (ms).
- * Prevents a wedged backend read/write/lock from poisoning the in-process
- * per-feature promise chain and blocking later hooks or workflow tools.
+ * Must exceed the composed DB lock/read/write/release path. A timed-out caller
+ * does not cancel the underlying durable operation, so this is a last-resort
+ * guard for truly wedged backends rather than a normal DB contention budget.
  */
-export const SESSION_STORE_OPERATION_TIMEOUT_MS = 35_000
+export const SESSION_STORE_OPERATION_TIMEOUT_MS = 180_000
 
 /** Environment variable override for SessionStateStore operation timeout. */
 export const SESSION_STORE_OPERATION_TIMEOUT_ENV = "OPENARTISAN_SESSION_STORE_OPERATION_TIMEOUT_MS"

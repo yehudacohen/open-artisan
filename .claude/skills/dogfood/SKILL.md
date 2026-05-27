@@ -66,7 +66,7 @@ When the driver exposes a real framework or runtime issue, the supervisor must:
 4. Add or identify targeted tests.
 5. Implement the smallest correct fix.
 6. Run the targeted verification.
-7. Commit the checkpoint if progress is meaningful.
+7. Commit a checkpoint only when the user explicitly asks for a commit.
 8. Resume the driver from the interrupted workflow state.
 
 Do not defer known framework issues to a later cleanup if they are actively blocking or degrading dogfooding quality.
@@ -118,8 +118,11 @@ Look for:
 - shared-bridge socket refusal/no-response
 - `.bridge-meta.json` advertising a PID/socket while the PID is not running or `.bridge.sock` is absent
 - stale bridge ownership or stale attached clients
+- stale persisted feature ownership being overwritten by an old in-memory session
 - resumed task-review drift after restart/reattach
 - status files that lost the latest review evidence after approval
+- invalid isolated-review tokens changing workflow state
+- write-like Claude `PreToolUse` failures allowing instead of blocking
 
 ## Pre-Resume Checklist
 
@@ -129,6 +132,7 @@ Before returning control to the driver after any framework/runtime fix:
 2. Confirm persisted workflow state is coherent.
 3. Confirm the driver will attach to fresh code/runtime state, not a stale bridge or stale process.
 4. Confirm the next step is a real resume point, not an inferred one.
+5. Confirm no scope or allowlist expansion was applied without a real `USER_GATE` response.
 
 For `driver=hermes`, this specifically means checking whether the shared bridge process or metadata needs to be refreshed so Hermes does not continue against stale code.
 It also means checking that Hermes is using the intended continuation-capable launch/resume path, not a one-shot foreground path that bypasses autonomous continuation behavior.
@@ -188,7 +192,7 @@ At the end of each meaningful slice, record a compact summary that includes:
 3. stop classification
 4. fix applied or not applied
 5. tests run
-6. checkpoint commit, if any
+6. checkpoint commit, if explicitly requested by the user
 7. exact persisted workflow phase/state remaining
 
 ## Repeated-Incident Rule

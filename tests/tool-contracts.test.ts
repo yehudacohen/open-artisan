@@ -4,7 +4,7 @@ import { join } from "node:path"
 
 import { TOOL_HANDLERS } from "#bridge/methods/tool-execute"
 import { TOOLS as MCP_TOOLS } from "#claude-code/bin/artisan-mcp-tools"
-import { buildHermesToolContractsArtifact, hermesToolContractCount } from "../tools/hermes-tool-contract-artifact"
+import { buildHermesPluginManifestArtifact, buildHermesToolContractsArtifact, hermesToolContractCount } from "../tools/hermes-tool-contract-artifact"
 import { ProductManagementQueueItemToolSchema, RequestReviewToolSchema, toJsonSchema } from "#core/schemas"
 import { WORKFLOW_TOOL_NAMES } from "#core/workflow-tool-names"
 import {
@@ -20,6 +20,12 @@ import {
   WORKFLOW_TOOL_CONTRACTS,
   type DriftBacktrackAutoSkipPolicy,
 } from "#core/tool-contracts"
+
+const PRODUCT_MANAGEMENT_TOOL_NAMES = [
+  "product_management_assess_request",
+  "product_management_list_work",
+  "product_management_queue_item",
+]
 
 describe("tool contract registry", () => {
   it("has unique canonical and MCP names", () => {
@@ -108,6 +114,17 @@ describe("tool contract registry", () => {
     expect(generatedContracts).toEqual(JSON.parse(buildHermesToolContractsArtifact()))
   })
 
+  it("keeps the Hermes plugin manifest aligned with the author projection", () => {
+    const manifestPath = join(process.cwd(), "packages", "adapter-hermes", "plugin.yaml")
+    const manifest = readFileSync(manifestPath, "utf-8")
+
+    expect(manifest).toBe(buildHermesPluginManifestArtifact())
+    expect(manifest).not.toContain("oa_mark_satisfied")
+    expect(manifest).not.toContain("oa_submit_task_review")
+    expect(manifest).not.toContain("oa_submit_auto_approve")
+    expect(manifest).not.toContain("oa_spawn_sub_workflow")
+  })
+
   it("keeps reviewer and control tools out of the Hermes author projection", () => {
     const hermesBridgeNames = HERMES_AUTHOR_TOOL_CONTRACTS.map((contract) => contract.name).sort()
     expect(hermesBridgeNames).not.toContain("mark_satisfied")
@@ -157,13 +174,7 @@ describe("tool contract registry", () => {
   })
 
   it("projects product-management tools as author-facing chat-safe bridge, MCP, OpenCode, and Hermes tools", () => {
-    const productManagementToolNames = [
-      "product_management_assess_request",
-      "product_management_list_work",
-      "product_management_queue_item",
-    ]
-
-    for (const name of productManagementToolNames) {
+    for (const name of PRODUCT_MANAGEMENT_TOOL_NAMES) {
       const contract = TOOL_CONTRACTS.find((candidate) => candidate.name === name)
       expect(contract).toBeDefined()
       expect(contract?.workflowGuard).toBe(false)
@@ -174,10 +185,25 @@ describe("tool contract registry", () => {
 
     const queueContract = TOOL_CONTRACTS.find((contract) => contract.name === "product_management_queue_item")
     expect(queueContract?.schema).toBe(ProductManagementQueueItemToolSchema)
-    expect(BRIDGE_TOOL_CONTRACTS.map((contract) => contract.name)).toEqual(expect.arrayContaining(productManagementToolNames))
-    expect(MCP_TOOL_CONTRACTS.map((contract) => contract.name)).toEqual(expect.arrayContaining(productManagementToolNames))
-    expect(OPENCODE_TOOL_CONTRACTS.map((contract) => contract.name)).toEqual(expect.arrayContaining(productManagementToolNames))
-    expect(HERMES_AUTHOR_TOOL_CONTRACTS.map((contract) => contract.name)).toEqual(expect.arrayContaining(productManagementToolNames))
+    expect(BRIDGE_TOOL_CONTRACTS.map((contract) => contract.name)).toEqual(expect.arrayContaining(PRODUCT_MANAGEMENT_TOOL_NAMES))
+    expect(MCP_TOOL_CONTRACTS.map((contract) => contract.name)).toEqual(expect.arrayContaining(PRODUCT_MANAGEMENT_TOOL_NAMES))
+    expect(OPENCODE_TOOL_CONTRACTS.map((contract) => contract.name)).toEqual(expect.arrayContaining(PRODUCT_MANAGEMENT_TOOL_NAMES))
+    expect(HERMES_AUTHOR_TOOL_CONTRACTS.map((contract) => contract.name)).toEqual(expect.arrayContaining(PRODUCT_MANAGEMENT_TOOL_NAMES))
+  })
+
+  it("documents product-management runtime behavior and verification evidence", () => {
+    const runtimeReference = readFileSync(join(process.cwd(), "docs", "current-runtime-reference.md"), "utf-8")
+
+    expect(runtimeReference).toContain("## Product Management Overlay")
+    expect(runtimeReference).toContain("Queued roadmap descriptions include source workflow, feature, session, task, artifact, message, execution-slice, and discovered roadmap ids")
+    expect(runtimeReference).toContain("fall back to current workflow plus attached roadmap context")
+    expect(runtimeReference).toContain("Execution decisions at `USER_GATE` or `ESCAPE_HATCH`")
+    expect(runtimeReference).toContain("opencode run --agent artisan")
+    expect(runtimeReference).toContain("product_management_assess_request")
+    expect(runtimeReference).toContain("## Product Management Overlay")
+    expect(runtimeReference).toContain("### Current-State Review Ratings")
+    expect(runtimeReference).toContain("9.1/10 overall")
+    expect(runtimeReference).toContain("request classification is heuristic")
   })
 
   it("models drift backtrack auto-skip policy as explicit operational contract data", () => {

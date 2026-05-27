@@ -91,6 +91,19 @@ describe("validateWorkflowState — valid states", () => {
   it("returns null for DONE/DRAFT", () => {
     expect(validateWorkflowState(makeValidState({ phase: "DONE", phaseState: "DRAFT" }))).toBeNull()
   })
+
+  it("returns null for MODE_SELECT with null mode", () => {
+    expect(validateWorkflowState(makeValidState({ mode: null, phase: "MODE_SELECT", phaseState: "DRAFT" }))).toBeNull()
+  })
+})
+
+describe("validateWorkflowState — mode selection", () => {
+  it("rejects null mode after MODE_SELECT once a workflow feature is adopted", () => {
+    const err = validateWorkflowState(makeValidState({ mode: null, featureName: "feature-a", phase: "PLANNING", phaseState: "DRAFT" }))
+
+    expect(err).not.toBeNull()
+    expect(err).toContain("mode must be selected")
+  })
 })
 
 describe("validateWorkflowState — schema version", () => {

@@ -258,6 +258,15 @@ export const handleSubmitTaskReview: ToolHandler = async (args, toolCtx, ctx) =>
   const parsedArgs = parseToolArgs(SubmitTaskReviewToolSchema, args)
   if (!parsedArgs.success) return `Error: ${parsedArgs.error}`
   const taskId = recoveredTaskId
+  const tokenResult = consumeReviewSubmissionToken(ctx, parsedArgs.data.review_token, toolCtx.sessionId, "task", taskId, false)
+  if (tokenResult.error) return `Error: ${tokenResult.error}`
+  const currentTaskHash = taskReviewArtifactHash(state, taskId, toolCtx.directory)
+  if (tokenResult.artifactHash && (!currentTaskHash || tokenResult.artifactHash !== currentTaskHash)) {
+    return (
+      "Error: The task files changed after isolated task review context was issued. " +
+      "Request a fresh task review context and retry."
+    )
+  }
   const baseTaskRubricItems = buildTaskReviewRubricItems(buildAdjacentTasksForTask(state.implDag, taskId).length > 0)
   const normalizedSubmission = buildTaskReviewOutputFromSubmission(parsedArgs.data)
   if (!normalizedSubmission.success) {
@@ -324,15 +333,6 @@ export const handleSubmitTaskReview: ToolHandler = async (args, toolCtx, ctx) =>
       `**Attempt consumed:** no\n` +
       `**Reviewer/tool error:** ${review.error}\n` +
       (duplicateCount > 1 ? `\n**Known tooling defect:** same reviewer parse failure seen ${duplicateCount} times. Safe to retry this reviewer submission after fixing/restarting the reviewer path.\n` : "")
-    )
-  }
-  const tokenResult = consumeReviewSubmissionToken(ctx, parsedArgs.data.review_token, toolCtx.sessionId, "task", taskId, false)
-  if (tokenResult.error) return `Error: ${tokenResult.error}`
-  const currentTaskHash = taskReviewArtifactHash(state, taskId, toolCtx.directory)
-  if (tokenResult.artifactHash && (!currentTaskHash || tokenResult.artifactHash !== currentTaskHash)) {
-    return (
-      "Error: The task files changed after isolated task review context was issued. " +
-      "Request a fresh task review context and retry."
     )
   }
   ctx.reviewSubmissionTokens?.delete(parsedArgs.data.review_token)
@@ -418,6 +418,15 @@ export const handleSubmitPhaseReview: ToolHandler = async (args, toolCtx, ctx) =
 
   const parsedArgs = parseToolArgs(SubmitPhaseReviewToolSchema, args)
   if (!parsedArgs.success) return `Error: ${parsedArgs.error}`
+  const tokenResult = consumeReviewSubmissionToken(ctx, parsedArgs.data.review_token, toolCtx.sessionId, "phase", state.phase, false)
+  if (tokenResult.error) return `Error: ${tokenResult.error}`
+  const currentPhaseHash = artifactFilesHash(state.reviewArtifactFiles, toolCtx.directory)
+  if (tokenResult.artifactHash && (!currentPhaseHash || tokenResult.artifactHash !== currentPhaseHash)) {
+    return (
+      "Error: The phase artifact files changed after isolated review context was issued. " +
+      "Request a fresh phase review context and retry."
+    )
+  }
   const normalizedSubmission = buildPhaseReviewOutputFromSubmission(parsedArgs.data)
   if (!normalizedSubmission.success) return `Error: ${normalizedSubmission.error}`
   const reviewOutput = normalizedSubmission.reviewOutput
@@ -476,15 +485,6 @@ export const handleSubmitPhaseReview: ToolHandler = async (args, toolCtx, ctx) =
 
   const result = computeMarkSatisfiedTransition(rawCriteria, state, ctx.engine!.sm)
   if (!result.success) return `Error: ${result.error}`
-  const tokenResult = consumeReviewSubmissionToken(ctx, parsedArgs.data.review_token, toolCtx.sessionId, "phase", state.phase, false)
-  if (tokenResult.error) return `Error: ${tokenResult.error}`
-  const currentPhaseHash = artifactFilesHash(state.reviewArtifactFiles, toolCtx.directory)
-  if (tokenResult.artifactHash && (!currentPhaseHash || tokenResult.artifactHash !== currentPhaseHash)) {
-    return (
-      "Error: The phase artifact files changed after isolated review context was issued. " +
-      "Request a fresh phase review context and retry."
-    )
-  }
   ctx.reviewSubmissionTokens?.delete(parsedArgs.data.review_token)
   await persistPhaseReviewResult(ctx.openArtisanServices, state, rawCriteria.map((criterion) => ({
     criterion: criterion.criterion,

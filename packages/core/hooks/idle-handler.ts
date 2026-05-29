@@ -58,6 +58,14 @@ export function handleIdle(state: WorkflowState): IdleDecision {
     }
   }
 
+  const structuralFailure = repeatedStructuralToolFailure(state)
+  if (structuralFailure) {
+    return {
+      action: "escalate",
+      message: buildStructuralFailureMessage(state, structuralFailure),
+    }
+  }
+
   if (state.phaseState === "USER_GATE") {
     const isRobotArtisan = state.activeAgent === "robot-artisan"
     if (!isRobotArtisan) {
@@ -120,7 +128,16 @@ export function handleIdle(state: WorkflowState): IdleDecision {
 function shouldEscalateBuildModeStall(state: WorkflowState): boolean {
   return state.retryCount >= MAX_IDLE_RETRIES || (
     state.phaseState === "REVIEW" && hasReviewerRuntimeFailure(state)
-  )
+  ) || repeatedStructuralToolFailure(state) !== null
+}
+
+function repeatedStructuralToolFailure(state: WorkflowState): WorkflowState["toolFailureHistory"][number] | null {
+  return state.toolFailureHistory.find((entry) => (
+    entry.count > 1 &&
+    entry.phase === state.phase &&
+    entry.phaseState === state.phaseState &&
+    (entry.category === "tooling" || entry.category === "guard-block")
+  )) ?? null
 }
 
 function hasReviewerRuntimeFailure(state: WorkflowState): boolean {
@@ -147,5 +164,14 @@ function buildEscalationMessage(phase: Phase, phaseState: PhaseState, retries: n
   return (
     `Workflow stalled: the agent stopped ${retries} times during the ${phase}/${phaseState} ` +
     `phase without completing it. Please provide input or instructions to continue.`
+  )
+}
+
+function buildStructuralFailureMessage(state: WorkflowState, failure: WorkflowState["toolFailureHistory"][number]): string {
+  return (
+    `Workflow stalled because ${failure.toolName} has hit the same ${failure.category} failure ` +
+    `${failure.count} times during ${state.phase}/${state.phaseState}: ${failure.message}. ` +
+    `Do not keep retrying the same tool call or invent placeholder files. ` +
+    `Run summarize_workflow_incident, repair the workflow metadata/state, or ask the user for maintainer guidance.`
   )
 }

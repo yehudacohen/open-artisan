@@ -120,6 +120,22 @@ export const TASK_REVIEW_TIMEOUT_MS = 600_000
  */
 export const CHANGE_PROPOSAL_REVIEW_TIMEOUT_MS = 600_000
 
+/** Idle timeout for isolated review work before progress-aware supervision intervenes. */
+export const REVIEW_PROGRESS_IDLE_TIMEOUT_MS = 120_000
+
+/**
+ * Idle timeout for final IMPLEMENTATION reviews. These review the accumulated
+ * project artifact set and regularly need longer than smaller phase/task reviews
+ * before producing meaningful progress.
+ */
+export const IMPLEMENTATION_REVIEW_PROGRESS_IDLE_TIMEOUT_MS = 600_000
+
+/** Absolute wall-clock cap for isolated review work; progress never extends beyond this. */
+export const REVIEW_PROGRESS_HARD_TIMEOUT_MS = 900_000
+
+/** Grace period for owned reviewer child shutdown before force-kill. */
+export const REVIEW_PROGRESS_SHUTDOWN_GRACE_MS = 5_000
+
 /** Number of random bytes in one-time bridge reviewer submission tokens. */
 export const REVIEW_SUBMISSION_TOKEN_BYTES = 32
 
@@ -128,6 +144,9 @@ export const REVIEW_SUBMISSION_TOKEN_TTL_MS = 15 * 60 * 1000
 
 /** Maximum JSON-RPC stdio request line length accepted by the bridge. */
 export const BRIDGE_MAX_STDIO_REQUEST_CHARS = 1_048_576
+
+/** Maximum time stdio bridge close waits for in-flight requests before cleanup proceeds. */
+export const BRIDGE_ACTIVE_REQUEST_DRAIN_TIMEOUT_MS = 30_000
 
 /**
  * Maximum number of times the agent can call mark_task_complete for the same

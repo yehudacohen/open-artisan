@@ -74,12 +74,12 @@ describe("buildTaskReviewAcceptancePlan", () => {
       concurrency: { maxParallelTasks: 1 },
       taskId: "T1",
       implDag: [
-        makeTask({ id: "T1", status: "complete", expectedFiles: ["src/a.ts"] }),
+        makeTask({ id: "T1", status: "complete", expectedFiles: ["src/a.ts"], expectedTests: ["tests/a.test.ts"] }),
         makeTask({ id: "T2", dependencies: ["T1"], status: "pending" }),
       ],
     })
 
-    expect(plan.completedTaskFiles).toEqual(["src/a.ts"])
+    expect(plan.completedTaskFiles).toEqual(["src/a.ts", "tests/a.test.ts"])
     expect(plan.nextTaskId).toBe("T2")
     expect(plan.nextPhaseState).toBe("SCHEDULING")
     expect(plan.resetUserGateMessage).toBe(false)

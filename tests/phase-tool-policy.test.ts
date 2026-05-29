@@ -467,6 +467,20 @@ describe("Tool policy — IMPLEMENTATION with INCREMENTAL allowlist", () => {
     expect(policy.writePathPredicate?.("/project/src/baz.ts")).toBe(false)
   })
 
+  it("allows approved cleanup delete paths separately from task ownership", () => {
+    const policy = getPhaseToolPolicy(
+      "IMPLEMENTATION",
+      "DRAFT",
+      "INCREMENTAL",
+      allowlist,
+      ["/project/src/foo.ts"],
+      "/project",
+      ["/project/src/accidental-shim.ts"],
+    )
+    expect(policy.writePathPredicate?.("/project/src/accidental-shim.ts")).toBe(false)
+    expect(policy.cleanupPathPredicate?.("/project/src/accidental-shim.ts")).toBe(true)
+  })
+
   it("GREENFIELD/REFACTOR mode: no write block, but has writePathPredicate for .env (R3-G1)", () => {
     const policy = getPhaseToolPolicy("IMPLEMENTATION", "DRAFT", "GREENFIELD", [])
     expect(policy.blocked).not.toContain("write")

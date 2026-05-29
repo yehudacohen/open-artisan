@@ -47,6 +47,8 @@ function makeState(overrides: Partial<WorkflowState> = {}): WorkflowState {
     pendingRevisionSteps: null,
     revisionAutoSkipBlockedReason: null,
     pendingAllowlistExpansions: [],
+    pendingCurrentTaskScopeExpansions: [],
+    approvedCleanupFiles: [],
     toolFailureHistory: [],
     userGateMessageReceived: false,
     artifactDiskPaths: {},
@@ -199,8 +201,8 @@ describe("captureRevisionBaseline — file-based phases", () => {
     expect(baseline).not.toBeNull()
     expect(baseline!.type).toBe("git-sha")
     if (baseline!.type === "git-sha") {
-      // Hash should match what git diff would produce
-      const expectedDiff = execFileSync("git", ["diff"], { cwd: tmpDir, stdio: "pipe", encoding: "utf-8" })
+      // Hash should match what git diff HEAD -- would produce.
+      const expectedDiff = execFileSync("git", ["diff", "HEAD", "--"], { cwd: tmpDir, stdio: "pipe", encoding: "utf-8" })
       expect(baseline!.sha).toBe(contentHash(expectedDiff))
     }
   })
@@ -359,6 +361,23 @@ describe("hasArtifactChanged — git-sha (worktree hash)", () => {
     expect(baseline).not.toBeNull()
     // Modify tracked file (unstaged change — shows in git diff)
     writeFileSync(filePath, "new content")
+    const changed = await hasArtifactChanged(baseline!, "INTERFACES", state, tmpDir)
+    expect(changed).toBe(true)
+  })
+
+  it("returns true when new REVISE work is staged before request_review", async () => {
+    initGitRepo(tmpDir)
+    const filePath = join(tmpDir, "types.ts")
+    writeFileSync(filePath, "old content")
+    git(["add", "-A"], tmpDir)
+    git(["commit", "-m", "track"], tmpDir)
+    const state = makeState({ phase: "INTERFACES" })
+    const baseline = await captureRevisionBaseline("INTERFACES", state, tmpDir)
+    expect(baseline).not.toBeNull()
+
+    writeFileSync(filePath, "new content")
+    git(["add", filePath], tmpDir)
+
     const changed = await hasArtifactChanged(baseline!, "INTERFACES", state, tmpDir)
     expect(changed).toBe(true)
   })

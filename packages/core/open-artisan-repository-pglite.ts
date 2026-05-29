@@ -271,6 +271,8 @@ function freshWorkflowState(sessionId: string): WorkflowState {
     pendingRevisionSteps: null,
     revisionAutoSkipBlockedReason: null,
     pendingAllowlistExpansions: [],
+    pendingCurrentTaskScopeExpansions: [],
+    approvedCleanupFiles: [],
     toolFailureHistory: [],
     userGateMessageReceived: false,
     reviewArtifactHash: null,
@@ -307,6 +309,7 @@ function buildImportedTaskGraph(state: WorkflowState, workflowId: string): DbTas
       status: task.status,
       category: task.humanGate ? "human-gate" : (task.category ?? "standalone"),
       complexity: task.estimatedComplexity,
+      ...(task.intentionalDeletionTargets ? { intentionalDeletionTargets: unique(task.intentionalDeletionTargets) } : {}),
       createdAt: nowIso(),
       updatedAt: nowIso(),
     })),
@@ -329,6 +332,14 @@ function buildImportedTaskGraph(state: WorkflowState, workflowId: string): DbTas
         roadmapItemId,
       })),
     ),
+  }
+}
+
+function normalizeDbTaskRecord(task: DbTask): DbTask {
+  const intentionalDeletionTargets = unique(task.intentionalDeletionTargets ?? [])
+  return {
+    ...task,
+    ...(intentionalDeletionTargets.length > 0 ? { intentionalDeletionTargets } : {}),
   }
 }
 
@@ -685,8 +696,13 @@ export function createPGliteOpenArtisanRepository(
     await schemaDb.deleteFrom("task_dependencies").where("workflow_id", "=", workflowId).execute()
     await schemaDb.deleteFrom("tasks").where("workflow_id", "=", workflowId).execute()
 
-    if (graph.tasks.length > 0) {
-      await schemaDb.insertInto("tasks").values(graph.tasks.map((task) => ({
+    const normalizedGraph: DbTaskGraph = {
+      ...graph,
+      tasks: graph.tasks.map(normalizeDbTaskRecord),
+    }
+
+    if (normalizedGraph.tasks.length > 0) {
+      await schemaDb.insertInto("tasks").values(normalizedGraph.tasks.map((task) => ({
         id: task.id,
         workflow_id: workflowId,
         task_key: task.taskKey,
@@ -721,7 +737,7 @@ export function createPGliteOpenArtisanRepository(
         roadmap_item_id: link.roadmapItemId,
       }))).execute()
     }
-    return openArtisanDbOk(clone(graph))
+    return openArtisanDbOk(clone(normalizedGraph))
   }
 
   async function analyzeBoundaryChangeInDb(db: DbExecutor, input: BoundaryChangeInput): Promise<OpenArtisanDbResult<BoundaryChangeAnalysis>> {
@@ -1864,6 +1880,7 @@ export function createPGliteOpenArtisanRepository(
         if (!("realWorldAcceptanceScenario" in state) || state.realWorldAcceptanceScenario === undefined) {
           state.realWorldAcceptanceScenario = null
         }
+        state.approvedCleanupFiles ??= []
         const artifactRows = await schemaDb.selectFrom("artifacts").selectAll().where("workflow_id", "=", workflow.id).execute()
         for (const artifactRow of artifactRows) {
           const artifact = rowRecord<DbArtifact>(artifactRow)
@@ -1902,6 +1919,7 @@ export function createPGliteOpenArtisanRepository(
             estimatedComplexity: task.complexity,
             status: task.status,
             category: task.category,
+            ...(task.intentionalDeletionTargets ? { intentionalDeletionTargets: [...task.intentionalDeletionTargets] } : {}),
             ...(roadmapItemIdsByTaskId.has(task.id) ? { roadmapItemIds: roadmapItemIdsByTaskId.get(task.id)! } : {}),
             ...(gatesByTaskId.has(task.id)
               ? {

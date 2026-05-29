@@ -324,6 +324,18 @@ describe("computeProposeBacktrackTransition", () => {
     expect(result.transition.clearImplDag).toBe(true)
   })
 
+  it("allows backtracking from IMPLEMENTATION/HUMAN_GATE when the user reroutes planning", () => {
+    const state = makeState({ phase: "IMPLEMENTATION", phaseState: "HUMAN_GATE" })
+    const result = computeProposeBacktrackTransition(
+      { target_phase: "PLANNING", reason: "The user wants to replace the manual prerequisite gate with graph-native provisioning." },
+      state,
+    )
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    expect(result.transition.targetPhase).toBe("PLANNING")
+    expect(result.transition.clearImplDag).toBe(true)
+  })
+
   it("does NOT clear IMPL DAG when backtracking within late phases", () => {
     const state = makeState({ phase: "IMPLEMENTATION", phaseState: "DRAFT" })
     const result = computeProposeBacktrackTransition(
@@ -389,6 +401,6 @@ describe("computeProposeBacktrackTransition", () => {
     )
     expect(result.success).toBe(false)
     if (result.success) return
-    expect(result.error).toContain("DRAFT, REVISE, or IMPLEMENTATION/TASK_REVISE")
+    expect(result.error).toContain("DRAFT, REVISE, IMPLEMENTATION/TASK_REVISE, or IMPLEMENTATION/HUMAN_GATE")
   })
 })

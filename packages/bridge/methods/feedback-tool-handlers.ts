@@ -19,6 +19,7 @@ import { parseToolArgs } from "../../core/tool-args"
 import { SubmitFeedbackToolSchema } from "../../core/schemas"
 import { computeSubmitFeedbackApproveTransition, computeSubmitFeedbackReviseTransition } from "../../core/tools/transitions"
 import { applyPendingAllowlistExpansions, buildAllowlistWithPendingExpansions } from "../../core/tools/allowlist-expansion"
+import { applyPendingCurrentTaskScopeExpansions } from "../../core/tools/current-task-scope"
 import { computeForwardSkip } from "../../core/fast-forward"
 import {
   buildSubmitFeedbackClarificationMessage,
@@ -511,9 +512,50 @@ async function handleApproveFeedback(
       const files = Array.from(new Set(state.pendingAllowlistExpansions.flatMap((request) => request.files)))
       return `Dry-run allowlist expansion approval passed for ${files.join(", ")}. No checkpoint was created and workflow state was not mutated.`
     }
+    const hasExplicitFeedbackText = (args.feedback_text ?? "").trim().length > 0
+    const hasExplicitPendingAllowlistApproval = (() => {
+      if (!args.approved_files || args.approved_files.length === 0) return false
+      const approved = new Set(normalizeApprovalFilePaths(args.approved_files, cwd))
+      return state.pendingAllowlistExpansions
+        .flatMap((request) => request.files)
+        .every((file) => approved.has(normalizeApprovalFilePaths([file], cwd)[0] ?? file))
+    })()
+    if (!state.userGateMessageReceived && !hasExplicitFeedbackText && !hasExplicitPendingAllowlistApproval) {
+      return buildSelfApprovalBlockedMessage()
+    }
+    if (!state.userGateMessageReceived) {
+      await ctx.engine!.store.update(toolCtx.sessionId, (draft) => {
+        draft.userGateMessageReceived = true
+      })
+    }
     let message = ""
+    const explicitUserApproval = hasExplicitFeedbackText || hasExplicitPendingAllowlistApproval
     await ctx.engine!.store.update(toolCtx.sessionId, (draft) => {
-      const applied = applyPendingAllowlistExpansions(draft, toolCtx.directory)
+      const applied = applyPendingAllowlistExpansions(draft, toolCtx.directory, { explicitUserApproval })
+      message = applied.success ? applied.message : `Error: ${applied.error}`
+    })
+    return message
+  }
+  if (state.pendingCurrentTaskScopeExpansions.length > 0 && state.phase === "IMPLEMENTATION") {
+    if (args.dry_run) {
+      const files = Array.from(new Set(state.pendingCurrentTaskScopeExpansions.flatMap((request) => [...request.files, ...request.expectedTests, ...(request.cleanupFiles ?? [])])))
+      return `Dry-run current-task scope expansion approval passed for ${files.join(", ")}. No checkpoint was created and workflow state was not mutated.`
+    }
+    const hasExplicitFeedbackText = (args.feedback_text ?? "").trim().length > 0
+    const hasExplicitPendingTaskScopeApproval = (() => {
+      if (!args.approved_files || args.approved_files.length === 0) return false
+      const approved = new Set(normalizeApprovalFilePaths(args.approved_files, cwd))
+      return state.pendingCurrentTaskScopeExpansions
+        .flatMap((request) => [...request.files, ...request.expectedTests, ...(request.cleanupFiles ?? [])])
+        .every((file) => approved.has(normalizeApprovalFilePaths([file], cwd)[0] ?? file))
+    })()
+    if (!state.userGateMessageReceived && !hasExplicitFeedbackText && !hasExplicitPendingTaskScopeApproval) {
+      return buildSelfApprovalBlockedMessage()
+    }
+    let message = ""
+    const explicitUserApproval = hasExplicitFeedbackText || hasExplicitPendingTaskScopeApproval
+    await ctx.engine!.store.update(toolCtx.sessionId, (draft) => {
+      const applied = applyPendingCurrentTaskScopeExpansions(draft, toolCtx.directory, { explicitUserApproval })
       message = applied.success ? applied.message : `Error: ${applied.error}`
     })
     return message
@@ -580,7 +622,11 @@ export const handleSubmitFeedback: ToolHandler = async (args, toolCtx, ctx) => {
   const gateError = validateSubmitFeedbackGate(state.phaseState)
   if (gateError) return `Error: ${gateError}`
 
-  if (!state.userGateMessageReceived && !parsedArgs.data.dry_run) {
+  const allowPendingExpansionWithExplicitFeedback = parsedArgs.data.feedback_type === "approve" &&
+    ((state.pendingAllowlistExpansions.length > 0 && (state.phase === "IMPL_PLAN" || state.phase === "IMPLEMENTATION")) ||
+      (state.pendingCurrentTaskScopeExpansions.length > 0 && state.phase === "IMPLEMENTATION")) &&
+    (feedbackTextArg.trim().length > 0 || Boolean(parsedArgs.data.approved_files && parsedArgs.data.approved_files.length > 0))
+  if (!state.userGateMessageReceived && !parsedArgs.data.dry_run && !allowPendingExpansionWithExplicitFeedback) {
     return buildSelfApprovalBlockedMessage()
   }
 

@@ -380,9 +380,10 @@ export function computeProposeBacktrackTransition(
   const isBacktrackAuthoringState =
     state.phaseState === "DRAFT" ||
     state.phaseState === "REVISE" ||
-    (state.phase === "IMPLEMENTATION" && state.phaseState === "TASK_REVISE")
+    (state.phase === "IMPLEMENTATION" && state.phaseState === "TASK_REVISE") ||
+    (state.phase === "IMPLEMENTATION" && state.phaseState === "HUMAN_GATE")
   if (!isBacktrackAuthoringState) {
-    return { success: false, error: `propose_backtrack can only be called from DRAFT, REVISE, or IMPLEMENTATION/TASK_REVISE state (current: ${state.phase}/${state.phaseState}).` }
+    return { success: false, error: `propose_backtrack can only be called from DRAFT, REVISE, IMPLEMENTATION/TASK_REVISE, or IMPLEMENTATION/HUMAN_GATE state (current: ${state.phase}/${state.phaseState}).` }
   }
   if (state.phase === "MODE_SELECT" || state.phase === "DISCOVERY" || state.phase === "DONE") {
     return { success: false, error: `propose_backtrack cannot be called from ${state.phase} — there is no earlier phase to backtrack to.` }

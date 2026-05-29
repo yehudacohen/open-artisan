@@ -169,6 +169,69 @@ describe("applyPendingAllowlistExpansions", () => {
     expect(state.phaseState).toBe("TASK_REVISE")
   })
 
+  it("applies prior TESTS pending expansion during HUMAN_GATE without mutating task boundary", () => {
+    const state = makeWorkflowState({
+      mode: "INCREMENTAL",
+      phase: "IMPLEMENTATION",
+      phaseState: "HUMAN_GATE",
+      userGateMessageReceived: true,
+      currentTaskId: "T-human",
+      fileAllowlist: ["/repo/src/runtime.ts"],
+      pendingAllowlistExpansions: [{
+        files: ["/repo/tests/platform-composition.test.ts", "/repo/src/platform-stack.ts"],
+        reason: "TESTS review approved adding planned files that were outside the original allowlist.",
+        sourceArtifact: "tests",
+        requestedAtPhase: "TESTS",
+        requestedAt: 1,
+      }],
+      implDag: [{
+        id: "T-human",
+        description: "External platform setup",
+        dependencies: [],
+        expectedFiles: [],
+        expectedTests: [],
+        estimatedComplexity: "medium",
+        status: "human-gated",
+        humanGate: { whatIsNeeded: "Configure platform", why: "Needed for runtime", verificationSteps: "Check credentials", resolved: false },
+      }],
+    })
+
+    const result = applyPendingAllowlistExpansions(state)
+
+    expect(result.success).toBe(true)
+    expect(state.fileAllowlist).toContain("/repo/tests/platform-composition.test.ts")
+    expect(state.fileAllowlist).toContain("/repo/src/platform-stack.ts")
+    expect(state.implDag?.[0]?.expectedFiles).toEqual([])
+    expect(state.implDag?.[0]?.expectedTests).toEqual([])
+    expect(state.pendingAllowlistExpansions).toEqual([])
+    expect(state.phase).toBe("IMPLEMENTATION")
+    expect(state.phaseState).toBe("HUMAN_GATE")
+  })
+
+  it("accepts explicit approval proof for prior TESTS pending expansion without persisted gate flag", () => {
+    const state = makeWorkflowState({
+      mode: "INCREMENTAL",
+      phase: "IMPLEMENTATION",
+      phaseState: "HUMAN_GATE",
+      userGateMessageReceived: false,
+      fileAllowlist: ["/repo/src/runtime.ts"],
+      pendingAllowlistExpansions: [{
+        files: ["/repo/tests/platform-composition.test.ts"],
+        reason: "TESTS review approved adding planned files that were outside the original allowlist.",
+        sourceArtifact: "tests",
+        requestedAtPhase: "TESTS",
+        requestedAt: 1,
+      }],
+    })
+
+    const result = applyPendingAllowlistExpansions(state, "/repo", { explicitUserApproval: true })
+
+    expect(result.success).toBe(true)
+    expect(state.fileAllowlist).toContain("/repo/tests/platform-composition.test.ts")
+    expect(state.pendingAllowlistExpansions).toEqual([])
+    expect(state.phaseState).toBe("HUMAN_GATE")
+  })
+
   it("rejects pending expansion at USER_GATE without real user input", () => {
     const state = makeWorkflowState({
       mode: "INCREMENTAL",

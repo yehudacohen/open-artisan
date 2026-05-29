@@ -9,6 +9,9 @@ export interface PhaseToolPolicy {
    */
   writePathPredicate?: (filePath: string) => boolean
 
+  /** For delete-only guarded patches: optional predicate for approved cleanup deletes. */
+  cleanupPathPredicate?: (filePath: string) => boolean
+
   /**
    * For bash/shell tools: an optional predicate on the command string.
    * If provided, the bash command is only allowed when predicate returns true.

@@ -19,6 +19,7 @@ from hermes_adapter.prompt_hook import (
     _dispatch_auto_approve,
     _auto_accept_review,
     _extract_user_message,
+    _review_idle_timeout_s,
     _review_timeout_s,
 )
 from hermes_adapter.types import BridgeError
@@ -26,6 +27,19 @@ from hermes_adapter.session_projects import clear_session_project_dir, get_last_
 from hermes_adapter.constants import resolve_reviewer_command
 
 from .conftest import MockBridgeClient
+
+
+def test_review_idle_timeout_is_longer_for_implementation(monkeypatch):
+    monkeypatch.delenv("OPENARTISAN_REVIEW_IDLE_TIMEOUT_S", raising=False)
+
+    assert _review_idle_timeout_s("PLANNING") == 120
+    assert _review_idle_timeout_s("IMPLEMENTATION") == 600
+
+
+def test_review_idle_timeout_env_override_applies_to_implementation(monkeypatch):
+    monkeypatch.setenv("OPENARTISAN_REVIEW_IDLE_TIMEOUT_S", "240")
+
+    assert _review_idle_timeout_s("IMPLEMENTATION") == 240
 
 
 @pytest.fixture(autouse=True)
@@ -445,11 +459,11 @@ class TestDispatchTaskReviewSubprocess:
         )
 
         with patch(
-            "hermes_adapter.prompt_hook.subprocess.run", return_value=mock_result
+            "hermes_adapter.prompt_hook._run_reviewer_subprocess", return_value=mock_result
         ) as run:
             _dispatch_task_review(started_bridge, "s1", state, "/tmp/project")
 
-        assert run.call_args.kwargs["cwd"] == "/tmp/project"
+        assert run.call_args.args[1] == "/tmp/project"
 
         # Should have called tool.execute with submit_task_review
         tool_calls = started_bridge.get_calls("tool.execute")
@@ -468,7 +482,7 @@ class TestDispatchTaskReviewSubprocess:
         state = {"taskCompletionInProgress": "T1"}
 
         with patch(
-            "hermes_adapter.prompt_hook.subprocess.run",
+            "hermes_adapter.prompt_hook._run_reviewer_subprocess",
             side_effect=FileNotFoundError("claude not found"),
         ):
             _dispatch_task_review(started_bridge, "s1", state, "/tmp/project")
@@ -508,7 +522,7 @@ class TestDispatchTaskReviewSubprocess:
         started_bridge.set_response_fn("tool.execute", flaky_tool_execute)
 
         with patch(
-            "hermes_adapter.prompt_hook.subprocess.run", return_value=mock_result
+            "hermes_adapter.prompt_hook._run_reviewer_subprocess", return_value=mock_result
         ):
             _dispatch_task_review(started_bridge, "s1", state, "/tmp/project")
 
@@ -523,7 +537,7 @@ class TestDispatchTaskReviewSubprocess:
         state = {"taskCompletionInProgress": "T1"}
 
         with patch(
-            "hermes_adapter.prompt_hook.subprocess.run",
+            "hermes_adapter.prompt_hook._run_reviewer_subprocess",
             side_effect=subprocess.TimeoutExpired("claude", 180),
         ):
             _dispatch_task_review(started_bridge, "s1", state, "/tmp/project")
@@ -544,7 +558,7 @@ class TestDispatchTaskReviewSubprocess:
         mock_result.stdout = ""
 
         with patch(
-            "hermes_adapter.prompt_hook.subprocess.run", return_value=mock_result
+            "hermes_adapter.prompt_hook._run_reviewer_subprocess", return_value=mock_result
         ):
             _dispatch_task_review(started_bridge, "s1", state, "/tmp/project")
 
@@ -597,7 +611,7 @@ class TestPhaseReviewDispatch:
         )
 
         with patch(
-            "hermes_adapter.prompt_hook.subprocess.run", return_value=mock_result
+            "hermes_adapter.prompt_hook._run_reviewer_subprocess", return_value=mock_result
         ):
             hook = create_prompt_hook(started_bridge, "s1")
             hook()
@@ -631,11 +645,11 @@ class TestPhaseReviewDispatch:
         )
 
         with patch(
-            "hermes_adapter.prompt_hook.subprocess.run", return_value=mock_result
+            "hermes_adapter.prompt_hook._run_reviewer_subprocess", return_value=mock_result
         ) as run:
             dispatch_phase_review(started_bridge, "s1", state, "/tmp/project")
 
-        assert run.call_args.kwargs["cwd"] == "/tmp/project"
+        assert run.call_args.args[1] == "/tmp/project"
 
         tool_calls = started_bridge.get_calls("tool.execute")
         assert len(tool_calls) == 1
@@ -650,7 +664,7 @@ class TestPhaseReviewDispatch:
         state = {"phase": "PLANNING", "phaseState": "REVIEW"}
 
         with patch(
-            "hermes_adapter.prompt_hook.subprocess.run",
+            "hermes_adapter.prompt_hook._run_reviewer_subprocess",
             side_effect=subprocess.TimeoutExpired("claude", 180),
         ):
             dispatch_phase_review(started_bridge, "s1", state, "/tmp/project")
@@ -682,7 +696,7 @@ class TestPhaseReviewDispatch:
         mock_result.stderr = "Please run /login"
 
         with patch(
-            "hermes_adapter.prompt_hook.subprocess.run", return_value=mock_result
+            "hermes_adapter.prompt_hook._run_reviewer_subprocess", return_value=mock_result
         ):
             dispatch_phase_review(started_bridge, "s1", state, "/tmp/project")
 
@@ -702,7 +716,7 @@ class TestPhaseReviewDispatch:
         mock_result.stderr = ""
 
         with patch(
-            "hermes_adapter.prompt_hook.subprocess.run", return_value=mock_result
+            "hermes_adapter.prompt_hook._run_reviewer_subprocess", return_value=mock_result
         ):
             dispatch_phase_review(started_bridge, "s1", state, "/tmp/project")
 
@@ -722,7 +736,7 @@ class TestPhaseReviewDispatch:
         mock_result.stderr = "Reviewer wrote only stderr"
 
         with patch(
-            "hermes_adapter.prompt_hook.subprocess.run", return_value=mock_result
+            "hermes_adapter.prompt_hook._run_reviewer_subprocess", return_value=mock_result
         ):
             dispatch_phase_review(started_bridge, "s1", state, "/tmp/project")
 
@@ -741,7 +755,7 @@ class TestPhaseReviewDispatch:
 
     def test_review_timeout_rejects_too_low_values(self, monkeypatch):
         monkeypatch.setenv("OPENARTISAN_REVIEW_TIMEOUT_S", "5")
-        assert _review_timeout_s() == 180
+        assert _review_timeout_s() == 900
 
     def test_auto_approve_runs_reviewer_inside_project_dir(self, started_bridge):
         started_bridge.set_response("message.process", {"intercepted": True})
@@ -752,11 +766,11 @@ class TestPhaseReviewDispatch:
         mock_result.stdout = json.dumps({"approved": False, "reason": "test"})
 
         with patch(
-            "hermes_adapter.prompt_hook.subprocess.run", return_value=mock_result
+            "hermes_adapter.prompt_hook._run_reviewer_subprocess", return_value=mock_result
         ) as run:
             _dispatch_auto_approve(started_bridge, "s1", "/tmp/project")
 
-        assert run.call_args.kwargs["cwd"] == "/tmp/project"
+        assert run.call_args.args[1] == "/tmp/project"
 
 
 # ---------------------------------------------------------------------------

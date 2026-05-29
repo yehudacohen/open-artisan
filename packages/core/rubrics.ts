@@ -150,7 +150,7 @@ export function getPhaseStructuralGate(phase: Phase): string {
     case "TESTS":
       return "**Bespoke structural gate — Tests review:** verify the reviewed artifacts are runnable tests that exercise behavior through the intended public/runtime seams. Tests must catch missing wiring, integration boundary drift, and helper-only implementations, not merely assert isolated helpers exist." + uncertaintyGate
     case "IMPL_PLAN":
-      return "**Bespoke structural gate — Implementation-plan review:** verify the DAG makes structure and wiring executable. Every task must own clear files, dependencies, handoffs, task category, expected tests, and any scaffold → human-gate → integration chain needed for real runtime completion." + uncertaintyGate
+      return "**Bespoke structural gate — Implementation-plan review:** verify the DAG makes structure and wiring executable. Every unfinished task must own clear files, dependencies, handoffs, task category, expected tests, and any scaffold → human-gate → integration chain needed for real runtime completion. Completed immutable tasks in a revised implementation plan are historical audit records: do not require their metadata to be rewritten; require any missing readiness/evidence to be owned by a future corrective, revert, or superseding task." + uncertaintyGate
     case "IMPLEMENTATION":
       return "**Bespoke structural gate — Implementation review:** verify the shipped runtime is wired end-to-end. Helpers, adapters, guards, clients, bridge paths, docs, tests, and dogfood evidence must agree with the approved scope; half-integrated shared paths fail even if isolated unit tests pass." + uncertaintyGate
     default:
@@ -358,6 +358,8 @@ ${structuralGate}
 8. Protocol/API completeness — for adapter, plugin, or integration projects: every method, event, or lifecycle hook in the target protocol that affects correctness must be accounted for. Cross-reference the protocol definition (API docs, reference implementations, or protocol spec) and verify no required calls are omitted. If a protocol method used by reference implementations is intentionally skipped, the omission must be explicitly justified (e.g. "compaction not needed because X manages context internally"). Uncaught omissions here become structural bugs that surface late.
 9. ${scenarioSufficiencyCriterion}
 [If the artifact is a pass-through:] Does the justification for why this phase is low-value hold up? Is the reason specific and verifiable, not vague? Would a reasonable engineer agree? Is the agent being lazy?
+
+State-aware completed-task rule: if this is a revised IMPL_PLAN after implementation has begun, completed tasks are immutable historical records. A completed task that lacks ideal executable metadata does not fail review by itself when the artifact preserves it unchanged and a future corrective/revert/superseding task explicitly owns the missing files, tests, commands, evidence, or final-review readiness. Fail the artifact only if the gap is unowned, the completed task is rewritten, or the corrective ownership is ambiguous.
 
 ${qualityBlock}
 ${designBlock}

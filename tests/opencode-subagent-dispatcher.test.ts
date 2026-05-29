@@ -4,7 +4,7 @@
  * Verifies:
  * - createSession extracts session ID from SDK envelope
  * - prompt() extracts text from SDK parts array
- * - destroy() calls session.delete (no parentId) or skips (with parentId)
+ * - destroy() calls session.delete for created reviewer sessions, including parented UI children
  * - Model routing is sent with prompts, not session creation
  * - Throws when client.session is not available
  */
@@ -200,12 +200,12 @@ describe("createOpenCodeSubagentDispatcher", () => {
     expect(client.session.delete).toHaveBeenCalledTimes(1)
   })
 
-  it("destroy() skips session.delete when parentId is set", async () => {
+  it("destroy() deletes the created child session when parentId is set", async () => {
     const client = makeClient()
     const dispatcher = createOpenCodeSubagentDispatcher(client as any)
     const session = await dispatcher.createSession({ title: "test", agent: "workflow-reviewer", parentId: "parent-1" })
     await session.destroy()
-    expect(client.session.delete).not.toHaveBeenCalled()
+    expect(client.session.delete).toHaveBeenCalledWith({ path: { id: "sess-1" } })
   })
 
   it("uses SDK-compatible session.create body only", async () => {
@@ -342,13 +342,47 @@ describe("createOpenCodeSubagentDispatcher", () => {
       },
     })).rejects.toThrow("must call submit_task_review_result")
 
-    expect(calls).toEqual([
-      "begin:sess-1:submit_task_review_result:parent-1:task:T2:attempt-1",
-      "take:sess-1:submit_task_review_result",
-      "take:sess-1:submit_task_review_result",
-      "take:sess-1:submit_task_review_result",
-      "clear:sess-1",
-    ])
+    expect(calls[0]).toBe("begin:sess-1:submit_task_review_result:parent-1:task:T2:attempt-1")
+    expect(calls.filter((call) => call === "take:sess-1:submit_task_review_result").length).toBeGreaterThanOrEqual(3)
+    expect(calls.at(-1)).toBe("clear:sess-1")
+    expect(client.session.prompt).toHaveBeenCalledTimes(2)
+  })
+
+  it("re-prompts for a required reviewer tool submission before failing closed", async () => {
+    let takeCount = 0
+    const payload = JSON.stringify({
+      satisfied: true,
+      criteria_results: [{ criterion: "Runtime", met: true, evidence: "repaired tool submission", severity: "blocking" }],
+    })
+    const submissions = {
+      begin() {},
+      recordRubricItem() { return { success: true as const } },
+      take() {
+        takeCount++
+        return takeCount >= 4 ? payload : null
+      },
+      clear() {},
+    }
+    let promptCount = 0
+    const client = makeClient()
+    ;(client.session.prompt as ReturnType<typeof mock>).mockImplementation(async () => {
+      promptCount++
+      if (promptCount === 1) return { data: { parts: [{ type: "text", text: "I reviewed it in prose instead of using the tool." }] } }
+      await new Promise(() => {})
+    })
+    const dispatcher = createOpenCodeSubagentDispatcher(client as any, { reviewerToolSubmissions: submissions })
+    const session = await dispatcher.createSession({ title: "test", agent: "workflow-reviewer" })
+
+    const text = await session.prompt("hello", { submissionTool: { name: "submit_phase_review_result" } })
+    const decoded = decodeSubagentToolSubmission(text, "submit_phase_review_result")
+
+    expect(decoded.success).toBe(true)
+    if (!decoded.success) return
+    expect(JSON.parse(decoded.payload).criteria_results[0].evidence).toBe("repaired tool submission")
+    expect(client.session.prompt).toHaveBeenCalledTimes(2)
+    const repairPrompt = ((client.session.prompt as ReturnType<typeof mock>).mock.calls[1] as any)?.[0]?.body?.parts?.[0]?.text
+    expect(repairPrompt).toContain("did not call the required `submit_phase_review_result` tool")
+    expect(repairPrompt).toContain("Do not reply with prose")
   })
 
   it("rejects text fallback when a local reviewer submission tool is required", async () => {
@@ -375,13 +409,10 @@ describe("createOpenCodeSubagentDispatcher", () => {
 
     await expect(session.prompt("hello", { submissionTool: { name: "submit_task_review_result" } }))
       .rejects.toThrow("must call submit_task_review_result")
-    expect(calls).toEqual([
-      "begin:sess-1:submit_task_review_result",
-      "take:sess-1:submit_task_review_result",
-      "take:sess-1:submit_task_review_result",
-      "take:sess-1:submit_task_review_result",
-      "clear:sess-1",
-    ])
+    expect(calls[0]).toBe("begin:sess-1:submit_task_review_result")
+    expect(calls.filter((call) => call === "take:sess-1:submit_task_review_result").length).toBeGreaterThanOrEqual(3)
+    expect(calls.at(-1)).toBe("clear:sess-1")
+    expect(client.session.prompt).toHaveBeenCalledTimes(2)
   })
 
   it("uses structured prompt payloads before text extraction", async () => {

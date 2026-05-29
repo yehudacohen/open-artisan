@@ -52,8 +52,9 @@ import { createHash } from "node:crypto"
 import { resolve } from "node:path"
 import { readFileSync } from "node:fs"
 import { parseSelectModeArgs } from "../../core/tools/select-mode"
-import { processMarkTaskComplete, validateMarkTaskCompletePhase } from "../../core/tools/mark-task-complete"
+import { isMetadataOnlyDeletionTask, processMarkTaskComplete, validateMarkTaskCompletePhase } from "../../core/tools/mark-task-complete"
 import { buildAdjacentTasksForTask, buildTaskReviewPrompt } from "../../core/task-review"
+import { applyDispatch } from "../../core/scheduler"
 import { buildReviewPrompt } from "../../core/self-review"
 import {
   computeMarkScanCompleteTransition,
@@ -482,6 +483,23 @@ const handleMarkTaskComplete: ToolHandler = async (args, toolCtx, ctx) => {
   if (!parsedArgs.success) return `Error: ${parsedArgs.error}`
   const result = processMarkTaskComplete(parsedArgs.data, state.implDag, state.currentTaskId)
   if ("error" in result) return `Error: ${result.error}`
+  const task = state.implDag?.find((candidate) => candidate.id === parsedArgs.data.task_id)
+  if (task && isMetadataOnlyDeletionTask(task)) {
+    await store.update(toolCtx.sessionId, (draft) => {
+      draft.implDag = result.updatedNodes
+      draft.currentTaskId = result.nextTaskId
+      if (result.nextTaskId) draft.implDag = applyDispatch(draft, result.nextTaskId)
+      draft.taskCompletionInProgress = null
+      draft.taskReviewCount = 0
+      draft.latestReviewResults = null
+      draft.phaseState = result.awaitingHuman ? "HUMAN_GATE" : "DRAFT"
+      const existing = new Set(draft.reviewArtifactFiles)
+      for (const file of result.completedTaskFiles) {
+        if (!existing.has(file)) draft.reviewArtifactFiles.push(file)
+      }
+    })
+    return result.responseMessage + "\n\n**Per-task review skipped:** this task is metadata-only deletion-target audit work (`Files: none`, `Expected tests: none`). The approved IMPL_PLAN metadata is the artifact; final implementation review will evaluate the deletion-target behavior."
+  }
 
   // Persist DAG changes and set review gate
   await store.update(toolCtx.sessionId, (draft) => {

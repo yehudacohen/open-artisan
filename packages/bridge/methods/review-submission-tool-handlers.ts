@@ -24,6 +24,7 @@ import { artifactFilesHash, buildImplPlanExecutableContractFailureCriterion } fr
 import { consumeReviewSubmissionToken, getReviewSubmissionTokenRecord } from "./review-submission-tokens"
 import { recordToolFailure } from "../../core/tool-failure-history"
 import { buildTaskReviewRubricItems, completeReviewAttempt, createReviewAttempt, recordReviewRubricItemProgress, rubricItemsFromPhaseCriteria, rubricItemsFromTaskReviewResult, upsertReviewAttempt } from "../../core/tools/review-attempts"
+import { appendWorkflowProgressEvent, buildWorkflowProgressEvent } from "../../core/workflow-progress"
 
 function requireState(ctx: BridgeContext, sessionId: string): WorkflowState {
   const state = ctx.engine!.store.get(sessionId)
@@ -31,6 +32,30 @@ function requireState(ctx: BridgeContext, sessionId: string): WorkflowState {
     throw new JSONRPCErrorException(`Session "${sessionId}" not found`, SESSION_NOT_FOUND)
   }
   return state
+}
+
+async function emitReviewerSubmissionProgress(ctx: BridgeContext, state: WorkflowState, input: {
+  sessionId: string
+  kind: "task" | "phase"
+  subject: string
+  toolName: string
+  message: string
+}): Promise<void> {
+  const stateDir = ctx.stateDir ?? ctx.runtimeBackendInfo.stateDir
+  if (!stateDir) return
+  try {
+    await appendWorkflowProgressEvent(stateDir, buildWorkflowProgressEvent({
+      sessionId: input.sessionId,
+      kind: input.kind === "task" ? "task-review.tool" : "phase-review.tool",
+      status: "in-progress",
+      message: input.message,
+      spanId: `${input.kind}:${input.subject}:tool`,
+      ...(input.kind === "task" ? { taskId: input.subject } : {}),
+      metadata: { toolName: input.toolName },
+    }, state))
+  } catch (error) {
+    ctx.pinoLogger?.debug({ err: error }, "Reviewer submission progress emit failed")
+  }
 }
 
 function agentKindFromSession(agent: string | null | undefined): DbAgentLease["agentKind"] {
@@ -223,6 +248,13 @@ export const handleSubmitReviewRubricItem: ToolHandler = async (args, toolCtx, c
       },
     })
   })
+  await emitReviewerSubmissionProgress(ctx, state, {
+    sessionId: toolCtx.sessionId,
+    kind: reviewKind,
+    subject: tokenRecord.subject,
+    toolName: "submit_review_rubric_item",
+    message: `submit_review_rubric_item called for ${parsedArgs.data.criterion}`,
+  })
   return "Review rubric item recorded."
 }
 
@@ -267,6 +299,13 @@ export const handleSubmitTaskReview: ToolHandler = async (args, toolCtx, ctx) =>
       "Request a fresh task review context and retry."
     )
   }
+  await emitReviewerSubmissionProgress(ctx, state, {
+    sessionId: toolCtx.sessionId,
+    kind: "task",
+    subject: taskId,
+    toolName: "submit_task_review",
+    message: `submit_task_review called for ${taskId}`,
+  })
   const baseTaskRubricItems = buildTaskReviewRubricItems(buildAdjacentTasksForTask(state.implDag, taskId).length > 0)
   const normalizedSubmission = buildTaskReviewOutputFromSubmission(parsedArgs.data)
   if (!normalizedSubmission.success) {
@@ -427,6 +466,13 @@ export const handleSubmitPhaseReview: ToolHandler = async (args, toolCtx, ctx) =
       "Request a fresh phase review context and retry."
     )
   }
+  await emitReviewerSubmissionProgress(ctx, state, {
+    sessionId: toolCtx.sessionId,
+    kind: "phase",
+    subject: state.phase,
+    toolName: "submit_phase_review",
+    message: `submit_phase_review called for ${state.phase}`,
+  })
   const normalizedSubmission = buildPhaseReviewOutputFromSubmission(parsedArgs.data)
   if (!normalizedSubmission.success) return `Error: ${normalizedSubmission.error}`
   const reviewOutput = normalizedSubmission.reviewOutput

@@ -33,6 +33,19 @@ describe("evaluateMarkSatisfied — all criteria met", () => {
     expect(result.responseMessage).toContain("3")
   })
 
+  it("response message points user gates at structured choices", () => {
+    const result = evaluateMarkSatisfied({
+      criteria_met: [
+        { criterion: "A", met: true, evidence: "e1" },
+      ],
+    })
+
+    expect(result.passed).toBe(true)
+    expect(result.responseMessage).toContain("`question` tool")
+    expect(result.responseMessage).toContain("approve")
+    expect(result.responseMessage).toContain("revise")
+  })
+
   it("preserves stable criterion IDs when provided", () => {
     const result = evaluateMarkSatisfied({
       criteria_met: [
@@ -221,6 +234,19 @@ describe("countExpectedBlockingCriteria", () => {
 1. This looks like numbered but is in suggestion section`
     // Only counts up to "Suggestion criteria" split
     expect(countExpectedBlockingCriteria(text)).toBe(1)
+  })
+
+  it("does not turn IMPL_PLAN completed-task guidance into an extra required criterion", () => {
+    const text = `**Blocking criteria:**
+1. Every unfinished task has executable ownership
+2. Dependencies are acyclic
+
+State-aware completed-task rule: completed tasks are immutable history; future corrective tasks own missing evidence.
+
+**Suggestion criteria:**
+- Nice to have`
+
+    expect(countExpectedBlockingCriteria(text)).toBe(2)
   })
 
   it("returns 0 for text with no numbered items", () => {

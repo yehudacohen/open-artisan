@@ -9,6 +9,7 @@
  * 4. If any blocking criterion unmet → fires `self_review_fail` → loops in REVIEW
  */
 import type { CriterionResult, MarkSatisfiedArgs } from "../review-types"
+import { buildUserGateChoiceToolReminder } from "../user-gate-choice"
 
 // Re-export for test convenience
 export type { CriterionResult }
@@ -154,7 +155,7 @@ function buildPassMessage(total: number, unmetSuggestions: CriterionResult[]): s
     : ""
   return (
     `Self-review complete — all blocking criteria satisfied out of ${total} total.${suggestionNote} ` +
-    `Advancing to user gate. ` +
+    buildUserGateChoiceToolReminder() + " " +
     `Present a clear summary of what was built and what acceptance criteria were met.`
   )
 }

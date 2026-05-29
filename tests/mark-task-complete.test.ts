@@ -13,7 +13,7 @@
  * - Blocked DAG: appropriate message
  */
 import { describe, expect, it } from "bun:test"
-import { processMarkTaskComplete, validateMarkTaskCompletePhase } from "#core/tools/mark-task-complete"
+import { isMetadataOnlyDeletionTask, processMarkTaskComplete, validateMarkTaskCompletePhase } from "#core/tools/mark-task-complete"
 import type { TaskNode } from "#core/dag"
 
 // ---------------------------------------------------------------------------
@@ -372,14 +372,19 @@ describe("processMarkTaskComplete — blocked DAG", () => {
 // ---------------------------------------------------------------------------
 
 describe("processMarkTaskComplete — completedTaskFiles", () => {
-  it("returns the task's expectedFiles on success", () => {
+  it("returns the task's expectedFiles and expectedTests on success", () => {
     const nodes = [
-      makeTask({ id: "T1", status: "in-flight", expectedFiles: ["src/foo.ts", "src/bar.ts"] }),
+      makeTask({
+        id: "T1",
+        status: "in-flight",
+        expectedFiles: ["src/foo.ts", "src/bar.ts"],
+        expectedTests: ["tests/foo.test.ts"],
+      }),
     ]
     const result = processMarkTaskComplete(VALID_ARGS, nodes)
     expect("error" in result).toBe(false)
     if (!("error" in result)) {
-      expect(result.completedTaskFiles).toEqual(["src/foo.ts", "src/bar.ts"])
+      expect(result.completedTaskFiles).toEqual(["src/foo.ts", "src/bar.ts", "tests/foo.test.ts"])
     }
   })
 
@@ -399,5 +404,31 @@ describe("processMarkTaskComplete — completedTaskFiles", () => {
     if (!("error" in result)) {
       expect(result.completedTaskFiles).toEqual([])
     }
+  })
+})
+
+describe("isMetadataOnlyDeletionTask", () => {
+  it("identifies deletion-target metadata-only tasks", () => {
+    expect(isMetadataOnlyDeletionTask(makeTask({
+      id: "T10",
+      status: "in-flight",
+      expectedFiles: [],
+      expectedTests: [],
+      verificationCommands: [],
+      intentionalDeletionTargets: ["src/deleted.ts"],
+    }))).toBe(true)
+  })
+
+  it("does not skip review for tasks with owned files or tests", () => {
+    expect(isMetadataOnlyDeletionTask(makeTask({
+      id: "T10",
+      expectedFiles: ["src/file.ts"],
+      intentionalDeletionTargets: ["src/deleted.ts"],
+    }))).toBe(false)
+    expect(isMetadataOnlyDeletionTask(makeTask({
+      id: "T10",
+      expectedTests: ["tests/file.test.ts"],
+      intentionalDeletionTargets: ["src/deleted.ts"],
+    }))).toBe(false)
   })
 })

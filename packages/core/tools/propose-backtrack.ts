@@ -1,8 +1,9 @@
 /**
  * propose-backtrack.ts — Pure handler for agent-initiated backtrack proposals.
  *
- * The agent calls propose_backtrack when it discovers during DRAFT or REVISE
- * that an upstream artifact is fundamentally flawed. The orchestrator validates
+ * The agent calls propose_backtrack when it discovers during DRAFT/REVISE, or
+ * while handling a user reroute at IMPLEMENTATION/HUMAN_GATE, that an upstream
+ * artifact is fundamentally flawed. The orchestrator validates
  * the proposal via assess() + diverge():
  *
  *   - backtrack / strategic → execute immediately (skip REVIEW → USER_GATE)
@@ -73,11 +74,19 @@ function driftReportAutoSkipBlockedReason(reason: string): string | null {
   return null
 }
 
+function humanGateRerouteAutoSkipBlockedReason(state: WorkflowState): string | null {
+  if (state.phase === "IMPLEMENTATION" && state.phaseState === "HUMAN_GATE") {
+    return "human-gate reroute requires explicit upstream artifact updates"
+  }
+  return null
+}
+
 function isBacktrackAuthoringState(state: WorkflowState): boolean {
   return (
     state.phaseState === "DRAFT" ||
     state.phaseState === "REVISE" ||
-    (state.phase === "IMPLEMENTATION" && state.phaseState === "TASK_REVISE")
+    (state.phase === "IMPLEMENTATION" && state.phaseState === "TASK_REVISE") ||
+    (state.phase === "IMPLEMENTATION" && state.phaseState === "HUMAN_GATE")
   )
 }
 
@@ -97,7 +106,7 @@ export async function handleProposeBacktrack(
     return {
       action: "error",
       message:
-        `propose_backtrack can only be called from DRAFT, REVISE, or IMPLEMENTATION/TASK_REVISE state ` +
+        `propose_backtrack can only be called from DRAFT, REVISE, IMPLEMENTATION/TASK_REVISE, or IMPLEMENTATION/HUMAN_GATE state ` +
         `(current: ${state.phase}/${state.phaseState}).`,
     }
   }
@@ -165,6 +174,7 @@ export async function handleProposeBacktrack(
 
   const autoSkipBlockedReason =
     getAutoSkipBlockedReasonForClassification(plan) ??
+    humanGateRerouteAutoSkipBlockedReason(state) ??
     driftReportAutoSkipBlockedReason(args.reason)
   const revisionSteps = withAutoSkipBlockedReason(plan.revisionSteps, autoSkipBlockedReason)
   const { classification } = plan
@@ -179,7 +189,7 @@ export async function handleProposeBacktrack(
     const boundaryRepairHint = state.phase === "IMPLEMENTATION" && /allowlist|task boundary|current task files|expected files|impl[_ -]?plan|guard/.test(tacticalText)
       ? (
         `\n\nExecutable repair path: this looks like a local task-boundary/allowlist repair, so do not backtrack. ` +
-        `If the file is already approved for this task, call \`approve_current_task_scope_expansion\`. ` +
+        `If the file is already approved for this task, call \`approve_current_task_scope_expansion\`; outside USER_GATE it records the request and moves to a valid approval gate before applying. ` +
         `If the approved IMPL_PLAN already lists the missing files, call \`repair_current_task_boundary_from_impl_plan\`. ` +
         `If neither applies, request a user/planning scope decision before editing.`
       )

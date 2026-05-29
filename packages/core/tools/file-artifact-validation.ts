@@ -2,6 +2,7 @@ import type { Phase } from "../workflow-primitives"
 import type { WorkflowState } from "../workflow-state-types"
 import { isInterfaceFile, isOpenArtisanFile, isTestFile } from "../hooks/tool-guard"
 import { normalizeWorkflowPaths } from "../path-normalization"
+import { extractExistingFileArgumentsFromCommand, isLikelyCommandMetadataEntry } from "../task-metadata-paths"
 import { existsSync } from "node:fs"
 import { basename, resolve } from "node:path"
 
@@ -20,11 +21,26 @@ export function collectImplementationReviewArtifactFiles(state: WorkflowState, c
   if (state.phase !== "IMPLEMENTATION") return []
   const projectRoot = cwd ?? process.cwd()
   const files = new Set(normalizeWorkflowPaths(state.reviewArtifactFiles, projectRoot))
+  const deletionTargets = new Set<string>()
   for (const task of state.implDag ?? []) {
     if (task.status !== "complete") continue
-    for (const file of normalizeWorkflowPaths(task.expectedFiles ?? [], projectRoot)) files.add(file)
-    for (const file of normalizeWorkflowPaths(task.expectedTests ?? [], projectRoot)) files.add(file)
+    for (const entry of task.expectedFiles ?? []) {
+      if (isLikelyCommandMetadataEntry(entry, projectRoot)) {
+        for (const file of extractExistingFileArgumentsFromCommand(entry, projectRoot)) files.add(file)
+        continue
+      }
+      for (const file of normalizeWorkflowPaths([entry], projectRoot)) files.add(file)
+    }
+    for (const entry of task.expectedTests ?? []) {
+      if (isLikelyCommandMetadataEntry(entry, projectRoot)) {
+        for (const file of extractExistingFileArgumentsFromCommand(entry, projectRoot)) files.add(file)
+        continue
+      }
+      for (const file of normalizeWorkflowPaths([entry], projectRoot)) files.add(file)
+    }
+    for (const file of normalizeWorkflowPaths(task.intentionalDeletionTargets ?? [], projectRoot)) deletionTargets.add(file)
   }
+  for (const file of deletionTargets) files.delete(file)
   return Array.from(files)
 }
 
@@ -52,6 +68,9 @@ export function validateFileBasedReviewArtifacts(input: {
   const allowedImplementationMarkdownFiles = new Set(normalizeWorkflowPaths(input.implementationArtifactFiles ?? [], cwd))
 
   for (const file of input.artifactFiles) {
+    if (isLikelyCommandMetadataEntry(file, cwd)) {
+      return `request_review for ${input.phase} received a command where artifact_files must contain real files: ${file}. Put runnable commands in verificationCommands / **Verification commands:** metadata instead of artifact_files.`
+    }
     if (!existsSync(file)) {
       return `request_review for ${input.phase} requires artifact_files to exist on disk; missing file: ${file}`
     }

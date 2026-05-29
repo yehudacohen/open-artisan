@@ -65,7 +65,7 @@ describe("propose_backtrack — validation guards", () => {
       makeOrchestrator(),
     )
     expect(result.action).toBe("error")
-    expect(result.message).toContain("DRAFT, REVISE, or IMPLEMENTATION/TASK_REVISE")
+    expect(result.message).toContain("DRAFT, REVISE, IMPLEMENTATION/TASK_REVISE, or IMPLEMENTATION/HUMAN_GATE")
   })
 
   it("rejects when phaseState is USER_GATE", async () => {
@@ -76,7 +76,7 @@ describe("propose_backtrack — validation guards", () => {
       makeOrchestrator(),
     )
     expect(result.action).toBe("error")
-    expect(result.message).toContain("DRAFT, REVISE, or IMPLEMENTATION/TASK_REVISE")
+    expect(result.message).toContain("DRAFT, REVISE, IMPLEMENTATION/TASK_REVISE, or IMPLEMENTATION/HUMAN_GATE")
   })
 
   it("rejects when phaseState is ESCAPE_HATCH", async () => {
@@ -87,13 +87,25 @@ describe("propose_backtrack — validation guards", () => {
       makeOrchestrator(),
     )
     expect(result.action).toBe("error")
-    expect(result.message).toContain("DRAFT, REVISE, or IMPLEMENTATION/TASK_REVISE")
+    expect(result.message).toContain("DRAFT, REVISE, IMPLEMENTATION/TASK_REVISE, or IMPLEMENTATION/HUMAN_GATE")
   })
 
   it("allows IMPLEMENTATION/TASK_REVISE to backtrack for upstream scope repair", async () => {
     const state = makeState({ phase: "IMPLEMENTATION", phaseState: "TASK_REVISE" })
     const result = await handleProposeBacktrack(
       { target_phase: "PLANNING", reason: "The isolated reviewer found approved scope excludes required files and needs widening" },
+      state,
+      makeOrchestrator({ classification: "backtrack" }),
+    )
+    expect(result.action).toBe("execute")
+    if (result.action !== "execute") return
+    expect(result.targetPhase).toBe("PLANNING")
+  })
+
+  it("allows IMPLEMENTATION/HUMAN_GATE to backtrack when the user reroutes the plan", async () => {
+    const state = makeState({ phase: "IMPLEMENTATION", phaseState: "HUMAN_GATE" })
+    const result = await handleProposeBacktrack(
+      { target_phase: "PLANNING", reason: "The user changed the human gate into graph-native infrastructure provisioning, so the approved plan must be revised." },
       state,
       makeOrchestrator({ classification: "backtrack" }),
     )
@@ -301,6 +313,28 @@ describe("propose_backtrack — orchestrator routing", () => {
     if (result.action !== "execute") throw new Error("unreachable")
     expect(result.autoSkipBlockedReason).toBeUndefined()
     expect(result.pendingRevisionSteps.some((step) => step.autoSkipBlockedReason)).toBe(false)
+  })
+
+  it("blocks auto-skip for accepted HUMAN_GATE reroutes even without classifier trigger", async () => {
+    const state = makeState({ phase: "IMPLEMENTATION", phaseState: "HUMAN_GATE" })
+    const orchestrator = makeOrchestrator({
+      classification: "strategic",
+      revisionSteps: [
+        { artifact: "plan", phase: "PLANNING", phaseState: "REVISE", instructions: "Replace the human-gated prerequisite model." },
+        { artifact: "impl_plan", phase: "IMPL_PLAN", phaseState: "REVISE", instructions: "Add graph-native infrastructure tasks." },
+      ],
+    })
+
+    const result = await handleProposeBacktrack(
+      { target_phase: "PLANNING", reason: "The user wants to replace the human-gated production prerequisite model with graph-native infrastructure composition." },
+      state,
+      orchestrator,
+    )
+
+    expect(result.action).toBe("execute")
+    if (result.action !== "execute") throw new Error("unreachable")
+    expect(result.autoSkipBlockedReason).toBe("human-gate reroute requires explicit upstream artifact updates")
+    expect(result.pendingRevisionSteps.every((step) => step.autoSkipBlockedReason === result.autoSkipBlockedReason)).toBe(true)
   })
 
   it("blocks auto-skip for tool-generated drift report backtracks", async () => {

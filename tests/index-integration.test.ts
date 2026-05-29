@@ -9,6 +9,7 @@
  */
 import { describe, expect, it, beforeEach, afterEach, mock } from "bun:test"
 import { existsSync, mkdtempSync, readFileSync, rmSync, mkdirSync } from "node:fs"
+import { execFileSync } from "node:child_process"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 
@@ -540,6 +541,178 @@ describe("OpenCode integration — task boundary revision workflow", () => {
     expect(state.phaseState).toBe("DRAFT")
   })
 
+  it("requests then applies current task scope expansion from IMPLEMENTATION/DRAFT", async () => {
+    const sid = `int-test-${Date.now()}-current-task-scope-request-apply`
+    await plugin.event({ event: { type: "session.created", properties: { info: { id: sid } } } })
+    const ctx = { directory: tempDir, sessionId: sid }
+    await plugin.tool.select_mode.execute({ mode: "INCREMENTAL", feature_name: `current-task-scope-request-apply-${Date.now()}` }, ctx)
+    const completedFile = `${tempDir}/src/factories/ory/types.ts`
+    const correctiveFile = `${tempDir}/src/factories/ory/compositions/ory-platform-stack.ts`
+    const correctiveTest = `${tempDir}/test/factories/ory/platform-composition.test.ts`
+    await plugin._testStore.update(sid, (d: any) => {
+      d.phase = "IMPLEMENTATION"
+      d.phaseState = "DRAFT"
+      d.currentTaskId = "task-008"
+      d.fileAllowlist = [completedFile, correctiveFile, correctiveTest]
+      d.implDag = [{
+        id: "task-001",
+        description: "Completed Ory type work",
+        dependencies: [],
+        expectedFiles: [completedFile],
+        expectedTests: [],
+        estimatedComplexity: "medium",
+        status: "complete",
+      }, {
+        id: "task-008",
+        description: "Correct Ory platform composition",
+        dependencies: ["task-001"],
+        expectedFiles: [correctiveFile],
+        expectedTests: [],
+        estimatedComplexity: "medium",
+        status: "in-flight",
+      }]
+    })
+
+    const request = await plugin.tool.approve_current_task_scope_expansion.execute({
+      task_id: "task-008",
+      files: [completedFile],
+      expected_tests: [correctiveTest],
+      reason: "User explicitly approved expanding task-008 to cover corrective Ory validation files.",
+    }, ctx)
+
+    expect(request).toContain("Current-task scope expansion requested")
+    let state = plugin._testStore.get(sid)
+    expect(state.phaseState).toBe("USER_GATE")
+    expect(state.implDag.find((task: any) => task.id === "task-001").expectedFiles).toEqual([completedFile])
+    expect(state.implDag.find((task: any) => task.id === "task-008").expectedFiles).toEqual([correctiveFile])
+
+    const approval = await plugin.tool.submit_feedback.execute({
+      feedback_type: "approve",
+      feedback_text: "approved",
+    }, ctx)
+
+    expect(approval).toContain("Approved and applied pending current-task scope expansion")
+    state = plugin._testStore.get(sid)
+    expect(state.phaseState).toBe("DRAFT")
+    expect(state.pendingCurrentTaskScopeExpansions).toEqual([])
+    expect(state.implDag.find((task: any) => task.id === "task-001").expectedFiles).toEqual([completedFile])
+    expect(state.implDag.find((task: any) => task.id === "task-001").status).toBe("complete")
+    expect(state.implDag.find((task: any) => task.id === "task-008").expectedFiles).toEqual([correctiveFile, completedFile])
+    expect(state.implDag.find((task: any) => task.id === "task-008").expectedTests).toEqual([correctiveTest])
+  })
+
+  it("treats current explicit approval text as the real response for pending allowlist expansion", async () => {
+    const sid = `int-test-${Date.now()}-allowlist-expansion-current-approval`
+    await plugin.event({ event: { type: "session.created", properties: { info: { id: sid } } } })
+    const ctx = { directory: tempDir, sessionId: sid }
+    await plugin.tool.select_mode.execute({ mode: "INCREMENTAL", feature_name: `allowlist-expansion-current-approval-${Date.now()}` }, ctx)
+    await plugin._testStore.update(sid, (d: any) => {
+      d.phase = "IMPLEMENTATION"
+      d.phaseState = "DRAFT"
+      d.fileAllowlist = [`${tempDir}/src/allowed.ts`]
+    })
+
+    await plugin.tool.request_allowlist_expansion.execute({
+      files: ["scripts/build-packages.ts"],
+      reason: "Implementation verification requires scoped stale-lock self-healing in the package build script.",
+      source_artifact: "implementation",
+    }, ctx)
+
+    const result = await plugin.tool.submit_feedback.execute({
+      feedback_type: "approve",
+      feedback_text: "approved",
+    }, ctx)
+
+    expect(result).toContain("Applied approved allowlist expansion")
+    const state = plugin._testStore.get(sid)
+    expect(state.fileAllowlist).toContain(`${tempDir}/scripts/build-packages.ts`)
+    expect(state.pendingAllowlistExpansions).toEqual([])
+    expect(state.userGateMessageReceived).toBe(false)
+  })
+
+  it("recovers prior TESTS allowlist expansion from IMPLEMENTATION/HUMAN_GATE with explicit approval", async () => {
+    const sid = `int-test-${Date.now()}-human-gate-prior-tests-allowlist-recovery`
+    await plugin.event({ event: { type: "session.created", properties: { info: { id: sid } } } })
+    const ctx = { directory: tempDir, sessionId: sid }
+    await plugin.tool.select_mode.execute({ mode: "INCREMENTAL", feature_name: `human-gate-prior-tests-allowlist-recovery-${Date.now()}` }, ctx)
+    const stack = `${tempDir}/src/factories/ory/compositions/ory-platform-stack.ts`
+    const compositionTest = `${tempDir}/test/factories/ory/platform-composition.test.ts`
+    await plugin._testStore.update(sid, (d: any) => {
+      d.phase = "IMPLEMENTATION"
+      d.phaseState = "HUMAN_GATE"
+      d.userGateMessageReceived = false
+      d.fileAllowlist = [`${tempDir}/src/existing.ts`]
+      d.currentTaskId = "task-005"
+      d.pendingAllowlistExpansions = [{
+        files: [stack, compositionTest],
+        reason: "TESTS review approved adding planned Ory composition files outside the original allowlist.",
+        sourceArtifact: "tests",
+        requestedAtPhase: "TESTS",
+        requestedAt: 1,
+      }]
+      d.implDag = [{
+        id: "task-005",
+        description: "Configure external Ory platform",
+        dependencies: [],
+        expectedFiles: [],
+        expectedTests: [],
+        estimatedComplexity: "medium",
+        status: "human-gated",
+        humanGate: { whatIsNeeded: "Configure Ory", why: "Needed for runtime", verificationSteps: "Check Ory credentials", resolved: false },
+      }]
+    })
+
+    const result = await plugin.tool.submit_feedback.execute({
+      feedback_type: "approve",
+      feedback_text: "approved",
+    }, ctx)
+
+    expect(result).toContain("Applied approved allowlist expansion")
+    const state = plugin._testStore.get(sid)
+    expect(state.fileAllowlist).toContain(stack)
+    expect(state.fileAllowlist).toContain(compositionTest)
+    expect(state.pendingAllowlistExpansions).toEqual([])
+    expect(state.phase).toBe("IMPLEMENTATION")
+    expect(state.phaseState).toBe("HUMAN_GATE")
+    expect(state.implDag[0].expectedFiles).toEqual([])
+    expect(state.implDag[0].expectedTests).toEqual([])
+  })
+
+  it("recovers prior TESTS allowlist expansion from HUMAN_GATE when approval is supplied as approved_files", async () => {
+    const sid = `int-test-${Date.now()}-human-gate-prior-tests-approved-files-recovery`
+    await plugin.event({ event: { type: "session.created", properties: { info: { id: sid } } } })
+    const ctx = { directory: tempDir, sessionId: sid }
+    await plugin.tool.select_mode.execute({ mode: "INCREMENTAL", feature_name: `human-gate-prior-tests-approved-files-recovery-${Date.now()}` }, ctx)
+    const stack = `${tempDir}/src/factories/ory/compositions/ory-platform-stack.ts`
+    const compositionTest = `${tempDir}/test/factories/ory/platform-composition.test.ts`
+    await plugin._testStore.update(sid, (d: any) => {
+      d.phase = "IMPLEMENTATION"
+      d.phaseState = "HUMAN_GATE"
+      d.userGateMessageReceived = false
+      d.fileAllowlist = [`${tempDir}/src/existing.ts`]
+      d.pendingAllowlistExpansions = [{
+        files: [stack, compositionTest],
+        reason: "TESTS review approved adding planned Ory composition files outside the original allowlist.",
+        sourceArtifact: "tests",
+        requestedAtPhase: "TESTS",
+        requestedAt: 1,
+      }]
+    })
+
+    const result = await plugin.tool.submit_feedback.execute({
+      feedback_type: "approve",
+      feedback_text: "",
+      approved_files: [stack, compositionTest],
+    }, ctx)
+
+    expect(result).toContain("Applied approved allowlist expansion")
+    const state = plugin._testStore.get(sid)
+    expect(state.fileAllowlist).toContain(stack)
+    expect(state.fileAllowlist).toContain(compositionTest)
+    expect(state.pendingAllowlistExpansions).toEqual([])
+    expect(state.phaseState).toBe("HUMAN_GATE")
+  })
+
   it("applies pending INTERFACES allowlist expansion during approval", async () => {
     const sid = `int-test-${Date.now()}-interfaces-allowlist-expansion-apply`
     await plugin.event({ event: { type: "session.created", properties: { info: { id: sid } } } })
@@ -578,6 +751,49 @@ describe("OpenCode integration — task boundary revision workflow", () => {
     expect(state.fileAllowlist).toContain(createApp)
     expect(state.pendingAllowlistExpansions).toEqual([])
     expect(state.approvedArtifactFiles.interfaces).toEqual(expect.arrayContaining([allowed, runtime, createApp]))
+  })
+
+  it("applies pending TESTS allowlist expansion before cascade approval advances", async () => {
+    const sid = `int-test-${Date.now()}-tests-cascade-allowlist-expansion-apply`
+    await plugin.event({ event: { type: "session.created", properties: { info: { id: sid } } } })
+    const ctx = { directory: tempDir, sessionId: sid }
+    await plugin.tool.select_mode.execute({ mode: "INCREMENTAL", feature_name: `tests-cascade-allowlist-expansion-apply-${Date.now()}` }, ctx)
+    const existing = `${tempDir}/tests/existing.test.ts`
+    const newTest = `${tempDir}/test/factories/ory/platform-composition.test.ts`
+    const newSource = `${tempDir}/src/factories/ory/compositions/ory-platform-stack.ts`
+    await plugin._testStore.update(sid, (d: any) => {
+      d.phase = "TESTS"
+      d.phaseState = "USER_GATE"
+      d.userGateMessageReceived = true
+      d.fileAllowlist = [existing]
+      d.reviewArtifactFiles = [existing, newTest]
+      d.pendingAllowlistExpansions = [{
+        files: [newTest, newSource],
+        reason: "TESTS review approved adding planned Ory composition files outside the original allowlist.",
+        sourceArtifact: "tests",
+        requestedAtPhase: "TESTS",
+        requestedAt: 1,
+      }]
+      d.pendingRevisionSteps = [{
+        artifact: "impl_plan",
+        phase: "IMPL_PLAN",
+        phaseState: "REVISE",
+        instructions: "Carry the approved test allowlist expansion forward into implementation planning.",
+      }]
+    })
+
+    const result = await plugin.tool.submit_feedback.execute({
+      feedback_type: "approve",
+      feedback_text: "approved",
+    }, ctx)
+
+    expect(result).toContain("cascade continues")
+    const state = plugin._testStore.get(sid)
+    expect(state.fileAllowlist).toContain(newTest)
+    expect(state.fileAllowlist).toContain(newSource)
+    expect(state.pendingAllowlistExpansions).toEqual([])
+    expect(state.phase).toBe("IMPL_PLAN")
+    expect(state.phaseState).toBe("REVISE")
   })
 
   it("rejects boundary changes that would reset completed task ownership", async () => {
@@ -3057,6 +3273,78 @@ describe("userGateMessageReceived — blocks self-approval", () => {
     expect(output.parts[0]?.text).toContain("Call `submit_feedback` NOW")
   })
 
+  it("records structured question approval replies as real user gate input", async () => {
+    const sid = `int-test-${Date.now()}-question-approve`
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: sid, agent: "artisan" } } },
+    })
+    await plugin._testStore.update(sid, (draft: any) => {
+      draft.mode = "GREENFIELD"
+      draft.featureName = "question-approve"
+      draft.phase = "PLANNING"
+      draft.phaseState = "USER_GATE"
+      draft.activeAgent = "artisan"
+      draft.userGateMessageReceived = false
+    })
+
+    await plugin.event({
+      event: {
+        type: "question.replied",
+        properties: { sessionID: sid, requestID: "q1", answers: [["approve"]] },
+      },
+    })
+
+    expect(plugin._testStore.get(sid).userGateMessageReceived).toBe(true)
+  })
+
+  it("does not treat structured status-question replies as gate decisions", async () => {
+    const sid = `int-test-${Date.now()}-question-status`
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: sid, agent: "artisan" } } },
+    })
+    await plugin._testStore.update(sid, (draft: any) => {
+      draft.mode = "GREENFIELD"
+      draft.featureName = "question-status"
+      draft.phase = "PLANNING"
+      draft.phaseState = "USER_GATE"
+      draft.activeAgent = "artisan"
+      draft.userGateMessageReceived = false
+    })
+
+    await plugin.event({
+      event: {
+        type: "question.replied",
+        properties: { sessionID: sid, requestID: "q1", answers: [["status question"]] },
+      },
+    })
+
+    expect(plugin._testStore.get(sid).userGateMessageReceived).toBe(false)
+  })
+
+  it("records structured human-gate backtrack replies as gate input", async () => {
+    const sid = `int-test-${Date.now()}-question-human-backtrack`
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: sid, agent: "artisan" } } },
+    })
+    await plugin._testStore.update(sid, (draft: any) => {
+      draft.mode = "INCREMENTAL"
+      draft.featureName = "question-human-backtrack"
+      draft.phase = "IMPLEMENTATION"
+      draft.phaseState = "HUMAN_GATE"
+      draft.activeAgent = "artisan"
+      draft.userGateMessageReceived = false
+    })
+
+    await plugin.event({
+      event: {
+        type: "question.replied",
+        properties: { sessionID: sid, requestID: "q1", answers: [["backtrack"]] },
+      },
+    })
+
+    expect(plugin._testStore.get(sid).userGateMessageReceived).toBe(true)
+  })
+
   it("does not call durable state update when injecting submit_feedback routing", async () => {
     const sid = `int-test-${Date.now()}-gate-persist-fails`
     await plugin.event({
@@ -3177,8 +3465,8 @@ describe("mark_task_complete — phase gating and final-task cleanup", () => {
           id: "T1",
           description: "Final task",
           dependencies: [],
-          expectedTests: [],
-          expectedFiles: [],
+          expectedTests: ["tests/final.test.ts"],
+          expectedFiles: ["src/final.ts"],
           estimatedComplexity: "small",
           status: "in-flight",
         },
@@ -3209,6 +3497,7 @@ describe("mark_task_complete — phase gating and final-task cleanup", () => {
     expect(updated?.currentTaskId).toBeNull()
     expect(updated?.taskCompletionInProgress).toBeNull()
     expect(updated?.taskReviewCount).toBe(0)
+    expect(updated?.reviewArtifactFiles).toEqual(["src/final.ts", "tests/final.test.ts"])
   })
 })
 
@@ -4011,6 +4300,30 @@ ${VALID_REAL_WORLD_ACCEPTANCE_SCENARIO}`)
     )
     expect(result).toContain("Error")
     expect(result).toContain("artifact_files")
+  })
+
+  it("validates missing source artifact_files before the REVISE diff gate", async () => {
+    const sid = `int-test-${Date.now()}-revise-source-files-first`
+    execFileSync("git", ["init"], { cwd: tempDir, stdio: "pipe" })
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: sid } } },
+    })
+    const ctx = { directory: tempDir, sessionId: sid }
+    await plugin._testStore.update(sid, (draft: any) => {
+      draft.mode = "GREENFIELD"
+      draft.featureName = "revise-source-files-first"
+      draft.phase = "INTERFACES"
+      draft.phaseState = "REVISE"
+      draft.revisionBaseline = { type: "git-sha", sha: "e3b0c44298fc1c149afbf4c8996fb924" }
+    })
+
+    const result = await plugin.tool.request_review.execute(
+      { summary: "Interfaces", artifact_description: "Interface source files" },
+      ctx,
+    )
+
+    expect(result).toContain("artifact_files listing the files to review")
+    expect(result).not.toContain("no changes detected")
   })
 
   it("still blocks request_review at USER_GATE", async () => {

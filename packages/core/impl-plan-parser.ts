@@ -95,8 +95,11 @@ const CATEGORY_RE = /^\s*(?:-\s*)?\*{0,2}Category[*:\s]+(.*)$/i
 /** Matches "**Roadmap items:** item-1, item-2" */
 const ROADMAP_ITEMS_RE = /^\s*(?:-\s*)?\*{0,2}Roadmap\s+items?[*:\s]+(.*)$/i
 
-/** Matches "**Files:** src/foo.ts, src/bar.ts" or "**Expected files:** ..." */
-const FILES_RE = /^\s*(?:-\s*)?\*{0,2}(?:Expected\s+)?files?[*:\s]+(.*)$/i
+/** Matches "**Files:** src/foo.ts, src/bar.ts", "**Expected files:** ...", or "**Required files:** ..." */
+const FILES_RE = /^\s*(?:-\s*)?\*{0,2}(?:(?:Expected|Required)\s+)?files?[*:\s]+(.*)$/i
+
+/** Matches "**Intentional deletion targets:** src/old.ts", "**Deletion targets:** ...", or "**Deleted files:** ..." */
+const DELETION_TARGETS_RE = /^\s*(?:-\s*)?\*{0,2}(?:(?:Intentional\s+)?deletion\s+targets?|Deleted\s+files?)[*:\s]+(.*)$/i
 
 const LIST_ITEM_RE = /^\s*[-*]\s+(.+)$/
 
@@ -109,25 +112,29 @@ function normalizeListEntry(raw: string): string {
   return raw.trim().replace(/^`(.+)`$/, "$1")
 }
 
+function isNoneListText(raw: string): boolean {
+  return /^none(?:\s+by\s+default)?\.?$/i.test(raw.trim())
+}
+
 function parseList(raw: string): string[] {
   const trimmed = raw.trim()
-  if (/^none$/i.test(trimmed) || trimmed === "" || trimmed === "-") return []
+  if (isNoneListText(trimmed) || trimmed === "" || trimmed === "-") return []
   return trimmed
     .split(/[,\s]+/)
     .map(normalizeListEntry)
-    .filter((s) => s.length > 0 && !/^none$/i.test(s))
+    .filter((s) => s.length > 0 && !isNoneListText(s))
 }
 
 function parseCommandList(raw: string): string[] {
   const trimmed = raw.trim()
-  if (/^none$/i.test(trimmed) || trimmed === "" || trimmed === "-") return []
+  if (isNoneListText(trimmed) || trimmed === "" || trimmed === "-") return []
   const inlineCommands = Array.from(trimmed.matchAll(/`([^`]+)`/g), (match) => match[1]!.trim())
-    .filter((command) => command.length > 0 && !/^none$/i.test(command))
+    .filter((command) => command.length > 0 && !isNoneListText(command))
   if (inlineCommands.length > 0) return inlineCommands
   return trimmed
     .split(/\s*,\s*/)
     .map((command) => command.trim())
-    .filter((command) => command.length > 0 && !/^none$/i.test(command))
+    .filter((command) => command.length > 0 && !isNoneListText(command))
 }
 
 function looksLikeExpectedTestPath(value: string): boolean {
@@ -180,6 +187,7 @@ interface RawBlock {
   rawComplexity: string
   rawCategory: string
   rawRoadmapItems: string
+  rawDeletionTargets: string
   hasDepsField: boolean
   hasTestsField: boolean
   hasFilesField: boolean
@@ -195,7 +203,7 @@ function extractRawBlocks(text: string): RawBlock[] {
   const blocks: RawBlock[] = []
   let current: RawBlock | null = null
   let inCodeBlock = false
-  let pendingListField: "deps" | "tests" | "files" | "commands" | "roadmapItems" | null = null
+  let pendingListField: "deps" | "tests" | "files" | "commands" | "roadmapItems" | "deletionTargets" | null = null
 
   for (const line of lines) {
     // Track fenced code blocks — ignore task headers inside them
@@ -225,6 +233,7 @@ function extractRawBlocks(text: string): RawBlock[] {
         rawComplexity: "",
         rawCategory: "",
         rawRoadmapItems: "",
+        rawDeletionTargets: "",
         hasDepsField: false,
         hasTestsField: false,
         hasFilesField: false,
@@ -257,6 +266,13 @@ function extractRawBlocks(text: string): RawBlock[] {
       current.hasFilesField = true
       current.rawFiles = filesMatch[1]!.trim()
       pendingListField = current.rawFiles === "" ? "files" : null
+      continue
+    }
+
+    const deletionTargetsMatch = DELETION_TARGETS_RE.exec(line)
+    if (deletionTargetsMatch) {
+      current.rawDeletionTargets = deletionTargetsMatch[1]!.trim()
+      pendingListField = current.rawDeletionTargets === "" ? "deletionTargets" : null
       continue
     }
 
@@ -300,8 +316,10 @@ function extractRawBlocks(text: string): RawBlock[] {
           current.rawCommands = current.rawCommands ? `${current.rawCommands}, ${value}` : value
         } else if (pendingListField === "files") {
           current.rawFiles = current.rawFiles ? `${current.rawFiles}, ${value}` : value
-        } else {
+        } else if (pendingListField === "roadmapItems") {
           current.rawRoadmapItems = current.rawRoadmapItems ? `${current.rawRoadmapItems}, ${value}` : value
+        } else {
+          current.rawDeletionTargets = current.rawDeletionTargets ? `${current.rawDeletionTargets}, ${value}` : value
         }
       }
       continue
@@ -361,12 +379,13 @@ export function parseImplPlan(artifactText: string): ParseResult {
       .filter((l) => l.length > 0)
       .join(" ")
     const description = bodyProse
-      ? `${block.description} — ${bodyProse}`.slice(0, 500)
+      ? `${block.description} — ${bodyProse}`
       : block.description
 
     const category = parseCategory(block.rawCategory)
     const expectedFiles = parseList(block.rawFiles)
     const roadmapItemIds = parseList(block.rawRoadmapItems)
+    const intentionalDeletionTargets = parseList(block.rawDeletionTargets)
     for (const file of extractBoundaryRepairFiles(block.bodyLines)) {
       if (!expectedFiles.includes(file)) expectedFiles.push(file)
     }
@@ -380,6 +399,7 @@ export function parseImplPlan(artifactText: string): ParseResult {
       expectedFiles,
       estimatedComplexity: parseComplexity(block.rawComplexity),
       status: "pending",
+      ...(intentionalDeletionTargets.length > 0 ? { intentionalDeletionTargets } : {}),
       ...(roadmapItemIds.length > 0 ? { roadmapItemIds } : {}),
       // Only set category if explicitly specified; undefined = defaults to "standalone"
       // semantics in stub detection and scheduler logic
@@ -437,7 +457,7 @@ export function validateExecutableImplPlan(
         `Expected tests accepts test/spec file paths only; put runnable commands under **Verification commands:**.`,
       )
     }
-    const invalidPaths = findInvalidWorkflowPaths([...task.expectedFiles, ...task.expectedTests], cwd, { allowOutsideProject: false })
+    const invalidPaths = findInvalidWorkflowPaths([...task.expectedFiles, ...task.expectedTests, ...(task.intentionalDeletionTargets ?? [])], cwd, { allowOutsideProject: false })
     if (invalidPaths.length > 0) {
       errors.push(
         `Task "${task.id}" references files outside the project root or invalid paths: ${invalidPaths.join(", ")}`,

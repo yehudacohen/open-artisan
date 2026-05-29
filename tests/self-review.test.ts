@@ -12,11 +12,12 @@
  * - Severity defaults: unknown severity treated as "blocking"
  */
 import { describe, expect, it, mock } from "bun:test"
-import { dispatchSelfReview, dispatchRebuttal, buildRebuttalPrompt, buildReviewPrompt, extractExpectedBlockingCriteria } from "#core/self-review"
+import { dispatchSelfReview, dispatchRebuttal, buildRebuttalPrompt, buildReviewPrompt, buildSelfReviewProgressTimeoutPolicy, extractExpectedBlockingCriteria } from "#core/self-review"
 import type { SelfReviewRequest } from "#core/self-review"
 import { encodeSubagentToolSubmission } from "#core/subagent-dispatcher"
 import type { SubagentDispatcher, SubagentSession } from "#core/subagent-dispatcher"
 import type { CriterionResult, RebuttalRequest } from "#core/review-types"
+import { IMPLEMENTATION_REVIEW_PROGRESS_IDLE_TIMEOUT_MS, REVIEW_PROGRESS_HARD_TIMEOUT_MS, REVIEW_PROGRESS_IDLE_TIMEOUT_MS } from "#core/constants"
 
 // ---------------------------------------------------------------------------
 // Mock dispatcher factory
@@ -96,6 +97,28 @@ const BASE_REQ: SelfReviewRequest = {
   criteriaText: "1. All requirements addressed\n2. Scope boundaries explicit",
 }
 
+describe("buildSelfReviewProgressTimeoutPolicy", () => {
+  it("uses the standard idle timeout for non-implementation reviews", () => {
+    const policy = buildSelfReviewProgressTimeoutPolicy({ phase: "PLANNING" }, "self-review")
+
+    expect(policy).toEqual({
+      label: "self-review",
+      idleTimeoutMs: REVIEW_PROGRESS_IDLE_TIMEOUT_MS,
+      hardTimeoutMs: REVIEW_PROGRESS_HARD_TIMEOUT_MS,
+    })
+  })
+
+  it("uses a longer idle timeout for final implementation reviews", () => {
+    const policy = buildSelfReviewProgressTimeoutPolicy({ phase: "IMPLEMENTATION" }, "self-review")
+
+    expect(policy).toEqual({
+      label: "self-review",
+      idleTimeoutMs: IMPLEMENTATION_REVIEW_PROGRESS_IDLE_TIMEOUT_MS,
+      hardTimeoutMs: REVIEW_PROGRESS_HARD_TIMEOUT_MS,
+    })
+  })
+})
+
 function makeReviewResponse(overrides?: {
   satisfied?: boolean
   criteria?: Array<{ criterion: string; met: boolean; evidence: string; severity?: string }>
@@ -164,7 +187,7 @@ describe("dispatchSelfReview — all criteria met", () => {
     const dispatcher = makeDispatcher(makeReviewResponse())
     await dispatchSelfReview(dispatcher, BASE_REQ)
 
-    expect(dispatcher._promptMock.mock.calls[0]?.[1]).toEqual({ submissionTool: { name: "submit_phase_review_result", progress: { kind: "phase", subject: "PLANNING" } } })
+    expect(dispatcher._promptMock.mock.calls[0]?.[1]).toEqual({ submissionTool: { name: "submit_phase_review_result", progress: { kind: "phase", subject: "PLANNING" } }, onProgress: expect.any(Function) })
   })
 })
 
@@ -221,6 +244,19 @@ describe("buildReviewPrompt — intent baseline context", () => {
     expect(prompt).toContain("Do not resurrect requirements")
     expect(prompt).toContain("factory-advertised { spec: ... } schemas")
     expect(prompt).toContain("newer feedback as authoritative")
+  })
+
+  it("instructs IMPL_PLAN reviewers to preserve completed tasks and verify forward correction", () => {
+    const prompt = buildReviewPrompt({
+      ...BASE_REQ,
+      phase: "IMPL_PLAN",
+      criteriaText: "1. Every unfinished task has files and tests",
+    })
+
+    expect(prompt).toContain("## Completed Task Immutability")
+    expect(prompt).toContain("treat completed tasks as immutable history")
+    expect(prompt).toContain("future corrective, revert, or superseding task")
+    expect(prompt).toContain("mark the criterion unmet only when that forward ownership is absent or ambiguous")
   })
 
   it("includes realWorldAcceptanceScenario as a review lens when captured", () => {
@@ -492,8 +528,8 @@ describe("dispatchSelfReview — invalid JSON recovery", () => {
     expect(result.success).toBe(true)
     const firstOptions = dispatcher._promptMock.mock.calls[0]?.[1] as any
     const repairOptions = dispatcher._promptMock.mock.calls[1]?.[1] as any
-    expect(firstOptions).toEqual({ submissionTool: { name: "submit_phase_review_result", progress: { kind: "phase", subject: "PLANNING" } } })
-    expect(repairOptions).toEqual({ submissionTool: { name: "submit_phase_review_result", progress: { kind: "phase", subject: "PLANNING" } } })
+    expect(firstOptions).toEqual({ submissionTool: { name: "submit_phase_review_result", progress: { kind: "phase", subject: "PLANNING" } }, onProgress: expect.any(Function) })
+    expect(repairOptions).toEqual({ submissionTool: { name: "submit_phase_review_result", progress: { kind: "phase", subject: "PLANNING" } }, onProgress: expect.any(Function) })
     expect(firstOptions?.responseFormat).toBeUndefined()
     expect(repairOptions?.responseFormat).toBeUndefined()
   })
@@ -929,7 +965,7 @@ describe("dispatchRebuttal — session lifecycle", () => {
     await dispatchRebuttal(dispatcher, BASE_REBUTTAL_REQ)
 
     expect(dispatcher._destroyMock.mock.calls).toHaveLength(1)
-    expect(dispatcher._promptMock.mock.calls[0]?.[1]).toEqual({ submissionTool: { name: "submit_rebuttal_review_result" } })
+    expect(dispatcher._promptMock.mock.calls[0]?.[1]).toEqual({ submissionTool: { name: "submit_rebuttal_review_result" }, onProgress: expect.any(Function) })
   })
 })
 

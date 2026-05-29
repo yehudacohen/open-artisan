@@ -127,6 +127,7 @@ export const handleInit: MethodHandler = async (params, ctx) => {
     const existingMetadata = await loadBridgeMetadata(stateDir)
     await upsertBridgeMetadata(stateDir, buildBridgeMetadata(projectDir, stateDir, transport, p.socketPath, existingMetadata))
   }
+  ctx.ownsRuntimeRegistration = registeredRuntime
 
   if (ctx.runtimeBackendDispose) {
     await ctx.runtimeBackendDispose()
@@ -291,6 +292,7 @@ export const handleShutdown: MethodHandler = async (params, ctx) => {
 
   try {
     await ctx.runtimeBackendDispose?.()
+    ctx.runtimeBackendDispose = null
   } catch (error) {
     ctx.engine?.log.warn("Runtime backend dispose failed", {
       detail: error instanceof Error ? error.message : String(error),
@@ -300,6 +302,10 @@ export const handleShutdown: MethodHandler = async (params, ctx) => {
   // Remove PID file before exit
   if (ctx.stateDir) {
     await removePidFile(ctx.stateDir)
+    if (ctx.ownsRuntimeRegistration) {
+      await removeBridgeMetadata(ctx.stateDir)
+      ctx.ownsRuntimeRegistration = false
+    }
   }
 
   // Flush pino's async transport before exit to avoid losing buffered log entries
@@ -370,6 +376,7 @@ export const handleSessionCreated: MethodHandler = async (params, ctx) => {
       stateDir: ctx.stateDir,
       lease: buildSessionLease(p.sessionId, normalizeAgentName(p.agent) ?? undefined),
     })
+    ctx.attachedBridgeClientIds?.add(p.sessionId)
   }
 
   return null
@@ -385,11 +392,6 @@ export const handleSessionDeleted: MethodHandler = async (params, ctx) => {
 
   sessions.unregister(p.sessionId)
 
-  const state = store.get(p.sessionId)
-  if (!state) {
-    return null
-  }
-
   if (ctx.stateDir && ctx.projectDir) {
     await detachBridgeClient({
       projectDir: ctx.projectDir,
@@ -397,6 +399,12 @@ export const handleSessionDeleted: MethodHandler = async (params, ctx) => {
       clientId: p.sessionId,
       reason: "disconnect",
     })
+    ctx.attachedBridgeClientIds?.delete(p.sessionId)
+  }
+
+  const state = store.get(p.sessionId)
+  if (!state) {
+    return null
   }
 
   log.debug("Session detached (state preserved)", {

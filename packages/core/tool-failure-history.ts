@@ -91,6 +91,7 @@ export function buildIncidentSummary(state: WorkflowState): string {
   }
   lines.push(`- Allowlist size: ${state.fileAllowlist.length}`)
   lines.push(`- Pending allowlist expansions: ${state.pendingAllowlistExpansions.length}`)
+  lines.push(`- Pending current-task scope expansions: ${state.pendingCurrentTaskScopeExpansions.length}`)
   lines.push(`- Recorded tool failures: ${state.toolFailureHistory.length}`)
   lines.push(`- Repeated tool failures: ${repeatedFailures.length}`)
   lines.push(``)
@@ -103,6 +104,15 @@ export function buildIncidentSummary(state: WorkflowState): string {
     lines.push(`## Pending Allowlist Expansions`)
     for (const request of state.pendingAllowlistExpansions) {
       lines.push(`- ${request.files.join(", ")} (${request.sourceArtifact}): ${request.reason}`)
+    }
+    lines.push(``)
+  }
+
+  if (state.pendingCurrentTaskScopeExpansions.length > 0) {
+    lines.push(`## Pending Current-Task Scope Expansions`)
+    for (const request of state.pendingCurrentTaskScopeExpansions) {
+      const paths = [...request.files, ...request.expectedTests]
+      lines.push(`- ${request.taskId}: ${paths.join(", ")} — ${request.reason}`)
     }
     lines.push(``)
   }
@@ -142,10 +152,10 @@ export function buildIncidentSummary(state: WorkflowState): string {
   if (repeatedFailures.some((entry) => entry.toolName === "mark_satisfied")) {
     lines.push(`- Repeated mark_satisfied failures are review-gate/runtime defects until proven otherwise. Inspect criteria counting, reviewer submission shape, and latestReviewResults before asking for artifact rewrites.`)
   }
-  if (state.pendingAllowlistExpansions.length > 0 || (state.phase === "IMPLEMENTATION" && state.currentTaskId)) {
+  if (state.pendingAllowlistExpansions.length > 0 || state.pendingCurrentTaskScopeExpansions.length > 0 || (state.phase === "IMPLEMENTATION" && state.currentTaskId)) {
     lines.push(`- If blocked writes involve approved task files, run the atomic current-task scope repair or repair from approved IMPL_PLAN before backtracking.`)
   }
-  if (state.toolFailureHistory.length === 0 && state.pendingAllowlistExpansions.length === 0) {
+  if (state.toolFailureHistory.length === 0 && state.pendingAllowlistExpansions.length === 0 && state.pendingCurrentTaskScopeExpansions.length === 0) {
     lines.push(`- No repeated tooling incident is currently recorded. Continue normal workflow repair.`)
   }
 

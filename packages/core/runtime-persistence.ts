@@ -50,6 +50,7 @@ export function materializeTaskGraph(state: WorkflowState): DbTaskGraph | null {
       status: task.status,
       category: task.humanGate ? "human-gate" : (task.category ?? "standalone"),
       complexity: task.estimatedComplexity,
+      ...(task.intentionalDeletionTargets ? { intentionalDeletionTargets: unique(task.intentionalDeletionTargets) } : {}),
       createdAt,
       updatedAt: createdAt,
     })),

@@ -3,13 +3,14 @@
  *
  * When the workflow enters REVISE, a baseline snapshot is captured:
  *   - In-memory phases (PLANNING, DISCOVERY, IMPL_PLAN): SHA-256 hash of the artifact file on disk
- *   - File-based phases (INTERFACES, TESTS, IMPLEMENTATION): SHA-256 hash of `git diff` output
+ *   - File-based phases (INTERFACES, TESTS, IMPLEMENTATION): SHA-256 hash of `git diff HEAD --` output
  *
- * For file-based phases, we hash the `git diff` output (uncommitted changes) rather
- * than storing a commit SHA. This prevents false positives during cascades: earlier
- * cascade steps may have left uncommitted changes that would always show up in a
- * cumulative `git diff <sha>` comparison. By comparing diff-output hashes, we only
- * detect NEW changes made during THIS REVISE step.
+ * For file-based phases, we hash the `git diff HEAD --` output (staged and
+ * unstaged uncommitted changes) rather than storing a commit SHA. This prevents
+ * false positives during cascades: earlier cascade steps may have left
+ * uncommitted changes that would always show up in a cumulative `git diff <sha>`
+ * comparison. By comparing diff-output hashes, we only detect NEW changes made
+ * during THIS REVISE step while still seeing staged edits.
  *
  * When request_review is called from REVISE, the current state is compared against
  * the baseline. If nothing changed, the agent is blocked — it must actually make
@@ -43,7 +44,7 @@ const CONTENT_HASH_PHASES: Set<Phase> = new Set(["PLANNING", "DISCOVERY", "IMPL_
 
 /**
  * File-based phases: the artifact is spread across source files.
- * Diff detection: hash of `git diff` output (worktree snapshot).
+ * Diff detection: hash of `git diff HEAD --` output (index + worktree snapshot).
  */
 const GIT_DIFF_PHASES: Set<Phase> = new Set(["INTERFACES", "TESTS", "IMPLEMENTATION"])
 
@@ -60,7 +61,7 @@ function contentHash(text: string): string {
  * Capture a baseline snapshot of the artifact for the given phase.
  *
  * For in-memory phases: reads the artifact file from disk and hashes its content.
- * For file-based phases: hashes the current `git diff` output (uncommitted changes).
+ * For file-based phases: hashes the current `git diff HEAD --` output (staged + unstaged changes).
  *
  * Returns null if the baseline cannot be captured (missing file, no git, etc.).
  * Callers should treat null as "cannot enforce diff gate" (graceful degradation).
@@ -86,12 +87,12 @@ export async function captureRevisionBaseline(
     }
 
     if (GIT_DIFF_PHASES.has(phase)) {
-      // File-based phase — hash the current `git diff` output.
-      // This captures a snapshot of uncommitted changes at REVISE entry.
-      // At check time, we hash `git diff` again and compare. If the hashes
-      // match, the agent made no new changes during this REVISE step.
+      // File-based phase — hash the current `git diff HEAD --` output.
+      // This captures a snapshot of staged and unstaged uncommitted changes at
+      // REVISE entry. At check time, we hash it again and compare. If the
+      // hashes match, the agent made no new changes during this REVISE step.
       try {
-        const diffOutput = execFileSync("git", ["diff"], { cwd, stdio: "pipe", encoding: "utf-8" })
+        const diffOutput = execFileSync("git", ["diff", "HEAD", "--"], { cwd, stdio: "pipe", encoding: "utf-8" })
         return { type: "git-sha", sha: contentHash(diffOutput) }
       } catch {
         return null // git not available — graceful degradation
@@ -139,11 +140,11 @@ export async function hasArtifactChanged(
     }
 
     if (baseline.type === "git-sha") {
-      // File-based phase — hash current `git diff` output and compare.
+      // File-based phase — hash current `git diff HEAD --` output and compare.
       // baseline.sha holds a content hash of the diff output at REVISE entry,
-      // NOT a commit SHA. If the hashes match, the working tree is unchanged.
+      // NOT a commit SHA. If the hashes match, the index/worktree is unchanged.
       try {
-        const diffOutput = execFileSync("git", ["diff"], { cwd, stdio: "pipe", encoding: "utf-8" })
+        const diffOutput = execFileSync("git", ["diff", "HEAD", "--"], { cwd, stdio: "pipe", encoding: "utf-8" })
         return contentHash(diffOutput) !== baseline.sha
       } catch {
         return true // git error — allow through

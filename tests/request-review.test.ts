@@ -5,7 +5,7 @@ import { describe, expect, it } from "bun:test"
 import { mkdtemp, rm, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
-import { validateFileBasedReviewArtifacts } from "#core/tools/file-artifact-validation"
+import { collectImplementationReviewArtifactFiles, validateFileBasedReviewArtifacts } from "#core/tools/file-artifact-validation"
 import { parseRequestReviewArtifactData, processRequestReview } from "#core/tools/request-review"
 
 function requestReviewArgs(overrides: { summary: string; artifact_description: string }) {
@@ -166,5 +166,34 @@ describe("validateFileBasedReviewArtifacts — mixed contract modules", () => {
     } finally {
       await rm(dir, { recursive: true, force: true })
     }
+  })
+})
+
+describe("collectImplementationReviewArtifactFiles", () => {
+  it("excludes historical files superseded by completed intentional deletion metadata", () => {
+    const files = collectImplementationReviewArtifactFiles({
+      phase: "IMPLEMENTATION",
+      reviewArtifactFiles: ["src/kept.ts", "src/deleted.ts"],
+      implDag: [{
+        id: "T1",
+        description: "Historical task",
+        dependencies: [],
+        expectedFiles: ["src/deleted.ts", "src/kept.ts"],
+        expectedTests: ["tests/kept.test.ts"],
+        estimatedComplexity: "small",
+        status: "complete",
+      }, {
+        id: "T9",
+        description: "Deletion metadata repair",
+        dependencies: ["T1"],
+        expectedFiles: [],
+        expectedTests: [],
+        intentionalDeletionTargets: ["src/deleted.ts"],
+        estimatedComplexity: "small",
+        status: "complete",
+      }],
+    } as any, "/repo")
+
+    expect(files).toEqual(["/repo/src/kept.ts", "/repo/tests/kept.test.ts"])
   })
 })

@@ -164,6 +164,27 @@ function isUserEscapeIdleEvent(event: SessionEvent): boolean {
   return false
 }
 
+function questionReplySessionId(event: SessionEvent): string | undefined {
+  return (
+    (event.properties?.["sessionID"] as string | undefined) ??
+    (event.properties?.["sessionId"] as string | undefined) ??
+    (event.properties?.["session_id"] as string | undefined)
+  )
+}
+
+function questionReplyText(event: SessionEvent): string {
+  const answers = event.properties?.["answers"]
+  if (!Array.isArray(answers)) return ""
+  const labels: string[] = []
+  for (const answer of answers) {
+    if (!Array.isArray(answer)) continue
+    for (const label of answer) {
+      if (typeof label === "string" && label.trim()) labels.push(label.trim())
+    }
+  }
+  return labels.join("\n")
+}
+
 export function createPluginHooks({
   ctx,
   projectRoot,
@@ -324,6 +345,31 @@ export function createPluginHooks({
           } catch (e) {
             log.warn("Failed to delete session state", { detail: e instanceof Error ? e.message : String(e), sessionId })
           }
+          return
+        }
+
+        if (event.type === "question.replied") {
+          const sessionId = questionReplySessionId(event)
+          hookSessionId = sessionId
+          if (!sessionId) return
+          const state = store.get(sessionId)
+          if (!state || !isWorkflowSessionActive(state)) return
+          if (state.phaseState !== "USER_GATE" && state.phaseState !== "ESCAPE_HATCH" && state.phaseState !== "HUMAN_GATE") return
+
+          const answerText = questionReplyText(event)
+          if (!answerText) return
+          const result = processUserMessage(state, [{ type: "text", text: answerText }])
+          ctx.trace.record("question.userGate.routing", {
+            sessionId,
+            intercepted: result.intercepted,
+            feedbackType: result.feedbackType,
+            phase: state.phase,
+            phaseState: state.phaseState,
+          })
+          if (!result.intercepted) return
+          mutateHookMemory(hook, sessionId, "question.userGateReceived", (draft) => {
+            draft.userGateMessageReceived = true
+          })
           return
         }
 
@@ -616,7 +662,11 @@ export function createPluginHooks({
           })
         }
 
-        if (refreshedState.phaseState !== "USER_GATE") return
+        if (
+          refreshedState.phaseState !== "USER_GATE" &&
+          refreshedState.phaseState !== "ESCAPE_HATCH" &&
+          refreshedState.phaseState !== "HUMAN_GATE"
+        ) return
 
         const result = processUserMessage(refreshedState, output.parts)
         ctx.trace.record("chat.userGate.routing", {
@@ -766,6 +816,8 @@ export function createPluginHooks({
               parentState.mode,
               parentState.fileAllowlist,
               parentTaskFiles,
+              projectRoot,
+              parentState.approvedCleanupFiles,
             )
             const toolName = input.tool.toLowerCase()
             if (policy.blocked.some((blocked) => toolName.includes(blocked))) {
@@ -833,9 +885,11 @@ export function createPluginHooks({
           refreshedState.phase,
           refreshedState.phaseState,
           refreshedState.mode,
-          refreshedState.fileAllowlist,
-          currentTaskFiles,
-        )
+            refreshedState.fileAllowlist,
+            currentTaskFiles,
+            projectRoot,
+            refreshedState.approvedCleanupFiles,
+          )
 
         const toolName = input.tool.toLowerCase()
         if (policy.blocked.some((blocked) => toolName.includes(blocked))) {

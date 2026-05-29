@@ -102,6 +102,7 @@ function splitApprovalWithMeta(text: string): { decisionText: string; metaText: 
 export function looksLikeUserGateMetaQuestion(text: string): boolean {
   const normalized = text.trim().toLowerCase().replace(/\s+/g, " ")
   if (!normalized) return false
+  if (/^(?:status question|ask question|clarification|clarifying question|question)$/i.test(normalized)) return true
 
   if (
     /\b(?:update me|status update|progress update|what changed|what has changed|what did you change|where are we|what's next|what is next)\b/.test(normalized) ||
@@ -168,6 +169,33 @@ function looksLikeProductManagementQueueingChat(text: string): boolean {
   )
 }
 
+function looksLikeHumanGateReroute(text: string): boolean {
+  const normalized = text.trim().toLowerCase().replace(/\s+/g, " ")
+  if (!normalized) return false
+  return (
+    /\b(?:backtrack|reroute|revise|replace|redraft)\b/.test(normalized) ||
+    /\b(?:rather than|instead of|not)\s+(?:resolve|resolv(?:ing|e)?|complete|completing)\b/.test(normalized) ||
+    /\b(?:do not|don't|dont)\s+(?:resolve|approve|treat)\b/.test(normalized) ||
+    /\b(?:current|approved)\s+(?:plan|design|model|artifact)\b.*\b(?:wrong|flawed|change|changed|replace|revise)\b/.test(normalized) ||
+    /\b(?:human[- ]?gated?|manual|prerequisite|production prerequisite)\b.*\b(?:wrong|flawed|replace|revise|backtrack|reroute)\b/.test(normalized) ||
+    /\b(?:plan|design)\b.*\b(?:must|needs? to|should)\s+(?:change|be changed|be revised|be replaced)\b/.test(normalized)
+  )
+}
+
+function looksLikeHumanGateResolution(text: string): boolean {
+  const normalized = text.trim().toLowerCase().replace(/\s+/g, " ")
+  if (!normalized || looksLikeHumanGateReroute(normalized)) return false
+  if (/^(?:done|resolved|complete|completed|fixed|ready)[.!?\s]*$/i.test(normalized)) return true
+  if (
+    /\b(?:t\d+|task[-_ ]?[a-z0-9_-]+)\b.*\b(?:resolved|completed|done|configured|created|provisioned|set up|setup|ready)\b/.test(normalized) ||
+    /\b(?:resolved|completed|done|configured|created|provisioned|set up|setup|ready)\b.*\b(?:t\d+|task[-_ ]?[a-z0-9_-]+)\b/.test(normalized)
+  ) return true
+  return (
+    /\b(?:resolved|completed|done|configured|created|provisioned|set up|setup|ready)\b/.test(normalized) &&
+    /\b(?:gate|task|prerequisite|credential|secret|infra|infrastructure|manual action|human)\b/.test(normalized)
+  )
+}
+
 // ---------------------------------------------------------------------------
 // Main export
 // ---------------------------------------------------------------------------
@@ -199,6 +227,19 @@ export function processUserMessage(
 
   if (state.phaseState === "HUMAN_GATE") {
     if (looksLikeUserGateMetaQuestion(textContent)) {
+      return { parts, intercepted: false, feedbackType: null }
+    }
+    if (looksLikeHumanGateReroute(textContent)) {
+      return {
+        parts: [
+          { type: "text", text: buildHumanGateRerouteNote(state) },
+          ...parts,
+        ],
+        intercepted: true,
+        feedbackType: "feedback",
+      }
+    }
+    if (!looksLikeHumanGateResolution(textContent)) {
       return { parts, intercepted: false, feedbackType: null }
     }
     return {
@@ -278,6 +319,21 @@ function buildEscapeHatchNote(phase: Phase): string {
     `Call \`submit_feedback\` NOW with feedback_type="revise" and feedback_text set to the user's exact message. ` +
     `This must be your first and only tool call. Do NOT do research or analysis first. ` +
     `Note: approval is NOT available during an escape hatch — only revision feedback.`
+  )
+}
+
+function buildHumanGateRerouteNote(state: WorkflowState): string {
+  const unresolved = (state.implDag ?? [])
+    .filter((task) => task.status === "human-gated" && (!task.humanGate || !task.humanGate.resolved))
+    .map((task) => task.id)
+  const taskHint = unresolved.length > 0
+    ? ` Current unresolved human-gated task IDs: ${unresolved.join(", ")}.`
+    : ""
+  return (
+    `[WORKFLOW HUMAN GATE — REROUTE REQUIRED] ` +
+    `The user is changing the approved plan/design instead of resolving the manual gate.${taskHint} ` +
+    `Call \`propose_backtrack\` NOW as your first tool call with the earliest affected target phase and the user's exact requested reroute as the reason. ` +
+    `Do NOT call \`submit_feedback(approve)\` and do NOT resolve the human gate unless the user explicitly confirms the prerequisite was completed.`
   )
 }
 

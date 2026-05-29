@@ -22,6 +22,7 @@ import { nextSchedulerDecision } from "../scheduler"
 import { getPhaseToolPolicy } from "./tool-guard"
 import { countExpectedBlockingCriteria } from "../tools/mark-satisfied"
 import { buildScenarioSufficiencyPromptBlock } from "../scenario-sufficiency"
+import { buildUserGateChoiceInstruction } from "../user-gate-choice"
 import {
   buildPhaseAcceptanceCriteria,
   getAcceptanceCriteria as getSharedAcceptanceCriteria,
@@ -107,8 +108,11 @@ Use this task metadata shape so the implementation DAG parser can create determi
 **Expected tests:** tests/example.test.ts
 **Verification commands:** bun test tests/example.test.ts, bun run typecheck
 **Files:** src/example.ts
+**Intentional deletion targets:** none
 **Category:** standalone
-**Complexity:** small`
+**Complexity:** small
+
+Completed tasks are immutable audit history. If a completed task's \`Files:\` list contains paths that were later deleted, keep those paths in that completed task's \`Files:\` metadata exactly as recorded. Put deleted/superseded paths only on a new forward corrective task using \`Intentional deletion targets:\` or \`Deleted files:\`; do not remove them from completed task metadata.`
   }
   return null
 }
@@ -127,6 +131,7 @@ function buildPhaseToolGuide(state: WorkflowState): string | null {
   }
   if (state.phaseState === "HUMAN_GATE") {
     lines.push("- `resolve_human_gate` — use only from the task that declared a human-gated requirement; otherwise wait for the user to complete the manual action.")
+    lines.push("- If the user changes the plan/design instead of resolving the manual prerequisite, call `propose_backtrack` to route the planning revision directly from HUMAN_GATE.")
     lines.push("- Do not treat HUMAN_GATE as an ordinary artifact approval/revision gate.")
     return lines.join("\n")
   }
@@ -150,7 +155,8 @@ function buildPhaseToolGuide(state: WorkflowState): string | null {
     lines.push("- `mark_task_complete` — call after implementing and verifying the current DAG task.")
     lines.push("- `route_patch_suggestions`, `apply_patch_suggestion`, `resolve_patch_suggestion` — handle reviewer patch suggestions before asking for user direction.")
     lines.push("- `analyze_task_boundary_change` / `apply_task_boundary_change` — route expected-file/test boundary drift through the DAG.")
-    lines.push("- `request_allowlist_expansion` or `approve_current_task_scope_expansion` — use when INCREMENTAL scope needs explicit repair.")
+    lines.push("- `request_allowlist_expansion` — use when the global INCREMENTAL allowlist needs explicit expansion.")
+    lines.push("- `approve_current_task_scope_expansion` — use when files are approved for the active task but missing from the current task boundary, or when the user approves deleting accidental cleanup files without task ownership; outside USER_GATE it records a pending request and moves to an approval gate before applying.")
     lines.push("- `report_drift`, `plan_drift_repair`, `apply_drift_repair` — use for artifact/task/worktree drift instead of ad-hoc revision requests.")
     lines.push("- `request_review` — submit final implementation files only after all agent-dispatchable DAG tasks are complete.")
   }
@@ -764,6 +770,11 @@ function buildSubStateContext(state: WorkflowState, reviewMode: "agent" | "isola
       break
     case "HUMAN_GATE":
       lines.push("You are in IMPLEMENTATION/HUMAN_GATE. Manual action is required before the workflow can continue.")
+      {
+        const choiceInstruction = buildUserGateChoiceInstruction(state)
+        if (choiceInstruction) lines.push("", choiceInstruction, "")
+      }
+      lines.push("If the user provides the requested manual action, resolve it with the human-gate flow. If they instead change the plan/design, call `propose_backtrack` from this state and route the revision directly.")
       lines.push("This is not a generic approval gate and should not be handled through ordinary approval routing.")
       break
     case "DELEGATED_WAIT":
@@ -805,6 +816,10 @@ function buildSubStateContext(state: WorkflowState, reviewMode: "agent" | "isola
     case "ESCAPE_HATCH":
       lines.push("**ESCAPE HATCH ACTIVE** — A strategic change was detected.")
       lines.push("The escape hatch presentation has been shown to the user.")
+      {
+        const choiceInstruction = buildUserGateChoiceInstruction(state)
+        if (choiceInstruction) lines.push("", choiceInstruction, "")
+      }
       lines.push("**MANDATORY:** Call `submit_feedback` as your FIRST and ONLY tool call with the user's response.")
       lines.push("The user's response is one of: `accept`, a description of alternative direction, or `abort`.")
       lines.push("Do NOT perform any research, analysis, or other tool calls before calling `submit_feedback`.")
@@ -813,6 +828,8 @@ function buildSubStateContext(state: WorkflowState, reviewMode: "agent" | "isola
     case "USER_GATE":
       {
         lines.push("The artifact is awaiting user approval.")
+        const choiceInstruction = buildUserGateChoiceInstruction(state)
+        if (choiceInstruction) lines.push("", choiceInstruction)
         lines.push("")
         lines.push("**MANDATORY PROTOCOL — READ CAREFULLY:**")
         lines.push("1. If the user's message is artifact feedback (approval, revision requests, or comments about the artifact):")

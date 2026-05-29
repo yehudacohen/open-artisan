@@ -6,8 +6,9 @@ import type { SubagentDispatcher } from "./subagent-dispatcher"
 import type { WorkflowState } from "./workflow-state-types"
 import type { ChangeProposalReviewOutput, ChangeProposalToolInput } from "./schemas"
 import { ChangeProposalReviewOutputSchema, toJsonSchema } from "./schemas"
-import { CHANGE_PROPOSAL_REVIEW_TIMEOUT_MS } from "./constants"
-import { extractJsonFromText, extractTextFromPromptResult, withTimeout } from "./utils"
+import { REVIEW_PROGRESS_HARD_TIMEOUT_MS, REVIEW_PROGRESS_IDLE_TIMEOUT_MS } from "./constants"
+import { extractJsonFromText, extractTextFromPromptResult } from "./utils"
+import { runWithProgressTimeout } from "./progress-timeout"
 
 export interface ChangeProposalReviewRequest {
   proposal: ChangeProposalToolInput
@@ -36,7 +37,7 @@ export type ChangeProposalParseResult =
 const ROUTE_DEFINITIONS: Record<ChangeProposalReviewOutput["route"], string> = {
   "current-task-fix": "The change is inside the current task and approved scope; the agent can fix it normally.",
   "task-boundary-change": "The change is valid but belongs in a different or expanded implementation DAG task boundary.",
-  "planning-allowlist-revision": "The change is valid fallout of approved work but requires expanding the INCREMENTAL file allowlist.",
+  "planning-allowlist-revision": "The change is valid fallout of approved work but requires explicit user-approved INCREMENTAL allowlist expansion. This route does not by itself mean backtrack to PLANNING.",
   "impl-plan-revision": "The change requires revising task ordering, ownership, expected tests, or DAG metadata.",
   backtrack: "The change reveals a flawed upstream artifact that must be revisited before implementation continues.",
   "defer-final-review": "The change is worth tracking but should be judged by final implementation review, not repaired now.",
@@ -108,7 +109,8 @@ export function buildChangeProposalReviewPrompt(req: ChangeProposalReviewRequest
   lines.push("")
   lines.push("## Decision Rules")
   lines.push("- Prefer the narrowest route that preserves approved workflow scope.")
-  lines.push("- If a file is outside the INCREMENTAL allowlist but is valid fallout of approved work, choose planning-allowlist-revision.")
+  lines.push("- If a file is outside the INCREMENTAL allowlist but is valid fallout of approved work, choose planning-allowlist-revision. Do not choose backtrack unless an approved artifact is actually wrong.")
+  lines.push("- If the proposal is cleanup of stale generated output, build output, temp directories, or lock files left by timed-out review/build tooling, classify it as valid fallout when the cleanup is needed to restore verification. Prefer planning-allowlist-revision for files outside the allowlist, then request explicit user approval for the allowlist expansion.")
   lines.push("- If a file is inside the allowlist but belongs to another DAG task, choose task-boundary-change or impl-plan-revision.")
   lines.push("- If the proposal reveals an upstream artifact is wrong, choose backtrack.")
   lines.push("- Reject unrelated scope creep even if the edit is small.")
@@ -125,6 +127,37 @@ export function buildChangeProposalReviewPrompt(req: ChangeProposalReviewRequest
     rejected_files: [],
   }, null, 2))
   return lines.join("\n")
+}
+
+export function buildChangeProposalNextAction(input: {
+  decision: ChangeProposalReviewOutput
+  proposal: ChangeProposalToolInput
+  state: WorkflowState
+}): string {
+  const route = input.decision.route
+  if (route === "planning-allowlist-revision") {
+    const files = input.decision.allowed_files.length > 0
+      ? input.decision.allowed_files
+      : input.proposal.affected_files ?? []
+    const fileList = files.length > 0 ? files.join(", ") : "the affected files identified in the proposal"
+    if (input.state.phase === "INTERFACES" || input.state.phase === "TESTS" || input.state.phase === "IMPLEMENTATION" || input.state.phase === "IMPL_PLAN") {
+      return (
+        `Next action: call request_allowlist_expansion for ${fileList}, then continue the current review/approval path so the pending expansion can be approved at the next valid gate. ` +
+        "Do not call propose_backtrack for this route unless the reviewer also says an approved upstream artifact is wrong."
+      )
+    }
+    return `Next action: revise the current planning allowlist to include ${fileList}; do not edit those files until the revised allowlist is approved.`
+  }
+  if (route === "task-boundary-change") {
+    return "Next action: use analyze_task_boundary_change/apply_task_boundary_change for cross-task ownership changes. For active-task scope expansion, call approve_current_task_scope_expansion; if you are not at USER_GATE it will record the request and move to a valid approval gate before applying."
+  }
+  if (route === "backtrack") {
+    return "Next action: call propose_backtrack only from an active DRAFT/REVISE/TASK_REVISE state; at USER_GATE, present the issue as revision feedback for the user to route."
+  }
+  if (route === "ask-user") {
+    return "Next action: ask the user for an explicit decision before changing workflow scope."
+  }
+  return "Next action: follow the selected route; do not edit files outside the active allowlist/task boundary without the matching approval tool."
 }
 
 function extractChangeProposalPayload(raw: unknown): unknown {
@@ -162,12 +195,22 @@ async function ephemeralChangeProposalPrompt(
     ...(parentModel ? { model: parentModel } : {}),
   })
   try {
-    return await session.prompt(prompt, {
-      submissionTool: { name: "submit_change_proposal_review_result" },
-      responseFormat: {
-        type: "json_schema",
-        schema: toJsonSchema(ChangeProposalReviewOutputSchema),
+    return await runWithProgressTimeout({
+      policy: {
+        label: "change-proposal-review",
+        idleTimeoutMs: REVIEW_PROGRESS_IDLE_TIMEOUT_MS,
+        hardTimeoutMs: REVIEW_PROGRESS_HARD_TIMEOUT_MS,
       },
+      run: (signal) => session.prompt(prompt, {
+        onProgress: signal.progress,
+        submissionTool: { name: "submit_change_proposal_review_result" },
+        responseFormat: {
+          type: "json_schema",
+          schema: toJsonSchema(ChangeProposalReviewOutputSchema),
+        },
+      }),
+      onIdleTimeout: () => session.destroy(),
+      onHardTimeout: () => session.destroy(),
     })
   } finally {
     await session.destroy()
@@ -180,11 +223,7 @@ export async function dispatchChangeProposalReview(
 ): Promise<ChangeProposalReviewResult> {
   const prompt = buildChangeProposalReviewPrompt(req)
   try {
-    const raw = await withTimeout(
-      ephemeralChangeProposalPrompt(dispatcher, prompt, req.parentSessionId, req.parentModel),
-      CHANGE_PROPOSAL_REVIEW_TIMEOUT_MS,
-      "change-proposal-review",
-    )
+    const raw = await ephemeralChangeProposalPrompt(dispatcher, prompt, req.parentSessionId, req.parentModel)
     const parsed = parseChangeProposalReviewResult(raw)
     if (!parsed.success) return parsed
     return { ...parsed, prompt }

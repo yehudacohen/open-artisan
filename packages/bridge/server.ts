@@ -17,7 +17,10 @@ import type { OpenArtisanServices } from "../core/open-artisan-services"
 import type pino from "pino"
 import { NOT_INITIALIZED } from "./protocol"
 import { validateBridgeMethodParams } from "./protocol-validation"
-import { BRIDGE_MAX_STDIO_REQUEST_CHARS } from "../core/constants"
+import { BRIDGE_ACTIVE_REQUEST_DRAIN_TIMEOUT_MS, BRIDGE_MAX_STDIO_REQUEST_CHARS } from "../core/constants"
+import { removePidFile } from "./pid-file"
+import { removeBridgeMetadata } from "./bridge-meta"
+import { detachBridgeClient } from "./bridge-clients"
 
 export interface ReviewSubmissionTokenRecord {
   sessionId: string
@@ -68,6 +71,10 @@ export interface BridgeContext {
   openArtisanServices: OpenArtisanServices | null
   /** Runtime backend cleanup hook selected at lifecycle.init. */
   runtimeBackendDispose?: (() => Promise<void>) | null | undefined
+  /** True when this process wrote shared bridge runtime metadata/PID files. */
+  ownsRuntimeRegistration?: boolean
+  /** Bridge client leases created by this process and safe to detach on transport close. */
+  attachedBridgeClientIds?: Set<string>
   /** Pino logger instance — set during lifecycle.init. Available for request logging. */
   pinoLogger: pino.Logger | null
   /** Flag for shutdown. */
@@ -134,8 +141,10 @@ export function createBridgeEngine(
   let roadmapService: RoadmapSliceService | null = null
   let openArtisanServices: OpenArtisanServices | null = null
   let runtimeBackendDispose: (() => Promise<void>) | null = null
+  let ownsRuntimeRegistration = false
   let pinoLogger: pino.Logger | null = null
   const reviewSubmissionTokens = new Map<string, ReviewSubmissionTokenRecord>()
+  const attachedBridgeClientIds = new Set<string>()
 
   const bridgeCtx: BridgeContext = {
     get engine() { return engine },
@@ -160,6 +169,9 @@ export function createBridgeEngine(
     set openArtisanServices(v: OpenArtisanServices | null) { openArtisanServices = v },
     get runtimeBackendDispose() { return runtimeBackendDispose },
     set runtimeBackendDispose(v: (() => Promise<void>) | null | undefined) { runtimeBackendDispose = v ?? null },
+    get ownsRuntimeRegistration() { return ownsRuntimeRegistration },
+    set ownsRuntimeRegistration(v: boolean) { ownsRuntimeRegistration = v },
+    attachedBridgeClientIds,
     get pinoLogger() { return pinoLogger },
     set pinoLogger(v: pino.Logger | null) { pinoLogger = v },
     get shuttingDown() { return shuttingDown },
@@ -227,6 +239,10 @@ export function createBridgeEngine(
 export interface BridgeServerOptions {
   input?: Readable
   output?: Writable
+  /** Exit the process after stdin/input closes and cleanup finishes. Defaults to true for CLI stdio. */
+  exitOnInputClose?: boolean
+  /** Test/embedding override for bounded active-request drain during transport close. */
+  activeRequestDrainTimeoutMs?: number
 }
 
 /**
@@ -242,6 +258,95 @@ export function createBridgeServer(
   const input = opts?.input ?? process.stdin
   const output = opts?.output ?? process.stdout
   const engine = createBridgeEngine(handlers)
+  const exitOnInputClose = opts?.exitOnInputClose ?? !opts?.input
+  const activeRequestDrainTimeoutMs = opts?.activeRequestDrainTimeoutMs ?? BRIDGE_ACTIVE_REQUEST_DRAIN_TIMEOUT_MS
+  let closeCleanupStarted = false
+  let activeRequests = 0
+  const idleResolvers: Array<() => void> = []
+  let resolveClosed!: () => void
+  const closed = new Promise<void>((resolve) => {
+    resolveClosed = resolve
+  })
+
+  function notifyIdle(): void {
+    if (activeRequests !== 0) return
+    while (idleResolvers.length > 0) idleResolvers.shift()?.()
+  }
+
+  async function waitForNoActiveRequests(): Promise<boolean> {
+    if (activeRequests === 0) return true
+    if (activeRequestDrainTimeoutMs <= 0) return false
+    let timeout: ReturnType<typeof setTimeout> | null = null
+    const drained = await Promise.race([
+      new Promise<true>((resolve) => idleResolvers.push(() => resolve(true))),
+      new Promise<false>((resolve) => {
+        timeout = setTimeout(() => resolve(false), activeRequestDrainTimeoutMs)
+      }),
+    ])
+    if (timeout) clearTimeout(timeout)
+    return drained
+  }
+
+  async function receiveJSONWithTracking(json: string): Promise<string | null> {
+    activeRequests++
+    try {
+      return await engine.receiveJSON(json)
+    } finally {
+      activeRequests--
+      notifyIdle()
+    }
+  }
+
+  async function cleanupAfterInputClose(): Promise<void> {
+    if (closeCleanupStarted) return
+    closeCleanupStarted = true
+    engine.ctx.shuttingDown = true
+    const drained = await waitForNoActiveRequests()
+    if (!drained) {
+      engine.ctx.engine?.log.warn("Timed out waiting for active bridge requests during input close", {
+        detail: `activeRequests=${activeRequests} timeoutMs=${activeRequestDrainTimeoutMs}`,
+      })
+    }
+
+    const stateDir = engine.ctx.stateDir
+    const projectDir = engine.ctx.projectDir
+    if (stateDir && projectDir && engine.ctx.attachedBridgeClientIds) {
+      for (const clientId of engine.ctx.attachedBridgeClientIds) {
+        try {
+          await detachBridgeClient({ projectDir, stateDir, clientId, reason: "disconnect" })
+        } catch {
+          // Best-effort transport cleanup must not block backend disposal.
+        }
+      }
+      engine.ctx.attachedBridgeClientIds.clear()
+    }
+
+    const dispose = engine.ctx.runtimeBackendDispose
+    engine.ctx.runtimeBackendDispose = null
+    if (dispose) {
+      try {
+        await dispose()
+      } catch (error) {
+        engine.ctx.engine?.log.warn("Runtime backend dispose failed after bridge input closed", {
+          detail: error instanceof Error ? error.message : String(error),
+        })
+      }
+    }
+
+    if (stateDir && engine.ctx.ownsRuntimeRegistration) {
+      try {
+        await removePidFile(stateDir)
+        await removeBridgeMetadata(stateDir)
+      } catch {
+        // Runtime ownership cleanup is best-effort; discovery can still recover stale files.
+      }
+      engine.ctx.ownsRuntimeRegistration = false
+    }
+
+    if (engine.ctx.pinoLogger) {
+      engine.ctx.pinoLogger.flush()
+    }
+  }
 
   function start() {
     const rl = createInterface({ input, crlfDelay: Infinity })
@@ -267,7 +372,7 @@ export function createBridgeServer(
       }
 
       try {
-        const response = await engine.receiveJSON(trimmed)
+        const response = await receiveJSONWithTracking(trimmed)
         if (response) writeResponse(response)
       } catch (error) {
         writeResponse(JSON.stringify({
@@ -279,15 +384,20 @@ export function createBridgeServer(
     })
 
     rl.on("close", () => {
-      engine.ctx.shuttingDown = true
+      void cleanupAfterInputClose()
+        .finally(() => {
+          resolveClosed()
+          if (exitOnInputClose) process.exit(0)
+        })
     })
   }
 
   return {
     start,
-    receiveJSON: engine.receiveJSON,
+    receiveJSON: receiveJSONWithTracking,
     get ctx() { return engine.ctx },
     get initialized() { return engine.initialized },
     get policyVersion() { return engine.policyVersion },
+    closed,
   }
 }

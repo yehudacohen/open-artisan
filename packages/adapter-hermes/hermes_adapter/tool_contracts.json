@@ -503,7 +503,7 @@
   {
     "hermes_name": "oa_approve_current_task_scope_expansion",
     "bridge_name": "approve_current_task_scope_expansion",
-    "description": "Atomically approve and apply current-task scope expansion to the INCREMENTAL allowlist and DAG task boundary.",
+    "description": "Approve current-task scope expansion or cleanup deletes; cleanup files do not mutate DAG task ownership.",
     "schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "type": "object",
@@ -520,6 +520,13 @@
           }
         },
         "expected_tests": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "cleanup_files": {
           "type": "array",
           "items": {
             "type": "string",

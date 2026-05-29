@@ -237,6 +237,7 @@ export const ApproveCurrentTaskScopeExpansionToolSchema = z.object({
   task_id: z.string().min(1).optional(),
   files: z.array(z.string().min(1)).optional(),
   expected_tests: z.array(z.string().min(1)).optional(),
+  cleanup_files: z.array(z.string().min(1)).optional(),
   reason: z.string().min(20),
 }).strict()
 

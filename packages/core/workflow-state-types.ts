@@ -76,8 +76,15 @@ import type { WorkflowRoadmapContext } from "./roadmap-types"
  *   v32: added roadmapContext to persist optional roadmap execution-slice
  *        traceability for workflows started from roadmap item IDs or slices;
  *        migrations default missing roadmapContext to null.
+ *   v33: added pendingCurrentTaskScopeExpansions for user-approved current-task
+ *        boundary repairs that must pause at USER_GATE before applying.
+ *   v34: added optional intentionalDeletionTargets on implDag TaskNode so
+ *        forward corrective tasks can mark historical files as intentionally
+ *        deleted without mutating completed expectedFiles metadata.
+ *   v35: added approvedCleanupFiles for user-approved cleanup deletes that do
+ *        not expand DAG task ownership.
  */
-export const SCHEMA_VERSION = 32
+export const SCHEMA_VERSION = 35
 
 /**
  * Runtime concurrency policy for nested or delegated workflow execution.
@@ -94,6 +101,15 @@ export interface PendingAllowlistExpansion {
   reason: UserAuthoredText
   sourceArtifact: ArtifactKey
   requestedAtPhase: Phase
+  requestedAt: number
+}
+
+export interface PendingCurrentTaskScopeExpansion {
+  taskId: string
+  files: string[]
+  expectedTests: string[]
+  cleanupFiles?: string[]
+  reason: UserAuthoredText
   requestedAt: number
 }
 
@@ -436,6 +452,16 @@ export interface WorkflowState {
    * These replace reviewer-text extraction for common out-of-allowlist boundary repairs.
    */
   pendingAllowlistExpansions: PendingAllowlistExpansion[]
+
+  /**
+   * Current-task boundary/scope repairs awaiting explicit user approval.
+   * Used when IMPLEMENTATION/DRAFT discovers valid, localized corrective files
+   * outside the active task boundary but should not backtrack upstream artifacts.
+   */
+  pendingCurrentTaskScopeExpansions: PendingCurrentTaskScopeExpansion[]
+
+  /** User-approved files that may be deleted as cleanup without changing task ownership. */
+  approvedCleanupFiles: string[]
 
   /**
    * Compact rolling history of workflow/tooling failures, keyed by fingerprint.
@@ -997,6 +1023,16 @@ export function validateWorkflowStateResult(state: WorkflowState): WorkflowState
           }
         }
       }
+      if (node.intentionalDeletionTargets !== undefined && node.intentionalDeletionTargets !== null) {
+        if (!Array.isArray(node.intentionalDeletionTargets)) {
+          return { success: false, error: workflowStateValidationError(`implDag task "${node.id}" intentionalDeletionTargets must be an array`) }
+        }
+        for (let j = 0; j < node.intentionalDeletionTargets.length; j++) {
+          if (typeof node.intentionalDeletionTargets[j] !== "string") {
+            return { success: false, error: workflowStateValidationError(`implDag task "${node.id}" intentionalDeletionTargets[${j}] must be a string`) }
+          }
+        }
+      }
       if (node.roadmapItemIds !== undefined && node.roadmapItemIds !== null) {
         if (!Array.isArray(node.roadmapItemIds)) {
           return { success: false, error: workflowStateValidationError(`implDag task "${node.id}" roadmapItemIds must be an array`) }
@@ -1092,6 +1128,39 @@ export function validateWorkflowStateResult(state: WorkflowState): WorkflowState
     if (typeof entry.requestedAt !== "number" || entry.requestedAt < 0 || !Number.isFinite(entry.requestedAt)) {
       return { success: false, error: workflowStateValidationError(`pendingAllowlistExpansions[${i}].requestedAt must be a non-negative number`) }
     }
+  }
+  if (!Array.isArray(state.pendingCurrentTaskScopeExpansions)) {
+    return { success: false, error: workflowStateValidationError(`pendingCurrentTaskScopeExpansions must be an array, got ${typeof state.pendingCurrentTaskScopeExpansions}`) }
+  }
+  for (let i = 0; i < state.pendingCurrentTaskScopeExpansions.length; i++) {
+    const entry = state.pendingCurrentTaskScopeExpansions[i]
+    if (!entry || typeof entry !== "object") {
+      return { success: false, error: workflowStateValidationError(`pendingCurrentTaskScopeExpansions[${i}] must be an object`) }
+    }
+    if (typeof entry.taskId !== "string" || entry.taskId.trim().length === 0) {
+      return { success: false, error: workflowStateValidationError(`pendingCurrentTaskScopeExpansions[${i}].taskId must be non-empty`) }
+    }
+    if (!Array.isArray(entry.files) || entry.files.some((file) => typeof file !== "string" || !file.startsWith("/"))) {
+      return { success: false, error: workflowStateValidationError(`pendingCurrentTaskScopeExpansions[${i}].files must be absolute paths`) }
+    }
+    if (!Array.isArray(entry.expectedTests) || entry.expectedTests.some((file) => typeof file !== "string" || !file.startsWith("/"))) {
+      return { success: false, error: workflowStateValidationError(`pendingCurrentTaskScopeExpansions[${i}].expectedTests must be absolute paths`) }
+    }
+    if (entry.cleanupFiles !== undefined && (!Array.isArray(entry.cleanupFiles) || entry.cleanupFiles.some((file) => typeof file !== "string" || !file.startsWith("/")))) {
+      return { success: false, error: workflowStateValidationError(`pendingCurrentTaskScopeExpansions[${i}].cleanupFiles must be absolute paths`) }
+    }
+    if (entry.files.length === 0 && entry.expectedTests.length === 0 && (entry.cleanupFiles?.length ?? 0) === 0) {
+      return { success: false, error: workflowStateValidationError(`pendingCurrentTaskScopeExpansions[${i}] must include files, expectedTests, or cleanupFiles`) }
+    }
+    if (typeof entry.reason !== "string" || entry.reason.trim().length === 0) {
+      return { success: false, error: workflowStateValidationError(`pendingCurrentTaskScopeExpansions[${i}].reason must be non-empty`) }
+    }
+    if (typeof entry.requestedAt !== "number" || entry.requestedAt < 0 || !Number.isFinite(entry.requestedAt)) {
+      return { success: false, error: workflowStateValidationError(`pendingCurrentTaskScopeExpansions[${i}].requestedAt must be a non-negative number`) }
+    }
+  }
+  if (!Array.isArray(state.approvedCleanupFiles) || state.approvedCleanupFiles.some((file) => typeof file !== "string" || !file.startsWith("/"))) {
+    return { success: false, error: workflowStateValidationError(`approvedCleanupFiles must be an array of absolute paths`) }
   }
   if (!Array.isArray(state.toolFailureHistory)) {
     return { success: false, error: workflowStateValidationError(`toolFailureHistory must be an array, got ${typeof state.toolFailureHistory}`) }

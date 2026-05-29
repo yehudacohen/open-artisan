@@ -194,6 +194,7 @@ DONE            DRAFT (sentinel only)
 | `escape_hatch_triggered` | Strategic pivot detected at USER_GATE | Orchestrator diverge → strategic classification |
 | `revision_complete` | Revision done, ready for re-review | `request_review` tool |
 | `allowlist_expansion_requested` | INCREMENTAL scope expansion must pause for approval | `request_allowlist_expansion` |
+| `scope_expansion_requested` | Current-task boundary expansion must pause for approval | `approve_current_task_scope_expansion` from active implementation states |
 | `scope_expansion_approved` | Approved scope repair returns to implementation/plan authoring | `submit_feedback(approve)`, current-task scope tools |
 
 ### 5.3 Phase Pattern (Repeating Unit)
@@ -470,6 +471,7 @@ Workflow state is persisted through the `StateBackend` abstraction. The default 
 | `reviewArtifactFiles` | `string[]` | v22 | Orchestrator-driven file paths for reviewer. Accumulated from DAG task `expectedFiles` at `mark_task_complete`, supplemented by agent's `artifact_files` in `request_review`. Reset on phase approval. |
 | `backtrackContext` | `{fromPhase, targetPhase, reason, ...} \| null` | v23 | Provenance for structural backtracking decisions. |
 | `approvedArtifactFiles` | `Partial<Record<ArtifactKey, string[]>>` | v24 | Source-file artifacts approved via `request_review artifact_files`; used as downstream source of truth. |
+| `approvedCleanupFiles` | `string[]` | v35 | User-approved cleanup-delete paths. These permit deletion of accidental files without adding DAG task ownership or final-review expected files. |
 
 ### 10.3 Orchestrator-Driven Artifact Tracking (v22)
 
@@ -485,6 +487,10 @@ The isolated reviewer needs to know exactly which files to evaluate. Prior to v2
 6. **Phase approval:** `reviewArtifactFiles` is reset to `[]` when the phase advances.
 
 The reviewer prompt also unconditionally includes `artifactDiskPaths` (plan, conventions, impl_plan locations) so the reviewer can cross-reference the plan regardless of workflow mode.
+
+**Intentional deletion metadata:** Forward corrective tasks may declare `Intentional deletion targets:`, `Deletion targets:`, or `Deleted files:` in IMPL_PLAN metadata. These paths are audit metadata for files intentionally removed or superseded by later work. Completed historical tasks keep their original `Files:` metadata unchanged; deletion ownership belongs to the future corrective task, and final implementation review subtracts these deletion targets instead of recreating removed files. Approval diagnostics report the exact missing/extra completed-task paths when a revised plan accidentally removes deleted historical files from a completed task's `Files:` list.
+
+**Accidental cleanup deletes:** If an agent creates an accidental file outside the current task boundary, the repair path is not to mutate completed task metadata or add ownership to the active task. The agent requests user approval via `approve_current_task_scope_expansion` with `cleanup_files`. Approved cleanup files are stored in `approvedCleanupFiles` and may be deleted by guarded delete patches; they are not added to `fileAllowlist`, `expectedFiles`, or `expectedTests`.
 
 ### 10.4 Revision Baseline (Diff Gate)
 
@@ -579,6 +585,7 @@ In INCREMENTAL mode, the reviewer must validate that the file allowlist covers a
 | `submit_feedback` | */USER_GATE, */ESCAPE_HATCH | Route user feedback (approve or revise). At ESCAPE_HATCH: accept drift, provide alternative direction, start new direction, or abort. |
 | `mark_task_complete` | IMPLEMENTATION/DRAFT, IMPLEMENTATION/REVISE | Complete a DAG task (triggers per-task review). Accumulates the task's `expectedFiles` into `state.reviewArtifactFiles` for the final implementation reviewer. |
 | `resolve_human_gate` | IMPLEMENTATION/* | Activate a human gate for a DAG task |
+| `approve_current_task_scope_expansion` | IMPLEMENTATION/* | Request/apply user-approved active-task scope repairs. `files`/`expected_tests` update the current task boundary; `cleanup_files` approves deletion-only cleanup without mutating task ownership. |
 | `check_prior_workflow` | MODE_SELECT | Check if prior workflow artifacts are relevant to current intent; blocks `select_mode` if mismatch detected unless user overrides |
 | `spawn_sub_workflow` | IMPLEMENTATION/* | Delegate a DAG task to an independent child sub-workflow session |
 | `query_parent_workflow` | any (sub-workflow only) | Read-only inspection of the parent workflow's phase, conventions, and approved artifacts |

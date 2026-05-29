@@ -19,6 +19,7 @@ import { nextSchedulerDecisionForInput, readDecisionInput, resolveHumanGate, typ
 import { resolve } from "node:path"
 import { parseImplPlan, validateExecutableImplPlan } from "../impl-plan-parser"
 import { normalizeWorkflowPaths } from "../path-normalization"
+import { completedTaskRewriteDiagnostic } from "../completed-task-comparison"
 
 export const SUBMIT_FEEDBACK_DESCRIPTION = `
 Call this tool to record the user's response at a review gate.
@@ -147,6 +148,9 @@ export function materializeImplPlanDag(planContent: string, cwd?: string): { nod
     ...task,
     expectedFiles: cwd ? normalizeWorkflowPaths(task.expectedFiles, cwd) : task.expectedFiles,
     expectedTests: cwd ? normalizeWorkflowPaths(task.expectedTests, cwd) : task.expectedTests,
+    ...(task.intentionalDeletionTargets
+      ? { intentionalDeletionTargets: cwd ? normalizeWorkflowPaths(task.intentionalDeletionTargets, cwd) : task.intentionalDeletionTargets }
+      : {}),
   }))
   const firstReady = nodes.find((task) => task.status === "pending" && task.dependencies.length === 0)
   return { nodes, currentTaskId: firstReady?.id ?? null }
@@ -155,25 +159,6 @@ export function materializeImplPlanDag(planContent: string, cwd?: string): { nod
 export type ForwardOnlyImplPlanMaterializationResult =
   | { success: true; nodes: TaskNode[]; currentTaskId: string | null }
   | { success: false; error: string }
-
-function sameStringArray(left: string[], right: string[]): boolean {
-  return left.length === right.length && left.every((value, index) => right[index] === value)
-}
-
-function completedTaskRewriteReason(existing: TaskNode, planned: TaskNode): string | null {
-  const checks: Array<[string, boolean]> = [
-    ["description", existing.description === planned.description],
-    ["dependencies", sameStringArray(existing.dependencies, planned.dependencies)],
-    ["expectedTests", sameStringArray(existing.expectedTests, planned.expectedTests)],
-    ["verificationCommands", sameStringArray(existing.verificationCommands ?? [], planned.verificationCommands ?? [])],
-    ["expectedFiles", sameStringArray(existing.expectedFiles, planned.expectedFiles)],
-    ["roadmapItemIds", sameStringArray(existing.roadmapItemIds ?? [], planned.roadmapItemIds ?? [])],
-    ["estimatedComplexity", existing.estimatedComplexity === planned.estimatedComplexity],
-    ["category", (existing.category ?? "standalone") === (planned.category ?? "standalone")],
-  ]
-  const changed = checks.find(([, matches]) => !matches)
-  return changed?.[0] ?? null
-}
 
 export function materializeForwardOnlyImplPlanDag(
   planContent: string,
@@ -189,13 +174,14 @@ export function materializeForwardOnlyImplPlanDag(
   for (const task of completed) {
     const planned = plannedById.get(task.id)
     if (!planned) continue
-    const changedField = completedTaskRewriteReason(task, planned)
-    if (changedField) {
+    const rewrite = completedTaskRewriteDiagnostic(task, planned)
+    if (rewrite) {
       return {
         success: false,
         error:
-          `Completed task "${task.id}" is immutable; revised IMPL_PLAN changes its ${changedField}. ` +
-          `Preserve completed tasks exactly and add a new corrective, revert, or superseding task for future work.`,
+          `Completed task "${task.id}" is immutable; revised IMPL_PLAN changes its ${rewrite.field}. ` +
+          `${rewrite.detail ? `Details: ${rewrite.detail}. ` : ""}` +
+          rewrite.guidance,
       }
     }
   }
@@ -207,6 +193,7 @@ export function materializeForwardOnlyImplPlanDag(
       dependencies: [...task.dependencies],
       expectedTests: [...task.expectedTests],
       expectedFiles: [...task.expectedFiles],
+      ...(task.intentionalDeletionTargets ? { intentionalDeletionTargets: [...task.intentionalDeletionTargets] } : {}),
       ...(task.roadmapItemIds ? { roadmapItemIds: [...task.roadmapItemIds] } : {}),
       ...(task.verificationCommands ? { verificationCommands: [...task.verificationCommands] } : {}),
       ...(task.humanGate ? { humanGate: { ...task.humanGate } } : {}),

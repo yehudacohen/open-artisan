@@ -9,8 +9,9 @@
  */
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs"
-import { execFileSync } from "node:child_process"
+import { spawn } from "node:child_process"
 import { buildRobotArtisanAutoApproveFailureFeedback } from "#core/autonomous-user-gate"
+import { IMPLEMENTATION_REVIEW_PROGRESS_IDLE_TIMEOUT_MS, REVIEW_PROGRESS_HARD_TIMEOUT_MS, REVIEW_PROGRESS_IDLE_TIMEOUT_MS, REVIEW_PROGRESS_SHUTDOWN_GRACE_MS } from "#core/constants"
 import { sendSocketRequest } from "./socket-transport"
 import {
   getSocketPath,
@@ -117,6 +118,68 @@ function bridgeUnavailableDecision(toolName: string, toolInput: Record<string, u
 
 function extractReviewToken(reviewPrompt: string): string | null {
   return reviewPrompt.match(/OPEN_ARTISAN_REVIEW_TOKEN:\s*([a-f0-9]+)/i)?.[1] ?? null
+}
+
+async function runOwnedReviewerCommand(reviewPrompt: string, cwd: string, label: string, phase?: unknown): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn("claude", ["--print", "--max-turns", "1", "-p", reviewPrompt], {
+      cwd,
+      env: process.env,
+      stdio: ["pipe", "pipe", "pipe"],
+    })
+    let stdout = ""
+    let stderr = ""
+    let settled = false
+    let idleTimer: ReturnType<typeof setTimeout> | null = null
+    let hardTimer: ReturnType<typeof setTimeout> | null = null
+    let killTimer: ReturnType<typeof setTimeout> | null = null
+    const idleTimeoutMs = phase === "IMPLEMENTATION" ? IMPLEMENTATION_REVIEW_PROGRESS_IDLE_TIMEOUT_MS : REVIEW_PROGRESS_IDLE_TIMEOUT_MS
+
+    const clearTimers = () => {
+      if (idleTimer) clearTimeout(idleTimer)
+      if (hardTimer) clearTimeout(hardTimer)
+      if (killTimer) clearTimeout(killTimer)
+      idleTimer = null
+      hardTimer = null
+      killTimer = null
+    }
+    const terminateOwnedChild = () => {
+      if (child.exitCode !== null || child.signalCode !== null) return
+      child.kill("SIGTERM")
+      killTimer = setTimeout(() => {
+        if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL")
+      }, REVIEW_PROGRESS_SHUTDOWN_GRACE_MS)
+    }
+    const rejectOnce = (message: string) => {
+      if (settled) return
+      settled = true
+      clearTimers()
+      terminateOwnedChild()
+      reject(new Error(`${message}${stderr.trim() ? ` | stderr: ${stderr.trim()}` : ""}${stdout.trim() ? ` | stdout: ${stdout.trim()}` : ""}`))
+    }
+    const armIdleTimer = () => {
+      if (idleTimer) clearTimeout(idleTimer)
+      idleTimer = setTimeout(() => rejectOnce(`${label} idle timeout after ${idleTimeoutMs}ms`), idleTimeoutMs)
+    }
+
+    hardTimer = setTimeout(() => rejectOnce(`${label} hard timeout after ${REVIEW_PROGRESS_HARD_TIMEOUT_MS}ms`), REVIEW_PROGRESS_HARD_TIMEOUT_MS)
+    armIdleTimer()
+    child.stdout?.on("data", (chunk: Buffer) => {
+      stdout += chunk.toString("utf-8")
+      armIdleTimer()
+    })
+    child.stderr?.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString("utf-8")
+      armIdleTimer()
+    })
+    child.on("error", (error) => rejectOnce(`${label} failed to start: ${error.message}`))
+    child.on("close", (code) => {
+      if (settled) return
+      settled = true
+      clearTimers()
+      resolve({ stdout, stderr, exitCode: code ?? 1 })
+    })
+  })
 }
 
 // ---------------------------------------------------------------------------
@@ -250,12 +313,9 @@ export async function handleStop(input: HookInput): Promise<HookOutput> {
       try {
         // Spawn isolated reviewer — fresh Claude session with no conversation history.
         // Omit --model so it inherits the user's default (parent) model.
-        const reviewOutput = execFileSync("claude", ["--print", "--max-turns", "1", "-p", reviewPrompt], {
-          timeout: 180_000,
-          encoding: "utf-8",
-          env: process.env,
-          stdio: ["pipe", "pipe", "pipe"],
-        })
+        const result = await runOwnedReviewerCommand(reviewPrompt, projectDir, "task-review")
+        if (result.exitCode !== 0) throw new Error(`reviewer command exited with code ${result.exitCode}${result.stderr.trim() ? ` | stderr: ${result.stderr.trim()}` : ""}`)
+        const reviewOutput = result.stdout
         // Submit review results to bridge
         await bridgeCall(stateDir, "tool.execute", {
           name: "submit_task_review",
@@ -314,12 +374,9 @@ export async function handleStop(input: HookInput): Promise<HookOutput> {
       const reviewToken = extractReviewToken(reviewPrompt)
       const projectDir = input.cwd ?? process.env["CLAUDE_PROJECT_DIR"] ?? process.cwd()
       try {
-        const reviewOutput = execFileSync("claude", ["--print", "--max-turns", "1", "-p", reviewPrompt], {
-          timeout: 300_000,
-          encoding: "utf-8",
-          env: process.env,
-          stdio: ["pipe", "pipe", "pipe"],
-        })
+        const result = await runOwnedReviewerCommand(reviewPrompt, projectDir, "phase-review", state.phase)
+        if (result.exitCode !== 0) throw new Error(`reviewer command exited with code ${result.exitCode}${result.stderr.trim() ? ` | stderr: ${result.stderr.trim()}` : ""}`)
+        const reviewOutput = result.stdout
         const submitResult = await bridgeCall(stateDir, "tool.execute", {
           name: "submit_phase_review",
           args: { review_output: reviewOutput, review_token: reviewToken },
@@ -376,12 +433,9 @@ export async function handleStop(input: HookInput): Promise<HookOutput> {
       const autoApproveToken = extractReviewToken(approvePrompt)
       if (!autoApproveToken) return ALLOW
       try {
-        const approveOutput = execFileSync("claude", ["--print", "--max-turns", "1", "-p", approvePrompt], {
-          timeout: 120_000,
-          encoding: "utf-8",
-          env: process.env,
-          stdio: ["pipe", "pipe", "pipe"],
-        })
+        const result = await runOwnedReviewerCommand(approvePrompt, projectDir, "auto-approve")
+        if (result.exitCode !== 0) throw new Error(`auto-approval command exited with code ${result.exitCode}${result.stderr.trim() ? ` | stderr: ${result.stderr.trim()}` : ""}`)
+        const approveOutput = result.stdout
         await bridgeCall(stateDir, "tool.execute", {
           name: "submit_auto_approve",
           args: { review_output: approveOutput, review_token: autoApproveToken },

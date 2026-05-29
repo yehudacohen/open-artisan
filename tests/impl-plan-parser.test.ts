@@ -109,6 +109,22 @@ describe("parseImplPlan — happy path", () => {
     ])
   })
 
+  it("treats 'none by default' verification commands as empty metadata", () => {
+    const plan = `
+## Task T1: Optional human gate
+**Dependencies:** none
+**Files:** none
+**Expected tests:** none
+**Verification commands:** none by default.
+**Complexity:** medium
+`
+
+    const result = parseImplPlan(plan)
+    if (!result.success) throw new Error(result.errors.join("; "))
+    const task = Array.from(result.dag.tasks)[0]!
+    expect(task.verificationCommands).toEqual([])
+  })
+
   it("parses complexity correctly", () => {
     const result = parseImplPlan(SIMPLE_PLAN)
     if (!result.success) throw new Error(result.errors.join("; "))
@@ -171,6 +187,63 @@ Expose accepted parser expectations in prompts.
     if (!result.success) throw new Error(result.errors.join("; "))
     const task = Array.from(result.dag.tasks)[0]! as { roadmapItemIds?: string[] }
     expect(task.roadmapItemIds).toEqual(["item-1", "item-2"])
+  })
+
+  it("parses deletion targets aliases separately from task files", () => {
+    const plan = `
+## Task T1: Historical generator
+**Dependencies:** none
+**Files:** src/kept.ts
+**Expected tests:** none
+**Complexity:** small
+
+## Task T10: Deletion metadata repair
+**Dependencies:** T1
+**Files:** none
+**Expected tests:** none
+**Deletion targets:** src/deleted-openfga.ts, build/tmp/build-packages.lock
+**Complexity:** small
+`
+    const result = parseImplPlan(plan)
+    if (!result.success) throw new Error(result.errors.join("; "))
+    const task = Array.from(result.dag.tasks).find((candidate) => candidate.id === "T10")!
+    expect(task.expectedFiles).toEqual([])
+    expect(task.intentionalDeletionTargets).toEqual(["src/deleted-openfga.ts", "build/tmp/build-packages.lock"])
+  })
+
+  it("treats required files metadata as task ownership instead of description prose", () => {
+    const plan = `
+## Task T1: Historical task
+**Dependencies:** none
+**Expected tests:** none
+**Required files:** none
+**Complexity:** small
+
+Preserve completed history.
+`
+    const result = parseImplPlan(plan)
+    if (!result.success) throw new Error(result.errors.join("; "))
+    const task = Array.from(result.dag.tasks)[0]!
+    expect(task.expectedFiles).toEqual([])
+    expect(task.description).toBe("Historical task — Preserve completed history.")
+  })
+
+  it("preserves long descriptions so completed-task approval can compare immutable history", () => {
+    const longImplementation = Array.from({ length: 30 }, (_, index) => `step-${index}-preserved-history`).join(" ")
+    const plan = `
+## Task T1: Long completed task
+**Dependencies:** none
+**Expected tests:** none
+**Files:** none
+**Complexity:** medium
+
+Implementation: ${longImplementation}
+`
+    const result = parseImplPlan(plan)
+    if (!result.success) throw new Error(result.errors.join("; "))
+    const task = Array.from(result.dag.tasks)[0]!
+    expect(task.description.length).toBeGreaterThan(500)
+    expect(task.description).toContain("step-29-preserved-history")
   })
 })
 
@@ -759,5 +832,47 @@ Tighten bridge parity behavior.
     ])
     expect(t1.expectedTests).toEqual(["tests/bridge-tool-execute.test.ts"])
     expect(t1.description).toContain("Tighten bridge parity behavior")
+  })
+
+  it("parses intentional deletion targets as audit metadata instead of active files", () => {
+    const plan = `
+## Task T9: Deletion metadata repair
+**Dependencies:** none
+**Files:** none
+**Expected tests:** none
+**Intentional deletion targets:**
+
+- examples/agent-saas-app/src/policy/openfga.ts
+- packages/create-app/templates/agent-saas-starter/src/policy/openfga.ts.tmpl
+**Complexity:** small
+
+Record deleted OpenFGA source/template paths for final review.
+`
+    const result = parseImplPlan(plan)
+    if (!result.success) throw new Error(result.errors.join("; "))
+    const task = Array.from(result.dag.tasks)[0]!
+    expect(task.expectedFiles).toEqual([])
+    expect(task.intentionalDeletionTargets).toEqual([
+      "examples/agent-saas-app/src/policy/openfga.ts",
+      "packages/create-app/templates/agent-saas-starter/src/policy/openfga.ts.tmpl",
+    ])
+    expect(task.description).not.toContain("Intentional deletion targets")
+  })
+
+  it("does not require intentional deletion targets to be in the incremental allowlist", () => {
+    const plan = `
+## Task T9: Deletion metadata repair
+**Dependencies:** none
+**Files:** none
+**Expected tests:** none
+**Intentional deletion targets:** examples/agent-saas-app/src/policy/openfga.ts
+**Complexity:** small
+
+Record deleted OpenFGA paths.
+`
+
+    const errors = validateExecutableImplPlan(plan, "INCREMENTAL", [], "/repo")
+
+    expect(errors).toEqual([])
   })
 })

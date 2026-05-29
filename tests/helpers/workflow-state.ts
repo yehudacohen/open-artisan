@@ -27,6 +27,8 @@ export function makeWorkflowState(overrides: Partial<WorkflowState> = {}): Workf
     pendingRevisionSteps: null,
     revisionAutoSkipBlockedReason: null,
     pendingAllowlistExpansions: [],
+    pendingCurrentTaskScopeExpansions: [],
+    approvedCleanupFiles: [],
     toolFailureHistory: [],
     userGateMessageReceived: false,
     reviewArtifactHash: null,

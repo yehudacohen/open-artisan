@@ -534,6 +534,14 @@ describe("StateMachine — structural workflow states", () => {
     expect(result.nextPhaseState).toBe("USER_GATE")
   })
 
+  it("IMPLEMENTATION/DRAFT + scope_expansion_requested → IMPLEMENTATION/USER_GATE", () => {
+    const result = sm.transition("IMPLEMENTATION", "DRAFT", "scope_expansion_requested", "INCREMENTAL")
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.nextPhase).toBe("IMPLEMENTATION")
+    expect(result.nextPhaseState).toBe("USER_GATE")
+  })
+
   it("IMPLEMENTATION/HUMAN_GATE + human_gate_resolved → IMPLEMENTATION/SCHEDULING", () => {
     const result = sm.transition("IMPLEMENTATION", "HUMAN_GATE", "human_gate_resolved", "INCREMENTAL")
     expect(result.ok).toBe(true)

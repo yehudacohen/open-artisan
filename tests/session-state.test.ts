@@ -52,6 +52,8 @@ function makeState(sessionId: string, featureName: string | null, overrides?: Pa
     pendingRevisionSteps: null,
     revisionAutoSkipBlockedReason: null,
     pendingAllowlistExpansions: [],
+    pendingCurrentTaskScopeExpansions: [],
+    approvedCleanupFiles: [],
     toolFailureHistory: [],
     currentTaskId: null,
     feedbackHistory: [],
@@ -172,6 +174,48 @@ describe("SessionStateStore — create", () => {
     const loaded = store2.get("session-persist")
     expect(loaded).not.toBeNull()
     expect(loaded?.sessionId).toBe("session-persist")
+  })
+
+  it("repairs command-like completed task metadata on load", async () => {
+    const featureName = "command-metadata-repair"
+    const planDir = join(tmpDir, ".openartisan", featureName)
+    mkdirSync(planDir, { recursive: true })
+    const planPath = join(planDir, "plan.md")
+    writeFileSync(planPath, "# Plan\n", "utf-8")
+    writePerFeatureState(tmpDir, featureName, makeState("session-command-metadata", featureName, {
+      mode: "GREENFIELD",
+      phase: "IMPLEMENTATION",
+      phaseState: "DRAFT",
+      artifactDiskPaths: { plan: planPath },
+      implDag: [
+        {
+          id: "T1",
+          description: "Build feature",
+          dependencies: [],
+          expectedFiles: [
+            "src/feature.ts",
+            `${tmpDir}/bun test \"tests/feature.test.ts\" --timeout 10000`,
+          ],
+          expectedTests: ["bun test tests/feature.test.ts --timeout 10000", "tests/feature.test.ts"],
+          verificationCommands: ["bun run typecheck"],
+          estimatedComplexity: "small",
+          status: "complete",
+        },
+      ],
+    }))
+
+    const store2 = createSessionStateStore(createFileSystemStateBackend(tmpDir))
+    const result = await store2.load()
+    expect(result.success).toBe(true)
+    const task = store2.get("session-command-metadata")?.implDag?.[0]
+
+    expect(task?.expectedFiles).toEqual(["src/feature.ts"])
+    expect(task?.expectedTests).toEqual(["tests/feature.test.ts"])
+    expect(task?.verificationCommands).toEqual([
+      "bun run typecheck",
+      `${tmpDir}/bun test \"tests/feature.test.ts\" --timeout 10000`,
+      "bun test tests/feature.test.ts --timeout 10000",
+    ])
   })
 })
 

@@ -11,6 +11,7 @@ import { handleToolExecute, handleTaskGetReviewContext, handlePhaseGetReviewCont
 import type { BridgeContext } from "#bridge/server"
 import type { EngineContext } from "#core/engine-context"
 import { workflowDbId } from "#core/runtime-persistence"
+import { listWorkflowProgressEvents } from "#core/workflow-progress"
 
 let tmpDir: string
 let ctx: BridgeContext
@@ -328,6 +329,62 @@ describe("tool.execute — SubagentDispatcher-dependent tools", () => {
 })
 
 describe("tool.execute — task boundary revision workflow", () => {
+  it("requests and applies current-task scope expansion from IMPLEMENTATION/DRAFT", async () => {
+    await exec("select_mode", { mode: "INCREMENTAL", feature_name: "bridge-current-task-scope-request-apply" })
+    const completedFile = join(tmpDir, "src/factories/ory/types.ts")
+    const correctiveFile = join(tmpDir, "src/factories/ory/compositions/ory-platform-stack.ts")
+    const correctiveTest = join(tmpDir, "test/factories/ory/platform-composition.test.ts")
+    await ctx.engine!.store.update("s1", (d) => {
+      d.phase = "IMPLEMENTATION"
+      d.phaseState = "DRAFT"
+      d.currentTaskId = "task-008"
+      d.fileAllowlist = [completedFile, correctiveFile, correctiveTest]
+      d.implDag = [{
+        id: "task-001",
+        description: "Completed Ory type work",
+        dependencies: [],
+        expectedFiles: [completedFile],
+        expectedTests: [],
+        estimatedComplexity: "medium",
+        status: "complete",
+      }, {
+        id: "task-008",
+        description: "Correct Ory platform composition",
+        dependencies: ["task-001"],
+        expectedFiles: [correctiveFile],
+        expectedTests: [],
+        estimatedComplexity: "medium",
+        status: "in-flight",
+      }]
+    })
+
+    const request = await exec("approve_current_task_scope_expansion", {
+      task_id: "task-008",
+      files: [completedFile],
+      expected_tests: [correctiveTest],
+      reason: "User explicitly approved expanding task-008 to cover corrective Ory validation files.",
+    })
+
+    expect(request).toContain("Current-task scope expansion requested")
+    let state = ctx.engine!.store.get("s1")
+    expect(state?.phaseState).toBe("USER_GATE")
+    expect(state?.pendingCurrentTaskScopeExpansions).toHaveLength(1)
+
+    const approval = await exec("submit_feedback", {
+      feedback_type: "approve",
+      feedback_text: "approved",
+    })
+
+    expect(approval).toContain("Approved and applied pending current-task scope expansion")
+    state = ctx.engine!.store.get("s1")
+    expect(state?.phaseState).toBe("DRAFT")
+    expect(state?.pendingCurrentTaskScopeExpansions).toEqual([])
+    expect(state?.implDag?.find((task) => task.id === "task-001")?.expectedFiles).toEqual([completedFile])
+    expect(state?.implDag?.find((task) => task.id === "task-001")?.status).toBe("complete")
+    expect(state?.implDag?.find((task) => task.id === "task-008")?.expectedFiles).toEqual([correctiveFile, completedFile])
+    expect(state?.implDag?.find((task) => task.id === "task-008")?.expectedTests).toEqual([correctiveTest])
+  })
+
   it("analyzes an ownership change and reports impacted tasks", async () => {
     await exec("select_mode", { mode: "GREENFIELD", feature_name: "boundary-analyze" })
     await ctx.engine!.store.update("s1", (d) => {
@@ -853,6 +910,81 @@ describe("tool.execute — submit_feedback", () => {
     expect(state?.approvedArtifactFiles?.interfaces).toEqual(expect.arrayContaining([allowed, runtime, createApp]))
   })
 
+  it("recovers prior TESTS allowlist expansion from IMPLEMENTATION/HUMAN_GATE with explicit approval", async () => {
+    await exec("select_mode", { mode: "INCREMENTAL", feature_name: "bridge-human-gate-tests-allowlist-recovery" })
+    const stack = join(tmpDir, "src/factories/ory/compositions/ory-platform-stack.ts")
+    const compositionTest = join(tmpDir, "test/factories/ory/platform-composition.test.ts")
+    await ctx.engine!.store.update("s1", (d) => {
+      d.phase = "IMPLEMENTATION"
+      d.phaseState = "HUMAN_GATE"
+      d.userGateMessageReceived = false
+      d.fileAllowlist = [join(tmpDir, "src/existing.ts")]
+      d.currentTaskId = "task-005"
+      d.pendingAllowlistExpansions = [{
+        files: [stack, compositionTest],
+        reason: "TESTS review approved adding planned Ory composition files outside the original allowlist.",
+        sourceArtifact: "tests",
+        requestedAtPhase: "TESTS",
+        requestedAt: 1,
+      }]
+      d.implDag = [{
+        id: "task-005",
+        description: "Configure external Ory platform",
+        dependencies: [],
+        expectedFiles: [],
+        expectedTests: [],
+        estimatedComplexity: "medium",
+        status: "human-gated",
+        humanGate: { whatIsNeeded: "Configure Ory", why: "Needed for runtime", verificationSteps: "Check Ory credentials", resolved: false },
+      }]
+    })
+
+    const result = await exec("submit_feedback", {
+      feedback_type: "approve",
+      feedback_text: "approved",
+    })
+
+    expect(result).toContain("Applied approved allowlist expansion")
+    const state = ctx.engine!.store.get("s1")
+    expect(state?.fileAllowlist).toContain(stack)
+    expect(state?.fileAllowlist).toContain(compositionTest)
+    expect(state?.pendingAllowlistExpansions).toEqual([])
+    expect(state?.phase).toBe("IMPLEMENTATION")
+    expect(state?.phaseState).toBe("HUMAN_GATE")
+  })
+
+  it("recovers prior TESTS allowlist expansion from HUMAN_GATE when approval is supplied as approved_files", async () => {
+    await exec("select_mode", { mode: "INCREMENTAL", feature_name: "bridge-human-gate-tests-approved-files-recovery" })
+    const stack = join(tmpDir, "src/factories/ory/compositions/ory-platform-stack.ts")
+    const compositionTest = join(tmpDir, "test/factories/ory/platform-composition.test.ts")
+    await ctx.engine!.store.update("s1", (d) => {
+      d.phase = "IMPLEMENTATION"
+      d.phaseState = "HUMAN_GATE"
+      d.userGateMessageReceived = false
+      d.fileAllowlist = [join(tmpDir, "src/existing.ts")]
+      d.pendingAllowlistExpansions = [{
+        files: [stack, compositionTest],
+        reason: "TESTS review approved adding planned Ory composition files outside the original allowlist.",
+        sourceArtifact: "tests",
+        requestedAtPhase: "TESTS",
+        requestedAt: 1,
+      }]
+    })
+
+    const result = await exec("submit_feedback", {
+      feedback_type: "approve",
+      feedback_text: "",
+      approved_files: [stack, compositionTest],
+    })
+
+    expect(result).toContain("Applied approved allowlist expansion")
+    const state = ctx.engine!.store.get("s1")
+    expect(state?.fileAllowlist).toContain(stack)
+    expect(state?.fileAllowlist).toContain(compositionTest)
+    expect(state?.pendingAllowlistExpansions).toEqual([])
+    expect(state?.phaseState).toBe("HUMAN_GATE")
+  })
+
   it("rejects INCREMENTAL planning approval without an allowlist source", async () => {
     await exec("select_mode", { mode: "INCREMENTAL", feature_name: "missing-allowlist-feat" })
     const planPath = join(tmpDir, ".openartisan", "missing-allowlist-feat", "plan.md")
@@ -1002,13 +1134,50 @@ describe("tool.execute — mark_task_complete", () => {
     expect(state?.currentTaskId).toBe("T1")
   })
 
+  it("completes metadata-only deletion-target tasks without per-task reviewer dispatch", async () => {
+    await exec("select_mode", { mode: "GREENFIELD", feature_name: "metadata-only-feat" })
+    await ctx.engine!.store.update("s1", (d) => {
+      d.phase = "IMPLEMENTATION"
+      d.phaseState = "DRAFT"
+      d.implDag = [
+        {
+          id: "T10",
+          description: "Record deletion targets",
+          dependencies: [],
+          expectedTests: [],
+          expectedFiles: [],
+          verificationCommands: [],
+          intentionalDeletionTargets: ["src/deleted-openfga.ts"],
+          estimatedComplexity: "small",
+          status: "in-flight",
+        },
+      ]
+      d.currentTaskId = "T10"
+    })
+
+    const result = await exec("mark_task_complete", {
+      task_id: "T10",
+      implementation_summary: "Recorded deletion target metadata.",
+      tests_passing: true,
+    })
+
+    expect(result).toContain("Per-task review skipped")
+    expect(result).toContain("request_review")
+    const state = ctx.engine!.store.get("s1")
+    expect(state?.phaseState).toBe("DRAFT")
+    expect(state?.taskCompletionInProgress).toBeNull()
+    expect(state?.taskReviewCount).toBe(0)
+    expect(state?.currentTaskId).toBeNull()
+    expect(state?.implDag?.find((task) => task.id === "T10")?.status).toBe("complete")
+  })
+
   it("submit_task_review advances on pass", async () => {
     await exec("select_mode", { mode: "GREENFIELD", feature_name: "str-feat" })
     await ctx.engine!.store.update("s1", (d) => {
       d.phase = "IMPLEMENTATION"
       d.phaseState = "TASK_REVIEW"
       d.implDag = [
-        { id: "T1", description: "Setup", dependencies: [], expectedTests: [], expectedFiles: [], estimatedComplexity: "small", status: "complete" },
+        { id: "T1", description: "Setup", dependencies: [], expectedTests: ["tests/setup.test.ts"], expectedFiles: ["src/setup.ts"], estimatedComplexity: "small", status: "complete" },
         { id: "T2", description: "Core", dependencies: ["T1"], expectedTests: [], expectedFiles: [], estimatedComplexity: "medium", status: "pending" },
       ]
       d.currentTaskId = "T1"
@@ -1027,6 +1196,7 @@ describe("tool.execute — mark_task_complete", () => {
     expect(state?.taskReviewCount).toBe(0)
     expect(state?.currentTaskId).toBe("T2")
     expect(state?.implDag?.find((t) => t.id === "T2")?.status).toBe("in-flight")
+    expect(state?.reviewArtifactFiles).toEqual(["src/setup.ts", "tests/setup.test.ts"])
   })
 
   it("submit_task_review accepts typed reviewer fields without review_output", async () => {
@@ -1390,7 +1560,7 @@ describe("tool.execute — agent-only mode", () => {
     const result = await agentExec("mark_satisfied", { criteria_met: criteria })
     // Should advance to USER_GATE (not error about SubagentDispatcher)
     expect(result).not.toContain("SubagentDispatcher")
-    expect(result.toLowerCase()).toContain("user gate")
+    expect(result.toLowerCase()).toContain("user_gate")
   })
 
   it("mark_satisfied fails and routes to REVISE with unmet criteria", async () => {
@@ -1723,6 +1893,11 @@ describe("tool.execute — agent-only mode", () => {
     expect(result).toContain("Error")
     expect(result).toContain("runnable test/spec files")
     expect(ctx.engine!.store.get("s1")?.phaseState).toBe("DRAFT")
+    expect(ctx.engine!.store.get("s1")?.toolFailureHistory[0]).toMatchObject({
+      category: "tooling",
+      toolName: "request_review",
+      count: 1,
+    })
   })
 
   it("rejects markdown summaries not declared as IMPLEMENTATION review artifacts", async () => {
@@ -1984,6 +2159,12 @@ describe("tool.execute — agent-only mode", () => {
     expect(final).toContain("Isolated phase review submitted")
     const completedItem = ctx.engine!.store.get("s1")?.reviewAttempts[0]?.rubricItems.find((candidate) => candidate.criterion === "Vision alignment")
     expect(completedItem?.status).toBe("passed")
+    const events = await listWorkflowProgressEvents(join(tmpDir, ".openartisan"), {
+      featureName: ctx.engine!.store.get("s1")?.featureName ?? null,
+      sessionId: "s1",
+    })
+    expect(events.some((event) => event.kind === "phase-review.tool" && event.message.includes("submit_review_rubric_item called"))).toBe(true)
+    expect(events.some((event) => event.kind === "phase-review.tool" && event.message.includes("submit_phase_review called"))).toBe(true)
   })
 
   it("submit_phase_review rejects stale reviewed artifact files", async () => {

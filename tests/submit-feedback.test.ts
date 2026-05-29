@@ -177,7 +177,7 @@ describe("submit_feedback IMPL_PLAN approval helpers", () => {
 Already completed.
 
 ## Task T2: Correct foundation behavior
-**Dependencies:** T1
+**Dependencies:** none
 **Expected tests:** tests/a.test.ts
 **Files:** src/a.ts
 **Complexity:** small
@@ -193,6 +193,293 @@ Add a forward corrective task instead of rewriting T1.
     expect(materialized.nodes.find((node) => node.id === "T1")).toEqual(completed)
     expect(materialized.nodes.find((node) => node.id === "T2")?.status).toBe("pending")
     expect(materialized.currentTaskId).toBe("T2")
+  })
+
+  it("accepts immutable completed history when a future task owns missing executable readiness", () => {
+    const revisedPlan = `
+## Task T1: Historical foundation
+**Dependencies:** none
+**Expected tests:** none
+**Verification commands:** none
+**Files:** none
+**Complexity:** small
+
+Already completed before executable metadata was required.
+
+## Task T8: Correct historical readiness evidence
+**Dependencies:** T1
+**Expected tests:** tests/final-readiness.test.ts
+**Verification commands:** bun test tests/final-readiness.test.ts
+**Files:** src/final-readiness.ts, tests/final-readiness.test.ts
+**Complexity:** medium
+
+Own the evidence and final-review readiness gap left by T1 without rewriting T1.
+`
+    const completed = task({
+      id: "T1",
+      status: "complete",
+      description: "Historical foundation — Already completed before executable metadata was required.",
+      expectedFiles: [],
+      expectedTests: [],
+      verificationCommands: [],
+    })
+
+    const contractError = validateSubmitFeedbackImplPlanApproval({
+      planContent: revisedPlan,
+      mode: "INCREMENTAL",
+      effectiveAllowlist: ["src/final-readiness.ts", "tests/final-readiness.test.ts"],
+      cwd: "/repo",
+      parseFixInstruction: "Fix it.",
+    })
+    const materialized = materializeForwardOnlyImplPlanDag(revisedPlan, "/repo", [completed])
+
+    expect(contractError).toBeNull()
+    expect(materialized.success).toBe(true)
+    if (!materialized.success) return
+    expect(materialized.nodes.find((node) => node.id === "T1")).toEqual(completed)
+    expect(materialized.nodes.find((node) => node.id === "T8")?.expectedFiles).toEqual([
+      "/repo/src/final-readiness.ts",
+      "/repo/tests/final-readiness.test.ts",
+    ])
+    expect(materialized.currentTaskId).toBe("T8")
+  })
+
+  it("ignores executable metadata when comparing completed task descriptions", () => {
+    const revisedPlan = `
+## Task T3: Historical task
+**Dependencies:** none
+**Expected tests:** none
+**Files:** none
+**Complexity:** small
+
+Implementation: Preserve completed history. Required Files: none / Expected tests: none
+
+## Task T4: Forward correction
+**Dependencies:** T3
+**Expected tests:** tests/final.test.ts
+**Files:** src/final.ts, tests/final.test.ts
+**Complexity:** small
+
+Own follow-up readiness without rewriting T3.
+`
+    const completed = task({
+      id: "T3",
+      status: "complete",
+      description: "Historical task — Implementation: Preserve completed history.",
+      expectedFiles: [],
+      expectedTests: [],
+      verificationCommands: [],
+    })
+
+    const materialized = materializeForwardOnlyImplPlanDag(revisedPlan, "/repo", [completed])
+
+    expect(materialized.success).toBe(true)
+    if (!materialized.success) return
+    expect(materialized.nodes.find((node) => node.id === "T3")).toEqual(completed)
+    expect(materialized.currentTaskId).toBe("T4")
+  })
+
+  it("does not classify parser truncation of long completed descriptions as a rewrite", () => {
+    const longImplementation = Array.from({ length: 30 }, (_, index) => `step-${index}-preserved-history`).join(" ")
+    const description = `Long completed task — Implementation: ${longImplementation}`
+    const revisedPlan = `
+## Task T3: Long completed task
+**Dependencies:** none
+**Expected tests:** none
+**Files:** none
+**Complexity:** medium
+
+Implementation: ${longImplementation}
+
+## Task T4: Forward correction
+**Dependencies:** T3
+**Expected tests:** tests/final.test.ts
+**Files:** src/final.ts, tests/final.test.ts
+**Complexity:** small
+
+Own follow-up readiness without rewriting T3.
+`
+    const completed = task({
+      id: "T3",
+      status: "complete",
+      description,
+      expectedFiles: [],
+      expectedTests: [],
+      verificationCommands: [],
+      estimatedComplexity: "medium",
+    })
+
+    const materialized = materializeForwardOnlyImplPlanDag(revisedPlan, "/repo", [completed])
+
+    expect(materialized.success).toBe(true)
+    if (!materialized.success) return
+    expect(materialized.nodes.find((node) => node.id === "T3")).toEqual(completed)
+    expect(materialized.currentTaskId).toBe("T4")
+  })
+
+  it("accepts legacy completed descriptions persisted with the old 500-character parser cap", () => {
+    const longImplementation = Array.from({ length: 30 }, (_, index) => `step-${index}-legacy-history`).join(" ")
+    const fullDescription = `Legacy completed task — Implementation: ${longImplementation}`
+    const revisedPlan = `
+## Task T3: Legacy completed task
+**Dependencies:** none
+**Expected tests:** none
+**Files:** none
+**Complexity:** medium
+
+Implementation: ${longImplementation}
+
+## Task T4: Forward correction
+**Dependencies:** T3
+**Expected tests:** tests/final.test.ts
+**Files:** src/final.ts, tests/final.test.ts
+**Complexity:** small
+
+Own follow-up readiness without rewriting T3.
+`
+    const completed = task({
+      id: "T3",
+      status: "complete",
+      description: fullDescription.slice(0, 500),
+      expectedFiles: [],
+      expectedTests: [],
+      verificationCommands: [],
+      estimatedComplexity: "medium",
+    })
+
+    const materialized = materializeForwardOnlyImplPlanDag(revisedPlan, "/repo", [completed])
+
+    expect(materialized.success).toBe(true)
+    if (!materialized.success) return
+    expect(materialized.nodes.find((node) => node.id === "T3")).toEqual(completed)
+    expect(materialized.currentTaskId).toBe("T4")
+  })
+
+  it("compares completed implementation prose without treating surrounding review metadata as a rewrite", () => {
+    const revisedPlan = `
+## Task T5: Documentation cleanup
+**Dependencies:** none
+**Expected tests:** none
+**Files:** none
+**Complexity:** medium
+
+Intentional deletion targets:
+
+- build/tmp/generated.js
+
+Implementation:
+
+- Preserve existing docs cleanup.
+- Keep generated artifacts outside default discovery.
+
+Acceptance:
+
+- Final review understands the deletion metadata.
+
+## Task T6: Forward correction
+**Dependencies:** T5
+**Expected tests:** tests/final.test.ts
+**Files:** src/final.ts, tests/final.test.ts
+**Complexity:** small
+
+Own follow-up readiness without rewriting T5.
+`
+    const completed = task({
+      id: "T5",
+      status: "complete",
+      description: "Documentation cleanup — Implementation: - Preserve existing docs cleanup. - Keep generated artifacts outside default discovery.",
+      dependencies: [],
+      expectedFiles: [],
+      expectedTests: [],
+      verificationCommands: [],
+      estimatedComplexity: "medium",
+    })
+
+    const materialized = materializeForwardOnlyImplPlanDag(revisedPlan, "/repo", [completed])
+
+    expect(materialized.success).toBe(true)
+    if (!materialized.success) return
+    expect(materialized.nodes.find((node) => node.id === "T5")).toEqual(completed)
+    expect(materialized.currentTaskId).toBe("T6")
+  })
+
+  it("compares completed acceptance prose without treating markdown scheduling notes as a rewrite", () => {
+    const revisedPlan = `
+## Task T7: Final verification sweep
+**Dependencies:** none
+**Expected tests:** tests/final.test.ts
+**Files:** none
+**Complexity:** medium
+
+Acceptance:
+
+- All approved focused tests pass.
+- Template/example parity passes.
+
+## Scheduling Notes
+
+- Execute T9 after T8 if final-review metadata still needs repair.
+- T6 is optional and human-gated.
+
+## Task T9: Forward deletion metadata repair
+**Dependencies:** T7
+**Expected tests:** none
+**Files:** none
+**Complexity:** small
+
+Own follow-up deletion metadata without rewriting T7.
+`
+    const completed = task({
+      id: "T7",
+      status: "complete",
+      description: "Final verification sweep — Acceptance: - All approved focused tests pass. - Template/example parity passes. ## Scheduling Notes - T6 is optional and human-gated.",
+      expectedFiles: [],
+      expectedTests: ["/repo/tests/final.test.ts"],
+      verificationCommands: [],
+      estimatedComplexity: "medium",
+    })
+
+    const materialized = materializeForwardOnlyImplPlanDag(revisedPlan, "/repo", [completed])
+
+    expect(materialized.success).toBe(true)
+    if (!materialized.success) return
+    expect(materialized.nodes.find((node) => node.id === "T7")).toEqual(completed)
+    expect(materialized.currentTaskId).toBe("T9")
+  })
+
+  it("materializes future intentional deletion targets without mutating completed task expected files", () => {
+    const revisedPlan = `
+## Task T1: Historical generator task
+**Dependencies:** none
+**Expected tests:** none
+**Files:** src/deleted-openfga.ts, src/kept.ts
+**Complexity:** small
+
+Implementation: Historical task remains immutable.
+
+## Task T9: Deletion metadata repair
+**Dependencies:** T1
+**Expected tests:** none
+**Files:** none
+**Intentional deletion targets:** src/deleted-openfga.ts
+**Complexity:** small
+
+Implementation: Mark deleted OpenFGA files as final-review deletion targets.
+`
+    const completed = task({
+      id: "T1",
+      status: "complete",
+      description: "Historical generator task — Implementation: Historical task remains immutable.",
+      expectedFiles: ["/repo/src/deleted-openfga.ts", "/repo/src/kept.ts"],
+      expectedTests: [],
+    })
+
+    const materialized = materializeForwardOnlyImplPlanDag(revisedPlan, "/repo", [completed])
+
+    expect(materialized.success).toBe(true)
+    if (!materialized.success) return
+    expect(materialized.nodes.find((node) => node.id === "T1")).toEqual(completed)
+    expect(materialized.nodes.find((node) => node.id === "T9")?.intentionalDeletionTargets).toEqual(["/repo/src/deleted-openfga.ts"])
   })
 
   it("forward-only materialization rejects rewrites of completed task metadata", () => {
@@ -212,7 +499,43 @@ Attempts to rewrite completed task ownership.
     expect(materialized.success).toBe(false)
     if (materialized.success) return
     expect(materialized.error).toContain("Completed task \"T1\" is immutable")
-    expect(materialized.error).toContain("add a new corrective")
+    expect(materialized.error).toContain("add a future corrective")
+  })
+
+  it("explains missing deleted historical files when completed task Files metadata is changed", () => {
+    const rewrittenPlan = `
+## Task T1: Historical generator task
+**Dependencies:** none
+**Expected tests:** none
+**Files:** src/kept.ts
+**Complexity:** small
+
+Implementation: Historical task remains immutable.
+
+## Task T10: Deletion metadata repair
+**Dependencies:** T1
+**Expected tests:** none
+**Files:** none
+**Intentional deletion targets:** src/deleted-openfga.ts
+**Complexity:** small
+
+Implementation: Mark deleted OpenFGA files as final-review deletion targets.
+`
+    const completed = task({
+      id: "T1",
+      status: "complete",
+      description: "Historical generator task — Implementation: Historical task remains immutable.",
+      expectedFiles: ["/repo/src/kept.ts", "/repo/src/deleted-openfga.ts"],
+      expectedTests: [],
+    })
+
+    const materialized = materializeForwardOnlyImplPlanDag(rewrittenPlan, "/repo", [completed])
+
+    expect(materialized.success).toBe(false)
+    if (materialized.success) return
+    expect(materialized.error).toContain("missing from revised plan: /repo/src/deleted-openfga.ts")
+    expect(materialized.error).toContain("Do not remove deleted historical files")
+    expect(materialized.error).toContain("Intentional deletion targets/Deleted files")
   })
 
   it("forward-only materialization rejects description-only rewrites of completed tasks", () => {

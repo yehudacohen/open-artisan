@@ -32,8 +32,9 @@ import type { DbWorktreeObservation } from "./open-artisan-repository"
 import type { WorkflowMode } from "./workflow-primitives"
 import type { SubagentDispatcher } from "./subagent-dispatcher"
 import { nextSchedulerDecisionForInput, readDecisionInput, type SchedulerDecision } from "./scheduler"
-import { withTimeout, extractJsonFromText } from "./utils"
-import { TASK_REVIEW_TIMEOUT_MS } from "./constants"
+import { extractJsonFromText } from "./utils"
+import { REVIEW_PROGRESS_HARD_TIMEOUT_MS, REVIEW_PROGRESS_IDLE_TIMEOUT_MS } from "./constants"
+import { runWithProgressTimeout } from "./progress-timeout"
 import { buildTaskReviewRubric, getTaskReviewCheckCountLabel } from "./rubrics"
 import { TaskReviewOutputSchema, formatZodError, toJsonSchema } from "./schemas"
 import { buildScenarioSufficiencyPromptBlock } from "./scenario-sufficiency"
@@ -172,7 +173,7 @@ export function buildTaskReviewAcceptancePlan(args: {
   })).decision
 
   return {
-    completedTaskFiles: completionNode?.expectedFiles ?? [],
+    completedTaskFiles: [...(completionNode?.expectedFiles ?? []), ...(completionNode?.expectedTests ?? [])],
     nextTaskId: decision.action === "dispatch" ? decision.task.id : null,
     nextPhaseState: decision.action === "awaiting-human"
       ? "HUMAN_GATE"
@@ -454,6 +455,7 @@ async function ephemeralTaskReviewPrompt(
   parentSessionId?: string,
   parentModel?: string | { modelID: string; providerID?: string },
   title = "task-review",
+  timeoutLabel = title,
 ): Promise<string> {
   const session = await dispatcher.createSession({
     title,
@@ -462,15 +464,25 @@ async function ephemeralTaskReviewPrompt(
     ...(parentModel ? { model: parentModel } : {}),
   })
   try {
-    return await session.prompt(prompt, {
-      submissionTool: {
-        name: "submit_task_review_result",
-        progress: { kind: "task", subject: taskId, ...(attemptId ? { attemptId } : {}) },
+    return await runWithProgressTimeout({
+      policy: {
+        label: timeoutLabel,
+        idleTimeoutMs: REVIEW_PROGRESS_IDLE_TIMEOUT_MS,
+        hardTimeoutMs: REVIEW_PROGRESS_HARD_TIMEOUT_MS,
       },
-      responseFormat: {
-        type: "json_schema",
-        schema: toJsonSchema(TaskReviewOutputSchema),
-      },
+      run: (signal) => session.prompt(prompt, {
+        onProgress: signal.progress,
+        submissionTool: {
+          name: "submit_task_review_result",
+          progress: { kind: "task", subject: taskId, ...(attemptId ? { attemptId } : {}) },
+        },
+        responseFormat: {
+          type: "json_schema",
+          schema: toJsonSchema(TaskReviewOutputSchema),
+        },
+      }),
+      onIdleTimeout: () => session.destroy(),
+      onHardTimeout: () => session.destroy(),
     })
   } finally {
     await session.destroy()
@@ -498,19 +510,11 @@ export async function dispatchTaskReview(
     const prompt = buildTaskReviewPrompt(req)
     const featureSlug = req.featureName ? ` (${req.featureName})` : ""
     const title = `Task Review: ${req.task.id}${featureSlug}`
-    const text = await withTimeout(
-      ephemeralTaskReviewPrompt(dispatcher, prompt, req.task.id, req.reviewAttemptId, req.parentSessionId, req.parentModel, title),
-      TASK_REVIEW_TIMEOUT_MS,
-      "task-review",
-    )
+    const text = await ephemeralTaskReviewPrompt(dispatcher, prompt, req.task.id, req.reviewAttemptId, req.parentSessionId, req.parentModel, title, "task-review")
     const parsed = parseTaskReviewResult(text)
     if (parsed.success) return parsed
 
-    const repairedText = await withTimeout(
-      ephemeralTaskReviewPrompt(dispatcher, buildTaskReviewJsonRepairPrompt(text), req.task.id, req.reviewAttemptId, req.parentSessionId, req.parentModel, `${title} JSON repair`),
-      TASK_REVIEW_TIMEOUT_MS,
-      "task-review-json-repair",
-    )
+    const repairedText = await ephemeralTaskReviewPrompt(dispatcher, buildTaskReviewJsonRepairPrompt(text), req.task.id, req.reviewAttemptId, req.parentSessionId, req.parentModel, `${title} JSON repair`, "task-review-json-repair")
     const repaired = parseTaskReviewResult(repairedText)
     if (repaired.success) return repaired
     return {

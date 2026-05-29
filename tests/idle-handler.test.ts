@@ -97,6 +97,33 @@ describe("handleIdle — reprompt for active states", () => {
     expect(decision.message).toContain("do not keep revising the artifact")
   })
 
+  it("escalates repeated structural tool failures instead of reprompting", () => {
+    const state = makeState({
+      phase: "IMPLEMENTATION",
+      phaseState: "DRAFT",
+      retryCount: 0,
+      toolFailureHistory: [{
+        fingerprint: "request-review-command",
+        category: "tooling",
+        toolName: "request_review",
+        message: "artifact_files contains a command",
+        count: 2,
+        firstSeenAt: 1,
+        lastSeenAt: 2,
+        phase: "IMPLEMENTATION",
+        phaseState: "DRAFT",
+      }],
+    })
+
+    const decision = handleIdle(state)
+
+    expect(decision.action).toBe("escalate")
+    if (decision.action !== "escalate") return
+    expect(decision.message).toContain("request_review")
+    expect(decision.message).toContain("Do not keep retrying")
+    expect(decision.message).toContain("summarize_workflow_incident")
+  })
+
   it("disables build-artisan on reviewer runtime failure instead of reprompting", () => {
     const state = makeState({
       phase: "IMPLEMENTATION",

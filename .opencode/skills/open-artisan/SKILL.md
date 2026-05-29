@@ -76,7 +76,7 @@ When Open Artisan is active:
 These are structural rules, not suggestions:
 
 - In `INCREMENTAL` mode, `INTERFACES` and `TESTS` writes must satisfy both the phase file-shape rule and the approved file allowlist.
-- `approve_current_task_scope_expansion` is not an author-side shortcut. It requires `IMPLEMENTATION/USER_GATE` and a real recorded user response before changing the active task boundary or allowlist.
+- `approve_current_task_scope_expansion` is not an author-side shortcut. It requires `IMPLEMENTATION/USER_GATE` and a real recorded user response before changing the active task boundary or approving `cleanup_files`; cleanup deletes do not mutate DAG task ownership.
 - `request_allowlist_expansion` records a request and routes to approval; pending allowlist expansions must not be applied outside a real user-gated approval.
 - Native OpenCode `submit_feedback approve` can automatically dispatch an isolated scope reviewer for reviewed `INTERFACES`/`TESTS` artifacts that are missing from the INCREMENTAL allowlist; it may expand only exactly those reviewed files when architecture and DAG safety both pass.
 - Bridge reviewer submissions validate isolated-review tokens and reviewed artifact hashes before any reviewer-output parsing or state mutation.

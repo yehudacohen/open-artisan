@@ -240,6 +240,7 @@ export interface DbTask {
   status: TaskStatus
   category: TaskCategory
   complexity: TaskComplexity
+  intentionalDeletionTargets?: Array<RelativePath | AbsolutePath>
   currentAgentLeaseId?: DbRecordId
   createdAt: IsoTimestamp
   updatedAt: IsoTimestamp

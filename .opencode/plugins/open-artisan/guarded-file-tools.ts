@@ -33,13 +33,16 @@ function buildGuardedPolicy(state: WorkflowState, cwd: string) {
     ? getTaskWriteFiles(state.implDag.find((task) => task.id === state.currentTaskId))
     : undefined
   const taskFiles = rawTaskFiles?.map((file) => file.startsWith("/") ? file : resolve(cwd, file))
-  return getPhaseToolPolicy(state.phase, state.phaseState, state.mode, state.fileAllowlist, taskFiles, cwd)
+  return getPhaseToolPolicy(state.phase, state.phaseState, state.mode, state.fileAllowlist, taskFiles, cwd, state.approvedCleanupFiles)
 }
 
-function validateGuardedTarget(toolName: string, state: WorkflowState, cwd: string, filePath: string) {
+function validateGuardedTarget(toolName: string, state: WorkflowState, cwd: string, filePath: string, options: { cleanupDelete?: boolean } = {}) {
   const resolved = resolveGuardedTarget(filePath, cwd)
   if (!resolved.success) return resolved
   const policy = buildGuardedPolicy(state, cwd)
+  if (options.cleanupDelete && policy.cleanupPathPredicate?.(resolved.targetPath)) {
+    return { success: true as const, targetPath: resolved.targetPath, displayPath: resolved.displayPath }
+  }
   if (!policy.writePathPredicate) {
     return { success: false as const, error: `${toolName} is blocked in ${state.phase}/${state.phaseState}. ${policy.allowedDescription}` }
   }
@@ -118,10 +121,15 @@ export function createGuardedFileTools(tool: any, ctx: { store: SessionStateStor
         if (!parsed.success) return `Error: ${parsed.error}`
         const cwd = context.directory || ctx.projectRoot
         const resolvedTargets = new Map<string, { targetPath: string; displayPath: string }>()
-        for (const filePath of parsed.data.targetPaths) {
-          const target = validateGuardedTarget("guarded_patch", state, cwd, filePath)
+        for (const operation of parsed.data.operations) {
+          const target = validateGuardedTarget("guarded_patch", state, cwd, operation.path, { cleanupDelete: operation.type === "delete" })
           if (!target.success) return `Error: ${target.error}`
-          resolvedTargets.set(filePath, { targetPath: target.targetPath, displayPath: target.displayPath })
+          resolvedTargets.set(operation.path, { targetPath: target.targetPath, displayPath: target.displayPath })
+          if (operation.type === "update" && operation.moveTo) {
+            const moveTarget = validateGuardedTarget("guarded_patch", state, cwd, operation.moveTo)
+            if (!moveTarget.success) return `Error: ${moveTarget.error}`
+            resolvedTargets.set(operation.moveTo, { targetPath: moveTarget.targetPath, displayPath: moveTarget.displayPath })
+          }
         }
         const initialContents = new Map<string, string | null>()
         for (const [filePath, target] of resolvedTargets) {

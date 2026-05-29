@@ -28,8 +28,8 @@ export interface SubagentCreateOptions {
   agent: string
   /**
    * Parent session ID for TUI nesting.
-   * When present, the parent session owns cleanup/lifecycle visibility and adapters may
-   * intentionally skip explicit child-session deletion during destroy().
+   * When present, the child is nested under the parent for UI visibility. The
+   * dispatcher still owns the created child session and must clean it up.
    */
   parentId?: string
   /**
@@ -54,6 +54,8 @@ export interface SubagentSession {
 }
 
 export interface SubagentPromptOptions {
+  /** Called by adapters when the child session makes meaningful progress. */
+  onProgress?: (message?: string) => void
   /**
    * Adapter-native structured output request. Adapters that support model-level
    * JSON schema enforcement should pass this through to the underlying LLM API;

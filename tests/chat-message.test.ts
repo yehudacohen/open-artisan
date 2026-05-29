@@ -209,6 +209,68 @@ describe("processUserMessage — ESCAPE_HATCH clarification", () => {
   })
 })
 
+describe("processUserMessage — HUMAN_GATE routing", () => {
+  it("routes explicit manual prerequisite resolution through submit_feedback", () => {
+    const state = makeState({
+      phase: "IMPLEMENTATION",
+      phaseState: "HUMAN_GATE",
+      implDag: [{
+        id: "task-005",
+        description: "Provision production prerequisites",
+        dependencies: [],
+        expectedFiles: [],
+        expectedTests: [],
+        estimatedComplexity: "small",
+        status: "human-gated",
+      }],
+    })
+
+    const result = processUserMessage(state, [{ type: "text", text: "I configured the prerequisite for task-005" }])
+
+    expect(result.intercepted).toBe(true)
+    expect(result.feedbackType).toBe("approve")
+    expect(result.parts[0]?.text).toContain("submit_feedback")
+    expect(result.parts[0]?.text).toContain("resolved_human_gates")
+  })
+
+  it("routes plan/design changes at HUMAN_GATE through propose_backtrack", () => {
+    const state = makeState({
+      phase: "IMPLEMENTATION",
+      phaseState: "HUMAN_GATE",
+      implDag: [{
+        id: "task-005",
+        description: "Provision production prerequisites",
+        dependencies: [],
+        expectedFiles: [],
+        expectedTests: [],
+        estimatedComplexity: "small",
+        status: "human-gated",
+      }],
+    })
+
+    const result = processUserMessage(state, [{
+      type: "text",
+      text: "Revise rather than resolve the human gate as production prerequisites; replace the current model with graph-native infrastructure.",
+    }])
+
+    expect(result.intercepted).toBe(true)
+    expect(result.feedbackType).toBe("feedback")
+    expect(result.parts[0]?.text).toContain("propose_backtrack")
+    expect(result.parts[0]?.text).toContain("Do NOT call `submit_feedback(approve)`")
+  })
+
+  it("does not force ambiguous HUMAN_GATE chat into approval", () => {
+    const state = makeState({ phase: "IMPLEMENTATION", phaseState: "HUMAN_GATE" })
+    const parts = [{ type: "text", text: "ok, go ahead" }]
+
+    const result = processUserMessage(state, parts)
+
+    expect(result.intercepted).toBe(false)
+    expect(result.feedbackType).toBeNull()
+    expect(result.parts).toBe(parts)
+  })
+})
+
 describe("processUserMessage — injected parts structure", () => {
   it("prepends a routing note as a new text part (approval)", () => {
     const state = makeState({ phaseState: "USER_GATE" })

@@ -95,6 +95,13 @@ export interface TaskNode extends TaskRoadmapTraceability {
    */
   expectedFiles: string[]
 
+  /**
+   * File paths intentionally deleted or superseded by this task. These paths
+   * are audit metadata, not files to recreate or include in final artifact
+   * review. Used to subtract historical completed-task files from final review.
+   */
+  intentionalDeletionTargets?: string[]
+
   /** Rough complexity estimate — used for scheduling prioritization */
   estimatedComplexity: TaskComplexity
 
@@ -207,6 +214,7 @@ export function createImplDAG(tasks: TaskNode[]): ImplDAG {
     expectedTests: [...t.expectedTests],
     verificationCommands: [...(t.verificationCommands ?? [])],
     expectedFiles: [...(t.expectedFiles ?? [])],
+    ...(t.intentionalDeletionTargets !== undefined ? { intentionalDeletionTargets: [...t.intentionalDeletionTargets] } : {}),
     ...(t.roadmapItemIds !== undefined ? { roadmapItemIds: [...t.roadmapItemIds] } : {}),
     ...(t.isolation
       ? {

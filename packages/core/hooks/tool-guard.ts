@@ -299,6 +299,7 @@ export function getPhaseToolPolicy(
   fileAllowlist: string[],
   taskExpectedFiles?: string[],
   cwd = process.cwd(),
+  cleanupFiles?: string[],
 ): PhaseToolPolicy {
   switch (phase) {
     // -----------------------------------------------------------------------
@@ -531,7 +532,7 @@ export function getPhaseToolPolicy(
           return {
             blocked: ["write", "edit"],
             bashCommandPredicate: readOnlyBash,
-            allowedDescription: "INCREMENTAL mode: no approved file allowlist is available for the current implementation scope — all writes are blocked until the scope is repaired through the workflow.",
+            allowedDescription: "INCREMENTAL mode: no approved file allowlist is available for the current implementation scope — all writes, deletes, and filesystem mutations are blocked until the scope is repaired through the workflow.",
           }
         }
         // In INCREMENTAL, per-task files intersect with the workflow allowlist.
@@ -540,6 +541,9 @@ export function getPhaseToolPolicy(
         const allowSet = new Set(normalizeWorkflowPaths(fileAllowlist, cwd))
         const taskSet = taskExpectedFiles && taskExpectedFiles.length > 0
           ? new Set(normalizeWorkflowPaths(taskExpectedFiles, cwd))
+          : null
+        const cleanupSet = cleanupFiles && cleanupFiles.length > 0
+          ? new Set(normalizeWorkflowPaths(cleanupFiles, cwd))
           : null
         return {
           blocked: [],
@@ -552,6 +556,15 @@ export function getPhaseToolPolicy(
             if (taskSet && !taskSet.has(normalized)) return false
             return true
           },
+          ...(cleanupSet
+            ? {
+                cleanupPathPredicate: (filePath: string) => {
+                  if (isEnvFile(filePath)) return false
+                  const normalized = normalizeWorkflowPath(filePath, cwd)
+                  return normalized ? cleanupSet.has(normalized) : false
+                },
+              }
+            : {}),
           bashCommandPredicate: (command: string) => {
             // Block bash commands that contain obvious file-write operators.
             // This is best-effort — cannot catch all obfuscation — but catches
@@ -561,8 +574,8 @@ export function getPhaseToolPolicy(
             return readOnlyBash(command)
           },
           allowedDescription: taskSet
-            ? `INCREMENTAL mode has two write gates: global feature allowlist (${fileAllowlist.length} files) and current task boundary (${taskSet.size} files). The file must pass both. If the user already approved this file for the active task, call approve_current_task_scope_expansion to update both gates atomically. .env always blocked.`
-            : `INCREMENTAL mode: only allowlisted files may be written (${fileAllowlist.length} files). .env always blocked. Bash write operators (>, >>, tee, sed -i) are blocked.`,
+            ? `INCREMENTAL mode has two write gates: global feature allowlist (${fileAllowlist.length} files) and current task boundary (${taskSet.size} files). The file must pass both. If the file is globally allowlisted but missing from the active task boundary, call approve_current_task_scope_expansion; it will request USER_GATE approval when needed, then update both gates atomically. Approved cleanup deletes are separate and do not mutate task ownership. .env always blocked. Bash filesystem mutations including rm/rmdir/mkdir and redirection are blocked.`
+            : `INCREMENTAL mode: only allowlisted files may be written (${fileAllowlist.length} files). Approved cleanup deletes are separate and do not mutate task ownership. .env always blocked. Bash filesystem mutations including rm/rmdir/mkdir and redirection are blocked; request allowlist/scope expansion for cleanup outside the current scope.`,
         }
       }
 
@@ -582,7 +595,7 @@ export function getPhaseToolPolicy(
             return normalized ? taskSet.has(normalized) : false
           },
           bashCommandPredicate: readOnlyBash,
-          allowedDescription: `Implementation phase: only current task boundary files may be written (${taskSet.size} files). If the file is approved for this active task but missing from the boundary, call approve_current_task_scope_expansion. .openartisan/ always allowed. .env always blocked.`,
+          allowedDescription: `Implementation phase: only current task boundary files may be written (${taskSet.size} files). If the file is approved for this active task but missing from the boundary, call approve_current_task_scope_expansion; it will request USER_GATE approval when needed. .openartisan/ always allowed. .env always blocked.`,
         }
       }
 

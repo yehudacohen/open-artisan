@@ -129,6 +129,7 @@ function buildTable(): TableEntry[] {
   }
   for (const state of ["DRAFT", "REVISE", "SCHEDULING", "TASK_REVISE"] as const) {
     table.push({ from: ["IMPLEMENTATION", state], event: "allowlist_expansion_requested", modePredicate: (m) => m === "INCREMENTAL", to: ["IMPLEMENTATION", "USER_GATE"] })
+    table.push({ from: ["IMPLEMENTATION", state], event: "scope_expansion_requested", modePredicate: null, to: ["IMPLEMENTATION", "USER_GATE"] })
   }
   table.push({ from: ["IMPL_PLAN", "USER_GATE"], event: "scope_expansion_approved", modePredicate: (m) => m === "INCREMENTAL", to: ["IMPL_PLAN", "DRAFT"] })
   for (const state of ["DRAFT", "SCHEDULING", "TASK_REVISE", "USER_GATE"] as const) {

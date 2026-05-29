@@ -20,6 +20,7 @@ import { createImplDAG } from "../../core/dag"
 import { parseImplPlan, validateExecutableImplPlan } from "../../core/impl-plan-parser"
 import { parseRequestReviewArtifactData } from "../../core/tools/request-review"
 import { buildReviewArtifactSubmission, recordReviewArtifactSubmission } from "../../core/tools/review-artifact-submissions"
+import { recordToolFailure } from "../../core/tool-failure-history"
 
 function requireState(ctx: BridgeContext, sessionId: string): WorkflowState {
   const state = ctx.engine!.store.get(sessionId)
@@ -234,7 +235,12 @@ export const handleRequestReview: ToolHandler = async (args, toolCtx, ctx) => {
       featureName: state.featureName,
       implementationArtifactFiles: collectImplementationReviewArtifactFiles(state, toolCtx.directory),
     })
-    if (artifactValidationError) return `Error: ${artifactValidationError}`
+    if (artifactValidationError) {
+      await store.update(toolCtx.sessionId, (draft) => {
+        recordToolFailure(draft, { category: "tooling", toolName: "request_review", message: artifactValidationError })
+      })
+      return `Error: ${artifactValidationError}`
+    }
     const planningContractError = validatePlanningReviewArtifact(state, toolCtx.directory, artifactFiles)
     if (planningContractError) {
       return `Error: PLANNING review failed interface-artifact validation: ${planningContractError}. Fix the plan so reviewed INTERFACES artifacts are phase-legal, or label non-interface files as supporting dependencies before re-submitting request_review.`
@@ -307,7 +313,12 @@ export const handleRequestReview: ToolHandler = async (args, toolCtx, ctx) => {
     featureName: state.featureName,
     implementationArtifactFiles: collectImplementationReviewArtifactFiles(state, toolCtx.directory),
   })
-  if (artifactValidationError) return `Error: ${artifactValidationError}`
+  if (artifactValidationError) {
+    await store.update(toolCtx.sessionId, (draft) => {
+      recordToolFailure(draft, { category: "tooling", toolName: "request_review", message: artifactValidationError })
+    })
+    return `Error: ${artifactValidationError}`
+  }
   const planningContractError = validatePlanningReviewArtifact(state, toolCtx.directory, artifactFiles)
   if (planningContractError) {
     return `Error: PLANNING review failed interface-artifact validation: ${planningContractError}. Fix the plan so reviewed INTERFACES artifacts are phase-legal, or label non-interface files as supporting dependencies before re-submitting request_review.`

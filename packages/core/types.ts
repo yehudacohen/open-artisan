@@ -61,6 +61,7 @@ export type WorkflowEvent =
   | "delegated_task_completed"
   | "scheduling_complete"
   | "allowlist_expansion_requested"
+  | "scope_expansion_requested"
   | "scope_expansion_approved"
 
 /** Artifact kinds tracked by workflow review/approval state. */

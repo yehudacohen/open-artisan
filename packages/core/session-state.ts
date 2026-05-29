@@ -25,6 +25,7 @@ import {
 import type { StateBackend } from "./state-backend-types"
 import { readDecisionInput, nextSchedulerDecisionForInput } from "./scheduler"
 import { extractApprovedFileAllowlist } from "./tools/plan-allowlist"
+import { isLikelyCommandMetadataEntry } from "./task-metadata-paths"
 import { SESSION_STORE_OPERATION_TIMEOUT_ENV, SESSION_STORE_OPERATION_TIMEOUT_MS } from "./constants"
 
 // ---------------------------------------------------------------------------
@@ -60,6 +61,8 @@ function freshState(sessionId: string): WorkflowState {
     pendingRevisionSteps: null,
     revisionAutoSkipBlockedReason: null,
     pendingAllowlistExpansions: [],
+    pendingCurrentTaskScopeExpansions: [],
+    approvedCleanupFiles: [],
     toolFailureHistory: [],
     userGateMessageReceived: false,
     reviewArtifactHash: null,
@@ -171,7 +174,7 @@ function migrateState(migrated: Record<string, unknown>): void {
   }
   // v21 → v22: add reviewArtifactFiles (orchestrator-driven artifact tracking)
   migrated["reviewArtifactFiles"] ??= []
-  // v22: backfill task artifact arrays on implDag nodes (new fields, default empty).
+  // v22/v29/v34: backfill task artifact arrays on implDag nodes (new fields, default empty).
   const dagNodes = migrated["implDag"]
   if (Array.isArray(dagNodes)) {
     for (const node of dagNodes) {
@@ -179,6 +182,7 @@ function migrateState(migrated: Record<string, unknown>): void {
         ;(node as Record<string, unknown>)["expectedTests"] ??= []
         ;(node as Record<string, unknown>)["expectedFiles"] ??= []
         ;(node as Record<string, unknown>)["verificationCommands"] ??= []
+        ;(node as Record<string, unknown>)["intentionalDeletionTargets"] ??= []
       }
     }
   }
@@ -200,6 +204,11 @@ function migrateState(migrated: Record<string, unknown>): void {
   migrated["reviewAttempts"] ??= []
   // v31 → v32: add optional roadmap execution-slice context.
   migrated["roadmapContext"] ??= null
+  // v32 → v33: add pending current-task scope expansion records.
+  migrated["pendingCurrentTaskScopeExpansions"] ??= []
+  // v33 → v34: add optional task-level deletion metadata for final review artifact pruning (backfilled above with task arrays).
+  // v34 → v35: add approved cleanup deletes that do not alter DAG task ownership.
+  migrated["approvedCleanupFiles"] ??= []
   // retryCount is transient — reset on load so the idle handler starts fresh.
   // If the agent was stuck before a restart, it deserves a clean retry budget.
   migrated["retryCount"] = 0
@@ -260,6 +269,32 @@ function repairStateInconsistencies(state: WorkflowState): void {
     state.taskCompletionInProgress = null
     state.taskReviewCount = 0
     return
+  }
+
+  const cwd = state.artifactDiskPaths.plan
+    ? dirname(dirname(dirname(state.artifactDiskPaths.plan)))
+    : undefined
+  for (const task of state.implDag) {
+    const commands = new Set(task.verificationCommands ?? [])
+    const keepExpectedFiles: string[] = []
+    const keepExpectedTests: string[] = []
+    for (const entry of task.expectedFiles ?? []) {
+      if (isLikelyCommandMetadataEntry(entry, cwd)) {
+        commands.add(entry.trim())
+      } else {
+        keepExpectedFiles.push(entry)
+      }
+    }
+    for (const entry of task.expectedTests ?? []) {
+      if (isLikelyCommandMetadataEntry(entry, cwd)) {
+        commands.add(entry.trim())
+      } else {
+        keepExpectedTests.push(entry)
+      }
+    }
+    task.expectedFiles = keepExpectedFiles
+    task.expectedTests = keepExpectedTests
+    task.verificationCommands = Array.from(commands)
   }
 
   const taskIds = new Set(state.implDag.map((task) => task.id))

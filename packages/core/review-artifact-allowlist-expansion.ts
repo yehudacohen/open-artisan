@@ -2,8 +2,9 @@ import type { SubagentDispatcher } from "./subagent-dispatcher"
 import type { WorkflowState } from "./workflow-state-types"
 import { isInterfaceFile, isTestFile } from "./hooks/tool-guard"
 import { normalizeWorkflowPaths } from "./path-normalization"
-import { CHANGE_PROPOSAL_REVIEW_TIMEOUT_MS } from "./constants"
-import { extractJsonFromText, extractTextFromPromptResult, withTimeout } from "./utils"
+import { REVIEW_PROGRESS_HARD_TIMEOUT_MS, REVIEW_PROGRESS_IDLE_TIMEOUT_MS } from "./constants"
+import { extractJsonFromText, extractTextFromPromptResult } from "./utils"
+import { runWithProgressTimeout } from "./progress-timeout"
 import { toJsonSchema, z } from "./schemas"
 
 export const ReviewArtifactAllowlistExpansionDecisionSchema = z.object({
@@ -217,11 +218,21 @@ async function ephemeralScopeExpansionReviewPrompt(
     ...(parentModel ? { model: parentModel } : {}),
   })
   try {
-    return await session.prompt(prompt, {
-      responseFormat: {
-        type: "json_schema",
-        schema: toJsonSchema(ReviewArtifactAllowlistExpansionDecisionSchema),
+    return await runWithProgressTimeout({
+      policy: {
+        label: "review-artifact-allowlist-expansion",
+        idleTimeoutMs: REVIEW_PROGRESS_IDLE_TIMEOUT_MS,
+        hardTimeoutMs: REVIEW_PROGRESS_HARD_TIMEOUT_MS,
       },
+      run: (signal) => session.prompt(prompt, {
+        onProgress: signal.progress,
+        responseFormat: {
+          type: "json_schema",
+          schema: toJsonSchema(ReviewArtifactAllowlistExpansionDecisionSchema),
+        },
+      }),
+      onIdleTimeout: () => session.destroy(),
+      onHardTimeout: () => session.destroy(),
     })
   } finally {
     await session.destroy()
@@ -241,11 +252,7 @@ export async function dispatchReviewArtifactAllowlistExpansionReview(
 ): Promise<ReviewArtifactAllowlistExpansionReviewResult> {
   const prompt = buildReviewArtifactAllowlistExpansionPrompt(req)
   try {
-    const raw = await withTimeout(
-      ephemeralScopeExpansionReviewPrompt(dispatcher, prompt, req.parentSessionId, req.parentModel),
-      CHANGE_PROPOSAL_REVIEW_TIMEOUT_MS,
-      "review-artifact-allowlist-expansion",
-    )
+    const raw = await ephemeralScopeExpansionReviewPrompt(dispatcher, prompt, req.parentSessionId, req.parentModel)
     const parsed = parseReviewArtifactAllowlistExpansionDecision(raw)
     if (!parsed.success) return parsed
     return { ...parsed, prompt }

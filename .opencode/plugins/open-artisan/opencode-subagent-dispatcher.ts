@@ -5,7 +5,7 @@
  *   - Session ID extraction from the SDK response envelope
  *   - Text extraction from prompt result parts
  *   - Model routing on session.prompt() when OpenCode provides a full provider/model pair
- *   - Conditional cleanup (skip delete when parentId is set — parent session owns the child)
+ *   - Explicit cleanup of the created child session, even when parentId is used for UI nesting
  *
  * This is the only file that imports OpencodeClient. All core modules use SubagentDispatcher.
  */
@@ -16,7 +16,7 @@ import { extractEphemeralSessionId, extractTextFromPromptResult } from "../../..
 import type { OpencodeClient } from "@opencode-ai/sdk"
 
 export interface ReviewerToolSubmissionStore {
-  begin(sessionId: string, toolName: string, context?: { parentSessionId?: string; kind?: "task" | "phase"; subject?: string; attemptId?: string }): void
+  begin(sessionId: string, toolName: string, context?: { parentSessionId?: string; kind?: "task" | "phase"; subject?: string; attemptId?: string; onProgress?: (message?: string) => void }): void
   take(sessionId: string, toolName: string): string | null
   clear(sessionId: string): void
 }
@@ -129,6 +129,28 @@ function requiresLocalSubmissionTool(toolName: string | undefined): boolean {
 
 function formatSubmissionPayload(toolName: string | undefined, payload: string, required: boolean): string {
   return toolName && required ? encodeSubagentToolSubmission(toolName, payload) : payload
+}
+
+function buildRequiredSubmissionRepairPrompt(toolName: string, previousText: string): string {
+  return [
+    `Your previous response did not call the required \`${toolName}\` tool.`,
+    "Text/prose responses cannot satisfy this isolated review gate.",
+    "Call the required tool now with the complete structured assessment. Do not reply with prose.",
+    "If your previous response already contained the assessment, convert it into the tool arguments now.",
+    "",
+    "Previous response:",
+    "```",
+    previousText.length > 4000 ? `${previousText.slice(0, 4000)}...[truncated]` : previousText,
+    "```",
+  ].join("\n")
+}
+
+function extractSubmissionRepairContext(result: unknown, title: string): string {
+  try {
+    return extractTextFromPromptResult(result, title)
+  } catch {
+    return summarizeResponse(result)
+  }
 }
 
 type PromptMessageIds = {
@@ -347,6 +369,10 @@ export function createOpenCodeSubagentDispatcher(client: OpencodeClient, options
         id: sessionId,
 
         async prompt(text: string, promptOptions?: SubagentPromptOptions): Promise<string> {
+          promptOptions?.onProgress?.("reviewer prompt started")
+          const progressHeartbeat = promptOptions?.onProgress
+            ? setInterval(() => promptOptions.onProgress?.("reviewer prompt still running"), 60_000)
+            : null
           const submissionToolName = promptOptions?.submissionTool?.name
           const requireSubmissionTool = promptOptions?.submissionTool?.required === true ||
             (!!options.reviewerToolSubmissions && requiresLocalSubmissionTool(submissionToolName))
@@ -357,6 +383,7 @@ export function createOpenCodeSubagentDispatcher(client: OpencodeClient, options
               ...(progress?.kind ? { kind: progress.kind } : {}),
               ...(progress?.subject ? { subject: progress.subject } : {}),
               ...(progress?.attemptId ? { attemptId: progress.attemptId } : {}),
+              ...(promptOptions.onProgress ? { onProgress: promptOptions.onProgress } : {}),
             })
           }
           // Generate a unique part ID with "prt" prefix — required by the OpenCode API
@@ -380,25 +407,79 @@ export function createOpenCodeSubagentDispatcher(client: OpencodeClient, options
                 ...(submissionToolName ? { takeSubmission: () => options.reviewerToolSubmissions?.take(sessionId, submissionToolName) } : {}),
               })
               if (promptOrSubmission.kind === "submission") {
+                promptOptions?.onProgress?.(`${submissionToolName} captured`)
                 return formatSubmissionPayload(submissionToolName, promptOrSubmission.payload, requireSubmissionTool)
               }
               result = promptOrSubmission.result
+              promptOptions?.onProgress?.("reviewer prompt resolved")
             } catch (promptError) {
               const submitted = submissionToolName ? options.reviewerToolSubmissions?.take(sessionId, submissionToolName) : null
-              if (submitted) return formatSubmissionPayload(submissionToolName, submitted, requireSubmissionTool)
+              if (submitted) {
+                promptOptions?.onProgress?.(`${submissionToolName} captured after prompt error`)
+                return formatSubmissionPayload(submissionToolName, submitted, requireSubmissionTool)
+              }
               throw promptError
             }
             const submitted = submissionToolName ? options.reviewerToolSubmissions?.take(sessionId, submissionToolName) : null
-            if (submitted) return formatSubmissionPayload(submissionToolName, submitted, requireSubmissionTool)
+            if (submitted) {
+              promptOptions?.onProgress?.(`${submissionToolName} captured after prompt resolution`)
+              return formatSubmissionPayload(submissionToolName, submitted, requireSubmissionTool)
+            }
             const structured = findStructuredSubmission(result, submissionToolName)
-            if (structured) return formatSubmissionPayload(submissionToolName, structured, requireSubmissionTool)
-            if (requireSubmissionTool) throw buildMissingSubmissionToolError(opts.title, submissionToolName!, result)
+            if (structured) {
+              promptOptions?.onProgress?.(`${submissionToolName} structured result found`)
+              return formatSubmissionPayload(submissionToolName, structured, requireSubmissionTool)
+            }
+            if (requireSubmissionTool && submissionToolName) {
+              promptOptions?.onProgress?.(`${submissionToolName} missing; requesting tool-only repair`)
+              const repairPartId = `prt_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+              const repairPromise = client.session!.prompt({
+                path: { id: sessionId },
+                body: {
+                  noReply: false,
+                  ...(opts.agent ? { agent: opts.agent } : {}),
+                  ...(modelConfig ? { model: modelConfig } : {}),
+                  ...(promptOptions?.responseFormat ? { format: promptOptions.responseFormat } : {}),
+                  tools: WORKFLOW_TOOL_DENYLIST,
+                  parts: [{
+                    type: "text",
+                    text: buildRequiredSubmissionRepairPrompt(submissionToolName, extractSubmissionRepairContext(result, opts.title)),
+                    id: repairPartId,
+                  }],
+                },
+              })
+              const repairOrSubmission = await waitForPromptOrSubmission({
+                promptPromise: repairPromise,
+                takeSubmission: () => options.reviewerToolSubmissions?.take(sessionId, submissionToolName),
+              })
+              if (repairOrSubmission.kind === "submission") {
+                promptOptions?.onProgress?.(`${submissionToolName} captured after tool-only repair`)
+                return formatSubmissionPayload(submissionToolName, repairOrSubmission.payload, requireSubmissionTool)
+              }
+              const repairedSubmitted = options.reviewerToolSubmissions?.take(sessionId, submissionToolName)
+              if (repairedSubmitted) {
+                promptOptions?.onProgress?.(`${submissionToolName} captured after repair prompt resolution`)
+                return formatSubmissionPayload(submissionToolName, repairedSubmitted, requireSubmissionTool)
+              }
+              const repairedStructured = findStructuredSubmission(repairOrSubmission.result, submissionToolName)
+              if (repairedStructured) {
+                promptOptions?.onProgress?.(`${submissionToolName} structured repair result found`)
+                return formatSubmissionPayload(submissionToolName, repairedStructured, requireSubmissionTool)
+              }
+              throw buildMissingSubmissionToolError(opts.title, submissionToolName, repairOrSubmission.result)
+            }
             return extractTextFromPromptResult(result, opts.title)
           } catch (initialError) {
             const submitted = submissionToolName ? options.reviewerToolSubmissions?.take(sessionId, submissionToolName) : null
-            if (submitted) return formatSubmissionPayload(submissionToolName, submitted, requireSubmissionTool)
+            if (submitted) {
+              promptOptions?.onProgress?.(`${submissionToolName} captured during recovery`)
+              return formatSubmissionPayload(submissionToolName, submitted, requireSubmissionTool)
+            }
             const structured = findStructuredSubmission(result, submissionToolName)
-            if (structured) return formatSubmissionPayload(submissionToolName, structured, requireSubmissionTool)
+            if (structured) {
+              promptOptions?.onProgress?.(`${submissionToolName} structured result found during recovery`)
+              return formatSubmissionPayload(submissionToolName, structured, requireSubmissionTool)
+            }
             if (result === null) throw initialError
             if (requireSubmissionTool && result !== null) throw buildMissingSubmissionToolError(opts.title, submissionToolName!, result)
             const messageIds = extractPromptMessageIds(result)
@@ -409,7 +490,10 @@ export function createOpenCodeSubagentDispatcher(client: OpencodeClient, options
               await sleep(500)
               const fetched = await fetchPromptMessageText(client, sessionId, messageIds)
               lastDiagnostic = fetched.diagnostic
-              if (fetched.text) return fetched.text
+              if (fetched.text) {
+                promptOptions?.onProgress?.("reviewer text fetched from session history")
+                return fetched.text
+              }
             }
             if (lastDiagnostic) {
               throw new Error(
@@ -419,14 +503,12 @@ export function createOpenCodeSubagentDispatcher(client: OpencodeClient, options
             }
             return extractTextFromPromptResult(lastResult, opts.title)
           } finally {
+            if (progressHeartbeat) clearInterval(progressHeartbeat)
             if (submissionToolName) options.reviewerToolSubmissions?.clear(sessionId)
           }
         },
 
         async destroy(): Promise<void> {
-          // Skip cleanup when session has a parent — parent session owns the lifecycle.
-          // This matches the existing behavior in all 7 subagent modules.
-          if (hasParent) return
           try {
             await client.session!.delete({ path: { id: sessionId } })
           } catch {

@@ -87,7 +87,7 @@ export const handleGuardCheck: MethodHandler = async (params, ctx) => {
     ? rawTaskFiles.map((f: string) => f.startsWith("/") ? f : resolve(ctx.projectDir!, f))
     : rawTaskFiles
   const baseDir = resolve(ctx.projectDir ?? process.cwd())
-  const policy = getPhaseToolPolicy(state.phase, state.phaseState, state.mode, state.fileAllowlist, taskExpectedFiles, baseDir)
+  const policy = getPhaseToolPolicy(state.phase, state.phaseState, state.mode, state.fileAllowlist, taskExpectedFiles, baseDir, state.approvedCleanupFiles)
 
   // Check blocked list
   if (policy.blocked.some((blocked) => policyToolName.includes(blocked))) {

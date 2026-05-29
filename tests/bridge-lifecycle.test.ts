@@ -7,7 +7,9 @@
 import { describe, expect, it, beforeEach, afterEach, setDefaultTimeout } from "bun:test"
 import { join } from "node:path"
 import { mkdtemp, rm } from "node:fs/promises"
+import { existsSync } from "node:fs"
 import { tmpdir } from "node:os"
+import { PassThrough } from "node:stream"
 
 import {
   handleInit,
@@ -367,6 +369,122 @@ describe("lifecycle.shutdown", () => {
     } finally {
       process.exit = originalExit
     }
+  })
+})
+
+describe("stdio transport close cleanup", () => {
+  it("waits for an active request before disposing runtime resources", async () => {
+    const { createBridgeServer } = await import("#bridge/server")
+    const input = new PassThrough()
+    const output = new PassThrough()
+    let releaseRequest!: () => void
+    let requestStarted!: () => void
+    const started = new Promise<void>((resolve) => {
+      requestStarted = resolve
+    })
+    const release = new Promise<void>((resolve) => {
+      releaseRequest = resolve
+    })
+    const server = createBridgeServer({
+      "lifecycle.ping": async () => {
+        requestStarted()
+        await release
+        return "pong"
+      },
+    }, { input, output, exitOnInputClose: false })
+
+    let disposed = false
+    server.ctx.runtimeBackendDispose = async () => {
+      disposed = true
+    }
+    server.start()
+
+    const request = server.receiveJSON(JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "lifecycle.ping",
+      params: {},
+    }))
+    await started
+
+    input.end()
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    expect(disposed).toBe(false)
+
+    releaseRequest()
+    expect(JSON.parse((await request) ?? "{}").result).toBe("pong")
+    await server.closed
+    expect(disposed).toBe(true)
+  })
+
+  it("bounds input close cleanup when an active request never settles", async () => {
+    const { createBridgeServer } = await import("#bridge/server")
+    const input = new PassThrough()
+    const output = new PassThrough()
+    let requestStarted!: () => void
+    const started = new Promise<void>((resolve) => {
+      requestStarted = resolve
+    })
+    const server = createBridgeServer({
+      "lifecycle.ping": async () => {
+        requestStarted()
+        await new Promise(() => {})
+      },
+    }, { input, output, exitOnInputClose: false, activeRequestDrainTimeoutMs: 10 })
+
+    let disposed = false
+    server.ctx.runtimeBackendDispose = async () => {
+      disposed = true
+    }
+    server.start()
+
+    void server.receiveJSON(JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "lifecycle.ping",
+      params: {},
+    }))
+    await started
+
+    input.end()
+    await server.closed
+    expect(disposed).toBe(true)
+  })
+
+  it("disposes runtime resources and removes owned runtime registration when input closes", async () => {
+    const { createBridgeServer } = await import("#bridge/server")
+    const input = new PassThrough()
+    const output = new PassThrough()
+    const server = createBridgeServer({
+      "lifecycle.init": handleInit,
+      "lifecycle.ping": handlePing,
+    }, { input, output, exitOnInputClose: false })
+
+    server.start()
+    const response = await server.receiveJSON(JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "lifecycle.init",
+      params: { projectDir: tmpDir, persistence: { kind: "filesystem" } },
+    }))
+    expect(JSON.parse(response ?? "{}").result).toBe("ready")
+
+    let disposed = false
+    const originalDispose = server.ctx.runtimeBackendDispose
+    server.ctx.runtimeBackendDispose = async () => {
+      disposed = true
+      await originalDispose?.()
+    }
+
+    input.end()
+    await server.closed
+
+    const stateDir = join(tmpDir, ".openartisan")
+    expect(disposed).toBe(true)
+    expect(server.ctx.runtimeBackendDispose).toBeNull()
+    expect(server.ctx.ownsRuntimeRegistration).toBe(false)
+    expect(existsSync(join(stateDir, ".bridge-pid"))).toBe(false)
+    expect(existsSync(join(stateDir, ".bridge-meta.json"))).toBe(false)
   })
 })
 

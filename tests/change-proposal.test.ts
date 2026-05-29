@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test"
 
 import {
+  buildChangeProposalNextAction,
   buildChangeProposalReviewPrompt,
   dispatchChangeProposalReview,
   parseChangeProposalReviewResult,
@@ -44,6 +45,60 @@ describe("change proposal review", () => {
     expect(prompt).toContain("planning-allowlist-revision")
     expect(prompt).toContain("task-boundary-change")
     expect(prompt).toContain("reject-out-of-scope")
+    expect(prompt).toContain("stale generated output")
+    expect(prompt).toContain("Do not choose backtrack unless an approved artifact is actually wrong")
+  })
+
+  it("guides implementation allowlist revisions through request_allowlist_expansion instead of backtrack", () => {
+    const nextAction = buildChangeProposalNextAction({
+      state,
+      proposal: {
+        summary: "Stale build lock cleanup",
+        why_needed: "A timed-out reviewer left build/tmp/build-packages.lock behind.",
+        affected_files: ["build/tmp/build-packages.lock", "scripts/build-packages.ts"],
+      },
+      decision: {
+        approved: true,
+        route: "planning-allowlist-revision",
+        confidence: "high",
+        reason: "The cleanup is valid fallout but outside the current allowlist.",
+        required_actions: [],
+        allowed_files: ["build/tmp/build-packages.lock", "scripts/build-packages.ts"],
+        rejected_files: [],
+      },
+    })
+
+    expect(nextAction).toContain("request_allowlist_expansion")
+    expect(nextAction).toContain("Do not call propose_backtrack")
+  })
+
+  it("guides TESTS allowlist revisions through request_allowlist_expansion instead of planning backtrack", () => {
+    const nextAction = buildChangeProposalNextAction({
+      state: makeWorkflowState({
+        mode: "INCREMENTAL",
+        phase: "TESTS",
+        phaseState: "REVISE",
+        fileAllowlist: ["/repo/tests/existing.test.ts"],
+      }),
+      proposal: {
+        summary: "Reviewer required planned composition tests",
+        why_needed: "TESTS review found the approved plan needs a platform composition test file.",
+        affected_files: ["/repo/test/factories/ory/platform-composition.test.ts"],
+      },
+      decision: {
+        approved: true,
+        route: "planning-allowlist-revision",
+        confidence: "high",
+        reason: "The file is valid fallout but outside the current allowlist.",
+        required_actions: [],
+        allowed_files: ["/repo/test/factories/ory/platform-composition.test.ts"],
+        rejected_files: [],
+      },
+    })
+
+    expect(nextAction).toContain("request_allowlist_expansion")
+    expect(nextAction).toContain("current review/approval path")
+    expect(nextAction).toContain("Do not call propose_backtrack")
   })
 
   it("parses a valid reviewer routing decision", () => {

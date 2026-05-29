@@ -30,6 +30,8 @@ function makeValidState(overrides: Partial<WorkflowState> = {}): WorkflowState {
     pendingRevisionSteps: null,
     revisionAutoSkipBlockedReason: null,
     pendingAllowlistExpansions: [],
+    pendingCurrentTaskScopeExpansions: [],
+    approvedCleanupFiles: [],
     toolFailureHistory: [],
     currentTaskId: null,
     feedbackHistory: [],
@@ -989,6 +991,38 @@ describe("validateWorkflowState — repair metadata validation", () => {
         requestedAt: -1,
       }],
     }))).toContain("requestedAt")
+  })
+
+  it("validates pending current-task scope expansion records", () => {
+    expect(validateWorkflowState(makeValidState({
+      pendingCurrentTaskScopeExpansions: [{
+        taskId: "T8",
+        files: ["/repo/src/a.ts"],
+        expectedTests: ["/repo/tests/a.test.ts"],
+        reason: "User approved this active task boundary expansion.",
+        requestedAt: 1,
+      }],
+    }))).toBeNull()
+
+    expect(validateWorkflowState(makeValidState({
+      pendingCurrentTaskScopeExpansions: [{
+        taskId: "T8",
+        files: ["src/a.ts"],
+        expectedTests: [],
+        reason: "User approved this active task boundary expansion.",
+        requestedAt: 1,
+      }],
+    }))).toContain("files")
+
+    expect(validateWorkflowState(makeValidState({
+      pendingCurrentTaskScopeExpansions: [{
+        taskId: "T8",
+        files: [],
+        expectedTests: [],
+        reason: "User approved this active task boundary expansion.",
+        requestedAt: 1,
+      }],
+    }))).toContain("must include files, expectedTests, or cleanupFiles")
   })
 
   it("rejects invalid tool failure history categories and phase/state pairs", () => {

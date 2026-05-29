@@ -860,6 +860,28 @@ pgliteShardDescribe("PGlite Open Artisan repository", () => {
     ])
   })
 
+  it("round-trips intentional deletion targets through task graph persistence and workflow export", async () => {
+    const repo = tempRepo()
+    await repo.createWorkflow(workflow())
+    const graph = taskGraph()
+    graph.tasks[1] = {
+      ...graph.tasks[1]!,
+      intentionalDeletionTargets: ["src/generated/openfga.ts", "src/generated/openfga.ts"],
+    }
+
+    expect((await repo.replaceTaskGraph("workflow-1", graph)).ok).toBe(true)
+
+    const projection = valueOf(await repo.getWorkflow("workflow-1"))
+    expect(projection?.taskGraph?.tasks.find((task) => task.id === "task-2")?.intentionalDeletionTargets).toEqual([
+      "src/generated/openfga.ts",
+    ])
+
+    const exported = valueOf(await repo.exportWorkflowState("workflow-1"))
+    expect(exported.implDag?.find((task) => task.id === "T2")?.intentionalDeletionTargets).toEqual([
+      "src/generated/openfga.ts",
+    ])
+  })
+
   it("preserves resolved human gate task status during compatibility imports", async () => {
     const repo = tempRepo()
     const state = legacyState()

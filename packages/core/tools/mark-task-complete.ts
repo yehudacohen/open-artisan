@@ -45,11 +45,20 @@ export interface MarkTaskCompleteResult {
   /** When true, all remaining tasks are blocked behind human gates — caller should auto-advance to request_review */
   awaitingHuman: boolean
   /**
-   * The completed task's expectedFiles — caller should accumulate these into
-   * state.reviewArtifactFiles for the reviewer. Empty array if the task had
-   * no expected files declared in the IMPL_PLAN.
+   * The completed task's owned implementation artifacts — caller should
+   * accumulate these into state.reviewArtifactFiles for the reviewer. Empty
+   * array if the task had no files or tests declared in the IMPL_PLAN.
    */
   completedTaskFiles: string[]
+}
+
+export function isMetadataOnlyDeletionTask(task: Pick<TaskNode, "expectedFiles" | "expectedTests" | "verificationCommands" | "intentionalDeletionTargets">): boolean {
+  return (
+    (task.expectedFiles ?? []).length === 0 &&
+    (task.expectedTests ?? []).length === 0 &&
+    (task.verificationCommands ?? []).length === 0 &&
+    (task.intentionalDeletionTargets ?? []).length > 0
+  )
 }
 
 export function validateMarkTaskCompletePhase(
@@ -223,5 +232,11 @@ export function processMarkTaskComplete(
     `Summary: ${args.implementation_summary}` +
     nextMsg
 
-  return { updatedNodes: finalNodes, responseMessage, nextTaskId, awaitingHuman, completedTaskFiles: task.expectedFiles ?? [] }
+  return {
+    updatedNodes: finalNodes,
+    responseMessage,
+    nextTaskId,
+    awaitingHuman,
+    completedTaskFiles: [...(task.expectedFiles ?? []), ...(task.expectedTests ?? [])],
+  }
 }

@@ -22,8 +22,9 @@ import type { ArtifactKey, Phase, WorkflowMode } from "./workflow-primitives"
 import type { CriterionResult, RebuttalRequest, RebuttalResult, SelfReviewResult } from "./review-types"
 import type { SubagentDispatcher } from "./subagent-dispatcher"
 import { decodeSubagentToolSubmission } from "./subagent-dispatcher"
-import { withTimeout, extractJsonFromText } from "./utils"
-import { SELF_REVIEW_TIMEOUT_MS } from "./constants"
+import { extractJsonFromText } from "./utils"
+import { IMPLEMENTATION_REVIEW_PROGRESS_IDLE_TIMEOUT_MS, REVIEW_PROGRESS_HARD_TIMEOUT_MS, REVIEW_PROGRESS_IDLE_TIMEOUT_MS } from "./constants"
+import { runWithProgressTimeout, type ProgressTimeoutPolicy } from "./progress-timeout"
 import { buildSelfReviewStructuralGate } from "./rubrics"
 import { countExpectedBlockingCriteria, countSubmittedBlockingCriteria, normalizeCriterionSeverity } from "./tools/mark-satisfied"
 import { buildScenarioSufficiencyPromptBlock } from "./scenario-sufficiency"
@@ -168,6 +169,11 @@ export function buildReviewPrompt(req: SelfReviewRequest): string {
   lines.push("")
   lines.push(buildSelfReviewStructuralGate(req.phase))
   lines.push("")
+  if (req.phase === "IMPL_PLAN") {
+    lines.push("## Completed Task Immutability")
+    lines.push("When reviewing a revised IMPL_PLAN after implementation has begun, treat completed tasks as immutable history. Do not require completed task descriptions, file lists, test lists, commands, or dependencies to be rewritten just to satisfy the fresh-plan ideal. If a completed task has a gap, verify that a future corrective, revert, or superseding task clearly owns the missing evidence/readiness; mark the criterion unmet only when that forward ownership is absent or ambiguous.")
+    lines.push("")
+  }
 
   // Add the user's original intent for context.
   if (req.intentBaseline && req.intentBaseline.trim().length > 0) {
@@ -316,6 +322,8 @@ async function ephemeralReviewPrompt(
   submissionToolName = "submit_phase_review_result",
   requireToolSubmission = false,
   progress?: { kind: "phase"; subject: string; attemptId?: string },
+  timeoutLabel = title,
+  timeoutPolicy: ProgressTimeoutPolicy = buildDefaultReviewProgressTimeoutPolicy(timeoutLabel),
 ): Promise<string> {
   const session = await dispatcher.createSession({
     title,
@@ -327,13 +335,36 @@ async function ephemeralReviewPrompt(
     const submissionTool = requireToolSubmission
       ? { name: submissionToolName, required: true, ...(progress ? { progress } : {}) }
       : { name: submissionToolName, ...(progress ? { progress } : {}) }
-    const raw = await session.prompt(prompt, { submissionTool })
+    const raw = await runWithProgressTimeout({
+      policy: timeoutPolicy,
+      run: (signal) => session.prompt(prompt, { submissionTool, onProgress: signal.progress }),
+      onIdleTimeout: () => session.destroy(),
+      onHardTimeout: () => session.destroy(),
+    })
     if (!requireToolSubmission) return raw
     const decoded = decodeSubagentToolSubmission(raw, submissionToolName)
     if (!decoded.success) throw new Error(decoded.error)
     return decoded.payload
   } finally {
     await session.destroy()
+  }
+}
+
+function buildDefaultReviewProgressTimeoutPolicy(label: string): ProgressTimeoutPolicy {
+  return {
+    label,
+    idleTimeoutMs: REVIEW_PROGRESS_IDLE_TIMEOUT_MS,
+    hardTimeoutMs: REVIEW_PROGRESS_HARD_TIMEOUT_MS,
+  }
+}
+
+export function buildSelfReviewProgressTimeoutPolicy(req: Pick<SelfReviewRequest, "phase">, label: string): ProgressTimeoutPolicy {
+  return {
+    label,
+    idleTimeoutMs: req.phase === "IMPLEMENTATION"
+      ? IMPLEMENTATION_REVIEW_PROGRESS_IDLE_TIMEOUT_MS
+      : REVIEW_PROGRESS_IDLE_TIMEOUT_MS,
+    hardTimeoutMs: REVIEW_PROGRESS_HARD_TIMEOUT_MS,
   }
 }
 
@@ -487,20 +518,12 @@ export async function dispatchSelfReview(
     const prompt = buildReviewPrompt(req)
     const featureSlug = req.featureName ? ` (${req.featureName})` : ""
     const title = `Review: ${req.phase}${featureSlug}`
-    const text = await withTimeout(
-      ephemeralReviewPrompt(dispatcher, prompt, req.parentSessionId, req.parentModel, title, "submit_phase_review_result", req.requireToolSubmission === true, { kind: "phase", subject: req.phase, ...(req.reviewAttemptId ? { attemptId: req.reviewAttemptId } : {}) }),
-      SELF_REVIEW_TIMEOUT_MS,
-      "self-review",
-    )
+    const text = await ephemeralReviewPrompt(dispatcher, prompt, req.parentSessionId, req.parentModel, title, "submit_phase_review_result", req.requireToolSubmission === true, { kind: "phase", subject: req.phase, ...(req.reviewAttemptId ? { attemptId: req.reviewAttemptId } : {}) }, "self-review", buildSelfReviewProgressTimeoutPolicy(req, "self-review"))
     const parsed = parseReviewText(text)
     const incomplete = incompleteCriteriaReason(req, parsed)
     if (parsed.success && !incomplete) return parsed
     if (parsed.success && incomplete) {
-      const repairedText = await withTimeout(
-        ephemeralReviewPrompt(dispatcher, buildIncompleteCriteriaRepairPrompt(req, text, incomplete.submitted, incomplete.expected), req.parentSessionId, req.parentModel, `${title} criteria repair`, "submit_phase_review_result", req.requireToolSubmission === true, { kind: "phase", subject: req.phase, ...(req.reviewAttemptId ? { attemptId: req.reviewAttemptId } : {}) }),
-        SELF_REVIEW_TIMEOUT_MS,
-        "self-review-criteria-repair",
-      )
+      const repairedText = await ephemeralReviewPrompt(dispatcher, buildIncompleteCriteriaRepairPrompt(req, text, incomplete.submitted, incomplete.expected), req.parentSessionId, req.parentModel, `${title} criteria repair`, "submit_phase_review_result", req.requireToolSubmission === true, { kind: "phase", subject: req.phase, ...(req.reviewAttemptId ? { attemptId: req.reviewAttemptId } : {}) }, "self-review-criteria-repair", buildSelfReviewProgressTimeoutPolicy(req, "self-review-criteria-repair"))
       const repaired = parseReviewText(repairedText)
       const repairedIncomplete = incompleteCriteriaReason(req, repaired)
       if (repaired.success && !repairedIncomplete) return repaired
@@ -516,11 +539,7 @@ export async function dispatchSelfReview(
       }
     }
 
-    const repairedText = await withTimeout(
-      ephemeralReviewPrompt(dispatcher, buildJsonRepairPrompt(text), req.parentSessionId, req.parentModel, `${title} JSON repair`, "submit_phase_review_result", req.requireToolSubmission === true, { kind: "phase", subject: req.phase, ...(req.reviewAttemptId ? { attemptId: req.reviewAttemptId } : {}) }),
-      SELF_REVIEW_TIMEOUT_MS,
-      "self-review-json-repair",
-    )
+    const repairedText = await ephemeralReviewPrompt(dispatcher, buildJsonRepairPrompt(text), req.parentSessionId, req.parentModel, `${title} JSON repair`, "submit_phase_review_result", req.requireToolSubmission === true, { kind: "phase", subject: req.phase, ...(req.reviewAttemptId ? { attemptId: req.reviewAttemptId } : {}) }, "self-review-json-repair", buildSelfReviewProgressTimeoutPolicy(req, "self-review-json-repair"))
     const repaired = parseReviewText(repairedText)
     const repairedIncomplete = incompleteCriteriaReason(req, repaired)
     if (repaired.success && !repairedIncomplete) return repaired
@@ -637,11 +656,7 @@ export async function dispatchRebuttal(
     const prompt = buildRebuttalPrompt(req)
     const featureSlug = req.featureName ? ` (${req.featureName})` : ""
     const title = `Rebuttal: ${req.phase}${featureSlug}`
-    const rawText = await withTimeout(
-      ephemeralReviewPrompt(dispatcher, prompt, req.parentSessionId, req.parentModel, title, "submit_rebuttal_review_result"),
-      SELF_REVIEW_TIMEOUT_MS,
-      "rebuttal",
-    )
+    const rawText = await ephemeralReviewPrompt(dispatcher, prompt, req.parentSessionId, req.parentModel, title, "submit_rebuttal_review_result", false, undefined, "rebuttal")
     const text = extractJsonFromText(rawText)
     const parsed = JSON.parse(text) as {
       criteria_results: Array<{

@@ -396,7 +396,22 @@ describe("buildWorkflowSystemPrompt — structural workflow sub-states", () => {
     }))
     expect(prompt).toContain("HUMAN_GATE")
     expect(prompt).toContain("manual action")
+    expect(prompt).toContain("Structured Human Gate")
+    expect(prompt).toContain("`resolved`, `backtrack`, `status question`")
+    expect(prompt).toContain("propose_backtrack")
     expect(prompt).not.toContain("submit_feedback")
+  })
+
+  it("instructs USER_GATE agents to prefer structured question choices", () => {
+    const prompt = buildWorkflowSystemPrompt(makeState({
+      phase: "PLANNING",
+      phaseState: "USER_GATE",
+      mode: "GREENFIELD",
+    }))
+
+    expect(prompt).toContain("Structured User Gate")
+    expect(prompt).toContain("`question` tool")
+    expect(prompt).toContain("`approve`, `revise`, `status question`")
   })
 
   it("treats IMPLEMENTATION/DELEGATED_WAIT as waiting on delegated sub-workflow completion", () => {
@@ -557,6 +572,13 @@ describe("buildWorkflowSystemPrompt — acceptance criteria at REVIEW", () => {
     const prompt = buildWorkflowSystemPrompt(makeState({ phase: "IMPL_PLAN", phaseState: "REVIEW" }))
     expect(prompt).toContain("Deployment tasks present")
     expect(prompt).toContain("Integration seams covered")
+  })
+
+  it("treats completed IMPL_PLAN tasks as immutable history when corrective tasks own gaps", () => {
+    const prompt = buildWorkflowSystemPrompt(makeState({ phase: "IMPL_PLAN", phaseState: "REVIEW" }))
+    expect(prompt).toContain("Completed immutable tasks")
+    expect(prompt).toContain("historical audit records")
+    expect(prompt).toContain("future corrective, revert, or superseding task")
   })
 
   it("includes deployment criterion in PLANNING/REVIEW", () => {

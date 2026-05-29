@@ -18,7 +18,9 @@ import json
 import logging
 import os
 import re
+import selectors
 import subprocess
+import time
 from typing import Any
 
 from . import continuation
@@ -37,8 +39,12 @@ from .session_projects import (
 
 logger = logging.getLogger(__name__)
 
-# Timeout for isolated reviewer subprocess (3 minutes)
-_DEFAULT_REVIEW_TIMEOUT_S = 180
+# Hard timeout for isolated reviewer subprocesses. Idle timeout handles stalls;
+# this cap prevents progress chatter from making review unbounded.
+_DEFAULT_REVIEW_TIMEOUT_S = 900
+_DEFAULT_REVIEW_IDLE_TIMEOUT_S = 120
+_DEFAULT_IMPLEMENTATION_REVIEW_IDLE_TIMEOUT_S = 600
+_REVIEW_SHUTDOWN_GRACE_S = 5
 _REVIEW_FAILURE_PREFIX = "ISOLATED_REVIEW_FAILED:"
 
 
@@ -60,6 +66,104 @@ def _review_timeout_s() -> int:
         logger.warning("OPENARTISAN_REVIEW_TIMEOUT_S=%s is too low; using default", value)
         return _DEFAULT_REVIEW_TIMEOUT_S
     return value
+
+
+def _review_idle_timeout_s(phase: str | None = None) -> int:
+    raw = os.environ.get("OPENARTISAN_REVIEW_IDLE_TIMEOUT_S")
+    default = (
+        _DEFAULT_IMPLEMENTATION_REVIEW_IDLE_TIMEOUT_S
+        if phase == "IMPLEMENTATION"
+        else _DEFAULT_REVIEW_IDLE_TIMEOUT_S
+    )
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning("Invalid OPENARTISAN_REVIEW_IDLE_TIMEOUT_S=%r; using default", raw)
+        return default
+    if value < 10:
+        logger.warning("OPENARTISAN_REVIEW_IDLE_TIMEOUT_S=%s is too low; using default", value)
+        return default
+    return value
+
+
+def _run_reviewer_subprocess(prompt: str, project_dir: str, label: str, phase: str | None = None) -> subprocess.CompletedProcess[str]:
+    cmd = resolve_reviewer_command(prompt)
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=project_dir,
+    )
+    stdout_parts: list[str] = []
+    stderr_parts: list[str] = []
+    started = time.monotonic()
+    last_progress = started
+    idle_timeout = _review_idle_timeout_s(phase)
+    hard_timeout = _review_timeout_s()
+    selector = selectors.DefaultSelector()
+    if proc.stdout is not None:
+        os.set_blocking(proc.stdout.fileno(), False)
+        selector.register(proc.stdout, selectors.EVENT_READ, "stdout")
+    if proc.stderr is not None:
+        os.set_blocking(proc.stderr.fileno(), False)
+        selector.register(proc.stderr, selectors.EVENT_READ, "stderr")
+
+    def terminate_owned_child(reason: str) -> None:
+        try:
+            proc.terminate()
+            proc.wait(timeout=_REVIEW_SHUTDOWN_GRACE_S)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        except OSError:
+            pass
+        raise subprocess.TimeoutExpired(cmd, hard_timeout, output="".join(stdout_parts), stderr=f"{reason}{''.join(stderr_parts)}")
+
+    try:
+        while proc.poll() is None:
+            now = time.monotonic()
+            if now - started >= hard_timeout:
+                terminate_owned_child(f"{label} hard timeout after {hard_timeout}s. ")
+            if now - last_progress >= idle_timeout:
+                terminate_owned_child(f"{label} idle timeout after {idle_timeout}s. ")
+            for key, _ in selector.select(timeout=0.1):
+                try:
+                    raw = os.read(key.fileobj.fileno(), 4096)
+                except BlockingIOError:
+                    continue
+                chunk = raw.decode("utf-8", errors="replace")
+                if not chunk:
+                    try:
+                        selector.unregister(key.fileobj)
+                    except Exception:
+                        pass
+                    continue
+                last_progress = time.monotonic()
+                if key.data == "stdout":
+                    stdout_parts.append(chunk)
+                else:
+                    stderr_parts.append(chunk)
+
+        for key in list(selector.get_map().values()):
+            chunks: list[str] = []
+            while True:
+                try:
+                    raw = os.read(key.fileobj.fileno(), 4096)
+                except BlockingIOError:
+                    break
+                if not raw:
+                    break
+                chunks.append(raw.decode("utf-8", errors="replace"))
+            rest = "".join(chunks)
+            if rest:
+                if key.data == "stdout":
+                    stdout_parts.append(rest)
+                else:
+                    stderr_parts.append(rest)
+        return subprocess.CompletedProcess(cmd, proc.returncode or 0, "".join(stdout_parts), "".join(stderr_parts))
+    finally:
+        selector.close()
 
 
 def _format_failed_review_output(reason: str, stdout: str = "", stderr: str = "") -> str:
@@ -292,13 +396,7 @@ def _dispatch_task_review(
                 parent_event_id=root_event_id,
                 task_id=task_id,
             )
-            result = subprocess.run(
-                resolve_reviewer_command(review_prompt),
-                capture_output=True,
-                cwd=project_dir,
-                text=True,
-                timeout=_review_timeout_s(),
-            )
+            result = _run_reviewer_subprocess(review_prompt, project_dir, "task-review")
             returncode = _completed_returncode(result)
             if returncode != 0:
                 _emit_progress(
@@ -489,13 +587,7 @@ def dispatch_phase_review(
                 parent_span_id=span_id,
                 parent_event_id=root_event_id,
             )
-            result = subprocess.run(
-                resolve_reviewer_command(review_prompt),
-                capture_output=True,
-                cwd=project_dir,
-                text=True,
-                timeout=_review_timeout_s(),
-            )
+            result = _run_reviewer_subprocess(review_prompt, project_dir, "phase-review", phase)
             returncode = _completed_returncode(result)
             review_args = {
                 "review_stdout": result.stdout,
@@ -620,13 +712,7 @@ def _dispatch_auto_approve(
             return
 
         try:
-            result = subprocess.run(
-                resolve_reviewer_command(approve_prompt),
-                capture_output=True,
-                cwd=project_dir,
-                text=True,
-                timeout=120,
-            )
+            result = _run_reviewer_subprocess(approve_prompt, project_dir, "auto-approve")
             approve_output = result.stdout
         except (FileNotFoundError, subprocess.TimeoutExpired) as e:
             logger.warning("Auto-approve subprocess failed: %s", e)

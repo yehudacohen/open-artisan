@@ -28,6 +28,7 @@ import {
   getActiveSessionPath,
   getEnabledPath,
 } from "#claude-code/src/constants"
+import { dispatchOwnedPhaseReview, dispatchOwnedTaskReview } from "#claude-code/src/hook-handlers"
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -51,17 +52,45 @@ function getSessionId(): string {
 }
 
 /** Read JSON from stdin if piped, otherwise return null. */
-async function readStdinJson(): Promise<Record<string, unknown> | null> {
-  // Check if stdin is a TTY (interactive) — if so, no piped input
+/**
+ * Read a JSON args object piped on stdin, or null if none.
+ *
+ * Hooks, background processes, and agent shells leave stdin as an open pipe that
+ * never reaches EOF, so a naive read-to-EOF blocks forever for any command that
+ * isn't given piped data. We arm a short idle timer: if no data arrives before it
+ * fires, we treat stdin as empty (no piped args). Once data starts arriving, we
+ * read to natural EOF so genuinely-piped JSON is never truncated.
+ */
+async function readStdinJson(idleTimeoutMs = 1000): Promise<Record<string, unknown> | null> {
+  // A TTY is interactive — no piped input.
   if (process.stdin.isTTY) return null
 
-  const chunks: Buffer[] = []
-  for await (const chunk of process.stdin) {
-    chunks.push(chunk as Buffer)
-  }
-  const text = Buffer.concat(chunks).toString("utf-8").trim()
-  if (!text) return null
+  const text = await new Promise<string>((resolveText) => {
+    const chunks: Buffer[] = []
+    let settled = false
+    const finish = () => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      process.stdin.removeListener("data", onData)
+      // Release stdin so an open, never-closed pipe (hooks/background shells)
+      // can't keep the event loop alive and stall process exit after the work.
+      process.stdin.pause()
+      process.stdin.unref?.()
+      resolveText(Buffer.concat(chunks).toString("utf-8").trim())
+    }
+    // Fires only if NO data has arrived yet — guards against a never-EOF empty pipe.
+    const timer = setTimeout(finish, idleTimeoutMs)
+    const onData = (chunk: Buffer) => {
+      chunks.push(chunk)
+      clearTimeout(timer) // data is flowing — wait for the real EOF
+    }
+    process.stdin.on("data", onData)
+    process.stdin.once("end", finish)
+    process.stdin.once("error", finish)
+  })
 
+  if (!text) return null
   try {
     return JSON.parse(text)
   } catch {
@@ -129,7 +158,7 @@ async function execTool(name: string, args: Record<string, unknown> = {}): Promi
 // Commands
 // ---------------------------------------------------------------------------
 
-const TOOL_COMMANDS: Record<string, string> = {
+export const TOOL_COMMANDS: Record<string, string> = {
   "select-mode": "select_mode",
   "reset-task": "reset_task",
   "mark-scan-complete": "mark_scan_complete",
@@ -144,12 +173,50 @@ const TOOL_COMMANDS: Record<string, string> = {
   "query-child-workflow": "query_child_workflow",
   "analyze-task-boundary-change": "analyze_task_boundary_change",
   "apply-task-boundary-change": "apply_task_boundary_change",
+  "approve-current-task-scope-expansion": "approve_current_task_scope_expansion",
+  "repair-current-task-boundary-from-impl-plan": "repair_current_task_boundary_from_impl_plan",
   "route-patch-suggestions": "route_patch_suggestions",
   "resolve-patch-suggestion": "resolve_patch_suggestion",
   "apply-patch-suggestion": "apply_patch_suggestion",
   "report-drift": "report_drift",
   "plan-drift-repair": "plan_drift_repair",
   "apply-drift-repair": "apply_drift_repair",
+  // Roadmap — durable cross-workflow plan (DAG of items + depends-on edges).
+  // Complex payloads (items/edges) are best passed via --args-file <json>.
+  "roadmap-read": "roadmap_read",
+  "roadmap-query": "roadmap_query",
+  "roadmap-derive-execution-slice": "roadmap_derive_execution_slice",
+  "roadmap-upsert-item": "roadmap_upsert_item",
+  "roadmap-update-item-status": "roadmap_update_item_status",
+  "roadmap-delete-item": "roadmap_delete_item",
+  "roadmap-upsert-edge": "roadmap_upsert_edge",
+  "roadmap-delete-edge": "roadmap_delete_edge",
+  "roadmap-replace": "roadmap_replace",
+  "roadmap-delete": "roadmap_delete",
+}
+
+async function handleRunReview(): Promise<void> {
+  await ensureSession()
+  const sessionId = getSessionId()
+  const stateDir = getStateDir()
+  const projectDir = getProjectDir()
+  const result = await call("state.get", { sessionId })
+  if (!result) {
+    console.error("No active workflow session.")
+    process.exit(1)
+  }
+  const s = result as Record<string, unknown>
+  let outcome: { ok: boolean; message: string }
+  if (s.taskCompletionInProgress) {
+    outcome = await dispatchOwnedTaskReview(stateDir, sessionId, projectDir)
+  } else if (s.phaseState === "REVIEW") {
+    outcome = await dispatchOwnedPhaseReview(stateDir, sessionId, projectDir, s.phase)
+  } else {
+    console.log(`Nothing to review — at ${s.phase}/${s.phaseState}. run-review applies at a phase REVIEW state or when a task awaits review.`)
+    return
+  }
+  console.log(outcome.message)
+  if (!outcome.ok) process.exit(1)
 }
 
 async function handleState(): Promise<void> {
@@ -214,7 +281,9 @@ async function handleToolCommand(command: string, cliArgs: string[]): Promise<vo
     process.exit(1)
   }
 
-  // Try --args-file first (bypass all shell escaping), then stdin JSON, then CLI flags
+  // Resolve args in priority order: --args-file (bypasses shell escaping), then
+  // CLI flags, then JSON piped on stdin. Flags are parsed BEFORE stdin so a
+  // flag/file-driven command never consults (and never blocks on) stdin.
   let args: Record<string, unknown> | null = null
   const argsFileIdx = cliArgs.indexOf("--args-file")
   if (argsFileIdx !== -1 && cliArgs[argsFileIdx + 1]) {
@@ -228,36 +297,15 @@ async function handleToolCommand(command: string, cliArgs: string[]): Promise<vo
   }
 
   if (!args) {
-    args = await readStdinJson()
+    const flagArgs = parseFlagArgs(cliArgs)
+    if (Object.keys(flagArgs).length > 0) args = flagArgs
   }
 
   if (!args) {
-    // Parse CLI flags into args object
-    args = {}
-    for (let i = 0; i < cliArgs.length; i++) {
-      const flag = cliArgs[i]!
-      if (flag.startsWith("--")) {
-        // Handle --key=value syntax
-        const eqIdx = flag.indexOf("=")
-        let key: string
-        let value: unknown
-        if (eqIdx !== -1) {
-          key = flag.slice(2, eqIdx).replace(/-/g, "_")
-          value = parseValue(flag.slice(eqIdx + 1))
-        } else {
-          key = flag.slice(2).replace(/-/g, "_")
-          const next = cliArgs[i + 1]
-          if (next && !next.startsWith("--")) {
-            value = parseValue(next)
-            i++
-          } else {
-            value = true // boolean flag
-          }
-        }
-        args[key] = value
-      }
-    }
+    args = await readStdinJson()
   }
+
+  if (!args) args = {}
 
   // Resolve --artifact-file: pass the path as the review artifact source.
   const artifactFile = args.artifact_file as string | undefined
@@ -283,6 +331,35 @@ function parseValue(value: string): unknown {
   return value
 }
 
+/**
+ * Parse `--key value` / `--key=value` / boolean `--flag` pairs into an args
+ * object (kebab keys → snake_case). `--args-file` is consumed elsewhere and
+ * skipped here. Returns {} when no flags are present.
+ */
+export function parseFlagArgs(cliArgs: string[]): Record<string, unknown> {
+  const args: Record<string, unknown> = {}
+  for (let i = 0; i < cliArgs.length; i++) {
+    const flag = cliArgs[i]!
+    if (!flag.startsWith("--")) continue
+    const eqIdx = flag.indexOf("=")
+    if (eqIdx !== -1) {
+      const key = flag.slice(2, eqIdx).replace(/-/g, "_")
+      args[key] = parseValue(flag.slice(eqIdx + 1))
+      continue
+    }
+    const key = flag.slice(2).replace(/-/g, "_")
+    if (key === "args_file") { i++; continue } // value consumed by --args-file handling
+    const next = cliArgs[i + 1]
+    if (next && !next.startsWith("--")) {
+      args[key] = parseValue(next)
+      i++
+    } else {
+      args[key] = true // boolean flag
+    }
+  }
+  return args
+}
+
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
@@ -306,6 +383,7 @@ Workflow tools (accepts --flags or JSON on stdin):
   mark-satisfied           Submit self-review criteria
   mark-task-complete       Complete a DAG task
   request-review           Submit artifact for review
+  run-review               Dispatch the pending isolated review (phase or task) and print the verdict
   submit-feedback          Approve or request revision
   check-prior-workflow     Check for prior workflow state
   resolve-human-gate       Set human gate on a task
@@ -317,6 +395,10 @@ Workflow tools (accepts --flags or JSON on stdin):
                            Preview a localized DAG task-boundary change
   apply-task-boundary-change
                            Apply a localized DAG task-boundary change
+  approve-current-task-scope-expansion
+                           Add file(s)/tests to the ACTIVE task's boundary (one USER_GATE approval, no task reset)
+  repair-current-task-boundary-from-impl-plan
+                           Re-sync the active task boundary with the approved IMPL_PLAN metadata
   route-patch-suggestions  Classify pending reviewer patch suggestions
   resolve-patch-suggestion Record patch suggestion disposition
   apply-patch-suggestion   Apply a pending reviewer patch suggestion
@@ -324,13 +406,27 @@ Workflow tools (accepts --flags or JSON on stdin):
   plan-drift-repair        Build a drift repair plan
   apply-drift-repair       Apply approved drift repair actions
 
+Roadmap tools (durable cross-workflow plan; use --args-file <json> for items/edges):
+  roadmap-read             Read the full roadmap document
+  roadmap-query            Query roadmap items by kind/status
+  roadmap-upsert-item      Create or update a roadmap item
+  roadmap-update-item-status  Update a roadmap item's status
+  roadmap-delete-item      Delete a roadmap item
+  roadmap-upsert-edge      Create or update a depends-on edge
+  roadmap-delete-edge      Delete a depends-on edge
+  roadmap-derive-execution-slice  Derive an execution slice from items
+  roadmap-replace          Replace the entire roadmap document
+  roadmap-delete           Delete the roadmap document
+
 Options:
   --artifact-file <path>   Add a file path to artifact_files for request-review
+  --args-file <path>       Read tool args as JSON from a file (bypasses shell escaping)
 
 Examples:
   artisan select-mode --mode GREENFIELD --feature-name my-feature
   artisan state
   artisan request-review --summary "Plan ready" --artifact-file .openartisan/feat/plan.md
+  artisan roadmap-upsert-item --args-file /tmp/item.json
   echo '{"task_id":"T1","implementation_summary":"Built it","tests_passing":true}' | artisan mark-task-complete`)
     process.exit(0)
   }
@@ -348,13 +444,19 @@ Examples:
     case "disable":
       await handleDisable()
       break
+    case "run-review":
+      await handleRunReview()
+      break
     default:
       await handleToolCommand(command, rest)
       break
   }
 }
 
-main().catch((err) => {
-  console.error(`Error: ${err instanceof Error ? err.message : String(err)}`)
-  process.exit(1)
-})
+// Only run when invoked as a script — importing for tests must not execute main().
+if (import.meta.main) {
+  main().catch((err) => {
+    console.error(`Error: ${err instanceof Error ? err.message : String(err)}`)
+    process.exit(1)
+  })
+}

@@ -47,6 +47,13 @@ export interface BridgeContext {
   stateDir: string | null
   /** The project directory path — set during lifecycle.init. Used for path resolution. */
   projectDir: string | null
+  /**
+   * Absolute path to the agent's memory directory, if the adapter supplies one
+   * (set during lifecycle.init). Write-like tools targeting files within it are
+   * allowed in any phase — memory is the agent's own notebook, not project source
+   * (not built, not reviewed, not in the project diff). null/undefined = no allowance.
+   */
+  memoryDir?: string | null
   /** Adapter capabilities — set during lifecycle.init. */
   capabilities: {
     selfReview: "isolated" | "agent-only"
@@ -128,6 +135,7 @@ export function createBridgeEngine(
   let shuttingDown = false
   let stateDir: string | null = null
   let projectDir: string | null = null
+  let memoryDir: string | null = null
   let capabilities = { selfReview: "isolated" as const, orchestrator: true, discoveryFleet: true }
   let runtimeBackendKind: OpenArtisanStateBackendKind = "filesystem"
   let runtimeBackendInfo: BridgeContext["runtimeBackendInfo"] = {
@@ -155,6 +163,8 @@ export function createBridgeEngine(
     set stateDir(v: string | null) { stateDir = v },
     get projectDir() { return projectDir },
     set projectDir(v: string | null) { projectDir = v },
+    get memoryDir() { return memoryDir },
+    set memoryDir(v: string | null) { memoryDir = v },
     get capabilities() { return capabilities },
     set capabilities(v: typeof capabilities) { capabilities = v },
     get runtimeBackendKind() { return runtimeBackendKind },

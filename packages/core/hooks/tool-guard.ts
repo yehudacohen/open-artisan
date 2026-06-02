@@ -33,10 +33,22 @@ export interface ParallelIsolationAssessment {
 
 // Predicates ---------------------------------------------------------------
 
-const BASH_WRITE_OPS = /(?:>>|>[^&]|\btee\b|\bsed\s+-i\b|\bdd\b.*\bof=|<<-?\s*['"]?[A-Za-z_][A-Za-z0-9_]*['"]?|(?:^|[;&|]\s*)(?:touch|mkdir|cp|mv|rm|rmdir|install|chmod|chown|ln|truncate|rsync|patch|cpio|unzip|tar\s+(?:-[A-Za-z]*x[A-Za-z]*|x[A-Za-z]*|--extract)|git\s+(?:add|commit|checkout|restore|reset|clean|mv|rm|apply|am)|(?:curl|wget)\b(?=.*\s(?:-o|-O|--output(?:=|\s)|--output-document(?:=|\s)))|(?:npm|pnpm|yarn|bun)\s+(?:install|add|remove|update|x)|(?:prettier|eslint|ruff|black|isort)\b.*(?:^|\s)(?:--write|--fix|--apply))\b|\b(?:python|python3|node|ruby|perl)\b.*\b(?:writeFile|open\s*\(|File\.write|fs\.write|write\s*\(|write_text\s*\(|write_bytes\s*\(|append_text\s*\(|append_bytes\s*\())/
+const BASH_WRITE_OPS = /(?:>>|>[^&]|\btee\b|\bsed\s+-i\b|\bdd\b.*\bof=|<<-?\s*['"]?[A-Za-z_][A-Za-z0-9_]*['"]?|(?:^|[;&|]\s*)(?:touch|mkdir|cp|mv|rm|rmdir|install|chmod|chown|ln|truncate|rsync|patch|cpio|unzip|tar\s+(?:-[A-Za-z]*x[A-Za-z]*|x[A-Za-z]*|--extract)|git\s+(?:add|commit|checkout|restore|reset|clean|mv|rm|apply|am)|(?:curl|wget)\b(?=.*\s(?:-o|-O|--output(?:=|\s)|--output-document(?:=|\s)))|(?:prettier|eslint|ruff|black|isort)\b.*(?:^|\s)(?:--write|--fix|--apply))\b|\b(?:python|python3|node|ruby|perl)\b.*\b(?:writeFile|open\s*\(|File\.write|fs\.write|write\s*\(|write_text\s*\(|write_bytes\s*\(|append_text\s*\(|append_bytes\s*\())/
+
+/**
+ * Package-manager invocations that MUTATE the project (manifests/lockfile semantics)
+ * or execute arbitrary packages, and so count as write ops:
+ *   - add / remove / rm / uninstall / update / upgrade  — mutate dependencies
+ *   - x / dlx / create                                  — execute arbitrary packages
+ *   - install/i/ci FOLLOWED BY a package arg            — same as `add`
+ * A BARE `install`/`i`/`ci` (no package arg, or only flags like --frozen-lockfile)
+ * merely materializes node_modules + the lockfile from the committed manifest and is
+ * NOT a write op — greenfield scaffolding and dependency hydration require it.
+ */
+const PM_WRITE_OPS = /(?:^|[;&|]\s*)(?:npm|pnpm|yarn|bun)\s+(?:add|remove|rm|uninstall|update|upgrade|dlx|create|x\b|(?:i|install|ci)\s+(?!-)\S)/
 
 function readOnlyBash(command: string): boolean {
-  return !BASH_WRITE_OPS.test(command)
+  return !BASH_WRITE_OPS.test(command) && !PM_WRITE_OPS.test(command)
 }
 
 function noEnvWritingBash(command: string): boolean {

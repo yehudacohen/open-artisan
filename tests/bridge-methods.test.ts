@@ -456,6 +456,58 @@ describe("guard.check", () => {
   })
 })
 
+describe("guard.check — memory dir allowance", () => {
+  // An absolute path OUTSIDE the project root — proves the allowance bypasses both
+  // the phase write predicate and the outside-root block.
+  const MEMORY = "/tmp/oa-agent-memory-test"
+
+  it("allows a write inside the memory dir even in a write-blocking phase", async () => {
+    ctx.memoryDir = MEMORY
+    await ctx.engine!.store.update("s1", (d) => { d.mode = "GREENFIELD"; d.phase = "INTERFACES"; d.phaseState = "DRAFT"; d.featureName = "f" })
+    const result = await handleGuardCheck({
+      toolName: "Write",
+      args: { file_path: `${MEMORY}/projects/x/memory/note.md`, content: "fact" },
+      sessionId: "s1",
+    }, ctx) as GuardCheckResult
+    expect(result.allowed).toBe(true)
+  })
+
+  it("rejects a traversal path that escapes the memory dir", async () => {
+    ctx.memoryDir = MEMORY
+    await ctx.engine!.store.update("s1", (d) => { d.mode = "GREENFIELD"; d.phase = "INTERFACES"; d.phaseState = "DRAFT"; d.featureName = "f" })
+    const result = await handleGuardCheck({
+      toolName: "Write",
+      args: { file_path: `${MEMORY}/../escape.md`, content: "x" },
+      sessionId: "s1",
+    }, ctx) as GuardCheckResult
+    expect(result.allowed).toBe(false)
+    expect(result.reason).toContain("outside the project root")
+  })
+
+  it("still blocks .env inside the memory dir", async () => {
+    ctx.memoryDir = MEMORY
+    await ctx.engine!.store.update("s1", (d) => { d.mode = "GREENFIELD"; d.phase = "INTERFACES"; d.phaseState = "DRAFT"; d.featureName = "f" })
+    const result = await handleGuardCheck({
+      toolName: "Write",
+      args: { file_path: `${MEMORY}/.env`, content: "SECRET=1" },
+      sessionId: "s1",
+    }, ctx) as GuardCheckResult
+    expect(result.allowed).toBe(false)
+  })
+
+  it("with no memory dir, an outside-root write stays blocked (unchanged)", async () => {
+    ctx.memoryDir = null
+    await ctx.engine!.store.update("s1", (d) => { d.mode = "GREENFIELD"; d.phase = "INTERFACES"; d.phaseState = "DRAFT"; d.featureName = "f" })
+    const result = await handleGuardCheck({
+      toolName: "Write",
+      args: { file_path: `${MEMORY}/projects/x/memory/note.md`, content: "x" },
+      sessionId: "s1",
+    }, ctx) as GuardCheckResult
+    expect(result.allowed).toBe(false)
+    expect(result.reason).toContain("outside the project root")
+  })
+})
+
 // ---------------------------------------------------------------------------
 // guard.policy
 // ---------------------------------------------------------------------------

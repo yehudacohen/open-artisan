@@ -4,6 +4,7 @@
 
 import { spawn } from "node:child_process"
 
+import { getPhaseToolPolicy } from "./hooks/tool-guard"
 import { extractPatchTouchedPaths } from "./patch-suggestion-application"
 import type { WorkflowState } from "./workflow-state-types"
 
@@ -86,10 +87,6 @@ function approvePendingApply(touchedFiles: string[], verificationCommand?: strin
 }
 
 export async function proposeDirectApplication(input: DirectApplicationInput): Promise<DirectApplicationResult> {
-  if (input.state.phase !== "MODE_SELECT" && input.state.phase !== "DONE") {
-    return reject(`Direct application is only available before a workflow starts or after DONE; current state is ${input.state.phase}/${input.state.phaseState}. Use the full workflow for active work.`)
-  }
-
   if (!input.whySafe.trim()) return reject("why_safe must explain why this is small and safe enough for direct application.")
   if (input.patch.length > MAX_DIRECT_APPLICATION_PATCH_CHARS) return reject(`Patch is too large for direct application (${input.patch.length} chars > ${MAX_DIRECT_APPLICATION_PATCH_CHARS}).`)
   if (/GIT binary patch|Binary files /.test(input.patch)) return reject("Binary patches are not eligible for direct application.")
@@ -119,6 +116,32 @@ export async function proposeDirectApplication(input: DirectApplicationInput): P
   const undeclaredTouched = touchedFiles.filter((file) => !affectedSet.has(file))
   if (missingFromPatch.length > 0 || undeclaredTouched.length > 0) {
     return reject(`affected_files must exactly match patch paths. Missing from patch: ${missingFromPatch.join(", ") || "none"}; undeclared touched files: ${undeclaredTouched.join(", ") || "none"}.`, touchedFiles)
+  }
+
+  // Phase gate. Direct application is always available at MODE_SELECT/DONE. During an
+  // ACTIVE workflow it may only touch OUT-OF-BAND files — files the current phase's own
+  // policy would NOT let the agent author directly (e.g. an unrelated design doc during
+  // INTERFACES). In-scope/in-phase files must go through the normal authoring + review
+  // path, so they are never applied unreviewed. (MODE_SELECT/DONE and gate states block
+  // all writes and expose no writePathPredicate, so every file is out-of-band there.)
+  const policy = getPhaseToolPolicy(
+    input.state.phase,
+    input.state.phaseState,
+    input.state.mode,
+    input.state.fileAllowlist,
+    undefined,
+    input.cwd,
+    input.state.approvedCleanupFiles,
+  )
+  const writableInPhase = policy.writePathPredicate
+  if (writableInPhase) {
+    const inScope = touchedFiles.filter((file) => writableInPhase(file))
+    if (inScope.length > 0) {
+      return reject(
+        `Direct application during ${input.state.phase}/${input.state.phaseState} may only touch out-of-band files. These are writable in the current phase — author them in-phase so they go through review: ${inScope.join(", ")}.`,
+        touchedFiles,
+      )
+    }
   }
 
   const approved = approvePendingApply(touchedFiles, input.verificationCommand)

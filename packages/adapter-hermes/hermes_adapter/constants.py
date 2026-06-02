@@ -30,9 +30,13 @@ def resolve_bridge_command() -> list[str]:
 
 def resolve_reviewer_command(prompt: str) -> list[str]:
     """Resolve the isolated reviewer subprocess command."""
+    # The reviewer prompt instructs the model to Read/Glob artifact (and source)
+    # files before producing its JSON verdict; each tool call consumes a turn, so
+    # a single-turn budget makes the reviewer exit with "Reached max turns (1)"
+    # before it can answer. Mirror REVIEWER_MAX_TURNS in packages/core/constants.ts.
     template = os.environ.get(
         "OPENARTISAN_REVIEWER_COMMAND",
-        "claude --print --max-turns 1 -p {prompt}",
+        "claude --print --max-turns 30 -p {prompt}",
     )
     parts = shlex.split(template)
     if not parts:

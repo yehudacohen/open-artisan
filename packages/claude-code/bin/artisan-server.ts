@@ -20,6 +20,7 @@
 
 import { join, resolve } from "node:path"
 import { existsSync } from "node:fs"
+import { homedir } from "node:os"
 import { parseArgs } from "node:util"
 
 import { createBridgeEngine } from "#bridge/server"
@@ -94,6 +95,22 @@ function parseCLIArgs(): { projectDir: string; daemon: boolean; stateDir?: strin
     ...(typeof stateDirValue === "string" ? { stateDir: resolve(stateDirValue) } : {}),
     ...(persistence ? { persistence } : {}),
   }
+}
+
+// ---------------------------------------------------------------------------
+// Memory directory — Claude Code's per-project agent memory store. Writes here
+// are allowed in any workflow phase (memory is the agent's notebook, not project
+// source). Derived from the project path's slug, overridable via env for sturdiness
+// against any future slug-scheme change.
+// ---------------------------------------------------------------------------
+
+function resolveMemoryDir(projectDir: string): string {
+  const override = process.env["OPENARTISAN_MEMORY_DIR"] ?? process.env["CLAUDE_MEMORY_DIR"]
+  if (override && override.trim()) return resolve(override.trim())
+  // Claude Code slugifies the absolute project path by replacing path separators
+  // with dashes: /Users/x/proj -> -Users-x-proj
+  const slug = resolve(projectDir).replace(/\/+$/, "").replace(/\//g, "-")
+  return join(homedir(), ".claude", "projects", slug, "memory")
 }
 
 // ---------------------------------------------------------------------------
@@ -181,6 +198,7 @@ async function main() {
   await handleInit({
     projectDir,
     stateDir,
+    memoryDir: resolveMemoryDir(projectDir),
     transport: "unix-socket",
     socketPath,
     registerRuntime: true,

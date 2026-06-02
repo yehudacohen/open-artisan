@@ -46,6 +46,12 @@ export const INVALID_PARAMS = -32602
 export interface LifecycleInitParams {
   projectDir: string
   stateDir?: string
+  /**
+   * Absolute path to the agent's memory directory, if the adapter has one. Writes
+   * within it are allowed in any phase (memory is the agent's notebook, not project
+   * source). Adapter-supplied so core stays agnostic to any host's memory layout.
+   */
+  memoryDir?: string
   /** Transport hosting this bridge engine. Stdio transports are process-local and should not advertise a reusable socket. */
   transport?: "stdio" | "unix-socket"
   /** Unix socket path when transport is unix-socket. */

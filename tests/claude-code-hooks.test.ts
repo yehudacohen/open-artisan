@@ -8,19 +8,25 @@ import { describe, expect, it, beforeAll, afterAll } from "bun:test"
 import { join } from "node:path"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { chmodSync, existsSync, mkdirSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { execFileSync, spawn, spawnSync, type ChildProcess } from "node:child_process"
 
 import { sendSocketRequest } from "#claude-code/src/socket-transport"
-import { getSocketPath, getEnabledPath, getActiveSessionPath, DEFAULT_STATE_DIR_NAME } from "#claude-code/src/constants"
+import { getSocketPath, getEnabledPath, getActiveSessionPath, DEFAULT_STATE_DIR_NAME, REVIEWER_SUBPROCESS_ENV } from "#claude-code/src/constants"
 import {
   handlePreToolUse,
   handleStop,
   handleSessionStart,
+  handleUserPromptSubmit,
   handlePreCompact,
   handlePostToolUse,
+  isPureArtisanCommand,
+  reviewerCommandArgs,
+  extractStreamJsonResult,
+  dispatchOwnedPhaseReview,
   type HookInput,
 } from "#claude-code/src/hook-handlers"
+import { REVIEWER_MAX_TURNS } from "#core/constants"
 
 const REPO_ROOT = join(import.meta.dirname, "..")
 const SERVER_SCRIPT = join(REPO_ROOT, "packages", "claude-code", "bin", "artisan-server.ts")
@@ -100,7 +106,11 @@ function fakePassingReviewerScript(): string {
     evidence: "verified by Claude smoke reviewer",
     severity: "blocking",
   }))
-  return `#!/usr/bin/env node\nconsole.log(${JSON.stringify(JSON.stringify({ satisfied: true, criteria_results: criteria }))})\n`
+  // The reviewer runs with --output-format stream-json, so the fake must emit a
+  // terminal `result` event carrying the verdict in its `result` field.
+  const verdict = JSON.stringify({ satisfied: true, criteria_results: criteria })
+  const resultEvent = JSON.stringify({ type: "result", subtype: "success", is_error: false, result: verdict })
+  return `#!/usr/bin/env node\nconsole.log(${JSON.stringify(resultEvent)})\n`
 }
 
 function extractReviewToken(prompt: string): string {
@@ -457,7 +467,19 @@ describe("hook: Stop", () => {
     expect(result.stderr).toContain("not yet complete")
   })
 
-  it("smoke: dispatches an isolated phase review through a real bridge", async () => {
+  it("nudges to run-review at a phase REVIEW state instead of auto-dispatching", async () => {
+    const sessionId = `claude-phase-nudge-${Date.now()}`
+    await moveSessionToPlanningReview(sessionId)
+    writeFileSync(getEnabledPath(stateDir), "1")
+    const result = await handleStop({ session_id: sessionId, cwd: tmpDir })
+    expect(result.exitCode).toBe(2)
+    expect(result.stderr).toContain("run-review")
+    // Did NOT auto-dispatch: still parked at REVIEW awaiting an explicit run-review.
+    const state = await readWorkflowState(sessionId)
+    expect(state.phaseState).toBe("REVIEW")
+  })
+
+  it("smoke: dispatchOwnedPhaseReview runs the isolated reviewer and advances PLANNING REVIEW → USER_GATE", async () => {
     const sessionId = `claude-phase-smoke-${Date.now()}`
     await moveSessionToPlanningReview(sessionId)
     const fakeBin = await mkdtemp(join(tmpdir(), "fake-claude-"))
@@ -466,18 +488,17 @@ describe("hook: Stop", () => {
     try {
       writeFileSync(fakeClaude, fakePassingReviewerScript(), "utf-8")
       chmodSync(fakeClaude, 0o755)
-      writeFileSync(getEnabledPath(stateDir), "1")
       process.env.PATH = `${fakeBin}:${oldPath ?? ""}`
       expect(execFileSync("claude", ["--smoke"], { encoding: "utf-8", env: process.env })).toContain("criteria_results")
 
-      const result = await handleStop({ session_id: sessionId, cwd: tmpDir })
+      const outcome = await dispatchOwnedPhaseReview(stateDir, sessionId, tmpDir, "PLANNING")
 
-      expect(result.exitCode).toBe(2)
-      if (!result.stderr?.includes("Phase review completed")) {
+      if (!outcome.ok) {
         const state = await readWorkflowState(sessionId)
-        throw new Error(`${result.stderr}\n${JSON.stringify(state.latestReviewResults ?? state.toolFailureHistory ?? state)}`)
+        throw new Error(`${outcome.message}\n${JSON.stringify(state.latestReviewResults ?? state)}`)
       }
-      expect(result.stderr).toContain("Phase review completed")
+      expect(outcome.ok).toBe(true)
+      expect(outcome.message).toContain("Phase review completed")
       const state = await readWorkflowState(sessionId)
       expect(state.phase).toBe("PLANNING")
       expect(state.phaseState).toBe("USER_GATE")
@@ -535,6 +556,69 @@ describe("hook: SessionStart", () => {
 })
 
 // ---------------------------------------------------------------------------
+// UserPromptSubmit — relays real user input so USER_GATE can be passed (finding #12)
+// ---------------------------------------------------------------------------
+
+describe("hook: UserPromptSubmit", () => {
+  async function driveToPlanningUserGate(sessionId: string): Promise<void> {
+    const featureName = `upsubmit-${Date.now()}`
+    await sendSocketRequest(socketPath, { jsonrpc: "2.0", method: "lifecycle.sessionCreated", params: { sessionId }, id: Date.now() })
+    await sendSocketRequest(socketPath, { jsonrpc: "2.0", method: "tool.execute", params: {
+      name: "select_mode", args: { mode: "GREENFIELD", feature_name: featureName }, context: { sessionId, directory: tmpDir },
+    }, id: Date.now() + 1 })
+    const artifactDir = join(tmpDir, ".openartisan", featureName)
+    mkdirSync(artifactDir, { recursive: true })
+    writeFileSync(join(artifactDir, "plan.md"), "# Plan\n\nA structurally valid planning artifact.", "utf-8")
+    await sendSocketRequest(socketPath, { jsonrpc: "2.0", method: "tool.execute", params: {
+      name: "request_review", args: { summary: "Plan", artifact_description: "Plan", artifact_files: [join(".openartisan", featureName, "plan.md")] }, context: { sessionId, directory: tmpDir },
+    }, id: Date.now() + 2 })
+    const reviewContext = await sendSocketRequest(socketPath, { jsonrpc: "2.0", method: "task.getPhaseReviewContext", params: { sessionId }, id: Date.now() + 3 })
+    const reviewToken = extractReviewToken(String((reviewContext as { result?: unknown }).result ?? ""))
+    await sendSocketRequest(socketPath, { jsonrpc: "2.0", method: "tool.execute", params: {
+      name: "submit_phase_review",
+      args: { review_stdout: JSON.stringify({ satisfied: true, criteria_results: passingPlanningCriteria() }), review_stderr: "", review_exit_code: 0, review_token: reviewToken },
+      context: { sessionId, directory: tmpDir, invocation: "isolated-reviewer" },
+    }, id: Date.now() + 4 })
+  }
+
+  it("allows (no-op) when disabled", async () => {
+    const enabledPath = getEnabledPath(stateDir)
+    if (existsSync(enabledPath)) { const { unlinkSync } = await import("node:fs"); unlinkSync(enabledPath) }
+    const r = await handleUserPromptSubmit(makeInput({ prompt: "hello" }))
+    expect(r.exitCode).toBe(0)
+    writeFileSync(enabledPath, "1")
+  })
+
+  it("no-ops for the isolated reviewer subprocess", async () => {
+    const prev = process.env[REVIEWER_SUBPROCESS_ENV]
+    process.env[REVIEWER_SUBPROCESS_ENV] = "1"
+    try {
+      const r = await handleUserPromptSubmit(makeInput({ prompt: "hello" }))
+      expect(r.exitCode).toBe(0)
+    } finally {
+      if (prev === undefined) delete process.env[REVIEWER_SUBPROCESS_ENV]
+      else process.env[REVIEWER_SUBPROCESS_ENV] = prev
+    }
+  })
+
+  it("flips userGateMessageReceived at PLANNING/USER_GATE so submit_feedback unblocks", async () => {
+    writeFileSync(getEnabledPath(stateDir), "1")
+    const sessionId = `upsubmit-gate-${Date.now()}`
+    await driveToPlanningUserGate(sessionId)
+
+    let st = await readWorkflowState(sessionId)
+    expect(st.phaseState).toBe("USER_GATE")
+    expect(st.userGateMessageReceived).toBeFalsy() // not yet — no real user message relayed
+
+    const res = await handleUserPromptSubmit({ session_id: sessionId, cwd: tmpDir, prompt: "please revise: add live AWS" })
+    expect(res.exitCode).toBe(0)
+
+    st = await readWorkflowState(sessionId)
+    expect(st.userGateMessageReceived).toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------------------
 // PreCompact
 // ---------------------------------------------------------------------------
 
@@ -577,6 +661,160 @@ describe("hook: PostToolUse", () => {
     expect(result.exitCode).toBe(0)
     expect(result.stdout).toBeNull()
     expect(result.stderr).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// reviewerCommandArgs — the isolated reviewer must get enough turns to use tools
+// ---------------------------------------------------------------------------
+
+describe("reviewerCommandArgs", () => {
+  it("gives the reviewer more than one turn (it must Read artifacts before answering)", () => {
+    const args = reviewerCommandArgs("review this")
+    const idx = args.indexOf("--max-turns")
+    expect(idx).toBeGreaterThanOrEqual(0)
+    const turns = Number(args[idx + 1])
+    expect(turns).toBe(REVIEWER_MAX_TURNS)
+    // A single-turn budget is consumed by the first Read tool call, leaving none
+    // for the JSON verdict — the reviewer then exits "Reached max turns (1)".
+    expect(turns).toBeGreaterThan(1)
+  })
+
+  it("passes the prompt via -p and runs in print mode", () => {
+    const args = reviewerCommandArgs("PROMPT-BODY")
+    expect(args).toContain("--print")
+    expect(args[args.indexOf("-p") + 1]).toBe("PROMPT-BODY")
+  })
+
+  it("streams so the idle-timeout watchdog sees progress (plain --print is silent until the end)", () => {
+    const args = reviewerCommandArgs("review this")
+    expect(args).toContain("--output-format")
+    expect(args[args.indexOf("--output-format") + 1]).toBe("stream-json")
+    expect(args).toContain("--verbose")
+  })
+})
+
+describe("extractStreamJsonResult", () => {
+  function streamWith(...events: object[]): string {
+    return events.map((e) => JSON.stringify(e)).join("\n") + "\n"
+  }
+
+  it("returns the verdict text from the terminal success result event", () => {
+    const verdict = JSON.stringify({ satisfied: true, criteria_results: [] })
+    const out = streamWith(
+      { type: "assistant", message: {} },
+      { type: "result", subtype: "success", is_error: false, result: verdict },
+    )
+    expect(extractStreamJsonResult(out)).toEqual({ ok: true, text: verdict })
+  })
+
+  it("fails when no result event was emitted", () => {
+    const r = extractStreamJsonResult(streamWith({ type: "assistant", message: {} }))
+    expect(r.ok).toBe(false)
+    expect(r.detail).toContain("no result event")
+  })
+
+  it("fails on an error result subtype (e.g. max turns)", () => {
+    const r = extractStreamJsonResult(streamWith({ type: "result", subtype: "error_max_turns", is_error: true, result: "" }))
+    expect(r.ok).toBe(false)
+    expect(r.detail).toContain("error_max_turns")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// isPureArtisanCommand — quote-aware classification of artisan invocations
+// ---------------------------------------------------------------------------
+
+describe("isPureArtisanCommand", () => {
+  it("allows bare artisan invocations", () => {
+    expect(isPureArtisanCommand("./artisan state")).toBe(true)
+    expect(isPureArtisanCommand("artisan ping")).toBe(true)
+    expect(isPureArtisanCommand("bun run ../open-artisan/bin/artisan.ts state")).toBe(true)
+    expect(isPureArtisanCommand("artisan request-review --summary \"Plan ready\" --artifact-file .openartisan/f/plan.md")).toBe(true)
+  })
+
+  it("allows shell metacharacters inside quotes (the false-positive fix)", () => {
+    // Semicolons / pipes / globs inside a quoted description are literal.
+    expect(isPureArtisanCommand('./artisan request-review --artifact-description "a; b; c"')).toBe(true)
+    expect(isPureArtisanCommand('artisan request-review --artifact-description "packages/layer/* and a|b"')).toBe(true)
+    expect(isPureArtisanCommand("artisan request-review --summary 'one; two & three'")).toBe(true)
+  })
+
+  it("blocks unquoted shell control operators (injection)", () => {
+    expect(isPureArtisanCommand("./artisan state; rm -rf /")).toBe(false)
+    expect(isPureArtisanCommand("artisan state && rm -rf /")).toBe(false)
+    expect(isPureArtisanCommand("artisan state | tee /tmp/x")).toBe(false)
+    expect(isPureArtisanCommand("artisan state > /tmp/x")).toBe(false)
+    expect(isPureArtisanCommand("artisan state `rm -rf /`")).toBe(false)
+  })
+
+  it("blocks command/variable substitution even inside double quotes", () => {
+    expect(isPureArtisanCommand('artisan request-review --artifact-description "$(rm -rf /)"')).toBe(false)
+    expect(isPureArtisanCommand('artisan request-review --artifact-description "`rm -rf /`"')).toBe(false)
+    expect(isPureArtisanCommand('artisan request-review --artifact-description "$HOME is home"')).toBe(false)
+  })
+
+  it("rejects non-artisan heads, multiline, and unterminated quotes", () => {
+    expect(isPureArtisanCommand("echo '{}' | artisan request-review")).toBe(false)
+    expect(isPureArtisanCommand("echo bad > /tmp/x\nartisan state")).toBe(false)
+    expect(isPureArtisanCommand('artisan request-review --summary "unterminated')).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Isolated reviewer subprocess transparency
+//
+// The phase/task reviewer runs as `claude --print` in the project dir, so it
+// inherits the project's open-artisan hooks. Marked with REVIEWER_SUBPROCESS_ENV,
+// every hook must no-op: otherwise the reviewer's own Stop hook reprompts and the
+// headless run exits non-zero (failed review dispatch), and SessionStart/PreToolUse
+// clobber the authoring session's `.active-session` pointer.
+// ---------------------------------------------------------------------------
+
+describe("hook: isolated reviewer subprocess", () => {
+  function withMarker<T>(fn: () => T): T {
+    const prev = process.env[REVIEWER_SUBPROCESS_ENV]
+    process.env[REVIEWER_SUBPROCESS_ENV] = "1"
+    try {
+      return fn()
+    } finally {
+      if (prev === undefined) delete process.env[REVIEWER_SUBPROCESS_ENV]
+      else process.env[REVIEWER_SUBPROCESS_ENV] = prev
+    }
+  }
+
+  it("PreToolUse allows write tools that would otherwise be blocked", async () => {
+    writeFileSync(getEnabledPath(stateDir), "1")
+    const result = await withMarker(() =>
+      handlePreToolUse(makeInput({
+        tool_name: "Write",
+        tool_input: { file_path: "/tmp/reviewer.ts", content: "x" },
+      })),
+    )
+    expect(result.exitCode).toBe(0)
+    expect(result.stderr).toBeNull()
+  })
+
+  it("Stop returns exit 0 instead of reprompting during an active workflow", async () => {
+    writeFileSync(getEnabledPath(stateDir), "1")
+    // Sanity: without the marker, an active workflow reprompts (exit 2).
+    const reprompt = await handleStop(makeInput())
+    expect(reprompt.exitCode).toBe(2)
+    // With the marker, the reviewer's Stop hook must allow a clean stop.
+    const result = await withMarker(() => handleStop(makeInput()))
+    expect(result.exitCode).toBe(0)
+    expect(result.stderr).toBeNull()
+  })
+
+  it("SessionStart injects nothing and does not clobber .active-session", async () => {
+    writeFileSync(getEnabledPath(stateDir), "1")
+    writeFileSync(getActiveSessionPath(stateDir), "authoring-session", "utf-8")
+    const result = await withMarker(() =>
+      handleSessionStart({ session_id: "throwaway-reviewer-session", cwd: tmpDir, source: "startup" }),
+    )
+    expect(result.exitCode).toBe(0)
+    expect(result.stdout).toBeNull()
+    expect(readFileSync(getActiveSessionPath(stateDir), "utf-8").trim()).toBe("authoring-session")
   })
 })
 

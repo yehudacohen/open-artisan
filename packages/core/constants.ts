@@ -136,6 +136,17 @@ export const REVIEW_PROGRESS_HARD_TIMEOUT_MS = 900_000
 /** Grace period for owned reviewer child shutdown before force-kill. */
 export const REVIEW_PROGRESS_SHUTDOWN_GRACE_MS = 5_000
 
+/**
+ * Max agent turns for the isolated reviewer subprocess (`claude --max-turns`).
+ * The reviewer prompt instructs it to Read/Glob the artifact (and, for later
+ * phases, the project source) before producing its JSON verdict — each tool call
+ * consumes a turn, so a single-turn budget makes the reviewer exit with
+ * "Reached max turns (1)" before it can answer. This budget allows several reads
+ * plus the final verdict; wall-clock is independently bounded by the idle/hard
+ * review timeouts above.
+ */
+export const REVIEWER_MAX_TURNS = 30
+
 /** Number of random bytes in one-time bridge reviewer submission tokens. */
 export const REVIEW_SUBMISSION_TOKEN_BYTES = 32
 

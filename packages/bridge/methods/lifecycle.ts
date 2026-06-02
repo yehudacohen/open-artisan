@@ -7,7 +7,7 @@
  * lifecycle.sessionCreated: Register a new session.
  * lifecycle.sessionDeleted: Unregister and delete session state.
  */
-import { join } from "node:path"
+import { join, resolve } from "node:path"
 import { randomUUID } from "node:crypto"
 import { JSONRPCErrorException } from "json-rpc-2.0"
 import type { MethodHandler, BridgeContext } from "../server"
@@ -227,6 +227,7 @@ export const handleInit: MethodHandler = async (params, ctx) => {
   ctx.setEngine(engine)
   ctx.stateDir = stateDir
   ctx.projectDir = projectDir
+  ctx.memoryDir = p.memoryDir ? resolve(p.memoryDir) : null
   ctx.capabilities = {
     selfReview: p.capabilities?.selfReview ?? "agent-only",
     orchestrator: p.capabilities?.orchestrator ?? false,

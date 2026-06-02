@@ -21,6 +21,18 @@ export const ACTIVE_SESSION_FILENAME = ".active-session"
 /** Enabled flag file — when present, hooks are active. */
 export const ENABLED_FILENAME = ".enabled"
 
+/**
+ * Env var marker set on the isolated reviewer/approver subprocess spawned by the
+ * adapter (runOwnedReviewerCommand). When present, every hook handler no-ops so
+ * the subprocess is fully transparent to the workflow: it is not gated by the
+ * guard, does not re-dispatch reviews from its own Stop hook, does not clobber
+ * the `.active-session` pointer, and receives no injected workflow context.
+ * Without this, the reviewer (which runs in the project dir and inherits the
+ * project's open-artisan hooks) gets reprompted by its own Stop hook and exits
+ * non-zero, and overwrites the authoring session's active-session pointer.
+ */
+export const REVIEWER_SUBPROCESS_ENV = "OPEN_ARTISAN_REVIEWER_SUBPROCESS"
+
 /** Resolve the socket path from a state directory. */
 export function getSocketPath(stateDir: string): string {
   return join(stateDir, SOCKET_FILENAME)

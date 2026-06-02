@@ -17,6 +17,7 @@ import {
   handlePreToolUse,
   handleStop,
   handleSessionStart,
+  handleUserPromptSubmit,
   handlePreCompact,
   handlePostToolUse,
   isWriteLikeTool,
@@ -49,6 +50,7 @@ const HANDLERS: Record<string, (input: HookInput) => Promise<import("#claude-cod
   "pre-tool-use": handlePreToolUse,
   "stop": handleStop,
   "session-start": handleSessionStart,
+  "user-prompt-submit": handleUserPromptSubmit,
   "pre-compact": handlePreCompact,
   "post-tool-use": handlePostToolUse,
 }

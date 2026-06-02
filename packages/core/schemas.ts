@@ -26,6 +26,7 @@ export const BridgeCapabilitiesSchema = z.object({
 export const LifecycleInitParamsSchema = z.object({
   projectDir: z.string().min(1),
   stateDir: z.string().optional(),
+  memoryDir: z.string().optional(),
   transport: z.enum(["stdio", "unix-socket"]).optional(),
   socketPath: z.string().optional(),
   registerRuntime: z.boolean().optional(),

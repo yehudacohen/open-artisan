@@ -9,7 +9,7 @@ import { relative, resolve } from "node:path"
 import type { MethodHandler } from "../server"
 import type { GuardCheckParams, GuardPolicyParams, GuardCheckResult, GuardPolicyResult } from "../protocol"
 import { SESSION_NOT_FOUND, INVALID_PARAMS } from "../protocol"
-import { extractWriteToolPaths, getPhaseToolPolicy, getTaskWriteFiles } from "../../core/hooks/tool-guard"
+import { extractWriteToolPaths, getPhaseToolPolicy, getTaskWriteFiles, isEnvFile } from "../../core/hooks/tool-guard"
 import { WORKFLOW_TOOL_NAMES } from "../../core/workflow-tool-names"
 import type { Phase, PhaseState, WorkflowMode } from "../../core/workflow-primitives"
 
@@ -87,6 +87,32 @@ export const handleGuardCheck: MethodHandler = async (params, ctx) => {
     ? rawTaskFiles.map((f: string) => f.startsWith("/") ? f : resolve(ctx.projectDir!, f))
     : rawTaskFiles
   const baseDir = resolve(ctx.projectDir ?? process.cwd())
+
+  // Memory-dir allowance: the agent's memory store is its own notebook, not project
+  // source — it is not built, reviewed, or part of the project diff. Allow write-like
+  // tools whose targets ALL live within the adapter-supplied memory dir, in ANY phase
+  // (checked before the blocked-list/predicate gates, which otherwise block writes in
+  // phases like USER_GATE). Traversal-proof; .env is still never writable.
+  if (ctx.memoryDir) {
+    const writeTokens = ["write", "edit", "patch", "create", "overwrite"]
+    if (writeTokens.some((t) => policyToolName.includes(t))) {
+      const filePaths = extractWriteToolPaths(p)
+      const allInMemory = filePaths.length > 0 && filePaths.every((filePath) => {
+        const abs = filePath.startsWith("/") ? filePath : resolve(baseDir, filePath)
+        const rel = relative(ctx.memoryDir!, abs)
+        return rel !== "" && !rel.startsWith("..") && !rel.startsWith("/") && !isEnvFile(abs)
+      })
+      if (allInMemory) {
+        return {
+          allowed: true,
+          policyVersion: ctx.policyVersion,
+          phase: state.phase,
+          phaseState: state.phaseState,
+        } satisfies GuardCheckResult
+      }
+    }
+  }
+
   const policy = getPhaseToolPolicy(state.phase, state.phaseState, state.mode, state.fileAllowlist, taskExpectedFiles, baseDir, state.approvedCleanupFiles)
 
   // Check blocked list
@@ -104,7 +130,7 @@ export const handleGuardCheck: MethodHandler = async (params, ctx) => {
     if (command && !policy.bashCommandPredicate(command)) {
       return {
         allowed: false,
-        reason: "Bash command blocked in INCREMENTAL mode — file-write operators not allowed.",
+        reason: `Bash command blocked in ${state.phase}/${state.phaseState} (${state.mode} mode) — file-write operators (e.g. >, >>, tee, sed -i) are not allowed in this phase.`,
         policyVersion: ctx.policyVersion,
       } satisfies GuardCheckResult
     }

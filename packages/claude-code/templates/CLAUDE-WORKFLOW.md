@@ -21,6 +21,7 @@ Each phase follows: **DRAFT → REVIEW → USER_GATE → (optional REVISE)**
 | `./artisan mark-analyze-complete` | Complete discovery analysis |
 | `./artisan mark-satisfied` | OpenCode/self-review compatibility only; bridge adapters use isolated review submission |
 | `./artisan request-review` | Submit review artifacts by on-disk `artifact_files` |
+| `./artisan run-review` | Dispatch the pending isolated review (phase or task) and print the verdict |
 | `./artisan submit-feedback` | Approve or request revision at USER_GATE |
 | `./artisan mark-task-complete` | Complete a DAG task during IMPLEMENTATION |
 | `./artisan check-prior-workflow` | Check for existing workflow state |
@@ -38,7 +39,7 @@ Do the work for this phase. When done, call `./artisan request-review`.
 For PLANNING artifacts, include a `## Real-World Acceptance Scenario` section with `### Scenario`, `### Required Capabilities`, `### Acceptance Checks`, and `### Explicit Non-Goals` before calling request review.
 
 ### REVIEW
-Stop authoring and let the adapter dispatch an isolated reviewer. Do NOT call `./artisan mark-satisfied`; bridge adapters submit isolated reviews through adapter-only review submission.
+Run **`./artisan run-review`** to dispatch the isolated reviewer. It spawns a fresh, context-isolated `claude` reviewer, submits its verdict via a one-time token, and prints the outcome — phase passed (→ USER_GATE) or needs revision (→ REVISE). It is a visible, awaited command (no hidden turn-end dispatch). Do NOT call `./artisan mark-satisfied`. If you stop while still at a REVIEW state, the Stop hook will remind you to run `./artisan run-review`.
 
 ### USER_GATE
 Present a clear artifact summary to the user. **STOP and wait for their response.** Do NOT call `./artisan submit-feedback` until the user responds. Not every user message is artifact feedback — casual conversation is fine.
@@ -79,7 +80,7 @@ Address ALL feedback points. Call `./artisan request-review` when done. No check
 ## Mode-Specific Rules
 
 ### Direct Application
-For small/simple tasks where the full phased workflow is too heavy, propose a direct patch with `./artisan propose-direct-application`. Open Artisan will structurally inspect the patch and apply it only if it is narrow, safe, and outside an active workflow. If rejected, use the full workflow.
+For small/simple tasks where the full phased workflow is too heavy, propose a direct patch with `./artisan propose-direct-application`. Open Artisan will structurally inspect the patch and apply it only if it is narrow and safe. It works before a workflow starts, after DONE, and **during an active workflow for out-of-band files** — files the current phase would not let you author directly (e.g. an unrelated doc). In-scope/in-phase files are rejected and must go through the normal authoring + review path. If rejected, use the full workflow.
 
 ### GREENFIELD
 No constraints beyond the standard phases. Discovery is skipped.
@@ -92,4 +93,4 @@ Full discovery. File allowlist enforced — you can only modify files explicitly
 
 ## Review Responsibility
 
-Phase review is handled by an isolated reviewer subprocess with no access to the authoring conversation. Wait for the adapter hook to submit the review result, then continue according to the next prompt.
+Phase and per-task reviews are handled by an isolated reviewer subprocess with no access to the authoring conversation. You dispatch it explicitly with `./artisan run-review` (it runs the reviewer, submits the verdict, and prints the result); then continue based on the printed outcome. The reviewer is a fresh `claude` with the workflow hooks suppressed, so it cannot see or pollute your context.

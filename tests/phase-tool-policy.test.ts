@@ -502,6 +502,51 @@ describe("Tool policy — IMPLEMENTATION with INCREMENTAL allowlist", () => {
   })
 })
 
+describe("Tool policy — bare dependency install is read-only; manifest mutation is a write op", () => {
+  // An ACTIVE task uses readOnlyBash (the branch that previously blocked installs).
+  // It must permit hydrating node_modules + the lockfile from the committed manifest
+  // — greenfield scaffolding can't run a single test otherwise — while still blocking
+  // dependency mutation and arbitrary-package execution.
+  const policy = getPhaseToolPolicy("IMPLEMENTATION", "DRAFT", "GREENFIELD", [], ["/project/src/task.ts"])
+  const allow = (cmd: string) => expect(policy.bashCommandPredicate?.(cmd)).toBe(true)
+  const block = (cmd: string) => expect(policy.bashCommandPredicate?.(cmd)).toBe(false)
+
+  it("allows a bare install / clean install across package managers", () => {
+    allow("bun install")
+    allow("npm install")
+    allow("npm ci")
+    allow("pnpm install")
+    allow("yarn install")
+    allow("bun i")
+    allow("bun install --frozen-lockfile")
+    allow("npm install --production")
+  })
+
+  it("blocks adding/removing/updating dependencies (manifest mutation)", () => {
+    block("bun add effect")
+    block("npm install react")
+    block("npm i lodash")
+    block("pnpm add -D vitest")
+    block("yarn remove foo")
+    block("npm uninstall bar")
+    block("bun update")
+    block("npm update")
+  })
+
+  it("blocks arbitrary-package execution", () => {
+    block("bun x cowsay")
+    block("pnpm dlx create-react-app x")
+    block("npm create vite")
+  })
+
+  it("still allows ordinary read-only commands and test runs", () => {
+    allow("bun test")
+    allow("bun run typecheck")
+    allow("ls -la")
+    allow("git status")
+  })
+})
+
 describe("Tool policy — IMPLEMENTATION structural sub-states", () => {
   const allowlist = ["/project/src/task.ts", "/project/tests/task.test.ts"]
   const taskFiles = ["/project/src/task.ts", "/project/tests/task.test.ts"]
@@ -665,7 +710,9 @@ describe("Tool policy — IMPLEMENTATION/INCREMENTAL bashCommandPredicate", () =
     expect(policy.bashCommandPredicate!("tar -xf archive.tar")).toBe(false)
     expect(policy.bashCommandPredicate!("rsync -a src/ dest/")).toBe(false)
     expect(policy.bashCommandPredicate!("git restore src/file.ts")).toBe(false)
-    expect(policy.bashCommandPredicate!("bun install")).toBe(false)
+    // Dependency MUTATION is a write op; a bare install is not (see the dedicated
+    // describe block — bare `bun install` materializes deps and is allowed).
+    expect(policy.bashCommandPredicate!("bun add left-pad")).toBe(false)
     expect(policy.bashCommandPredicate!("eslint src --fix")).toBe(false)
     expect(policy.bashCommandPredicate!("python -c \"from pathlib import Path; Path('x').write_text('bad')\"")).toBe(false)
   })

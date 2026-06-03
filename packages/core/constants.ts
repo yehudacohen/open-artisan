@@ -145,7 +145,16 @@ export const REVIEW_PROGRESS_SHUTDOWN_GRACE_MS = 5_000
  * plus the final verdict; wall-clock is independently bounded by the idle/hard
  * review timeouts above.
  */
-export const REVIEWER_MAX_TURNS = 30
+export const REVIEWER_MAX_TURNS = 80
+
+/**
+ * Maximum number of bounded `run-review` passes for a single resumable review
+ * before the loop is force-terminated. A large review diff is covered across
+ * multiple passes (the reviewer self-paces within REVIEWER_MAX_TURNS each pass
+ * and persists progress between passes); this caps the total work so a reviewer
+ * that never converges cannot loop forever.
+ */
+export const MAX_REVIEW_PASSES = 12
 
 /** Number of random bytes in one-time bridge reviewer submission tokens. */
 export const REVIEW_SUBMISSION_TOKEN_BYTES = 32

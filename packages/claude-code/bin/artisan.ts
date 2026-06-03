@@ -206,7 +206,7 @@ async function handleRunReview(): Promise<void> {
     process.exit(1)
   }
   const s = result as Record<string, unknown>
-  let outcome: { ok: boolean; message: string }
+  let outcome: { ok: boolean; message: string; partial?: boolean }
   if (s.taskCompletionInProgress) {
     outcome = await dispatchOwnedTaskReview(stateDir, sessionId, projectDir)
   } else if (s.phaseState === "REVIEW") {
@@ -216,6 +216,13 @@ async function handleRunReview(): Promise<void> {
     return
   }
   console.log(outcome.message)
+  // A partial pass is NOT a failure: the review is being covered across multiple
+  // bounded passes. Surface the "run again to continue" guidance and exit 0 so the
+  // agent treats it as progress and re-invokes `./artisan run-review`.
+  if (outcome.partial) {
+    console.log("The review is being covered across multiple bounded passes. Run `./artisan run-review` again to continue until it reports a final verdict.")
+    return
+  }
   if (!outcome.ok) process.exit(1)
 }
 

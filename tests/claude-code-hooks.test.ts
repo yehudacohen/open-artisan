@@ -24,9 +24,20 @@ import {
   reviewerCommandArgs,
   extractStreamJsonResult,
   dispatchOwnedPhaseReview,
+  hashReviewPrompt,
+  reviewProgressPath,
+  loadReviewProgress,
+  saveReviewProgress,
+  clearReviewProgress,
+  classifyReviewerOutput,
+  mergeReviewProgress,
+  buildResumableReviewerInstructions,
+  interpretReviewPass,
+  buildBestEffortVerdict,
+  type ReviewProgress,
   type HookInput,
 } from "#claude-code/src/hook-handlers"
-import { REVIEWER_MAX_TURNS } from "#core/constants"
+import { MAX_REVIEW_PASSES, REVIEWER_MAX_TURNS } from "#core/constants"
 
 const REPO_ROOT = join(import.meta.dirname, "..")
 const SERVER_SCRIPT = join(REPO_ROOT, "packages", "claude-code", "bin", "artisan-server.ts")
@@ -888,5 +899,215 @@ describe("artisan-hook CLI binary", () => {
       // Exit code 0 means no exception — if we get here, something else happened
       expect(err.status).toBe(0)
     }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Resumable isolated reviewer — self-pacing progress protocol
+//
+// A large review diff is covered across multiple bounded `run-review` passes
+// instead of failing with subtype=error_max_turns. The reviewer self-paces:
+// each pass emits either a `status:"partial"` payload (persisted, resume next
+// pass) or the final verdict (submitted, progress cleared). interpretReviewPass
+// is the pure decision function driving the loop, so we unit-test the full
+// partial→persist→resume→final cycle without spawning `claude`.
+// ---------------------------------------------------------------------------
+
+describe("resumable reviewer: hashReviewPrompt", () => {
+  it("is stable across token rotation (so passes share one artifact key)", () => {
+    const a = "Review the diff.\n\n---\n\nOPEN_ARTISAN_REVIEW_TOKEN: abc123\nblah"
+    const b = "Review the diff.\n\n---\n\nOPEN_ARTISAN_REVIEW_TOKEN: def456\nblah"
+    expect(hashReviewPrompt(a)).toBe(hashReviewPrompt(b))
+  })
+
+  it("changes when the underlying review content changes (→ start fresh)", () => {
+    const a = "Review file A.\nOPEN_ARTISAN_REVIEW_TOKEN: abc123"
+    const b = "Review file B.\nOPEN_ARTISAN_REVIEW_TOKEN: abc123"
+    expect(hashReviewPrompt(a)).not.toBe(hashReviewPrompt(b))
+  })
+})
+
+describe("resumable reviewer: classifyReviewerOutput", () => {
+  it("recognises a status:partial payload", () => {
+    const r = classifyReviewerOutput(JSON.stringify({ status: "partial", coveredFiles: ["a.ts"], findings: ["x"], remaining: ["b.ts"] }))
+    expect(r.kind).toBe("partial")
+    if (r.kind === "partial") {
+      expect(r.result.coveredFiles).toEqual(["a.ts"])
+      expect(r.result.remaining).toEqual(["b.ts"])
+    }
+  })
+
+  it("treats a verdict object as final", () => {
+    expect(classifyReviewerOutput(JSON.stringify({ passed: true, issues: [] })).kind).toBe("final")
+    expect(classifyReviewerOutput(JSON.stringify({ satisfied: true, criteria_results: [] })).kind).toBe("final")
+  })
+
+  it("tolerates a code-fenced partial payload", () => {
+    const r = classifyReviewerOutput("Here is my progress:\n```json\n{\"status\":\"partial\",\"coveredFiles\":[\"a.ts\"]}\n```")
+    expect(r.kind).toBe("partial")
+  })
+})
+
+describe("resumable reviewer: mergeReviewProgress", () => {
+  it("accumulates coverage/findings and bumps the pass counter", () => {
+    const p1 = mergeReviewProgress(null, "h", { status: "partial", coveredFiles: ["a.ts"], findings: ["f1"], remaining: ["b.ts", "c.ts"] })
+    expect(p1).toEqual({ artifactHash: "h", pass: 1, coveredFiles: ["a.ts"], findings: ["f1"], remaining: ["b.ts", "c.ts"] })
+
+    const p2 = mergeReviewProgress(p1, "h", { status: "partial", coveredFiles: ["b.ts"], findings: ["f2"], remaining: ["c.ts"] })
+    expect(p2.pass).toBe(2)
+    expect(p2.coveredFiles).toEqual(["a.ts", "b.ts"])
+    expect(p2.findings).toEqual(["f1", "f2"])
+    expect(p2.remaining).toEqual(["c.ts"])
+  })
+
+  it("drops now-covered files from remaining and de-dupes", () => {
+    const p = mergeReviewProgress({ artifactHash: "h", pass: 1, coveredFiles: ["a.ts"], findings: [], remaining: ["b.ts"] }, "h", {
+      status: "partial", coveredFiles: ["b.ts", "a.ts"], findings: [], remaining: ["b.ts", "d.ts"],
+    })
+    expect(p.coveredFiles).toEqual(["a.ts", "b.ts"])
+    expect(p.remaining).toEqual(["d.ts"])
+  })
+})
+
+describe("resumable reviewer: buildResumableReviewerInstructions", () => {
+  it("instructs on the partial protocol and the turn budget on pass 1", () => {
+    const text = buildResumableReviewerInstructions(null)
+    expect(text).toContain("RESUMABLE REVIEW")
+    expect(text).toContain(String(REVIEWER_MAX_TURNS))
+    expect(text).toContain('"status":"partial"')
+    expect(text).toContain("pass 1")
+  })
+
+  it("injects prior coverage so the reviewer does not re-read covered files", () => {
+    const text = buildResumableReviewerInstructions({ artifactHash: "h", pass: 2, coveredFiles: ["a.ts", "b.ts"], findings: ["finding-1"], remaining: ["c.ts"] })
+    expect(text).toContain("DO NOT re-read")
+    expect(text).toContain("a.ts")
+    expect(text).toContain("c.ts")
+    expect(text).toContain("finding-1")
+    expect(text).toContain("pass 2")
+  })
+})
+
+describe("resumable reviewer: interpretReviewPass + progress store (partial→persist→resume→final)", () => {
+  let dir: string
+  let progressPath: string
+  const HASH = "artifact-hash-1"
+
+  beforeAll(async () => {
+    dir = await mkdtemp(join(tmpdir(), "resume-review-"))
+    const sd = join(dir, DEFAULT_STATE_DIR_NAME)
+    progressPath = reviewProgressPath(sd, "my-feature", "phase")
+  })
+  afterAll(async () => { await rm(dir, { recursive: true, force: true }) })
+
+  it("drives a full partial → persist → resume → final loop", () => {
+    // Pass 1: reviewer self-paces with a partial payload.
+    expect(loadReviewProgress(progressPath, HASH)).toBeNull()
+    const o1 = interpretReviewPass({
+      reviewerOk: true,
+      reviewerText: JSON.stringify({ status: "partial", coveredFiles: ["a.ts"], findings: ["f1"], remaining: ["b.ts", "c.ts"] }),
+      prior: loadReviewProgress(progressPath, HASH),
+      artifactHash: HASH,
+    })
+    expect(o1.kind).toBe("partial")
+    if (o1.kind === "partial") {
+      saveReviewProgress(progressPath, o1.progress)
+      expect(o1.message).toContain("Run `./artisan run-review` again")
+      expect(o1.message).toContain("1 file(s) covered")
+    }
+    // Persisted to disk.
+    expect(existsSync(progressPath)).toBe(true)
+
+    // Pass 2: resumes from persisted progress, still partial.
+    const prior2 = loadReviewProgress(progressPath, HASH)
+    expect(prior2?.coveredFiles).toEqual(["a.ts"])
+    const o2 = interpretReviewPass({
+      reviewerOk: true,
+      reviewerText: JSON.stringify({ status: "partial", coveredFiles: ["b.ts"], findings: ["f2"], remaining: ["c.ts"] }),
+      prior: prior2,
+      artifactHash: HASH,
+    })
+    expect(o2.kind).toBe("partial")
+    if (o2.kind === "partial") {
+      saveReviewProgress(progressPath, o2.progress)
+      expect(o2.progress.pass).toBe(2)
+      expect(o2.progress.coveredFiles).toEqual(["a.ts", "b.ts"])
+    }
+
+    // Pass 3: reviewer finishes — emits the final verdict.
+    const prior3 = loadReviewProgress(progressPath, HASH)
+    const verdict = JSON.stringify({ passed: true, issues: [], reasoning: "all good", scores: { code_quality: 9, error_handling: 9 } })
+    const o3 = interpretReviewPass({ reviewerOk: true, reviewerText: verdict, prior: prior3, artifactHash: HASH })
+    expect(o3.kind).toBe("final")
+    if (o3.kind === "final") {
+      expect(o3.verdictText).toBe(verdict)
+      // Caller submits then clears.
+      clearReviewProgress(progressPath)
+    }
+    expect(existsSync(progressPath)).toBe(false)
+  })
+
+  it("salvages a partial payload even when the subprocess hit error_max_turns", () => {
+    const o = interpretReviewPass({
+      reviewerOk: false, // e.g. subtype=error_max_turns
+      reviewerText: JSON.stringify({ status: "partial", coveredFiles: ["x.ts"], findings: [], remaining: ["y.ts"] }),
+      prior: null,
+      artifactHash: HASH,
+    })
+    expect(o.kind).toBe("partial")
+    if (o.kind === "partial") expect(o.progress.coveredFiles).toEqual(["x.ts"])
+  })
+
+  it("loadReviewProgress starts fresh when the artifact hash changes", () => {
+    const p = reviewProgressPath(join(dir, DEFAULT_STATE_DIR_NAME), "feat2", "task")
+    saveReviewProgress(p, { artifactHash: "old", pass: 3, coveredFiles: ["a.ts"], findings: [], remaining: [] })
+    expect(loadReviewProgress(p, "new")).toBeNull() // different artifact → fresh
+    expect(loadReviewProgress(p, "old")?.pass).toBe(3) // same artifact → resume
+  })
+})
+
+describe("resumable reviewer: termination guard", () => {
+  it("stops on the pass cap and submits a best-effort verdict from findings", () => {
+    const prior: ReviewProgress = { artifactHash: "h", pass: MAX_REVIEW_PASSES - 1, coveredFiles: ["a.ts"], findings: ["bug-1"], remaining: ["b.ts"] }
+    const o = interpretReviewPass({
+      reviewerOk: true,
+      reviewerText: JSON.stringify({ status: "partial", coveredFiles: ["b.ts"], findings: ["bug-2"], remaining: [] }),
+      prior,
+      artifactHash: "h",
+    })
+    expect(o.kind).toBe("exhausted")
+    if (o.kind === "exhausted") {
+      expect(o.message).toContain("pass cap")
+      expect(o.verdictText).not.toBeNull()
+      const v = JSON.parse(o.verdictText!)
+      expect(v.passed).toBe(false)
+      expect(v.issues).toEqual(["bug-1", "bug-2"])
+    }
+  })
+
+  it("stops when a pass adds no new coverage (stuck reviewer)", () => {
+    const prior: ReviewProgress = { artifactHash: "h", pass: 2, coveredFiles: ["a.ts"], findings: ["only-finding"], remaining: ["b.ts"] }
+    const o = interpretReviewPass({
+      reviewerOk: false, // ran out of turns having made no progress and emitted nothing usable
+      reviewerText: "I could not parse the diff.",
+      prior,
+      artifactHash: "h",
+    })
+    expect(o.kind).toBe("exhausted")
+    if (o.kind === "exhausted") expect(o.message).toContain("no new file coverage")
+  })
+
+  it("returns no verdict to submit when there are zero findings", () => {
+    const prior: ReviewProgress = { artifactHash: "h", pass: 2, coveredFiles: ["a.ts"], findings: [], remaining: ["b.ts"] }
+    const o = interpretReviewPass({ reviewerOk: false, reviewerText: "stuck", prior, artifactHash: "h" })
+    expect(o.kind).toBe("exhausted")
+    if (o.kind === "exhausted") {
+      expect(o.verdictText).toBeNull()
+      expect(o.message).toContain("not submitted")
+    }
+  })
+
+  it("buildBestEffortVerdict returns null with no findings", () => {
+    expect(buildBestEffortVerdict({ artifactHash: "h", pass: 1, coveredFiles: [], findings: [], remaining: [] })).toBeNull()
   })
 })

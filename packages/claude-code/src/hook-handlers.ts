@@ -8,10 +8,11 @@
  * Hook scripts call these handlers via artisan-hook.ts CLI.
  */
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs"
+import { existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync } from "node:fs"
+import { createHash } from "node:crypto"
 import { spawn } from "node:child_process"
 import { buildRobotArtisanAutoApproveFailureFeedback } from "#core/autonomous-user-gate"
-import { IMPLEMENTATION_REVIEW_PROGRESS_IDLE_TIMEOUT_MS, REVIEW_PROGRESS_HARD_TIMEOUT_MS, REVIEW_PROGRESS_IDLE_TIMEOUT_MS, REVIEW_PROGRESS_SHUTDOWN_GRACE_MS, REVIEWER_MAX_TURNS } from "#core/constants"
+import { IMPLEMENTATION_REVIEW_PROGRESS_IDLE_TIMEOUT_MS, MAX_REVIEW_PASSES, REVIEW_PROGRESS_HARD_TIMEOUT_MS, REVIEW_PROGRESS_IDLE_TIMEOUT_MS, REVIEW_PROGRESS_SHUTDOWN_GRACE_MS, REVIEWER_MAX_TURNS } from "#core/constants"
 import { sendSocketRequest } from "./socket-transport"
 import {
   getSocketPath,
@@ -182,6 +183,309 @@ function extractReviewToken(reviewPrompt: string): string | null {
   return reviewPrompt.match(/OPEN_ARTISAN_REVIEW_TOKEN:\s*([a-f0-9]+)/i)?.[1] ?? null
 }
 
+// ---------------------------------------------------------------------------
+// Resumable review: progress store + self-pacing protocol
+//
+// A large review diff cannot always be covered within REVIEWER_MAX_TURNS in a
+// single pass — the reviewer runs out of turns reading files and exits
+// error_max_turns, which previously failed the whole dispatch and reverted the
+// task unreviewed. Instead we let the reviewer SELF-PACE: each `run-review`
+// pass reviews the not-yet-covered files within its turn budget. If it cannot
+// finish, it emits a `status:"partial"` object listing the files it covered,
+// findings so far, and what remains; we persist that and tell the agent to run
+// `./artisan run-review` again to continue. Only when the WHOLE review is
+// complete does the reviewer emit the normal final verdict, which is submitted
+// via the existing bridge path and the progress file cleared.
+//
+// This is entirely CLI-side: no bridge/daemon/core schema changes. The progress
+// file lives under the project's `.openartisan/<feature>/` (writes there are
+// allowed at runtime).
+// ---------------------------------------------------------------------------
+
+/** Persisted between bounded review passes. */
+export interface ReviewProgress {
+  /** Hash of the review prompt (token-stripped) — identifies the artifact under review. */
+  artifactHash: string
+  /** Number of passes completed so far (incremented each persisted partial pass). */
+  pass: number
+  /** Files the reviewer has already covered (must not be re-read). */
+  coveredFiles: string[]
+  /** Findings accumulated across passes. */
+  findings: string[]
+  /** Files/areas still to review. */
+  remaining: string[]
+}
+
+/** The reviewer's self-paced partial-progress payload (NOT a verdict). */
+export interface PartialReviewResult {
+  status: "partial"
+  coveredFiles?: string[]
+  findings?: string[]
+  remaining?: string[]
+}
+
+/**
+ * Stable identifier for the artifact under review. The bridge rotates the
+ * one-time review token on every dispatch, so we strip the token line before
+ * hashing — the hash then stays constant across passes for the same artifact
+ * and only changes when the underlying review content changes (→ start fresh).
+ */
+export function hashReviewPrompt(reviewPrompt: string): string {
+  const stripped = reviewPrompt.replace(/OPEN_ARTISAN_REVIEW_TOKEN:\s*[a-f0-9]+/gi, "")
+  return createHash("sha256").update(stripped).digest("hex").slice(0, 16)
+}
+
+function uniqueStrings(values: Iterable<string>): string[] {
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const v of values) {
+    if (typeof v !== "string") continue
+    const t = v.trim()
+    if (!t || seen.has(t)) continue
+    seen.add(t)
+    out.push(t)
+  }
+  return out
+}
+
+/** Resolve the per-feature+kind progress file path. */
+export function reviewProgressPath(stateDir: string, featureName: string, kind: "task" | "phase"): string {
+  const safeFeature = (featureName || "default").replace(/[^A-Za-z0-9._-]/g, "_")
+  return join(stateDir, safeFeature, `review-progress.${kind}.json`)
+}
+
+/** Load progress for the given artifact hash, or null if absent / for a different artifact. */
+export function loadReviewProgress(path: string, artifactHash: string): ReviewProgress | null {
+  if (!existsSync(path)) return null
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf-8")) as Partial<ReviewProgress>
+    // A different artifact hash means the content changed — start fresh.
+    if (parsed.artifactHash !== artifactHash) return null
+    return {
+      artifactHash,
+      pass: typeof parsed.pass === "number" ? parsed.pass : 0,
+      coveredFiles: uniqueStrings(parsed.coveredFiles ?? []),
+      findings: uniqueStrings(parsed.findings ?? []),
+      remaining: uniqueStrings(parsed.remaining ?? []),
+    }
+  } catch {
+    return null
+  }
+}
+
+/** Persist progress (creates parent dirs). */
+export function saveReviewProgress(path: string, progress: ReviewProgress): void {
+  mkdirSync(join(path, ".."), { recursive: true })
+  writeFileSync(path, JSON.stringify(progress, null, 2), "utf-8")
+}
+
+/** Remove any progress file (no-op if absent). */
+export function clearReviewProgress(path: string): void {
+  if (existsSync(path)) {
+    try { unlinkSync(path) } catch { /* best-effort */ }
+  }
+}
+
+/**
+ * Parse the reviewer's emitted text into one of:
+ *  - { kind: "partial", result } — a self-paced `{"status":"partial",...}` payload
+ *  - { kind: "final" }            — anything else parseable/non-partial (the verdict)
+ *
+ * The verdict's own shape is opaque here (the bridge validates it on submit); we
+ * only need to distinguish a partial-progress payload from a final verdict.
+ */
+export function classifyReviewerOutput(text: string): { kind: "partial"; result: PartialReviewResult } | { kind: "final" } {
+  const obj = tryParseJsonObject(text)
+  if (obj && obj["status"] === "partial") {
+    return {
+      kind: "partial",
+      result: {
+        status: "partial",
+        coveredFiles: Array.isArray(obj["coveredFiles"]) ? (obj["coveredFiles"] as string[]) : [],
+        findings: Array.isArray(obj["findings"]) ? (obj["findings"] as string[]) : [],
+        remaining: Array.isArray(obj["remaining"]) ? (obj["remaining"] as string[]) : [],
+      },
+    }
+  }
+  return { kind: "final" }
+}
+
+/** Best-effort: parse `text` as a JSON object, tolerating prose/code-fences around it. */
+function tryParseJsonObject(text: string): Record<string, unknown> | null {
+  const candidates: string[] = []
+  const trimmed = text.trim()
+  if (trimmed) candidates.push(trimmed)
+  // Strip a ```json … ``` fence if present.
+  const fence = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i)
+  if (fence?.[1]) candidates.push(fence[1].trim())
+  // Last resort: first {...} span.
+  const span = trimmed.match(/\{[\s\S]*\}/)
+  if (span?.[0]) candidates.push(span[0])
+  for (const c of candidates) {
+    try {
+      const v = JSON.parse(c) as unknown
+      if (v && typeof v === "object" && !Array.isArray(v)) return v as Record<string, unknown>
+    } catch { /* try next candidate */ }
+  }
+  return null
+}
+
+/** Merge a partial result into prior progress, bumping the pass counter. */
+export function mergeReviewProgress(prior: ReviewProgress | null, artifactHash: string, partial: PartialReviewResult): ReviewProgress {
+  const pass = (prior?.pass ?? 0) + 1
+  const coveredFiles = uniqueStrings([...(prior?.coveredFiles ?? []), ...(partial.coveredFiles ?? [])])
+  const findings = uniqueStrings([...(prior?.findings ?? []), ...(partial.findings ?? [])])
+  // `remaining` is authoritative from the latest pass (it shrinks); drop anything
+  // now covered. Fall back to the prior remaining if the reviewer omitted it.
+  const reportedRemaining = uniqueStrings(partial.remaining ?? [])
+  const remaining = (reportedRemaining.length > 0 ? reportedRemaining : (prior?.remaining ?? []))
+    .filter((f) => !coveredFiles.includes(f))
+  return { artifactHash, pass, coveredFiles, findings, remaining: uniqueStrings(remaining) }
+}
+
+/**
+ * Build the self-pacing instruction block appended to the review prompt. Includes
+ * any prior progress so the reviewer resumes and does NOT re-read covered files.
+ */
+export function buildResumableReviewerInstructions(prior: ReviewProgress | null): string {
+  const lines: string[] = []
+  lines.push("")
+  lines.push("---")
+  lines.push("")
+  lines.push("## RESUMABLE REVIEW — BOUNDED TURN BUDGET (read carefully)")
+  lines.push("")
+  lines.push(`You have a BOUNDED budget of ${REVIEWER_MAX_TURNS} agent turns for THIS pass. A large diff may not fit in one pass, so you must SELF-PACE across multiple passes:`)
+  lines.push("")
+  lines.push("1. Review the not-yet-covered files/areas this pass. Read files efficiently — do NOT re-read anything already listed under \"Already covered\" below.")
+  lines.push("2. If you can complete the ENTIRE review within this pass, output ONLY your normal final verdict JSON exactly as instructed above (this is treated as `status:\"final\"`).")
+  lines.push("3. If you CANNOT finish this pass, do NOT output a verdict. Instead output ONLY a JSON object of this exact shape (no prose, no code fence):")
+  lines.push('   {"status":"partial","coveredFiles":["path/a.ts","path/b.ts"],"findings":["issue or note ..."],"remaining":["path/c.ts","area still to review ..."]}')
+  lines.push("   - `coveredFiles`: files/areas you FULLY reviewed THIS pass (these will be merged with prior coverage and skipped next pass).")
+  lines.push("   - `findings`: concrete issues/observations so far (these accumulate across passes and inform the final verdict).")
+  lines.push("   - `remaining`: files/areas you have NOT yet reviewed and should be tackled next pass.")
+  lines.push("4. Aim to make forward progress every pass: always FULLY cover at least one not-yet-covered file before you run low on turns, so coverage strictly grows.")
+  if (prior && (prior.coveredFiles.length || prior.findings.length || prior.remaining.length)) {
+    lines.push("")
+    lines.push(`### Prior progress (resume from here — pass ${prior.pass} already done)`)
+    if (prior.coveredFiles.length) {
+      lines.push("Already covered (DO NOT re-read these):")
+      for (const f of prior.coveredFiles) lines.push(`  - ${f}`)
+    }
+    if (prior.remaining.length) {
+      lines.push("Remaining to review this pass (prioritise these):")
+      for (const f of prior.remaining) lines.push(`  - ${f}`)
+    }
+    if (prior.findings.length) {
+      lines.push("Findings so far (carry forward into the final verdict):")
+      for (const f of prior.findings) lines.push(`  - ${f}`)
+    }
+  } else {
+    lines.push("")
+    lines.push("### No prior progress — this is pass 1. Start the review from the top.")
+  }
+  lines.push("")
+  return lines.join("\n")
+}
+
+/** Outcome of interpreting a finished reviewer subprocess against the progress store. */
+export type ReviewPassOutcome =
+  | { kind: "final"; verdictText: string }
+  | { kind: "partial"; progress: ReviewProgress; message: string }
+  | { kind: "exhausted"; progress: ReviewProgress; verdictText: string | null; message: string }
+
+/**
+ * Pure decision function for a finished reviewer pass. Given the reviewer's raw
+ * result (text + whether the subprocess reported ok) and prior progress, decide:
+ *
+ *  - `final`     → the reviewer produced its verdict; caller submits it & clears progress.
+ *  - `partial`   → not done; caller persists `progress` and tells the agent to run again.
+ *  - `exhausted` → termination guard tripped (pass cap or no new coverage); caller stops
+ *                  looping, surfaces `message`, and optionally submits a best-effort
+ *                  verdict built from accumulated findings (`verdictText`, if any).
+ *
+ * Factored out (and exported) so the partial→persist→resume→final loop is unit-testable
+ * without spawning `claude`.
+ */
+export function interpretReviewPass(args: {
+  reviewerOk: boolean
+  reviewerText: string
+  prior: ReviewProgress | null
+  artifactHash: string
+  maxPasses?: number
+}): ReviewPassOutcome {
+  const { reviewerOk, reviewerText, prior, artifactHash } = args
+  const maxPasses = args.maxPasses ?? MAX_REVIEW_PASSES
+
+  // A clean reviewer run that did NOT emit a partial payload is the final verdict.
+  if (reviewerOk) {
+    const classified = classifyReviewerOutput(reviewerText)
+    if (classified.kind === "final") {
+      return { kind: "final", verdictText: reviewerText }
+    }
+    const progress = mergeReviewProgress(prior, artifactHash, classified.result)
+    return finishPartial(progress, prior, maxPasses)
+  }
+
+  // The subprocess did NOT end successfully (e.g. error_max_turns). Try to salvage
+  // a partial payload from whatever it emitted; otherwise record a no-new-coverage
+  // pass so the termination guard can detect a stuck reviewer.
+  const classified = classifyReviewerOutput(reviewerText)
+  const partial: PartialReviewResult = classified.kind === "partial"
+    ? classified.result
+    : { status: "partial", coveredFiles: [], findings: [], remaining: prior?.remaining ?? [] }
+  const progress = mergeReviewProgress(prior, artifactHash, partial)
+  return finishPartial(progress, prior, maxPasses)
+}
+
+function finishPartial(progress: ReviewProgress, prior: ReviewProgress | null, maxPasses: number): ReviewPassOutcome {
+  const priorCovered = prior?.coveredFiles.length ?? 0
+  const madeProgress = progress.coveredFiles.length > priorCovered
+  const remainingCount = progress.remaining.length
+  const coveredCount = progress.coveredFiles.length
+
+  // Termination guard: stop looping on the pass cap, or on a pass that added no
+  // new coverage (a stuck reviewer) — but give a no-progress pass a one-pass grace
+  // on the very first pass (prior===null) so a reviewer that legitimately produced
+  // no coverage yet still gets a second chance.
+  const hitCap = progress.pass >= maxPasses
+  const noNewCoverage = prior !== null && !madeProgress
+  if (hitCap || noNewCoverage) {
+    const reason = hitCap
+      ? `review pass cap (${maxPasses}) reached`
+      : "a review pass added no new file coverage"
+    const verdictText = buildBestEffortVerdict(progress)
+    return {
+      kind: "exhausted",
+      progress,
+      verdictText,
+      message: `Resumable review stopped after ${progress.pass} pass(es): ${reason}. ${coveredCount} file(s) covered, ${remainingCount} remaining. ${verdictText ? "Submitting a best-effort verdict from accumulated findings." : "No verdict could be derived; the review was not submitted — inspect findings manually."}`,
+    }
+  }
+
+  return {
+    kind: "partial",
+    progress,
+    message: `Review pass ${progress.pass} complete — ${coveredCount} file(s) covered, ${remainingCount} remaining. Run \`./artisan run-review\` again to continue.`,
+  }
+}
+
+/**
+ * Build a best-effort phase/task verdict JSON from accumulated findings when the
+ * termination guard stops the loop. Returns null when there are no findings to
+ * justify a verdict (caller then refrains from submitting). A non-empty findings
+ * list is treated as changes-requested.
+ */
+export function buildBestEffortVerdict(progress: ReviewProgress): string | null {
+  if (progress.findings.length === 0) return null
+  return JSON.stringify({
+    passed: false,
+    satisfied: false,
+    issues: progress.findings,
+    reasoning: `Resumable review terminated after ${progress.pass} pass(es) without converging; ${progress.coveredFiles.length} file(s) covered, ${progress.remaining.length} remaining. Best-effort verdict assembled from accumulated findings.`,
+    scores: { code_quality: 0, error_handling: 0 },
+  })
+}
+
 /**
  * Build the `claude` argv for the isolated reviewer.
  *
@@ -312,6 +616,15 @@ async function runOwnedReviewerCommand(reviewPrompt: string, cwd: string, label:
 export interface ReviewDispatchResult {
   ok: boolean
   message: string
+  /** True when this pass made partial progress; the agent should run `run-review` again. */
+  partial?: boolean
+}
+
+/** Resolve the feature name for progress-file keying (best-effort; falls back to "default"). */
+async function getFeatureName(stateDir: string, sessionId: string): Promise<string> {
+  const state = await bridgeCall(stateDir, "state.get", { sessionId }) as Record<string, unknown> | null
+  const name = state?.featureName
+  return typeof name === "string" && name ? name : "default"
 }
 
 /** Dispatch the pending PHASE review for a session at <phase>/REVIEW. */
@@ -326,18 +639,42 @@ export async function dispatchOwnedPhaseReview(
     return { ok: false, message: "No phase-review context available — is the session at a <phase>/REVIEW with a submitted artifact?" }
   }
   const reviewToken = extractReviewToken(reviewPrompt)
-  try {
-    const result = await runOwnedReviewerCommand(reviewPrompt, projectDir, "phase-review", phase)
-    if (result.exitCode !== 0) throw new Error(`reviewer command exited with code ${result.exitCode}${result.stderr.trim() ? ` | stderr: ${result.stderr.trim()}` : ""}`)
+  const featureName = await getFeatureName(stateDir, sessionId)
+  const progressPath = reviewProgressPath(stateDir, featureName, "phase")
+  const artifactHash = hashReviewPrompt(reviewPrompt)
+  const prior = loadReviewProgress(progressPath, artifactHash)
+  const augmentedPrompt = reviewPrompt + buildResumableReviewerInstructions(prior)
+
+  // Submit a final/best-effort verdict through the existing bridge path and clear
+  // progress. Returns the post-submit dispatch outcome.
+  const submitVerdict = async (verdictText: string): Promise<ReviewDispatchResult> => {
     const submitResult = await bridgeCall(stateDir, "tool.execute", {
       name: "submit_phase_review",
-      args: { review_output: result.stdout, review_token: reviewToken },
+      args: { review_output: verdictText, review_token: reviewToken },
       context: { sessionId, directory: projectDir, invocation: "isolated-reviewer" },
     })
     if (typeof submitResult === "string" && submitResult.startsWith("Error:")) throw new Error(submitResult)
     const nextState = await bridgeCall(stateDir, "state.get", { sessionId }) as Record<string, unknown> | null
     if (nextState?.phaseState === "REVIEW") throw new Error("Phase review submission did not advance the workflow out of REVIEW")
+    clearReviewProgress(progressPath)
     return { ok: true, message: `Phase review completed. Now at ${nextState?.phase ?? "?"}/${nextState?.phaseState ?? "?"}.` }
+  }
+
+  try {
+    const result = await runOwnedReviewerCommand(augmentedPrompt, projectDir, "phase-review", phase)
+    const outcome = interpretReviewPass({ reviewerOk: result.exitCode === 0, reviewerText: result.stdout, prior, artifactHash })
+    if (outcome.kind === "final") return await submitVerdict(outcome.verdictText)
+    if (outcome.kind === "partial") {
+      saveReviewProgress(progressPath, outcome.progress)
+      return { ok: true, partial: true, message: outcome.message }
+    }
+    // exhausted — stop looping. Submit a best-effort verdict if we have one.
+    if (outcome.verdictText) {
+      const submitted = await submitVerdict(outcome.verdictText)
+      return { ok: true, message: `${outcome.message} ${submitted.message}` }
+    }
+    clearReviewProgress(progressPath)
+    return { ok: false, message: outcome.message }
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err)
     await bridgeCall(stateDir, "tool.execute", {
@@ -345,6 +682,7 @@ export async function dispatchOwnedPhaseReview(
       args: { review_token: reviewToken, review_error: errMsg, review_exit_code: 1 },
       context: { sessionId, directory: projectDir, invocation: "isolated-reviewer" },
     })
+    clearReviewProgress(progressPath)
     return { ok: false, message: `Phase review failed and was recorded: ${errMsg}` }
   }
 }
@@ -360,19 +698,41 @@ export async function dispatchOwnedTaskReview(
     return { ok: false, message: "No task-review context available — is a task awaiting review (taskCompletionInProgress)?" }
   }
   const reviewToken = extractReviewToken(reviewPrompt)
-  try {
-    const result = await runOwnedReviewerCommand(reviewPrompt, projectDir, "task-review")
-    if (result.exitCode !== 0) throw new Error(`reviewer command exited with code ${result.exitCode}${result.stderr.trim() ? ` | stderr: ${result.stderr.trim()}` : ""}`)
+  const featureName = await getFeatureName(stateDir, sessionId)
+  const progressPath = reviewProgressPath(stateDir, featureName, "task")
+  const artifactHash = hashReviewPrompt(reviewPrompt)
+  const prior = loadReviewProgress(progressPath, artifactHash)
+  const augmentedPrompt = reviewPrompt + buildResumableReviewerInstructions(prior)
+
+  const submitVerdict = async (verdictText: string): Promise<ReviewDispatchResult> => {
     await bridgeCall(stateDir, "tool.execute", {
       name: "submit_task_review",
-      args: { review_output: result.stdout, review_token: reviewToken },
+      args: { review_output: verdictText, review_token: reviewToken },
       context: { sessionId, directory: projectDir, invocation: "isolated-reviewer" },
     })
+    clearReviewProgress(progressPath)
     const newState = await bridgeCall(stateDir, "state.get", { sessionId }) as Record<string, unknown> | null
     if (newState?.taskCompletionInProgress) {
       return { ok: false, message: "Per-task review is still pending (parse failed or revisions requested). Address feedback or re-run ./artisan run-review." }
     }
     return { ok: true, message: "Per-task review completed. Continue with the next implementation task." }
+  }
+
+  try {
+    const result = await runOwnedReviewerCommand(augmentedPrompt, projectDir, "task-review")
+    const outcome = interpretReviewPass({ reviewerOk: result.exitCode === 0, reviewerText: result.stdout, prior, artifactHash })
+    if (outcome.kind === "final") return await submitVerdict(outcome.verdictText)
+    if (outcome.kind === "partial") {
+      saveReviewProgress(progressPath, outcome.progress)
+      return { ok: true, partial: true, message: outcome.message }
+    }
+    // exhausted — stop looping; submit a best-effort verdict if available.
+    if (outcome.verdictText) {
+      const submitted = await submitVerdict(outcome.verdictText)
+      return { ok: submitted.ok, message: `${outcome.message} ${submitted.message}` }
+    }
+    clearReviewProgress(progressPath)
+    return { ok: false, message: outcome.message }
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err)
     await bridgeCall(stateDir, "tool.execute", {
@@ -383,6 +743,7 @@ export async function dispatchOwnedTaskReview(
       },
       context: { sessionId, directory: projectDir, invocation: "isolated-reviewer" },
     })
+    clearReviewProgress(progressPath)
     return { ok: false, message: `Per-task review dispatch failed — task reverted to pending: ${errMsg}` }
   }
 }

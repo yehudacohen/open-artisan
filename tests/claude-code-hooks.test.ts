@@ -34,6 +34,7 @@ import {
   buildResumableReviewerInstructions,
   interpretReviewPass,
   buildBestEffortVerdict,
+  REVIEWER_ALLOWED_TOOLS,
   type ReviewProgress,
   type HookInput,
 } from "#claude-code/src/hook-handlers"
@@ -702,6 +703,27 @@ describe("reviewerCommandArgs", () => {
     expect(args).toContain("--output-format")
     expect(args[args.indexOf("--output-format") + 1]).toBe("stream-json")
     expect(args).toContain("--verbose")
+  })
+
+  it("allowlists SCOPED verify commands so the reviewer can RUN tests but not arbitrary Bash", () => {
+    const args = reviewerCommandArgs("review this")
+    const idx = args.indexOf("--allowedTools")
+    expect(idx).toBeGreaterThanOrEqual(0)
+    const allowed = args[idx + 1]
+    expect(allowed).toBe(REVIEWER_ALLOWED_TOOLS)
+    // The read/search tools must be listed: once --allowedTools is given it is the
+    // exhaustive allowlist, so the implicit read-only auto-allow no longer applies.
+    expect(allowed).toContain("Read")
+    expect(allowed).toContain("Glob")
+    expect(allowed).toContain("Grep")
+    // Bash is scoped to test/typecheck targets via prefix specifiers — NOT blanket.
+    expect(allowed).toContain("Bash(bun run test:*)")
+    expect(allowed).toContain("Bash(bun run typecheck:*)")
+    expect(allowed).toContain("Bash(npm test:*)")
+    // Crucially, blanket Bash must NOT be granted — only scoped verify commands.
+    const specs = allowed!.split(",")
+    expect(specs).not.toContain("Bash")
+    expect(specs.every((s) => s === "Read" || s === "Glob" || s === "Grep" || /^Bash\(.+:\*\)$/.test(s))).toBe(true)
   })
 })
 

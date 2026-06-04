@@ -497,9 +497,70 @@ export function buildBestEffortVerdict(progress: ReviewProgress): string | null 
  *   only on output) kills any review whose silent work exceeds the idle window.
  *   Streaming emits events throughout the run, keeping the watchdog satisfied;
  *   the final verdict is carried in the terminal `result` event.
+ * - `--allowedTools`: in headless `--print` mode Claude Code auto-allows read-only
+ *   tools (Read/Glob/Grep) but DENIES Bash, because Bash can mutate. A reviewer
+ *   that must *run the tests* to verify a task therefore had every runner call
+ *   (`vitest`, `npm test`, `tsc`, `bun`) silently denied — it could read code but
+ *   never execute it, and (correctly) flagged "test execution blocked". Rather than
+ *   allow blanket `Bash` (which would let the reviewer run arbitrary, possibly
+ *   mutating, shell), the allowlist scopes Bash to a curated set of read-only
+ *   VERIFICATION targets — the project's `test`/`typecheck` scripts across the
+ *   common runners — via prefix-matched `Bash(<cmd>:*)` specifiers. The reviewer
+ *   can run the suite to verify a task but cannot use Bash for anything else. It
+ *   stays transparent to the workflow it reviews via the subprocess marker (its
+ *   artisan-guard hook no-ops). Read/Glob/Grep are listed explicitly because once
+ *   `--allowedTools` is given it becomes the exhaustive allowlist (the implicit
+ *   read-only auto-allow no longer applies).
  */
+/**
+ * Read-only verification commands the reviewer may run, scoped by prefix. These are
+ * the standard `test` / `typecheck` targets across the runners a project might use;
+ * each becomes a `Bash(<cmd>:*)` permission specifier so the reviewer can execute
+ * the suite but not arbitrary shell. Extend here if a new runner target is needed.
+ */
+export const REVIEWER_VERIFY_COMMANDS: ReadonlyArray<string> = [
+  "bun run test",
+  "bun run typecheck",
+  "bun test",
+  "bunx vitest",
+  "npm test",
+  "npm run test",
+  "npm run typecheck",
+  "pnpm test",
+  "pnpm run test",
+  "pnpm run typecheck",
+  "yarn test",
+  "npx vitest",
+  "npx tsc",
+  "tsc",
+  "vitest",
+]
+
+/**
+ * The reviewer's `--allowedTools` value: read/search tools plus the scoped verify
+ * commands. Comma-separated because the `Bash(...)` specifiers contain spaces, so a
+ * space-separated list would be mis-tokenised.
+ */
+export const REVIEWER_ALLOWED_TOOLS = [
+  "Read",
+  "Glob",
+  "Grep",
+  ...REVIEWER_VERIFY_COMMANDS.map((cmd) => `Bash(${cmd}:*)`),
+].join(",")
+
 export function reviewerCommandArgs(reviewPrompt: string): string[] {
-  return ["--print", "--output-format", "stream-json", "--verbose", "--max-turns", String(REVIEWER_MAX_TURNS), "-p", reviewPrompt]
+  return [
+    "--print",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--max-turns",
+    String(REVIEWER_MAX_TURNS),
+    "--allowedTools",
+    REVIEWER_ALLOWED_TOOLS,
+    "-p",
+    reviewPrompt,
+  ]
 }
 
 /**

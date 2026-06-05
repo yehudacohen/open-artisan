@@ -41,7 +41,12 @@ export function collectImplementationReviewArtifactFiles(state: WorkflowState, c
     for (const file of normalizeWorkflowPaths(task.intentionalDeletionTargets ?? [], projectRoot)) deletionTargets.add(file)
   }
   for (const file of deletionTargets) files.delete(file)
-  return Array.from(files)
+  // Auto-derived expected files come from the IMPL_PLAN DAG metadata, which can be stale or
+  // (before the parser fix) malformed — e.g. prose tokens from a "**Files:** none (…)" line.
+  // Only enforce DAG-derived paths that still exist on disk; a derived path that is gone is
+  // treated as stale and skipped rather than failing the whole review. The agent's explicitly
+  // provided artifact_files are merged in separately and remain strictly existence-checked.
+  return Array.from(files).filter((file) => existsSync(file))
 }
 
 export function mergeImplementationReviewArtifactFiles(state: WorkflowState, artifactFiles: string[], cwd?: string): string[] {

@@ -117,9 +117,13 @@ function isNoneListText(raw: string): boolean {
 }
 
 function parseList(raw: string): string[] {
-  const trimmed = raw.trim()
-  if (isNoneListText(trimmed) || trimmed === "" || trimmed === "-") return []
-  return trimmed
+  // Strip parenthetical asides (e.g. "none (verification-only task …)" or "foo.ts (the entry)")
+  // so prose inside them is never tokenized into list entries, then collapse whitespace. A
+  // leading "none" with any trailing punctuation means an empty list — without this, a
+  // "**Files:** none (…)" line leaked tokens like "(verification-only" as bogus file paths.
+  const cleaned = raw.replace(/\([^)]*\)/g, " ").replace(/\s+/g, " ").trim()
+  if (cleaned === "" || cleaned === "-" || /^none[\s.;:,–—-]*$/i.test(cleaned)) return []
+  return cleaned
     .split(/[,\s]+/)
     .map(normalizeListEntry)
     .filter((s) => s.length > 0 && !isNoneListText(s))
